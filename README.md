@@ -146,17 +146,40 @@ Or with TLS verification, import `certs/server-cert.pem` into your JDBC client's
 
 ### Docker
 
+Three paths, increasing in flexibility:
+
+**1. `docker compose` (recommended for first run)** — brings up Postgres + the manager together, with all persistent state bind-mounted to the host:
+
 ```bash
-# Multi-stage build: UI + Scala assembly compile inside the image
+cp .env.example .env       # tweak ports / auth / admin password
+docker compose up --build  # detached with `-d` once you're happy
+```
+
+Bind mounts created next to the compose file:
+- `./pgdata/`   — Postgres data dir (`slkstate_*` + `ducklake_*` tables)
+- `./ducklake/` — DuckLake Parquet files written by Quack nodes
+- `./certs/`    — auto-generated self-signed TLS cert + key
+
+**2. `scripts/start-docker.sh` (against an existing Postgres)** — runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.):
+
+```bash
 docker build -t quack-on-demand:dev .
 
-# Run, wiring the manager to a Postgres on the host
+PG_HOST=my-rds.amazonaws.com PG_PASSWORD=*** \
+  AUTH=true ADMIN_PASSWORD=change-me TLS=true \
+  ./scripts/start-docker.sh
+```
+
+`AUTH`, `TLS`, `ADMIN_*`, `API_KEY`, `DATA_PATH`, `CERTS_DIR`, port mappings — all overridable via env. Defaults to no-auth, no-TLS for fast smoke tests. DuckLake data persists at `$PWD/ducklake/` by default.
+
+**3. Raw `docker run`** — for one-off invocations:
+
+```bash
 docker run --rm -p 20900:20900 -p 31338:31338 \
   -e SL_QUACK_PG_HOST=host.docker.internal \
   -e SL_QUACK_PG_PASSWORD=azizam \
   -e SL_QUACK_ADMIN_PASSWORD=change-me \
   -v $(pwd)/ducklake:/app/ducklake \
-  -v $(pwd)/state:/app/state \
   -v $(pwd)/certs:/app/certs \
   quack-on-demand:dev
 ```
