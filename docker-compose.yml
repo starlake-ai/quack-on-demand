@@ -1,0 +1,75 @@
+# docker-compose.yml — local quack-on-demand stack
+#
+# Two services:
+#   - postgres : metastore + control-plane state (slkstate_*) + DuckLake metadata (ducklake_*)
+#   - quack    : the manager (REST + UI + FlightSQL edge) built from ./Dockerfile
+#
+# All persistent state is bind-mounted onto the host:
+#   ./pgdata   -> postgres data dir   (catalog, slkstate_*, ducklake_* tables)
+#   ./ducklake -> DuckLake data files (Parquet / etc. created by Quack nodes)
+#   ./certs    -> self-signed TLS cert + key (auto-generated on first boot)
+#
+# Settings live in `.env` (or env vars at compose time) — see .env.example.
+# Bring everything up with:
+#   docker compose up --build
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: quack-on-demand-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-azizam}
+      POSTGRES_DB:       ${PG_DBNAME:-tpch}
+    ports:
+      # Exposed on the host so external tools (psql, DBeaver) can also reach
+      # the metastore. Comment out for a tighter container-only network.
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DBNAME:-tpch}"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+  quack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quack-on-demand:dev
+    container_name: quack-on-demand
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # ----- Postgres connection (the service name is the hostname) -----
+      SL_QUACK_PG_HOST:     postgres
+      SL_QUACK_PG_PORT:     "5432"
+      SL_QUACK_PG_USER:     ${PG_USER:-postgres}
+      SL_QUACK_PG_PASSWORD: ${PG_PASSWORD:-azizam}
+      SL_QUACK_PG_DBNAME:   ${PG_DBNAME:-tpch}
+      SL_QUACK_PG_SCHEMA:   ${PG_SCHEMA:-main}
+
+      # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
+      SL_QUACK_AUTH_DB_ENABLED: ${AUTH:-false}
+      SL_QUACK_ADMIN_USERNAME:  ${ADMIN_USERNAME:-admin}
+      SL_QUACK_ADMIN_PASSWORD:  ${ADMIN_PASSWORD:-admin}
+      SL_QUACK_API_KEY:         ${API_KEY:-}
+      PROXY_TLS_ENABLED:        ${TLS:-false}
+
+      # ----- Local-mode Quack node port range -----
+      SL_QUACK_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
+      SL_QUACK_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
+
+    ports:
+      - "${MANAGER_PORT:-20900}:20900"   # REST + UI
+      - "${EDGE_PORT:-31338}:31338"      # FlightSQL edge
+      - "${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}:${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}"
+
+    volumes:
+      - ./ducklake:/app/ducklake
+      - ./certs:/app/certs

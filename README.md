@@ -4,6 +4,8 @@
 
 DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`, generates a random auth token at startup, and explicitly recommends a reverse proxy in front of it for TLS, external auth, and authorization. Quack on Demand is that proxy — with multi-tenancy, pluggable identity, table-level ACLs, role-aware routing, health probes, and a live admin UI built in.
 
+![Admin console — live per-node metrics, statement history, ACL editor](assets/metrics.jpg)
+
 ---
 
 ## Features
@@ -141,6 +143,25 @@ Or with TLS verification, import `certs/server-cert.pem` into your JDBC client's
 ```bash
 ./scripts/stop-quack-on-demand.sh
 ```
+
+### Docker
+
+```bash
+# Multi-stage build: UI + Scala assembly compile inside the image
+docker build -t quack-on-demand:dev .
+
+# Run, wiring the manager to a Postgres on the host
+docker run --rm -p 20900:20900 -p 31338:31338 \
+  -e SL_QUACK_PG_HOST=host.docker.internal \
+  -e SL_QUACK_PG_PASSWORD=azizam \
+  -e SL_QUACK_ADMIN_PASSWORD=change-me \
+  -v $(pwd)/ducklake:/app/ducklake \
+  -v $(pwd)/state:/app/state \
+  -v $(pwd)/certs:/app/certs \
+  quack-on-demand:dev
+```
+
+The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
 
 ---
 

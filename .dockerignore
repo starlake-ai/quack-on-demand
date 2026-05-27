@@ -1,0 +1,38 @@
+# Keep the build context small — exclude generated + IDE clutter.
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+.claude
+.metals
+
+# sbt / Scala build output
+target
+project/target
+project/project
+project/metals.sbt
+
+# UI build output (the build stage rebuilds inside the container)
+ui/node_modules
+ui/dist
+ui/*.tsbuildinfo
+ui/vite.config.d.ts
+ui/vite.config.js
+
+# Local runtime state — never bake credentials/data into images
+certs
+state
+ducklake
+pgdata
+distrib
+datasets
+docs/TPCH_SF1*
+.env
+
+# Editor + OS noise
+*.log
+*.swp
+
+# Existing assembly jar (the build stage produces a fresh one)
+distrib/quack-on-demand-assembly-*.jar
