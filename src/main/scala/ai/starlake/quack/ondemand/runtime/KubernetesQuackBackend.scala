@@ -1,0 +1,191 @@
+package ai.starlake.quack.ondemand.runtime
+
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RunningNode}
+import cats.effect.IO
+import io.fabric8.kubernetes.api.model._
+import io.fabric8.kubernetes.client.KubernetesClient
+
+import java.time.Instant
+import scala.jdk.CollectionConverters._
+
+/** Kubernetes-backed quack node runtime.
+  *
+  * Creates one Pod + one Service per node. Labels carry pool key, role and
+  * `maxConcurrent` so an orphan-discovery pass can reconstruct [[RunningNode]]
+  * after a manager restart.
+  *
+  * v1 limitation: the per-node token is held only in-memory. After a manager
+  * restart, discovered pods come back with an empty token; a follow-up task
+  * could persist it in a K8s Secret named after the pod.
+  */
+final class KubernetesQuackBackend(
+    client: KubernetesClient,
+    namespace: String,
+    image: String,
+    quackPort: Int,
+    podLabel: String,
+    startupTimeoutSec: Int,
+    defaultMetastore: Map[String, String] = Map.empty,
+    readPodReady: Pod => Boolean = pod =>
+      Option(pod.getStatus).map(_.getPhase).contains("Running")
+) extends QuackBackend:
+
+  private val (labelKey, labelValue) =
+    podLabel.split("=", 2) match
+      case Array(k, v) => (k, v)
+      case _           => sys.error(s"invalid podLabel: $podLabel")
+
+  private val tokens = scala.collection.concurrent.TrieMap.empty[String, String]
+
+  private def buildLabels(spec: NodeSpec): java.util.Map[String, String] =
+    val m = new java.util.HashMap[String, String]()
+    m.put(labelKey, labelValue)
+    m.put("quack-tenant", spec.poolKey.tenant)
+    m.put("quack-pool", spec.poolKey.pool)
+    m.put("quack-role", spec.role.toString)
+    m.put("quack-max-concurrent", spec.maxConcurrent.toString)
+    m
+
+  private def buildPod(spec: NodeSpec, token: String): Pod =
+    val envs = new java.util.ArrayList[EnvVar]()
+    // Defaults first, per-pool overrides next, then well-known QUACK_* keys.
+    val merged = defaultMetastore ++ spec.metastore
+    merged.foreach { case (k, v) =>
+      val e = new EnvVar()
+      e.setName(k)
+      e.setValue(v)
+      envs.add(e)
+    }
+    val tokenEnv = new EnvVar()
+    tokenEnv.setName("QUACK_TOKEN")
+    tokenEnv.setValue(token)
+    envs.add(tokenEnv)
+    val portEnv = new EnvVar()
+    portEnv.setName("QUACK_PORT")
+    portEnv.setValue(quackPort.toString)
+    envs.add(portEnv)
+
+    val containerPort = new ContainerPort()
+    containerPort.setContainerPort(quackPort)
+
+    val container = new Container()
+    container.setName("quack")
+    container.setImage(image)
+    container.setEnv(envs)
+    container.setPorts(java.util.List.of(containerPort))
+
+    val podSpec = new PodSpec()
+    podSpec.setContainers(java.util.List.of(container))
+
+    val meta = new ObjectMeta()
+    meta.setName(spec.nodeId)
+    meta.setLabels(buildLabels(spec))
+
+    val pod = new Pod()
+    pod.setMetadata(meta)
+    pod.setSpec(podSpec)
+    pod
+
+  private def buildService(spec: NodeSpec): Service =
+    val svcPort = new ServicePort()
+    svcPort.setPort(quackPort)
+    svcPort.setTargetPort(new IntOrString(quackPort))
+
+    val selector = new java.util.HashMap[String, String]()
+    selector.put(labelKey, labelValue)
+    selector.put("quack-tenant", spec.poolKey.tenant)
+    selector.put("quack-pool", spec.poolKey.pool)
+
+    val svcSpec = new ServiceSpec()
+    svcSpec.setSelector(selector)
+    svcSpec.setPorts(java.util.List.of(svcPort))
+
+    val svcLabels = new java.util.HashMap[String, String]()
+    svcLabels.put(labelKey, labelValue)
+
+    val meta = new ObjectMeta()
+    meta.setName(spec.nodeId)
+    meta.setLabels(svcLabels)
+
+    val svc = new Service()
+    svc.setMetadata(meta)
+    svc.setSpec(svcSpec)
+    svc
+
+  def start(spec: NodeSpec): IO[RunningNode] = IO.blocking {
+    val token = LocalQuackBackend.randomToken()
+    tokens.put(spec.nodeId, token)
+
+    val pod = buildPod(spec, token)
+    val created = client.pods.inNamespace(namespace).resource(pod).create()
+    waitReady(created)
+
+    val svc = buildService(spec)
+    client.services.inNamespace(namespace).resource(svc).create()
+
+    RunningNode(
+      nodeId    = spec.nodeId,
+      poolKey   = spec.poolKey,
+      role      = spec.role,
+      host      = s"${spec.nodeId}.$namespace.svc.cluster.local",
+      port      = quackPort,
+      token     = token,
+      pid       = None,
+      podName   = Some(spec.nodeId),
+      startedAt = Instant.now(),
+      maxConcurrent = spec.maxConcurrent
+    )
+  }
+
+  private def waitReady(p: Pod): Unit =
+    val deadline = System.currentTimeMillis() + startupTimeoutSec * 1000L
+    var ready = false
+    while !ready && System.currentTimeMillis() < deadline do
+      val latest = client.pods.inNamespace(namespace).withName(p.getMetadata.getName).get()
+      if latest != null && readPodReady(latest) then ready = true
+      else Thread.sleep(500)
+    if !ready then sys.error(s"pod ${p.getMetadata.getName} not ready in ${startupTimeoutSec}s")
+
+  def stop(nodeId: String): IO[Unit] = IO.blocking {
+    client.services.inNamespace(namespace).withName(nodeId).delete()
+    client.pods.inNamespace(namespace).withName(nodeId).delete()
+    tokens.remove(nodeId)
+    ()
+  }
+
+  def isAlive(nodeId: String): Boolean =
+    Option(client.pods.inNamespace(namespace).withName(nodeId).get()).exists(readPodReady)
+
+  def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
+    val pods = client.pods
+      .inNamespace(namespace)
+      .withLabel(labelKey, labelValue)
+      .list()
+      .getItems
+      .asScala
+      .toList
+    pods.flatMap { p =>
+      val labels = Option(p.getMetadata.getLabels)
+        .map(_.asScala)
+        .getOrElse(scala.collection.mutable.Map.empty)
+      for
+        tenant <- labels.get("quack-tenant")
+        pool   <- labels.get("quack-pool")
+        roleS  <- labels.get("quack-role")
+        role   <- Role.parse(roleS).toOption
+      yield RunningNode(
+        nodeId    = p.getMetadata.getName,
+        poolKey   = PoolKey(tenant, pool),
+        role      = role,
+        host      = s"${p.getMetadata.getName}.$namespace.svc.cluster.local",
+        port      = quackPort,
+        token     = tokens.getOrElse(p.getMetadata.getName, ""),
+        pid       = None,
+        podName   = Some(p.getMetadata.getName),
+        startedAt = Instant.now(),
+        maxConcurrent = labels.get("quack-max-concurrent").flatMap(_.toIntOption).getOrElse(0)
+      )
+    }
+  }
+
+  def cleanup(): IO[Unit] = IO.unit
