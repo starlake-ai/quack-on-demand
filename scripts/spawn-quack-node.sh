@@ -1,4 +1,4 @@
-    #!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Spawn one Quack node — invoked by LocalQuackBackend.
 #
@@ -84,8 +84,26 @@ cleanup() {
 }
 trap cleanup TERM INT EXIT
 
+# DuckDB does NOT honour the HTTP_PROXY / HTTPS_PROXY env vars for
+# `INSTALL <extension>` downloads — those have to be set via the SQL
+# `SET http_proxy=...` setting (duckdb forwards to libcurl through that
+# setting only). Without this, behind a corporate proxy the very first
+# INSTALL hangs and the node never reaches `quack_serve`. We emit the
+# SET lines only when a proxy env var is present, so non-proxied
+# environments are unaffected.
+PROXY_SQL=""
+PROXY_URL="${HTTP_PROXY:-${http_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}"
+if [[ -n "$PROXY_URL" ]]; then
+  # DuckDB wants "host:port" without the scheme prefix.
+  HOSTPORT="${PROXY_URL#http://}"
+  HOSTPORT="${HOSTPORT#https://}"
+  HOSTPORT="${HOSTPORT%/}"
+  PROXY_SQL="SET http_proxy = '$HOSTPORT';"
+fi
+
 # Feed init SQL
 cat >&9 <<SQL
+$PROXY_SQL
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
 INSTALL quack;    LOAD quack;
