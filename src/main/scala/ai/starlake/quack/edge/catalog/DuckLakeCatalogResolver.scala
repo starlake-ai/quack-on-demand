@@ -1,8 +1,8 @@
-package ai.starlake.gizmo.proxy.catalog
+package ai.starlake.quack.edge.catalog
 
 import ai.starlake.acl.model.{TableRef, TenantId}
 import ai.starlake.acl.policy.ResourceLookupResult
-import ai.starlake.gizmo.proxy.config.SessionConfig
+import ai.starlake.quack.edge.config.SessionConfig
 import com.typesafe.scalalogging.LazyLogging
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.statement.create.view.CreateView
@@ -173,13 +173,13 @@ class DuckLakeCatalogResolver(
     val env = sys.env
     val dbId = sessionConfig.slProjectId
     val quotedDbId = escapeIdentifier(dbId)
-    // The proxy JVM runs on the host, not inside Docker. Replace Docker's
+    // The manager JVM runs on the host, not inside Docker. Replace Docker's
     // host.docker.internal with localhost so the resolver can reach PostgreSQL.
     val pgHost =
       if sessionConfig.pgHost == "host.docker.internal" then "localhost"
       else sessionConfig.pgHost
 
-    // Build optional S3 secret SQL (same logic as ProxyServer)
+    // Build optional S3 secret SQL when AWS_* credentials are present in the environment.
     val s3SecretSql =
       (env.get("AWS_KEY_ID"), env.get("AWS_SECRET"), env.get("AWS_REGION"), env.get("AWS_ENDPOINT")) match
         case (Some(keyId), Some(secret), Some(region), Some(endpoint)) =>

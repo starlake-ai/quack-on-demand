@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.gizmo.proxy.config.*
+import ai.starlake.quack.edge.config.*
 
 /** Constructs OidcBearerAuthenticator instances with the correct JWKS URL
   * and expected issuer/audience for each supported OIDC provider.

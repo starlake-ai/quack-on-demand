@@ -1,13 +1,13 @@
 package ai.starlake.quack
 
-import ai.starlake.gizmo.proxy.config.{
+import ai.starlake.quack.edge._
+import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.config.{
   AclConfig, AuthenticationConfig, AwsAuthConfig, AzureAuthConfig,
   DatabaseAuthConfig, GoogleAuthConfig, JwtAuthConfig, KeycloakAuthConfig,
   OAuthConfig, SessionConfig
 }
-import ai.starlake.quack.edge._
-import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
@@ -25,8 +25,8 @@ object Main extends IOApp.Simple with LazyLogging:
 
   // Match the camelCase keys used in application.conf rather than pureconfig's
   // default kebab-case mapping. Affects our own ManagerConfig / FlightConfig
-  // AND the vendored gizmo AuthenticationConfig types (which `derives
-  // ConfigReader` at class-definition time — we shadow those defaults here).
+  // AND the edge AuthenticationConfig types (which `derives ConfigReader`
+  // at class-definition time — we shadow those defaults here).
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
   given ProductHint[K8sConfig]     = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]   = ProductHint[AdminConfig](camelMapping)
@@ -61,20 +61,15 @@ object Main extends IOApp.Simple with LazyLogging:
     val authCfg = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
 
-    // SessionConfig holds the legacy GIZMOSQL_USERNAME/PASSWORD fallback for
-    // AuthenticationService. We don't want that fallback — leave the env-var
-    // username empty so the service only uses configured providers.
     val sessionCfg = SessionConfig(
-      gizmosqlUsername = "",
-      gizmosqlPassword = "",
-      slProjectId      = "",
-      slDataPath       = "",
-      pgUsername       = mgrCfg.defaultMetastore.getOrElse("pgUser", "postgres"),
-      pgPassword       = mgrCfg.defaultMetastore.getOrElse("pgPassword", ""),
-      pgPort           = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
-      pgHost           = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
-      jwtSecretKey     = authCfg.jwt.secretKey,
-      aclTenant        = edgeCfg.defaultTenant
+      slProjectId  = "",
+      slDataPath   = "",
+      pgUsername   = mgrCfg.defaultMetastore.getOrElse("pgUser", "postgres"),
+      pgPassword   = mgrCfg.defaultMetastore.getOrElse("pgPassword", ""),
+      pgPort       = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
+      pgHost       = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
+      jwtSecretKey = authCfg.jwt.secretKey,
+      aclTenant    = edgeCfg.defaultTenant
     )
     val authService = new AuthenticationService(authCfg, sessionCfg)
 
@@ -147,9 +142,9 @@ object Main extends IOApp.Simple with LazyLogging:
     // SQL ACL validator. Picks between two implementations:
     //   - PostgresAclValidator (preferred when stateStorage=postgres): reads
     //     grants from slkstate_acl_grant, enforces them per statement.
-    //   - AclStatementValidator (file-based, vendored gizmo stack): reads
-    //     YAML files under acl.base-path. Still useful for read-only ACL
-    //     configs shipped alongside an immutable deploy.
+    //   - AclStatementValidator (file-based): reads YAML files under
+    //     acl.base-path. Still useful for read-only ACL configs shipped
+    //     alongside an immutable deploy.
     // Both honor acl.enabled=false by falling back to allow-all.
     val aclValidator: StatementValidator =
       if !aclCfg.enabled then

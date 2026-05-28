@@ -1,13 +1,10 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.gizmo.proxy.config.{AuthenticationConfig, SessionConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, SessionConfig}
 import com.typesafe.scalalogging.LazyLogging
 
 /** Central authentication orchestrator. Builds chains of authenticators from config
   * and tries them in order for each authentication request.
-  *
-  * The legacy GIZMOSQL_USERNAME/PASSWORD credentials (from SessionConfig) are always
-  * added as the last basic auth provider, so they work even when external providers are enabled.
   */
 class AuthenticationService(config: AuthenticationConfig, sessionConfig: SessionConfig)
     extends AutoCloseable, LazyLogging:
@@ -109,17 +106,7 @@ class AuthenticationService(config: AuthenticationConfig, sessionConfig: Session
         config.azure.clientId, config.azure.clientSecret,
         config.roleClaim
       )
-    // Only add GIZMOSQL_USERNAME/PASSWORD fallback when no external auth provider is configured at all
-    // (neither basic nor bearer). If any provider is enabled (even bearer-only like Google), skip the fallback.
-    val otherProviders = providers.result()
-    val anyProviderEnabled = config.database.enabled || config.keycloak.enabled ||
-      config.google.enabled || config.azure.enabled || config.aws.enabled ||
-      config.jwt.secretKey.nonEmpty || config.jwt.publicKeyPath.nonEmpty
-    if !anyProviderEnabled && sessionConfig.gizmosqlUsername.nonEmpty then
-      logger.info("No external auth providers configured, using env-var authenticator (GIZMOSQL_USERNAME/PASSWORD)")
-      otherProviders :+ new EnvVarAuthenticator(sessionConfig.gizmosqlUsername, sessionConfig.gizmosqlPassword)
-    else
-      otherProviders
+    providers.result()
 
   private def buildBearerChain(): List[BearerAuthProvider] =
     val providers = List.newBuilder[BearerAuthProvider]

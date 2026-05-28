@@ -6,7 +6,7 @@ import ai.starlake.quack.ondemand.state.AclGrantStore
 import com.typesafe.scalalogging.LazyLogging
 
 /** SQL ACL validator backed by the Postgres-relational `slkstate_acl_grant`
-  * table. Reuses gizmo's `SqlParser` to extract table refs from SELECT
+  * table. Uses the ACL `SqlParser` to extract table refs from SELECT
   * statements, then queries the grant table for the user's principal.
   *
   * Decision rule:

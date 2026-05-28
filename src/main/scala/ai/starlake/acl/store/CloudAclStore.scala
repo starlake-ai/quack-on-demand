@@ -2,7 +2,7 @@ package ai.starlake.acl.store
 
 import ai.starlake.acl.AclError
 import ai.starlake.acl.model.TenantId
-import ai.starlake.gizmo.proxy.config.{AclAzureConfig, AclGcsConfig, AclS3Config}
+import ai.starlake.quack.edge.config.{AclAzureConfig, AclGcsConfig, AclS3Config}
 import blobstore.Store
 import blobstore.url.{FsObject, Url}
 import cats.effect.IO

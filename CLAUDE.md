@@ -52,18 +52,18 @@ A FlightSQL request flows: `client → FlightProducerImpl → AuthenticationServ
 
 The `slkstate_*` prefix keeps control-plane tables from colliding with DuckLake's `__ducklake_*` namespace.
 
-### Vendored code (`ai.starlake.gizmo.*`, `ai.starlake.acl.*`)
+### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 
-[src/main/scala/ai/starlake/gizmo/](src/main/scala/ai/starlake/gizmo/) and [src/main/scala/ai/starlake/acl/](src/main/scala/ai/starlake/acl/) are vendored from [gizmo-on-demand](https://github.com/starlake-ai/gizmo-on-demand). Coordinate non-trivial changes upstream. The pureconfig `ProductHint`s in [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) override the vendored gizmo `derives ConfigReader` defaults to use camelCase (matching `application.conf`) instead of pureconfig's kebab-case.
+The auth/ACL/session config types and the DuckLake catalog resolver live under [quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/) and [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/). The pureconfig `ProductHint`s in [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) override the `derives ConfigReader` defaults to use camelCase (matching `application.conf`) instead of pureconfig's kebab-case.
 
 ### ACL validator — two implementations
 
 [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) picks the `StatementValidator` based on storage:
-- `PostgresAclValidator` when `stateStorage=postgres` — reads `slkstate_acl_grant`, uses [gizmo's SQL parser](src/main/scala/ai/starlake/acl/parser/) to extract table refs, expands the session's `(username, groups, role)` into `user:*`/`group:*`/`role:*` principals at validation time.
-- `AclStatementValidator` (file-based, vendored gizmo) — reads YAML under `acl.basePath`. Still useful for immutable deploys.
+- `PostgresAclValidator` when `stateStorage=postgres` — reads `slkstate_acl_grant`, uses the [ACL SQL parser](src/main/scala/ai/starlake/acl/parser/) to extract table refs, expands the session's `(username, groups, role)` into `user:*`/`group:*`/`role:*` principals at validation time.
+- `AclStatementValidator` (file-based) — reads YAML under `acl.basePath`. Still useful for immutable deploys.
 - `StatementValidator.allowAll` when `acl.enabled=false` (the default).
 
-**DML grants are coarse-grained today**: `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant — the gizmo `TableExtractor` only walks SELECT statements.
+**DML grants are coarse-grained today**: `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant — the ACL `TableExtractor` only walks SELECT statements.
 
 ## Configuration
 
@@ -78,4 +78,3 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
 - **Don't disable JVM forking** in build.sbt — see "JVM forking" above.
 - **Don't invoke `scripts/spawn-quack-node.sh` directly** — it's spawned by `LocalQuackBackend` with the right port + token + env contract. Manual invocation will leak ports and confuse the supervisor.
 - **Don't edit the bundled `application.conf` for local tweaks** — set the `SL_QUACK_*` env var instead, or the change vanishes on the next `sbt assembly`.
-- **Don't touch `ai.starlake.gizmo.*` / `ai.starlake.acl.*` casually** — they're vendored from `gizmo-on-demand`. Non-trivial fixes belong upstream.
