@@ -53,7 +53,7 @@ RUN --mount=type=cache,target=/root/.sbt \
 # =========================================================================
 FROM eclipse-temurin:17-jre
 
-ARG DUCKDB_VERSION=1.3.2
+ARG DUCKDB_VERSION=1.5.3
 ARG TARGETARCH
 
 # Runtime deps:
