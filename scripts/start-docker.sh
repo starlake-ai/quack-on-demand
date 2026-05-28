@@ -4,6 +4,17 @@
 # Auth and TLS are off by default for fast smoke tests; both are
 # parameterized so the same script also drives a production-shaped run.
 #
+# *** DO NOT MIX DOCKER AND NATIVE AGAINST THE SAME CATALOG DB ***
+# DuckLake bakes the *absolute* DATA_PATH into Postgres metadata
+# (__ducklake_data_file rows). Inside the container that path is
+# /app/ducklake/$PG_DBNAME; natively it's $PWD/ducklake/$PG_DBNAME on
+# the host. Once a manager writes a path, every future manager reading
+# that catalog must see the same string or every query will fail with
+# "could not open file ...". If you want to switch deployment modes,
+# either (a) point Docker at a different PG_DBNAME (e.g. tpch_docker)
+# so the two catalogs stay isolated, or (b) reset the data by dropping
+# the catalog DB and the corresponding ducklake/<db>/ directory.
+#
 # All knobs come from env vars (with defaults). Override what you need:
 #
 #   PG_HOST          remote Postgres host                (required)

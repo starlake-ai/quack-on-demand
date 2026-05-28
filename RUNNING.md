@@ -105,6 +105,16 @@ Every scalar in `application.conf` has a matching `SL_QUACK_*` /
 
 ## Path 2 — Docker container, against an external Postgres
 
+> ⚠️ **Don't share a catalog DB between Docker and native runs.** DuckLake
+> bakes the absolute `DATA_PATH` into Postgres metadata. Inside the
+> container that path is `/app/ducklake/<db>`; natively it's
+> `$PWD/ducklake/<db>` on the host. Once a manager writes a path, every
+> future manager reading that catalog must see the same string or every
+> query will fail with *"could not open file ..."*. If you've already
+> booted natively against `PG_DBNAME=tpch`, point Docker at a different
+> DB (e.g. `PG_DBNAME=tpch_docker`) — see the [Path-matching gotcha](#path-matching-gotcha-ducklake)
+> below for the why and the recovery steps.
+
 ### Prerequisites
 - Docker
 - A reachable Postgres (any host the container can route to)
@@ -138,7 +148,9 @@ What it does internally:
 - mounts `$PWD/certs/` → `/app/certs` (auto-generated TLS cert persists)
 - maps the lease range `21900-22500` for in-container Quack node ports
 
-To stop: `docker stop quack-on-demand`.
+To stop: `./scripts/stop-docker.sh` (graceful SIGTERM → SIGKILL after 30s,
+matching the `CONTAINER_NAME` from `start-docker.sh`; override the timeout
+with `STOP_TIMEOUT=60`).
 
 ### Seed with TPC-H and Run
 
@@ -250,12 +262,60 @@ rm -rf pgdata ducklake certs   # nuke from orbit (irreversible)
 
 ## Path-matching gotcha (DuckLake)
 
-> **DuckLake stores absolute paths** in the catalog. If you load data
-> with one `DATA_PATH` and later query it from a manager that sees a
-> different `DATA_PATH`, the Quack nodes will fail to open the Parquet
-> files. The three seed recipes above keep paths matched by construction
-> (native: same shell, same `$PWD`; Path 2: loader runs inside the
-> container; Path 3: bind-mount is shared by manager + `init-tpch`).
+**DuckLake stores absolute paths** in the Postgres catalog
+(`__ducklake_data_file.path` rows are full path strings, not relative
+references). Every Quack node that later reads the catalog opens parquet
+files by that exact string. So **any two managers sharing a catalog DB
+must see the same DATA_PATH**, or every query will fail with
+`could not open file '/...'`.
+
+### Where this bites
+
+The three seed recipes above keep paths matched by construction
+(native: same shell + same `$PWD`; Path 2: loader runs inside the
+container; Path 3: bind-mount shared by manager + `init-tpch`). The
+problem case is **mixing deployment modes against one catalog DB**:
+
+| First boot | Second boot | What breaks |
+|---|---|---|
+| Native (`$PWD/ducklake/tpch`) | Docker (`/app/ducklake/tpch`) | Docker nodes can't find host paths |
+| Docker (`/app/ducklake/tpch`) | Native (`$PWD/ducklake/tpch`) | Native nodes can't find `/app/...` |
+| Native from `/home/a/…` | Native from `/home/b/…` | Second `$PWD` doesn't match catalog |
+
+The `slkstate_*` control-plane tables (tenants, pools, ACLs, admin
+users) don't store paths so they're not the problem — the breakage is
+strictly in the DuckLake `__ducklake_*` metadata.
+
+### How to avoid it
+
+Pick one of:
+
+1. **Isolate by `PG_DBNAME`.** Native uses `SL_QUACK_PG_DBNAME=tpch`,
+   Docker uses `PG_DBNAME=tpch_docker`. Two catalogs, no overlap, both
+   can run any time. Recommended for dev machines that toggle between
+   modes.
+2. **Pick one mode and stay there.** If you only ever boot natively (or
+   only ever in Docker), there's nothing to coordinate.
+3. **Symlink to match the container path.** Mount `/app/ducklake` to the
+   host's `$PWD/ducklake` *and* symlink `/app/ducklake` on the host so
+   the absolute string `/app/ducklake/tpch` is also valid natively. Ugly
+   and platform-specific; not recommended.
+
+### Recovery if you already mixed
+
+A "stuck" catalog has rows in `__ducklake_data_file` pinned to a path
+that the current manager can't see. Two options:
+
+```bash
+# Option A — start fresh: drop the catalog DB + the data dir.
+psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
+rm -rf ducklake/tpch                    # the on-disk parquet files
+# Re-boot with SL_QUACK_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
+# `docker compose --profile init run --rm init-tpch` (Path 3).
+
+# Option B — keep the data, use a fresh catalog DB.
+SL_QUACK_PG_DBNAME=tpch_native ./scripts/start-quack-on-demand.sh
+```
 
 ---
 
