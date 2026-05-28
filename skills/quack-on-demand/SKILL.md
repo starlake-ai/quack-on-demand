@@ -22,7 +22,7 @@ Use this skill when the user wants to:
 - `scripts/stop-quack-on-demand.sh` — SIGTERM → wait → SIGKILL
 - `scripts/loadtest/loadtest.py` — Python FlightSQL load tester (ADBC driver)
 - `scripts/start-quack-ducklake.sh` — standalone single-node Quack for testing (no manager)
-- `scripts/load-tpch-sf1.sh` — load TPCH-SF1 into the metastore
+- `scripts/load-tpch-sf1.sh` — generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function
 - `src/main/resources/application.conf` — config (every key has a `SL_QUACK_*` env-var override)
 - `docs/superpowers/FOLLOWUPS.md` — triaged backlog
 - `README.md` — full feature list + operational notes

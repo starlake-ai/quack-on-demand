@@ -2,7 +2,7 @@
 
 **A production-grade FlightSQL gateway in front of [DuckDB Quack](https://duckdb.org/docs/current/core_extensions/quack) + [DuckLake](https://duckdb.org/docs/extensions/ducklake.html).**
 
-DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`, generates a random auth token at startup, and explicitly recommends a reverse proxy in front of it for TLS, external auth, and authorization. Quack on Demand is that proxy — with multi-tenancy, pluggable identity, table-level ACLs, role-aware routing, health probes, and a live admin UI built in.
+DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`, generates a random auth token at startup, and explicitly recommends a reverse proxy in front of it for TLS, external auth, and authorization. Quack on Demand is that proxy with multi-tenancy, pluggable identity, table-level ACLs, role-aware routing, health probes, and a live admin UI built in.
 
 ![Admin console — live per-node metrics, statement history, ACL editor](assets/metrics.jpg)
 
@@ -16,10 +16,10 @@ DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`
   - Postgres / any JDBC backend (BCrypt-hashed passwords, free-form SQL template)
   - External JWT (HS256 / RS256 / public-key PEM)
   - OIDC providers: Keycloak (with ROPC), Google, Azure AD, AWS Cognito
-- **Postgres-relational ACL** stored in `slkstate_acl_grant`, managed via REST, enforced per statement (gizmo's SQL parser extracts table refs, the validator looks up grants for the user's principal)
+- **Postgres-relational ACL** stored in `slkstate_acl_grant`, managed via REST, enforced per statement (SQL parser extracts table refs, the validator looks up grants for the user's principal)
 - **Admin REST API** with an `X-API-Key` static key OR a session token minted via `/api/auth/login`
 - **React admin console** at `/ui/` — tenant CRUD, pool CRUD, per-tenant ACL editor, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
-- **Single uber-jar** deployment; control-plane state lives next to DuckLake's metadata in the same Postgres database — no extra moving parts
+- **Single uber-jar** deployment; control-plane state lives next to DuckLake's metadata in the same Postgres database
 - **Self-healing on restart** — dead Quack child processes are detected (PID + port probe) and respawned automatically before the edge accepts traffic
 - **Every config key is overridable** via a `SL_QUACK_*` env var
 
@@ -79,7 +79,58 @@ DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`
 
 ## Quick start
 
-### Prerequisites
+### Docker Run
+
+Three paths, increasing in flexibility:
+
+**1. `docker compose` (recommended for first run)** brings up Postgres + the manager together, with all persistent state bind-mounted to the host:
+
+```bash
+cp .env.example .env       # tweak ports / auth / admin password
+docker compose up --build  # detached with `-d` once you're happy
+```
+
+Bind mounts created next to the compose file:
+- `./pgdata/`   — Postgres data dir (`slkstate_*` + `ducklake_*` tables)
+- `./ducklake/` — DuckLake Parquet files written by Quack nodes
+- `./certs/`    — auto-generated self-signed TLS cert + key
+
+To seed the metastore with a TPCH dataset (uses DuckDB's `dbgen()` — no input files needed), trigger the `init` profile once Postgres is healthy:
+
+```bash
+docker compose --profile init run --rm init-tpch    # SF=1 → ~6M lineitem rows
+TPCH_SF=10 docker compose --profile init run --rm init-tpch
+```
+
+Tables land in `tpch.tpch1.{region,nation,customer,supplier,part,partsupp,orders,lineitem}` by default. Override `TPCH_SF` / `TPCH_SCHEMA` in `.env`.
+
+**2. `scripts/start-docker.sh` (against an existing Postgres)** runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.):
+
+```bash
+docker build -t quack-on-demand:dev .
+
+PG_HOST=my-rds.amazonaws.com PG_PASSWORD=*** \
+  AUTH=true ADMIN_PASSWORD=change-me TLS=true \
+  ./scripts/start-docker.sh
+```
+
+`AUTH`, `TLS`, `ADMIN_*`, `API_KEY`, `DATA_PATH`, `CERTS_DIR`, port mappings — all overridable via env. Defaults to no-auth, no-TLS for fast smoke tests. DuckLake data persists at `$PWD/ducklake/` by default.
+
+**3. Raw `docker run`** — for one-off invocations:
+
+```bash
+docker run --rm -p 20900:20900 -p 31338:31338 \
+  -e SL_QUACK_PG_HOST=host.docker.internal \
+  -e SL_QUACK_PG_PASSWORD=azizam \
+  -e SL_QUACK_ADMIN_PASSWORD=change-me \
+  -v $(pwd)/ducklake:/app/ducklake \
+  -v $(pwd)/certs:/app/certs \
+  quack-on-demand:dev
+```
+
+The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
+
+### Native Run Prerequisites
 
 - JDK 17+
 - `sbt` 1.x and `npm` 18+
@@ -144,47 +195,6 @@ Or with TLS verification, import `certs/server-cert.pem` into your JDBC client's
 ./scripts/stop-quack-on-demand.sh
 ```
 
-### Docker
-
-Three paths, increasing in flexibility:
-
-**1. `docker compose` (recommended for first run)** — brings up Postgres + the manager together, with all persistent state bind-mounted to the host:
-
-```bash
-cp .env.example .env       # tweak ports / auth / admin password
-docker compose up --build  # detached with `-d` once you're happy
-```
-
-Bind mounts created next to the compose file:
-- `./pgdata/`   — Postgres data dir (`slkstate_*` + `ducklake_*` tables)
-- `./ducklake/` — DuckLake Parquet files written by Quack nodes
-- `./certs/`    — auto-generated self-signed TLS cert + key
-
-**2. `scripts/start-docker.sh` (against an existing Postgres)** — runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.):
-
-```bash
-docker build -t quack-on-demand:dev .
-
-PG_HOST=my-rds.amazonaws.com PG_PASSWORD=*** \
-  AUTH=true ADMIN_PASSWORD=change-me TLS=true \
-  ./scripts/start-docker.sh
-```
-
-`AUTH`, `TLS`, `ADMIN_*`, `API_KEY`, `DATA_PATH`, `CERTS_DIR`, port mappings — all overridable via env. Defaults to no-auth, no-TLS for fast smoke tests. DuckLake data persists at `$PWD/ducklake/` by default.
-
-**3. Raw `docker run`** — for one-off invocations:
-
-```bash
-docker run --rm -p 20900:20900 -p 31338:31338 \
-  -e SL_QUACK_PG_HOST=host.docker.internal \
-  -e SL_QUACK_PG_PASSWORD=azizam \
-  -e SL_QUACK_ADMIN_PASSWORD=change-me \
-  -v $(pwd)/ducklake:/app/ducklake \
-  -v $(pwd)/certs:/app/certs \
-  quack-on-demand:dev
-```
-
-The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
 
 ---
 
@@ -329,7 +339,7 @@ scripts/
 ├── start-quack-on-demand.sh       # Boot the manager from the uber-jar
 ├── stop-quack-on-demand.sh        # Graceful SIGTERM → SIGKILL escalation
 ├── start-quack-ducklake.sh        # Standalone single-node Quack for testing
-├── load-tpch-sf1.sh               # Load TPCH-SF1 into the metastore
+├── load-tpch-sf1.sh               # Generate TPCH-SF1 into the metastore via DuckDB's dbgen()
 └── spawn-quack-node.sh            # Called by LocalQuackBackend; do not invoke directly
 ui/
 └── src/                           # React SPA, built into src/main/resources/ui
