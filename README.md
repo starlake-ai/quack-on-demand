@@ -130,6 +130,64 @@ docker run --rm -p 20900:20900 -p 31338:31338 \
 
 The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
 
+### Behind a corporate proxy
+
+Both the **image build** and the **container runtime** need outbound HTTP/HTTPS access. Three sources of egress traffic to be aware of:
+
+| Step                  | What it fetches                                                                          | Where to set proxy                  |
+|-----------------------|------------------------------------------------------------------------------------------|-------------------------------------|
+| `docker build`        | Ubuntu apt mirrors, NodeSource, sbt/Maven, npm registry, the DuckDB CLI zip from GitHub  | `--build-arg` on the build          |
+| Manager + node boot   | `INSTALL quack` (and the `tpch` / `ducklake` / `postgres` extensions) from `extensions.duckdb.org` | container env vars (`HTTP(S)_PROXY`)|
+| Outbound from spawned Quack nodes | Same DuckDB extension registry on first node start                            | inherited from the container env    |
+
+If your proxy is reachable on the host's loopback (e.g. `localhost:3128`), the container won't see it unless you give it host networking. On Linux that's `--network=host`; on Docker Desktop, use `host.docker.internal:<port>`.
+
+**Build the image behind a proxy:**
+
+```bash
+docker build --network=host \
+  --build-arg HTTP_PROXY=http://localhost:3128 \
+  --build-arg HTTPS_PROXY=http://localhost:3128 \
+  --build-arg NO_PROXY=localhost,127.0.0.1 \
+  -t quack-on-demand:dev .
+```
+
+(The lowercase `http_proxy` / `https_proxy` form is also honoured; pass both if you're unsure — some tools only read one variant.)
+
+**Run the container behind a proxy** — without these env vars, the manager (and every Quack node it spawns) will hang on the first `INSTALL quack` call:
+
+```bash
+docker run -d --name quack-on-demand --network=host \
+  -e HTTP_PROXY=http://localhost:3128 \
+  -e HTTPS_PROXY=http://localhost:3128 \
+  -e NO_PROXY=localhost,127.0.0.1 \
+  -e SL_QUACK_PG_HOST=localhost \
+  -e SL_QUACK_PG_PASSWORD=*** \
+  quack-on-demand:dev
+```
+
+**Configure the Docker daemon globally** instead — once, in `~/.docker/config.json` — so every `docker build` and `docker run` inherit the proxy without per-command flags:
+
+```json
+{
+  "proxies": {
+    "default": {
+      "httpProxy":  "http://localhost:3128",
+      "httpsProxy": "http://localhost:3128",
+      "noProxy":    "localhost,127.0.0.1"
+    }
+  }
+}
+```
+
+**Bake the extensions into the image** if you want offline-capable nodes (no proxy required at runtime). Add the install step to the build stage of `Dockerfile`:
+
+```dockerfile
+RUN duckdb -c "INSTALL quack; INSTALL tpch; INSTALL ducklake; INSTALL postgres;"
+```
+
+The downloaded extensions live under `$HOME/.duckdb/extensions/` and the runtime image will use them in place of fetching from the registry.
+
 ### Native Run Prerequisites
 
 - JDK 17+
