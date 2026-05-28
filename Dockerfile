@@ -40,13 +40,31 @@ COPY . /src/
 # cache-mount target above is always an existing (possibly empty) directory,
 # so we re-run `npm ci` here to guarantee the tsc/vite binaries are present
 # before `sbt assembly` invokes `npm run build`.
+ARG TARGETARCH
 RUN --mount=type=cache,target=/root/.sbt \
     --mount=type=cache,target=/root/.ivy2/cache \
     --mount=type=cache,target=/root/.cache/coursier \
-    --mount=type=cache,target=/src/ui/node_modules \
-    (cd /src/ui && npm ci) && \
-    sbt -no-colors assembly && \
-    cp distrib/quack-on-demand-assembly-*.jar /quack-on-demand.jar
+    --mount=type=cache,target=/src/ui/node_modules <<EOF
+set -eu
+cd /src/ui && npm ci
+cd /src && sbt -no-colors assembly
+cp distrib/quack-on-demand-assembly-*.jar /quack-on-demand.jar
+
+# Strip non-Linux DuckDB JNI natives from the assembly jar (saves ~190MB).
+# The jar bundles libduckdb_java.so_{osx_universal,linux_amd64,linux_arm64,
+# windows_amd64} so it can run anywhere; only the matching Linux one is
+# ever loaded inside the runtime container.
+apt-get update
+apt-get install -y --no-install-recommends zip
+zip -dq /quack-on-demand.jar \
+  libduckdb_java.so_osx_universal \
+  libduckdb_java.so_windows_amd64
+case "${TARGETARCH:-amd64}" in
+  amd64) zip -dq /quack-on-demand.jar libduckdb_java.so_linux_arm64 ;;
+  arm64) zip -dq /quack-on-demand.jar libduckdb_java.so_linux_amd64 ;;
+esac
+rm -rf /var/lib/apt/lists/*
+EOF
 
 # =========================================================================
 #  Stage 2 — Runtime
@@ -89,12 +107,14 @@ RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" 2>/dev/null 
     useradd --create-home --shell /bin/bash --uid 1000 quack
 
 WORKDIR /app
-COPY --from=build /quack-on-demand.jar           /app/quack-on-demand.jar
-COPY scripts/spawn-quack-node.sh                 /app/scripts/spawn-quack-node.sh
-COPY scripts/load-tpch-dbgen.sh                  /app/scripts/load-tpch-dbgen.sh
-RUN chmod +x /app/scripts/spawn-quack-node.sh /app/scripts/load-tpch-dbgen.sh && \
-    mkdir -p /app/certs /app/state /app/ducklake && \
-    chown -R quack:quack /app
+# Use --chown on COPY rather than a trailing `chown -R`. `chown -R` rewrites
+# every file into a new layer (~213MB doubled the assembly jar); --chown is
+# applied as the file is staged, so no extra layer is produced. Same for
+# --chmod on the scripts.
+COPY --from=build --chown=quack:quack /quack-on-demand.jar           /app/quack-on-demand.jar
+COPY --chown=quack:quack --chmod=0755 scripts/spawn-quack-node.sh    /app/scripts/spawn-quack-node.sh
+COPY --chown=quack:quack --chmod=0755 scripts/load-tpch-dbgen.sh     /app/scripts/load-tpch-dbgen.sh
+RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 
 USER quack
 
@@ -106,7 +126,7 @@ EXPOSE 20900 31338 21900-22500
 # Sensible container defaults. Override at run time via -e.
 ENV SL_QUACK_ON_DEMAND_HOST=0.0.0.0 \
     PROXY_HOST=0.0.0.0 \
-    SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake \
+    SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake/tpch \
     SL_QUACK_STATE_PATH=/app/state/quack-on-demand-state.json \
     PROXY_TLS_CERT_CHAIN=/app/certs/server-cert.pem \
     PROXY_TLS_PRIVATE_KEY=/app/certs/server-key.pem \

@@ -74,3 +74,9 @@ certs/
 datasets/
 project/.bloop/
 project/project/
+
+# Local docker-compose overrides — may hold real PG_PASSWORD/ADMIN_PASSWORD/API_KEY.
+# .env.example is the tracked template.
+.env
+.env.local
+pgdata/
