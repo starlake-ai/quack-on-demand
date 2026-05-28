@@ -198,6 +198,16 @@ Env vars at `start-docker.sh` invocation time:
 
 ### First run
 
+> **Host Postgres already on 5432?** The compose file publishes the
+> bundled Postgres at `${PG_PORT:-5432}:5432`. If the host already owns
+> 5432, `docker compose up` fails with *"failed to bind host port … address
+> already in use"* before the stack starts. The manager talks to Postgres
+> over the compose-internal network (hostname `postgres`, container port
+> 5432) so it does **not** depend on the host publication — bumping
+> `PG_PORT=15432` in `.env` is enough; external `psql` would then connect
+> via `localhost:15432`. Alternatives: stop the host Postgres, or delete
+> the `postgres` service's `ports:` block if you never need external access.
+
 ```bash
 cp .env.example .env       # edit if you want; defaults work
 docker compose up --build  # add `-d` once you trust the boot
