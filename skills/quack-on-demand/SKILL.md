@@ -48,6 +48,8 @@ PROXY_TLS_ENABLED=false ./scripts/start-quack-on-demand.sh
 
 The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `SL_QUACK_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
 
+On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent — already-existing tenant/pool are left alone. Override with `SL_QUACK_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `SL_QUACK_BOOTSTRAP_ENABLED=false`.
+
 ## Auth flow (REST + UI)
 
 The REST API has two acceptable credentials:

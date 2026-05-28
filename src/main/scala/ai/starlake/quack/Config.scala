@@ -21,6 +21,15 @@ final case class AdminConfig(
   def usernameList: List[String] =
     username.split(",").iterator.map(_.trim).filter(_.nonEmpty).toList
 
+final case class RoleDistributionConfig(writeonly: Int, readonly: Int, dual: Int)
+
+final case class BootstrapConfig(
+    enabled: Boolean,
+    tenant: String,
+    pool: String,
+    roleDistribution: RoleDistributionConfig
+)
+
 final case class ManagerConfig(
     host: String,
     port: Int,
@@ -35,7 +44,8 @@ final case class ManagerConfig(
     healthCheckIntervalSec: Int,
     defaultMetastore: Map[String, String],
     admin: AdminConfig,
-    k8s: K8sConfig
+    k8s: K8sConfig,
+    bootstrap: BootstrapConfig
 )
 
 final case class FlightConfig(

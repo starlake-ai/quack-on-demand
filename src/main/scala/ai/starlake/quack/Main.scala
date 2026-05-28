@@ -28,10 +28,12 @@ object Main extends IOApp.Simple with LazyLogging:
   // AND the edge AuthenticationConfig types (which `derives ConfigReader`
   // at class-definition time — we shadow those defaults here).
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
-  given ProductHint[K8sConfig]     = ProductHint[K8sConfig](camelMapping)
-  given ProductHint[AdminConfig]   = ProductHint[AdminConfig](camelMapping)
-  given ProductHint[ManagerConfig] = ProductHint[ManagerConfig](camelMapping)
-  given ProductHint[FlightConfig]  = ProductHint[FlightConfig](camelMapping)
+  given ProductHint[K8sConfig]              = ProductHint[K8sConfig](camelMapping)
+  given ProductHint[AdminConfig]            = ProductHint[AdminConfig](camelMapping)
+  given ProductHint[RoleDistributionConfig] = ProductHint[RoleDistributionConfig](camelMapping)
+  given ProductHint[BootstrapConfig]        = ProductHint[BootstrapConfig](camelMapping)
+  given ProductHint[ManagerConfig]          = ProductHint[ManagerConfig](camelMapping)
+  given ProductHint[FlightConfig]           = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]   = ProductHint[DatabaseAuthConfig](camelMapping)
   given ProductHint[KeycloakAuthConfig]   = ProductHint[KeycloakAuthConfig](camelMapping)
   given ProductHint[GoogleAuthConfig]     = ProductHint[GoogleAuthConfig](camelMapping)
@@ -41,10 +43,12 @@ object Main extends IOApp.Simple with LazyLogging:
   given ProductHint[OAuthConfig]          = ProductHint[OAuthConfig](camelMapping)
   given ProductHint[AuthenticationConfig] = ProductHint[AuthenticationConfig](camelMapping)
 
-  given ConfigReader[K8sConfig]     = deriveReader[K8sConfig]
-  given ConfigReader[AdminConfig]   = deriveReader[AdminConfig]
-  given ConfigReader[ManagerConfig] = deriveReader[ManagerConfig]
-  given ConfigReader[FlightConfig]  = deriveReader[FlightConfig]
+  given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
+  given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
+  given ConfigReader[RoleDistributionConfig] = deriveReader[RoleDistributionConfig]
+  given ConfigReader[BootstrapConfig]        = deriveReader[BootstrapConfig]
+  given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
+  given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]   = deriveReader[DatabaseAuthConfig]
   given ConfigReader[KeycloakAuthConfig]   = deriveReader[KeycloakAuthConfig]
   given ConfigReader[GoogleAuthConfig]     = deriveReader[GoogleAuthConfig]
@@ -200,9 +204,49 @@ object Main extends IOApp.Simple with LazyLogging:
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds
     )
 
+    // Auto-create the bootstrap tenant + pool on every boot. Idempotent: a
+    // restart with the same config is a no-op. Disabled via
+    // quack-on-demand.bootstrap.enabled=false (e.g. when tenants are
+    // managed externally and the manager must not create them itself).
+    val bootstrapIO: IO[Unit] = IO.defer {
+      val bs = mgrCfg.bootstrap
+      if !bs.enabled then
+        logger.info("bootstrap: disabled (quack-on-demand.bootstrap.enabled=false)")
+        IO.unit
+      else
+        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, bs.pool)
+        val dist = ai.starlake.quack.model.RoleDistribution(
+          bs.roleDistribution.writeonly,
+          bs.roleDistribution.readonly,
+          bs.roleDistribution.dual
+        )
+        val createTenantIO =
+          if sup.getTenant(bs.tenant).isDefined then
+            IO.delay(logger.info(s"bootstrap: tenant '${bs.tenant}' already exists; skipping"))
+          else
+            sup.createTenant(ai.starlake.quack.model.Tenant(bs.tenant, Map.empty)).flatMap {
+              case Right(_) => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}'"))
+              case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
+            }
+        val createPoolIO =
+          if sup.get(key).isDefined then
+            IO.delay(logger.info(s"bootstrap: pool '${bs.tenant}/${bs.pool}' already exists; skipping"))
+          else
+            sup.createPool(key, dist, Map.empty, Map.empty).attempt.flatMap {
+              case Right(nodes) =>
+                IO.delay(logger.info(
+                  s"bootstrap: created pool '${bs.tenant}/${bs.pool}' with ${nodes.size} node(s) " +
+                  s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"))
+              case Left(t) =>
+                IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
+            }
+        createTenantIO *> createPoolIO
+    }
+
     val program =
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
+      bootstrapIO *>
       mgr.serve.use { _ =>
         logger.info(
           s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +

@@ -218,6 +218,21 @@ admin@localhost.local / admin   (or just `admin` / `admin`)
 
 Set `SL_QUACK_ADMIN_USERNAME=alice,bob` and `SL_QUACK_ADMIN_PASSWORD=…` to seed your own. Multiple comma-separated usernames are supported; all get the same password + role.
 
+### Starter tenant + pool (auto-bootstrapped)
+
+On every boot the manager creates a starter tenant `acme` with a pool `sales` (3 nodes: 1 WriteOnly + 1 ReadOnly + 1 Dual) if they don't already exist. `defaultTenant` / `defaultPool` are pointed at the same `acme` / `sales`, so a FlightSQL client that doesn't pass a tenant or `X-Pool` header lands on this pool out of the box. The bootstrap is idempotent — a restart with the same config is a no-op.
+
+Override or disable via `SL_QUACK_BOOTSTRAP_*` env vars:
+
+| Env var                          | Default | Purpose                                  |
+|----------------------------------|---------|------------------------------------------|
+| `SL_QUACK_BOOTSTRAP_ENABLED`     | `true`  | Set to `false` to skip the bootstrap.    |
+| `SL_QUACK_BOOTSTRAP_TENANT`      | `acme`  | Tenant name.                             |
+| `SL_QUACK_BOOTSTRAP_POOL`        | `sales` | Pool name.                               |
+| `SL_QUACK_BOOTSTRAP_WRITEONLY`   | `1`     | WriteOnly nodes in the bootstrap pool.   |
+| `SL_QUACK_BOOTSTRAP_READONLY`    | `1`     | ReadOnly nodes.                          |
+| `SL_QUACK_BOOTSTRAP_DUAL`        | `1`     | Dual nodes.                              |
+
 ### Create a pool from the UI or the CLI
 
 ```bash
