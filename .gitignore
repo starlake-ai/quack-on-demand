@@ -72,3 +72,5 @@ docs/
 certs/
 
 datasets/
+project/.bloop/
+project/project/
