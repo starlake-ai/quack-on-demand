@@ -76,8 +76,11 @@ apt-get purge -y --auto-remove curl unzip
 rm -rf /var/lib/apt/lists/*
 EOF
 
-# Non-root runtime user.
-RUN useradd --create-home --shell /bin/bash --uid 1000 quack
+# Non-root runtime user. Newer Ubuntu base images (24.04+) ship with an
+# `ubuntu` user already at UID 1000 — remove it first so this useradd
+# can claim the same UID.
+RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" 2>/dev/null || true; fi && \
+    useradd --create-home --shell /bin/bash --uid 1000 quack
 
 WORKDIR /app
 COPY --from=build /quack-on-demand.jar           /app/quack-on-demand.jar
