@@ -2,21 +2,29 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
-// ----- Sonatype publishing (snapshot + release-ready) -----
+// ----- Sonatype Central Portal publishing (snapshot + release-ready) -----
 // The published artifact is the assembly uber-jar — quack-on-demand is an
 // app, not an embed-style library, so consumers run `java -jar` rather
 // than pulling transitive deps via Maven resolution. The regular -classes
 // jar is disabled for the same reason (would be misleading without deps).
 //
-// Snapshot URL is chosen automatically by `sonatypePublishToBundle` based
-// on the version suffix; for releases this also handles the bundle/close
-// dance against s01.oss.sonatype.org.
+// Sonatype OSSRH (s01.oss.sonatype.org / oss.sonatype.org) was sunset in
+// 2025; all new publishing goes through the Central Portal at
+// central.sonatype.com. sbt-sonatype 3.12+ knows this host via
+// `sonatypeCentralHost`. Generate the SONATYPE_USERNAME / SONATYPE_PASSWORD
+// secrets from https://central.sonatype.com/account (User Token), NOT the
+// legacy OSSRH credentials.
 ThisBuild / publishMavenStyle      := true
-ThisBuild / publishTo              := sonatypePublishToBundle.value
-ThisBuild / sonatypeCredentialHost := "s01.oss.sonatype.org"
+ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
+ThisBuild / sonatypeProfileName    := "ai.starlake"
+ThisBuild / publishTo := {
+  val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
+  if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
+  else                  sonatypePublishToBundle.value
+}
 ThisBuild / credentials += Credentials(
-  "Sonatype Nexus Repository Manager",
-  "s01.oss.sonatype.org",
+  "Sonatype Central Portal",
+  sonatypeCentralHost,
   sys.env.getOrElse("SONATYPE_USERNAME", ""),
   sys.env.getOrElse("SONATYPE_PASSWORD", "")
 )
