@@ -1,6 +1,6 @@
 # 🦆 Quack on Demand
 
-**A production-grade FlightSQL gateway in front of [DuckDB Quack](https://duckdb.org/docs/extensions/quack.html) + [DuckLake](https://duckdb.org/docs/extensions/ducklake.html).**
+**A production-grade FlightSQL gateway in front of [DuckDB Quack](https://duckdb.org/docs/current/core_extensions/quack) + [DuckLake](https://duckdb.org/docs/extensions/ducklake.html).**
 
 DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`, generates a random auth token at startup, and explicitly recommends a reverse proxy in front of it for TLS, external auth, and authorization. Quack on Demand is that proxy — with multi-tenancy, pluggable identity, table-level ACLs, role-aware routing, health probes, and a live admin UI built in.
 
