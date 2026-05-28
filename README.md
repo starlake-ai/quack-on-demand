@@ -79,6 +79,10 @@ DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`
 
 ## Quick start
 
+For a full walkthrough of every deployment path (native, Docker against an
+external Postgres, full compose stack) and the optional TPC-H seed step,
+see **[`RUNNING.md`](RUNNING.md)**.
+
 ### Docker Run
 
 Three paths, increasing in flexibility:
@@ -413,7 +417,7 @@ scripts/
 ├── start-quack-on-demand.sh       # Boot the manager from the uber-jar
 ├── stop-quack-on-demand.sh        # Graceful SIGTERM → SIGKILL escalation
 ├── start-quack-ducklake.sh        # Standalone single-node Quack for testing
-├── load-tpch-sf1.sh               # Generate TPCH-SF1 into the metastore via DuckDB's dbgen()
+├── load-tpch-dbgen.sh             # Generate TPC-H (SF override via $SF) into the metastore via DuckDB's dbgen()
 └── spawn-quack-node.sh            # Called by LocalQuackBackend; do not invoke directly
 ui/
 └── src/                           # React SPA, built into src/main/resources/ui

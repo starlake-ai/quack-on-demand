@@ -91,7 +91,8 @@ RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" 2>/dev/null 
 WORKDIR /app
 COPY --from=build /quack-on-demand.jar           /app/quack-on-demand.jar
 COPY scripts/spawn-quack-node.sh                 /app/scripts/spawn-quack-node.sh
-RUN chmod +x /app/scripts/spawn-quack-node.sh && \
+COPY scripts/load-tpch-dbgen.sh                  /app/scripts/load-tpch-dbgen.sh
+RUN chmod +x /app/scripts/spawn-quack-node.sh /app/scripts/load-tpch-dbgen.sh && \
     mkdir -p /app/certs /app/state /app/ducklake && \
     chown -R quack:quack /app
 
