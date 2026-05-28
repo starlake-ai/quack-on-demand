@@ -118,10 +118,10 @@ fi
 # ---- Optional: seed TPC-H benchmark data via load-tpch-dbgen.sh ----
 # Off by default. Set SL_QUACK_BOOTSTRAP_LOAD_TPCH=true to populate the
 # catalog with TPC-H tables before the manager starts. Delegates to the
-# standalone loader script so behavior matches docker-compose's init-tpch
-# profile. The loader runs its own DuckLake-level idempotency probe and
-# exits 0 immediately when lineitem is already populated, so calling it on
-# every boot is cheap.
+# standalone loader script so behavior matches the Docker paths' use of
+# `docker exec ... /app/scripts/load-tpch-dbgen.sh`. The loader runs its
+# own DuckLake-level idempotency probe and exits 0 immediately when
+# lineitem is already populated, so calling it on every boot is cheap.
 if [[ "${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-false}" == "true" ]]; then
   tpch_schema="${SL_QUACK_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
   tpch_sf="${SL_QUACK_BOOTSTRAP_TPCH_SF:-1}"

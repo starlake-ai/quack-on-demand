@@ -99,11 +99,14 @@ Bind mounts created next to the compose file:
 - `./ducklake/` — DuckLake Parquet files written by Quack nodes
 - `./certs/`    — auto-generated self-signed TLS cert + key
 
-To seed the metastore with a TPCH dataset (uses DuckDB's `dbgen()` — no input files needed), trigger the `init` profile once Postgres is healthy:
+To seed the metastore with a TPCH dataset (uses DuckDB's `dbgen()` — no input files needed), either start with the loader flag or exec the loader against a running stack:
 
 ```bash
-docker compose --profile init run --rm init-tpch    # SF=1 → ~6M lineitem rows
-TPCH_SF=10 docker compose --profile init run --rm init-tpch
+LOAD_TPCH=true ./scripts/start-docker-compose.sh                # SF=1 → ~6M lineitem rows
+LOAD_TPCH=true TPCH_SF=10 ./scripts/start-docker-compose.sh
+
+# Or against a stack that is already up:
+docker compose exec quack /app/scripts/load-tpch-dbgen.sh
 ```
 
 Tables land in `tpch.tpch1.{region,nation,customer,supplier,part,partsupp,orders,lineitem}` by default. Override `TPCH_SF` / `TPCH_SCHEMA` in `.env`.

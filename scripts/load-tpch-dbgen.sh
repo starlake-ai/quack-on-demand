@@ -19,8 +19,10 @@
 #     container. Quack nodes fail to read the data files.
 #
 #   - Docker manager + Docker loader   -> works, paths match by construction
-#     Use `docker compose --profile init run --rm init-tpch` so the loader
-#     runs inside the same /app/ducklake mount as the manager.
+#     Use `LOAD_TPCH=true ./scripts/start-docker-compose.sh` (or
+#     `docker compose exec quack /app/scripts/load-tpch-dbgen.sh` against
+#     a running stack) so the loader runs inside the same /app/ducklake
+#     mount as the manager.
 #
 # What it does:
 #   1. ATTACH the DuckLake catalog (Postgres metadata + local data files)
@@ -90,7 +92,7 @@ elif [[ "$DATA_PATH" != /app/ducklake/* ]]; then
   echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
   echo "If you plan to run the manager in Docker, the container will look for the" >&2
   echo "data files at /app/ducklake/$DB_NAME (its bind-mount target), NOT at" >&2
-  echo "'$DATA_PATH'. Use 'docker compose --profile init run --rm init-tpch'" >&2
+  echo "'$DATA_PATH'. Use 'docker compose exec quack /app/scripts/load-tpch-dbgen.sh'" >&2
   echo "to load TPC-H from inside the container (paths match by construction)." >&2
   echo "" >&2
 fi

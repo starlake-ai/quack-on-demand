@@ -248,18 +248,31 @@ API_KEY=my-rest-key
 
 ### Seed with TPC-H and Run
 
-A profile-gated `init-tpch` service does the seed and exits cleanly. It
-uses the same image as the manager (no extra layers), shares the
-`./ducklake` host bind-mount, and writes to `tpch.tpch1` by default.
+`scripts/start-docker-compose.sh` will boot the stack and run the seed
+in one step when `LOAD_TPCH=true`:
 
 ```bash
-docker compose --profile init run --rm init-tpch              # SF=1
-TPCH_SF=10 docker compose --profile init run --rm init-tpch   # SF=10
+LOAD_TPCH=true ./scripts/start-docker-compose.sh                # SF=1
+LOAD_TPCH=true TPCH_SF=10 ./scripts/start-docker-compose.sh     # SF=10
 ```
 
-Override `TPCH_SCHEMA` and `TPCH_SF` in `.env` to make this the default.
-Re-running is cheap — the loader self-skips when `tpch1.lineitem` is
-already populated.
+Under the hood it does `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
+— same pattern as Path 2. The loader is baked into the image (so no
+bind-mounted scripts dir) and sees the same `/app/ducklake` mount the
+manager spawns Quack nodes against, so the absolute `DATA_PATH` the
+catalog persists matches what the nodes later resolve. Re-running is
+cheap — the loader self-skips when `tpch1.lineitem` is already populated.
+
+To seed against a stack that's already up (no restart needed):
+
+```bash
+docker compose exec \
+  -e PG_HOST=postgres -e PG_PORT=5432 \
+  -e PG_USER=postgres -e PG_PASS=azizam \
+  -e DB_NAME=tpch -e SCHEMA_NAME=tpch1 \
+  -e DATA_PATH=/app/ducklake/tpch -e SF=1 \
+  quack /app/scripts/load-tpch-dbgen.sh
+```
 
 ### Teardown
 
@@ -282,8 +295,9 @@ must see the same DATA_PATH**, or every query will fail with
 ### Where this bites
 
 The three seed recipes above keep paths matched by construction
-(native: same shell + same `$PWD`; Path 2: loader runs inside the
-container; Path 3: bind-mount shared by manager + `init-tpch`). The
+(native: same shell + same `$PWD`; Paths 2 + 3: `docker exec`/`docker
+compose exec` runs the loader inside the manager container, against the
+same `/app/ducklake` bind-mount the manager itself uses). The
 problem case is **mixing deployment modes against one catalog DB**:
 
 | First boot | Second boot | What breaks |
@@ -321,7 +335,7 @@ that the current manager can't see. Two options:
 psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
 rm -rf ducklake/tpch                    # the on-disk parquet files
 # Re-boot with SL_QUACK_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
-# `docker compose --profile init run --rm init-tpch` (Path 3).
+# LOAD_TPCH=true ./scripts/start-docker-compose.sh (Path 3).
 
 # Option B — keep the data, use a fresh catalog DB.
 SL_QUACK_PG_DBNAME=tpch_native ./scripts/start-quack-on-demand.sh
@@ -343,13 +357,25 @@ Once the manager is up:
   reports throughput + latency percentiles. Defaults to a TPC-H query mix —
   pair it with [Seed with TPC-H and Run](#seed-with-tpc-h-and-run) above.
 
+  > **URL scheme must match the server's TLS setting.** Native and the
+  > shipped compose `.env.example` both default to TLS **on**, so
+  > `grpc+tls://localhost:31338` (the loadtest default) works out of the
+  > box. The `start-docker.sh` path defaults to TLS **off** — pass
+  > `--url grpc://localhost:31338` against it. Mismatch surfaces as
+  > *"tls: first record does not look like a TLS handshake"* (client TLS
+  > against plaintext server) or *"connection reset"* (the inverse). Same
+  > story if you override `TLS=false` in `.env`.
+
   ```bash
   pip install adbc_driver_flightsql adbc_driver_manager
 
-  # Tiny smoke test: 2 workers, 5 queries each (~10 calls total)
+  # Tiny smoke test (TLS-on default — works for native and shipped compose)
   ./scripts/loadtest/loadtest.py -w 2 -i 5
 
-  # Slightly heavier — still finishes in seconds
+  # Same against a plaintext server (start-docker.sh default, or TLS=false)
+  ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+
+  # Slightly heavier (with seeded auth)
   LT_USER=admin LT_PASSWORD=change-me \
     ./scripts/loadtest/loadtest.py -w 4 -i 20
 
@@ -372,7 +398,7 @@ Once the manager is up:
 
   | Flag | Env var | Default | What it does |
   |---|---|---|---|
-  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint (`grpc+tls://` or plain `grpc://`) |
+  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint. Use `grpc+tls://` against a TLS-on server (native + shipped compose default), `grpc://` against plaintext (`start-docker.sh` default, or `TLS=false`). Scheme **must match** what the server is listening for — see callout above. |
   | `-u`, `--user` | `LT_USER` | `admin` | DB auth username (only used when the edge requires auth) |
   | `-p`, `--password` | `LT_PASSWORD` | `admin` | DB auth password |
   | `-w`, `--workers` | `LT_WORKERS` | `8` | concurrent client threads; each opens its own ADBC session |
@@ -380,9 +406,10 @@ Once the manager is up:
   | `--warmup` | `LT_WARMUP` | `5` | throwaway iterations per worker before timing starts |
   | `-q`, `--query` | `LT_QUERY` | unset | single SQL to repeat; unset cycles the TPC-H mix (Q1, Q3, Q5, Q6, Q10, Q12, Q14) |
   | `--schema` | `LT_SCHEMA` | `tpch1` | schema prefix injected into the default mix so it resolves regardless of the session's default schema (ignored with `-q`) |
-  | `--insecure` | `LT_INSECURE` | `true` | skip TLS cert verification (the auto-generated cert is self-signed) |
+  | `--insecure` | `LT_INSECURE` | `true` | skip TLS cert verification (the auto-generated cert is self-signed). Only meaningful when `--url` is `grpc+tls://`. |
 
-  Start small (`-w 2 -i 5`) to confirm auth/TLS work, then scale `-w` to
-  measure pool capacity and `-i` to amortize warmup over more samples.
+  Start small (`-w 2 -i 5`) to confirm URL scheme / auth / TLS work, then
+  scale `-w` to measure pool capacity and `-i` to amortize warmup over
+  more samples.
 
 See the README for credentials, default login, and the full feature tour.

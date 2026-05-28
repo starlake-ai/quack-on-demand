@@ -2,6 +2,43 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
+// ----- Sonatype publishing (snapshot + release-ready) -----
+// The published artifact is the assembly uber-jar — quack-on-demand is an
+// app, not an embed-style library, so consumers run `java -jar` rather
+// than pulling transitive deps via Maven resolution. The regular -classes
+// jar is disabled for the same reason (would be misleading without deps).
+//
+// Snapshot URL is chosen automatically by `sonatypePublishToBundle` based
+// on the version suffix; for releases this also handles the bundle/close
+// dance against s01.oss.sonatype.org.
+ThisBuild / publishMavenStyle      := true
+ThisBuild / publishTo              := sonatypePublishToBundle.value
+ThisBuild / sonatypeCredentialHost := "s01.oss.sonatype.org"
+ThisBuild / credentials += Credentials(
+  "Sonatype Nexus Repository Manager",
+  "s01.oss.sonatype.org",
+  sys.env.getOrElse("SONATYPE_USERNAME", ""),
+  sys.env.getOrElse("SONATYPE_PASSWORD", "")
+)
+ThisBuild / homepage := Some(url("https://github.com/starlake-ai/quack-on-demand"))
+ThisBuild / licenses := Seq(
+  "Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt")
+)
+ThisBuild / scmInfo := Some(
+  ScmInfo(
+    url("https://github.com/starlake-ai/quack-on-demand"),
+    "scm:git:git@github.com:starlake-ai/quack-on-demand.git"
+  )
+)
+ThisBuild / developers := List(
+  Developer(
+    id    = "hayssams",
+    name  = "Hayssam Saleh",
+    email = "hayssam.saleh@starlake.ai",
+    url   = url("https://github.com/hayssams")
+  )
+)
+
 lazy val root = (project in file("."))
   .settings(UiBuild.settings)
   .settings(
@@ -77,6 +114,13 @@ lazy val root = (project in file("."))
       case _                         => MergeStrategy.first
     },
     assembly / assemblyOutputPath := baseDirectory.value / "distrib" / (assembly / assemblyJarName).value,
+
+    // Publish the assembly uber-jar as THE artifact (no separate "thin" jar).
+    // `Compile / packageBin := assembly.value` makes sbt-sonatype upload the
+    // assembled jar under the standard quack-on-demand_3-<version>.jar name,
+    // which is exactly what `mvn dependency:get` consumers need to run
+    // `java -jar` without resolving any transitive deps.
+    Compile / packageBin := assembly.value,
 
     // Arrow Flight's arrow-memory-unsafe allocator reflects into java.nio
     // internals (Buffer.address etc.), which Java 17+ blocks under JPMS.
