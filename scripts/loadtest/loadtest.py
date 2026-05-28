@@ -34,102 +34,110 @@ from typing import List
 # parameter values from the spec — see https://www.tpc.org/tpch/. They
 # exercise a variety of plan shapes: per-group aggregation, 3- to 6-way
 # joins, lineitem filtering, CASE expressions, ORDER BY + LIMIT.
-DEFAULT_QUERIES = [
-    # --- Q1: Pricing Summary Report ---
-    """SELECT l_returnflag, l_linestatus,
-              sum(l_quantity)       AS sum_qty,
-              sum(l_extendedprice)  AS sum_base_price,
-              sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
-              sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
-              avg(l_quantity)       AS avg_qty,
-              avg(l_extendedprice)  AS avg_price,
-              avg(l_discount)       AS avg_disc,
-              count(*)              AS count_order
-       FROM lineitem
-       WHERE l_shipdate <= DATE '1998-09-02'
-       GROUP BY l_returnflag, l_linestatus
-       ORDER BY l_returnflag, l_linestatus""",
+#
+# Each table reference is prefixed at runtime with the schema chosen via
+# --schema / $LT_SCHEMA so the queries resolve regardless of what the
+# session's default schema happens to be. This lets the load tester point
+# at TPC-H seeded into tpch.tpch1.* without the server having to default
+# its session schema there.
+def default_queries(schema: str) -> List[str]:
+    s = schema
+    return [
+        # --- Q1: Pricing Summary Report ---
+        f"""SELECT l_returnflag, l_linestatus,
+                  sum(l_quantity)       AS sum_qty,
+                  sum(l_extendedprice)  AS sum_base_price,
+                  sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+                  sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+                  avg(l_quantity)       AS avg_qty,
+                  avg(l_extendedprice)  AS avg_price,
+                  avg(l_discount)       AS avg_disc,
+                  count(*)              AS count_order
+           FROM {s}.lineitem
+           WHERE l_shipdate <= DATE '1998-09-02'
+           GROUP BY l_returnflag, l_linestatus
+           ORDER BY l_returnflag, l_linestatus""",
 
-    # --- Q3: Shipping Priority (3-way join + group + top-N) ---
-    """SELECT l_orderkey,
-              sum(l_extendedprice * (1 - l_discount)) AS revenue,
-              o_orderdate,
-              o_shippriority
-       FROM customer, orders, lineitem
-       WHERE c_mktsegment = 'BUILDING'
-         AND c_custkey  = o_custkey
-         AND l_orderkey = o_orderkey
-         AND o_orderdate < DATE '1995-03-15'
-         AND l_shipdate  > DATE '1995-03-15'
-       GROUP BY l_orderkey, o_orderdate, o_shippriority
-       ORDER BY revenue DESC, o_orderdate
-       LIMIT 10""",
+        # --- Q3: Shipping Priority (3-way join + group + top-N) ---
+        f"""SELECT l_orderkey,
+                  sum(l_extendedprice * (1 - l_discount)) AS revenue,
+                  o_orderdate,
+                  o_shippriority
+           FROM {s}.customer, {s}.orders, {s}.lineitem
+           WHERE c_mktsegment = 'BUILDING'
+             AND c_custkey  = o_custkey
+             AND l_orderkey = o_orderkey
+             AND o_orderdate < DATE '1995-03-15'
+             AND l_shipdate  > DATE '1995-03-15'
+           GROUP BY l_orderkey, o_orderdate, o_shippriority
+           ORDER BY revenue DESC, o_orderdate
+           LIMIT 10""",
 
-    # --- Q5: Local Supplier Volume (6-way join) ---
-    """SELECT n_name,
-              sum(l_extendedprice * (1 - l_discount)) AS revenue
-       FROM customer, orders, lineitem, supplier, nation, region
-       WHERE c_custkey    = o_custkey
-         AND l_orderkey   = o_orderkey
-         AND l_suppkey    = s_suppkey
-         AND c_nationkey  = s_nationkey
-         AND s_nationkey  = n_nationkey
-         AND n_regionkey  = r_regionkey
-         AND r_name       = 'ASIA'
-         AND o_orderdate >= DATE '1994-01-01'
-         AND o_orderdate  < DATE '1995-01-01'
-       GROUP BY n_name
-       ORDER BY revenue DESC""",
+        # --- Q5: Local Supplier Volume (6-way join) ---
+        f"""SELECT n_name,
+                  sum(l_extendedprice * (1 - l_discount)) AS revenue
+           FROM {s}.customer, {s}.orders, {s}.lineitem, {s}.supplier, {s}.nation, {s}.region
+           WHERE c_custkey    = o_custkey
+             AND l_orderkey   = o_orderkey
+             AND l_suppkey    = s_suppkey
+             AND c_nationkey  = s_nationkey
+             AND s_nationkey  = n_nationkey
+             AND n_regionkey  = r_regionkey
+             AND r_name       = 'ASIA'
+             AND o_orderdate >= DATE '1994-01-01'
+             AND o_orderdate  < DATE '1995-01-01'
+           GROUP BY n_name
+           ORDER BY revenue DESC""",
 
-    # --- Q6: Forecasting Revenue (lineitem filter + sum) ---
-    """SELECT sum(l_extendedprice * l_discount) AS revenue
-       FROM lineitem
-       WHERE l_shipdate >= DATE '1994-01-01'
-         AND l_shipdate  < DATE '1995-01-01'
-         AND l_discount BETWEEN 0.05 AND 0.07
-         AND l_quantity  < 24""",
+        # --- Q6: Forecasting Revenue (lineitem filter + sum) ---
+        f"""SELECT sum(l_extendedprice * l_discount) AS revenue
+           FROM {s}.lineitem
+           WHERE l_shipdate >= DATE '1994-01-01'
+             AND l_shipdate  < DATE '1995-01-01'
+             AND l_discount BETWEEN 0.05 AND 0.07
+             AND l_quantity  < 24""",
 
-    # --- Q10: Returned Item Reporting ---
-    """SELECT c_custkey, c_name,
-              sum(l_extendedprice * (1 - l_discount)) AS revenue,
-              c_acctbal, n_name, c_address, c_phone, c_comment
-       FROM customer, orders, lineitem, nation
-       WHERE c_custkey   = o_custkey
-         AND l_orderkey  = o_orderkey
-         AND o_orderdate >= DATE '1993-10-01'
-         AND o_orderdate  < DATE '1994-01-01'
-         AND l_returnflag = 'R'
-         AND c_nationkey  = n_nationkey
-       GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
-       ORDER BY revenue DESC
-       LIMIT 20""",
+        # --- Q10: Returned Item Reporting ---
+        f"""SELECT c_custkey, c_name,
+                  sum(l_extendedprice * (1 - l_discount)) AS revenue,
+                  c_acctbal, n_name, c_address, c_phone, c_comment
+           FROM {s}.customer, {s}.orders, {s}.lineitem, {s}.nation
+           WHERE c_custkey   = o_custkey
+             AND l_orderkey  = o_orderkey
+             AND o_orderdate >= DATE '1993-10-01'
+             AND o_orderdate  < DATE '1994-01-01'
+             AND l_returnflag = 'R'
+             AND c_nationkey  = n_nationkey
+           GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
+           ORDER BY revenue DESC
+           LIMIT 20""",
 
-    # --- Q12: Shipping Modes and Order Priority ---
-    """SELECT l_shipmode,
-              sum(CASE WHEN o_orderpriority = '1-URGENT'
-                       OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END) AS high_line_count,
-              sum(CASE WHEN o_orderpriority <> '1-URGENT'
-                       AND o_orderpriority <> '2-HIGH' THEN 1 ELSE 0 END) AS low_line_count
-       FROM orders, lineitem
-       WHERE o_orderkey      = l_orderkey
-         AND l_shipmode IN ('MAIL', 'SHIP')
-         AND l_commitdate    < l_receiptdate
-         AND l_shipdate      < l_commitdate
-         AND l_receiptdate  >= DATE '1994-01-01'
-         AND l_receiptdate   < DATE '1995-01-01'
-       GROUP BY l_shipmode
-       ORDER BY l_shipmode""",
+        # --- Q12: Shipping Modes and Order Priority ---
+        f"""SELECT l_shipmode,
+                  sum(CASE WHEN o_orderpriority = '1-URGENT'
+                           OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END) AS high_line_count,
+                  sum(CASE WHEN o_orderpriority <> '1-URGENT'
+                           AND o_orderpriority <> '2-HIGH' THEN 1 ELSE 0 END) AS low_line_count
+           FROM {s}.orders, {s}.lineitem
+           WHERE o_orderkey      = l_orderkey
+             AND l_shipmode IN ('MAIL', 'SHIP')
+             AND l_commitdate    < l_receiptdate
+             AND l_shipdate      < l_commitdate
+             AND l_receiptdate  >= DATE '1994-01-01'
+             AND l_receiptdate   < DATE '1995-01-01'
+           GROUP BY l_shipmode
+           ORDER BY l_shipmode""",
 
-    # --- Q14: Promotion Effect ---
-    """SELECT 100.00 * sum(CASE WHEN p_type LIKE 'PROMO%'
-                                 THEN l_extendedprice * (1 - l_discount)
-                                 ELSE 0 END)
-              / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue
-       FROM lineitem, part
-       WHERE l_partkey   = p_partkey
-         AND l_shipdate >= DATE '1995-09-01'
-         AND l_shipdate  < DATE '1995-10-01'""",
-]
+        # --- Q14: Promotion Effect ---
+        f"""SELECT 100.00 * sum(CASE WHEN p_type LIKE 'PROMO%'
+                                     THEN l_extendedprice * (1 - l_discount)
+                                     ELSE 0 END)
+                  / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue
+           FROM {s}.lineitem, {s}.part
+           WHERE l_partkey   = p_partkey
+             AND l_shipdate >= DATE '1995-09-01'
+             AND l_shipdate  < DATE '1995-10-01'""",
+    ]
 
 
 def parse_args() -> argparse.Namespace:
@@ -155,6 +163,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-q", "--query",
                    default=os.environ.get("LT_QUERY"),
                    help="single SQL to repeat (else cycles the default mix)")
+    p.add_argument("--schema",
+                   default=os.environ.get("LT_SCHEMA", "tpch1"),
+                   help="schema to prefix the default TPC-H mix with (ignored with -q)")
     p.add_argument("--insecure", action="store_true",
                    default=os.environ.get("LT_INSECURE", "true").lower() == "true",
                    help="skip TLS certificate verification (dev only)")
@@ -252,12 +263,14 @@ def pct(sorted_values: List[float], p: float) -> float:
 
 def main() -> int:
     args = parse_args()
-    queries = [args.query] if args.query else DEFAULT_QUERIES
+    queries = [args.query] if args.query else default_queries(args.schema)
+    mix_label = "custom -q" if args.query else f"default TPC-H mix [schema={args.schema}]"
 
     print(
         f"Load test: {args.workers} workers x {args.iterations} iterations "
         f"(+{args.warmup} warmup) against {args.url} as {args.user}"
     )
+    print(f"Workload:  {mix_label}")
 
     latencies_ms: List[float] = []
     err_counter: Counter[str] = Counter()

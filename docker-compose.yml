@@ -102,7 +102,11 @@ services:
       SCHEMA_NAME: ${TPCH_SCHEMA:-tpch1}
       DATA_PATH:   /app/ducklake/${PG_DBNAME:-tpch}
       SF:          ${TPCH_SF:-1}
-    entrypoint: ["/usr/bin/tini", "--", "bash", "/app/scripts/load-tpch-sf1.sh"]
+    # Uses DuckDB's `dbgen()` so no input CSV files are needed (the heavy
+    # TPC-H source files don't ship with the repo). DATA_PATH is set above
+    # to /app/ducklake/<db>, which is exactly what the manager container
+    # also sees — catalog path strings match by construction.
+    entrypoint: ["/usr/bin/tini", "--", "bash", "/app/scripts/load-tpch-dbgen.sh"]
     volumes:
       - ./ducklake:/app/ducklake
       - ./scripts:/app/scripts:ro
