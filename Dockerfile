@@ -32,13 +32,19 @@ RUN --mount=type=cache,target=/root/.sbt \
     --mount=type=cache,target=/root/.ivy2/cache \
     --mount=type=cache,target=/root/.cache/coursier \
     --mount=type=cache,target=/src/ui/node_modules \
-    sbt -no-colors update
+    sbt -no-colors update && \
+    (cd /src/ui && npm ci)
 
 COPY . /src/
+# UiBuild.scala skips `npm ci` when ui/node_modules already exists — and the
+# cache-mount target above is always an existing (possibly empty) directory,
+# so we re-run `npm ci` here to guarantee the tsc/vite binaries are present
+# before `sbt assembly` invokes `npm run build`.
 RUN --mount=type=cache,target=/root/.sbt \
     --mount=type=cache,target=/root/.ivy2/cache \
     --mount=type=cache,target=/root/.cache/coursier \
     --mount=type=cache,target=/src/ui/node_modules \
+    (cd /src/ui && npm ci) && \
     sbt -no-colors assembly && \
     cp distrib/quack-on-demand-assembly-*.jar /quack-on-demand.jar
 
