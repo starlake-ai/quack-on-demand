@@ -1,7 +1,7 @@
 package ai.starlake.acl.store
 
 import ai.starlake.acl.watcher.WatcherConfig
-import ai.starlake.gizmo.proxy.config.AclConfig
+import ai.starlake.quack.edge.config.AclConfig
 import com.typesafe.scalalogging.LazyLogging
 
 /** Factory that creates the appropriate AclStore and AclChangeDetector

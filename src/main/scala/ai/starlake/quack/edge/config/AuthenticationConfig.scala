@@ -1,4 +1,4 @@
-package ai.starlake.gizmo.proxy.config
+package ai.starlake.quack.edge.config
 
 import pureconfig.*
 

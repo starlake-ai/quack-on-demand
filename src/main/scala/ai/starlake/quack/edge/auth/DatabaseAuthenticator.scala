@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.gizmo.proxy.config.DatabaseAuthConfig
+import ai.starlake.quack.edge.config.DatabaseAuthConfig
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}

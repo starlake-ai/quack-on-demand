@@ -4,8 +4,8 @@ import ai.starlake.acl.api.{AclSql, AclSqlConfig, SqlContext}
 import ai.starlake.acl.model.{TenantId, UserIdentity}
 import ai.starlake.acl.store.{AclChangeDetector, AclStore, AclStoreFactory}
 import ai.starlake.acl.watcher.TenantListener
-import ai.starlake.gizmo.proxy.catalog.DuckLakeCatalogResolver
-import ai.starlake.gizmo.proxy.config.{AclConfig, SessionConfig}
+import ai.starlake.quack.edge.catalog.DuckLakeCatalogResolver
+import ai.starlake.quack.edge.config.{AclConfig, SessionConfig}
 import com.typesafe.scalalogging.LazyLogging
 
 import java.nio.file.{Files, Paths}

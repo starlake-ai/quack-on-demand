@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.gizmo.proxy.config.JwtAuthConfig
+import ai.starlake.quack.edge.config.JwtAuthConfig
 import com.nimbusds.jose.crypto.{MACVerifier, RSASSAVerifier}
 import com.nimbusds.jose.jwk.RSAKey
 import com.nimbusds.jose.{JWSAlgorithm, JWSVerifier}

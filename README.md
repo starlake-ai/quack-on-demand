@@ -327,14 +327,15 @@ src/main/scala/ai/starlake/
 │   ├── Config.scala               # ManagerConfig, FlightConfig, AdminConfig
 │   ├── edge/                      # FlightSQL edge + router + adapter
 │   │   ├── auth/                  # AuthenticationService + provider chain
+│   │   ├── catalog/               # DuckLakeCatalogResolver (table/view lookup)
+│   │   ├── config/                # AuthenticationConfig, AclConfig, SessionConfig, …
 │   │   └── sql/                   # ACL + statement validators
 │   ├── ondemand/                  # Pool supervisor + handlers + state
 │   │   ├── api/                   # Tapir endpoints + DTOs + handlers
 │   │   ├── runtime/               # Local + Kubernetes backends
 │   │   └── state/                 # File + Postgres state stores
 │   └── route/                     # StatementClassifier + Router + RoleMatcher
-├── gizmo/                         # Vendored auth/proxy code from gizmo-on-demand
-└── acl/                           # Vendored ACL parser + model + store
+└── acl/                           # SQL parser + ACL model + multi-tenant store
 scripts/
 ├── start-quack-on-demand.sh       # Boot the manager from the uber-jar
 ├── stop-quack-on-demand.sh        # Graceful SIGTERM → SIGKILL escalation
@@ -353,7 +354,7 @@ Defaults and design choices an operator should be aware of before going to produ
 
 - **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `slkstate_user` with the configured admin at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `SL_QUACK_ADMIN_PASSWORD` before exposing the edge.**
 - **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `SL_QUACK_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
-- **DML grants in ACL mode are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant. Per-table DML grants need the vendored gizmo `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
+- **DML grants in ACL mode are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant. Per-table DML grants need the ACL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
 - **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
 - **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window — shrink the TTL or restart the manager for immediate effect.
 
@@ -367,4 +368,4 @@ Apache 2.0.
 
 ## Contributing
 
-Issues + PRs welcome. The vendored `ai.starlake.gizmo.*` and `ai.starlake.acl.*` packages come from [gizmo-on-demand](https://github.com/starlake-ai/gizmo-on-demand) — please coordinate upstream changes there.
+Issues + PRs welcome.

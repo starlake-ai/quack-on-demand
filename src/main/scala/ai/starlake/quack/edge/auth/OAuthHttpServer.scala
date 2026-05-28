@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.gizmo.proxy.config.{AuthenticationConfig, OAuthConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, OAuthConfig}
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import com.typesafe.scalalogging.LazyLogging
 
@@ -13,7 +13,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /** Lightweight HTTP server that handles the OAuth authorization code flow
-  * for browser-based ADBC/CLI clients. Mimics the GizmoSQL C++ OAuth server.
+  * for browser-based ADBC/CLI clients.
   *
   * Endpoints:
   *   GET /oauth/initiate         — start a session, return UUID + auth URL

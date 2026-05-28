@@ -8,8 +8,8 @@ import java.nio.file.Paths
 class StoreBackendTest extends AnyFunSuite with Matchers:
 
   test("local path without scheme returns Local") {
-    StoreBackend.fromUri("/etc/gizmosql/acl") shouldBe
-      StoreBackend.Local(Paths.get("/etc/gizmosql/acl"))
+    StoreBackend.fromUri("/etc/quack-on-demand/acl") shouldBe
+      StoreBackend.Local(Paths.get("/etc/quack-on-demand/acl"))
   }
 
   test("relative local path returns Local") {

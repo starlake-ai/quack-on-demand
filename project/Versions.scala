@@ -22,5 +22,5 @@ object Versions {
   val blobstore      = "0.10.1"
   val jsqlTranspiler = "1.8"
   val starlakeJdbc   = "0.7"
-  val duckdb         = "1.5.2.1"
+  val duckdb         = "1.5.3.0"
 }
