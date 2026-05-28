@@ -73,3 +73,37 @@ services:
     volumes:
       - ./ducklake:/app/ducklake
       - ./certs:/app/certs
+
+  # One-shot TPCH loader. Gated behind the `init` profile so plain
+  # `docker compose up` skips it. Uses the same image as the manager (which
+  # already bundles the duckdb CLI) and bind-mounts the scripts dir so the
+  # runtime image stays lean. Run with:
+  #
+  #   docker compose --profile init run --rm init-tpch
+  #
+  # `depends_on` pulls in postgres if it's not already up. Once the load
+  # finishes the container exits 0 and `--rm` removes it.
+  init-tpch:
+    image: quack-on-demand:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quack-on-demand-init-tpch
+    profiles: ["init"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_HOST:     postgres
+      PG_PORT:     "5432"
+      PG_USER:     ${PG_USER:-postgres}
+      PG_PASS:     ${PG_PASSWORD:-azizam}
+      DB_NAME:     ${PG_DBNAME:-tpch}
+      SCHEMA_NAME: ${TPCH_SCHEMA:-tpch1}
+      DATA_PATH:   /app/ducklake/${PG_DBNAME:-tpch}
+      SF:          ${TPCH_SF:-1}
+    entrypoint: ["/usr/bin/tini", "--", "bash", "/app/scripts/load-tpch-sf1.sh"]
+    volumes:
+      - ./ducklake:/app/ducklake
+      - ./scripts:/app/scripts:ro
+    restart: "no"
