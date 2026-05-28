@@ -72,11 +72,13 @@ INSTALL tpch;     LOAD tpch;
 ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
   (DATA_PATH '$DATA_PATH');
 
-USE $DB_NAME;
-CREATE SCHEMA IF NOT EXISTS $SCHEMA_NAME;
+CREATE SCHEMA IF NOT EXISTS $DB_NAME.$SCHEMA_NAME;
 
 .print ''
 .print '-- generating TPCH dataset in memory (SF=$SF) --'
+-- Leave `memory` as the active catalog: dbgen() only writes into DuckDB-file
+-- catalogs, so switching to the DuckLake-backed $DB_NAME first would fail with
+-- "dbgen is only supported for DuckDB database files".
 CALL dbgen(sf=$SF);
 
 .print ''
