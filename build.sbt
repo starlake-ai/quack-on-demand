@@ -1,6 +1,8 @@
 import xerial.sbt.Sonatype.sonatypeCentralHost
+import ReleaseTransformations._
 
-ThisBuild / version := "0.1.0-SNAPSHOT"
+// Version lives in `version.sbt` so sbt-release can rewrite it across the
+// release / next-snapshot bumps without touching this file.
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
@@ -151,5 +153,24 @@ lazy val root = (project in file("."))
     // have to pass --add-opens on the command line.
     assembly / packageOptions += Package.ManifestAttributes(
       "Add-Opens" -> "java.base/java.nio java.base/sun.nio.ch"
+    ),
+
+    // sbt-release flow — mirrors starlake-core's `sbt 'release with-defaults'`
+    // dance: bump version (drop -SNAPSHOT), commit, tag, sign+publish to
+    // Central Portal, release the bundle, bump to next snapshot, commit,
+    // push. Tests + clean are skipped because the assembly already does
+    // a full compile and we want releases to be fast/predictable; flip them
+    // on if you start cutting releases from dirty trees.
+    releaseProcess := Seq[ReleaseStep](
+      checkSnapshotDependencies,
+      inquireVersions,
+      setReleaseVersion,
+      commitReleaseVersion,
+      tagRelease,
+      releaseStepCommandAndRemaining("publishSigned"),
+      releaseStepCommand("sonatypeBundleRelease"),
+      setNextVersion,
+      commitNextVersion,
+      pushChanges
     )
   )

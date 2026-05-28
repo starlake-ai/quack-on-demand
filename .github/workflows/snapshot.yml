@@ -16,7 +16,7 @@ name: snapshot
 #   SONATYPE_USERNAME    OSSRH user token name   (Settings -> User Token on s01)
 #   SONATYPE_PASSWORD    OSSRH user token secret
 #   DOCKERHUB_USERNAME   Docker Hub login
-#   DOCKERHUB_TOKEN      Docker Hub access token (Personal Access Token, RW)
+#   DOCKER_PASSWORD      Docker Hub access token (Personal Access Token, RW)
 #
 # Triggers:
 #   - push to `main` (auto-snapshot per merged PR)
@@ -112,7 +112,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Docker metadata (labels only — tags applied in merge step)
         id: meta
@@ -182,7 +182,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
