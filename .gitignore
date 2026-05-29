@@ -80,3 +80,5 @@ project/project/
 .env
 .env.local
 pgdata/
+seaweedfs/
+seaweedfs-config/

@@ -255,6 +255,88 @@ TLS=true
 API_KEY=my-rest-key
 ```
 
+### DuckLake on S3-compatible object storage
+
+By default the `quack` service writes DuckLake parquet to the
+`./ducklake` host bind-mount. To put the data on an S3-compatible bucket
+instead (SeaweedFS, MinIO, AWS S3, R2, GCS via the S3-interop endpoint),
+point `SL_QUACK_DUCKLAKE_DATA_PATH` at an `s3://…` URL and set the
+`SL_QUACK_S3_*` credentials. `spawn-quack-node.sh` and
+`load-tpch-dbgen.sh` detect the scheme, `INSTALL httpfs` and
+`CREATE SECRET` so every Quack node reads/writes parquet against the
+bucket - the catalog persists the `s3://` URL, so all nodes resolve the
+same path regardless of host.
+
+#### Option A - bundled SeaweedFS (zero external dependencies)
+
+The compose file ships an opt-in `seaweedfs` profile that runs a
+single-node SeaweedFS (master + volume + filer + S3 gateway) and a
+one-shot bucket bootstrap.
+
+```bash
+# 1. Bring up SeaweedFS first so the bucket exists before the manager attaches.
+docker compose --profile seaweedfs up -d seaweedfs seaweedfs-init
+
+# 2. Uncomment Option A in .env (or paste these in):
+cat >> .env <<'EOF'
+SL_QUACK_DUCKLAKE_DATA_PATH=s3://ducklake/tpch
+SL_QUACK_S3_ENDPOINT=seaweedfs:8333
+SL_QUACK_S3_ACCESS_KEY_ID=quack
+SL_QUACK_S3_SECRET_ACCESS_KEY=quackquack
+SL_QUACK_S3_USE_SSL=false
+SL_QUACK_S3_URL_STYLE=path
+S3_BUCKET=ducklake
+EOF
+
+# 3. Boot the rest of the stack (postgres + quack) against SeaweedFS.
+./scripts/run-docker-compose.sh
+# or, to seed TPC-H onto S3 in the same step:
+LOAD_TPCH=true ./scripts/run-docker-compose.sh
+```
+
+Persistence: `./seaweedfs/` on the host (parquet) and
+`./seaweedfs-config/s3.json` (gateway credentials). Tear down + wipe with
+`NUKE=1 ./scripts/stop-docker-compose.sh` like the filesystem path; the
+`seaweedfs/` dir is owned by the container's uid, so the same ephemeral
+root-container wipe handles it.
+
+The S3 API is also exposed on the host at `localhost:8333` for
+`aws --endpoint-url` smoke tests:
+
+```bash
+aws --endpoint-url http://localhost:8333 \
+    --region us-east-1 \
+    s3 ls s3://ducklake/tpch/ --recursive
+```
+
+#### Option B - external S3 (AWS, MinIO, R2, GCS HMAC)
+
+Leave the `seaweedfs` profile off, point the same env vars at your
+endpoint, and run compose normally. Omit `SL_QUACK_S3_ENDPOINT` to use
+AWS's default (`s3.amazonaws.com`).
+
+```ini
+# .env
+SL_QUACK_DUCKLAKE_DATA_PATH=s3://my-bucket/quack/tpch
+SL_QUACK_S3_ACCESS_KEY_ID=AKIA...
+SL_QUACK_S3_SECRET_ACCESS_KEY=...
+SL_QUACK_S3_REGION=us-east-1
+SL_QUACK_S3_USE_SSL=true
+SL_QUACK_S3_URL_STYLE=vhost
+```
+
+```bash
+./scripts/run-docker-compose.sh
+```
+
+> **Path-matching still applies.** The catalog persists whichever
+> `SL_QUACK_DUCKLAKE_DATA_PATH` string was active on the first write. If
+> you toggle between `./ducklake` and `s3://…` against the **same**
+> `PG_DBNAME`, the second boot fails to open the previously-written
+> parquet. Use a separate `PG_DBNAME` per storage backend - same
+> isolation pattern as the [path-matching gotcha](#path-matching-gotcha-ducklake)
+> below.
+
 ### Seed with TPC-H and Run
 
 `scripts/run-docker-compose.sh` will boot the stack and run the seed
@@ -513,14 +595,14 @@ Once the manager is up:
   pip install adbc_driver_flightsql adbc_driver_manager
 
   # Tiny smoke test (TLS-on default - works for native and shipped compose)
-  ./scripts/loadtest/loadtest.py -w 2 -i 5
+  python ./scripts/loadtest/loadtest.py -w 2 -i 5
 
   # Same against a plaintext server (run-docker.sh default, or TLS=false)
-  ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+  python ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
 
   # Slightly heavier (with seeded auth)
   LT_USER=admin LT_PASSWORD=change-me \
-    ./scripts/loadtest/loadtest.py -w 4 -i 20
+    python ./scripts/loadtest/loadtest.py -w 4 -i 20
 
   # Heavy: 32 concurrent sessions x 200 iterations = 6400 queries.
   # Bigger warmup so the pool is steady-state before we start counting.

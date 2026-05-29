@@ -40,7 +40,50 @@ if [[ "$schemaName" == "$dbName" ]]; then
   exit 1
 fi
 
-mkdir -p "$dataPath"
+# Detect whether dataPath points at a remote object store. DuckLake accepts
+# s3:// (covers AWS S3, SeaweedFS, MinIO, R2, GCS via the S3-interop endpoint)
+# and azure:// / abfss:// when the matching DuckDB extension is loaded. For
+# remote schemes we skip the local mkdir (the parent dir doesn't exist on the
+# container fs) and emit the SQL needed to install httpfs/azure + a SECRET so
+# the ATTACH below can read/write parquet against the bucket.
+IS_REMOTE=0
+STORAGE_SQL=""
+case "$dataPath" in
+  s3://*|s3a://*|gs://*|r2://*)
+    IS_REMOTE=1
+    STORAGE_SQL="INSTALL httpfs; LOAD httpfs;"
+    if [[ -n "${SL_QUACK_S3_ACCESS_KEY_ID:-}" && -n "${SL_QUACK_S3_SECRET_ACCESS_KEY:-}" ]]; then
+      # Strip http(s):// from the endpoint - DuckDB wants "host:port".
+      ep="${SL_QUACK_S3_ENDPOINT:-}"
+      ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
+      STORAGE_SQL="$STORAGE_SQL
+CREATE OR REPLACE SECRET quack_s3 (
+  TYPE s3,
+  KEY_ID '${SL_QUACK_S3_ACCESS_KEY_ID}',
+  SECRET '${SL_QUACK_S3_SECRET_ACCESS_KEY}',
+  REGION '${SL_QUACK_S3_REGION:-us-east-1}',
+  ENDPOINT '${ep}',
+  URL_STYLE '${SL_QUACK_S3_URL_STYLE:-path}',
+  USE_SSL ${SL_QUACK_S3_USE_SSL:-true}
+);"
+    fi
+    ;;
+  az://*|azure://*|abfss://*)
+    IS_REMOTE=1
+    STORAGE_SQL="INSTALL azure; LOAD azure;"
+    if [[ -n "${SL_QUACK_AZURE_CONNECTION_STRING:-}" ]]; then
+      STORAGE_SQL="$STORAGE_SQL
+CREATE OR REPLACE SECRET quack_azure (
+  TYPE azure,
+  CONNECTION_STRING '${SL_QUACK_AZURE_CONNECTION_STRING}'
+);"
+    fi
+    ;;
+esac
+
+if [[ "$IS_REMOTE" == "0" ]]; then
+  mkdir -p "$dataPath"
+fi
 
 command -v duckdb >/dev/null 2>&1 || {
   echo "ERROR: duckdb not on PATH" >&2
@@ -107,6 +150,7 @@ $PROXY_SQL
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
 INSTALL quack;    LOAD quack;
+$STORAGE_SQL
 
 ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS $dbName
   (DATA_PATH '$dataPath');

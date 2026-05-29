@@ -46,11 +46,12 @@ NUKE="${NUKE:-0}"
 # ephemeral root container that has write access to the mount.
 if [[ "$NUKE" == "1" ]]; then
   echo "NUKE=1: tearing down any existing stack..."
-  docker compose -f docker-compose.yml down --remove-orphans 2>/dev/null || true
-  if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" ]]; then
-    echo "wiping ./pgdata, ./ducklake, ./certs via ephemeral container..."
+  docker compose -f docker-compose.yml --profile seaweedfs down --remove-orphans 2>/dev/null || true
+  if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" \
+     || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" ]]; then
+    echo "wiping ./pgdata, ./ducklake, ./certs, ./seaweedfs, ./seaweedfs-config via ephemeral container..."
     docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-      'rm -rf /work/pgdata /work/ducklake /work/certs'
+      'rm -rf /work/pgdata /work/ducklake /work/certs /work/seaweedfs /work/seaweedfs-config'
   fi
   # Pre-create the bind-mount dirs with the right ownership. Without
   # this, docker auto-creates them root-owned on `up`, and the
@@ -59,7 +60,9 @@ if [[ "$NUKE" == "1" ]]; then
   # silently dies) and `./ducklake` (TPC-H seed `mkdir` fails). Chown
   # via the ephemeral container so it works even when the host user
   # is not uid 1000. Postgres re-chowns ./pgdata to uid 70 on its own
-  # init, so we leave that one root-owned.
+  # init, so we leave that one root-owned. ./seaweedfs and
+  # ./seaweedfs-config are root-owned inside the container (seaweedfs
+  # image runs as root), so they stay root-owned here too.
   mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
   docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
     'chown 1000:1000 /work/ducklake /work/certs'
@@ -260,7 +263,14 @@ if [[ "$LOAD_TPCH" == "true" ]]; then
   tpch_schema="$(read_env TPCH_SCHEMA tpch1)"
   tpch_sf="$(read_env TPCH_SF 1)"
 
-  echo "seeding TPC-H (schema=$tpch_schema, SF=$tpch_sf) via docker compose exec quack ..."
+  # Honor SL_QUACK_DUCKLAKE_DATA_PATH when the user has switched to S3
+  # storage. Compose passes that var into the quack service unchanged, so
+  # the seeder writes parquet to the exact same prefix the manager will
+  # later read from. Falls back to the bind-mount path /app/ducklake/<db>
+  # for the default filesystem deployment.
+  data_path="$(read_env SL_QUACK_DUCKLAKE_DATA_PATH "/app/ducklake/$pg_dbname")"
+
+  echo "seeding TPC-H (schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
   docker compose -f "$COMPOSE_FILE" exec \
     -e PG_HOST=postgres \
     -e PG_PORT=5432 \
@@ -268,7 +278,7 @@ if [[ "$LOAD_TPCH" == "true" ]]; then
     -e PG_PASS="$pg_pass" \
     -e DB_NAME="$pg_dbname" \
     -e SCHEMA_NAME="$tpch_schema" \
-    -e DATA_PATH="/app/ducklake/$pg_dbname" \
+    -e DATA_PATH="$data_path" \
     -e SF="$tpch_sf" \
     quack /app/scripts/load-tpch-dbgen.sh
 fi

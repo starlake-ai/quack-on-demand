@@ -79,22 +79,61 @@ if [[ "$SCHEMA_NAME" == "$DB_NAME" ]]; then
   exit 1
 fi
 
-mkdir -p "$DATA_PATH"
-# Canonicalize - DuckLake persists this exact string in the catalog.
-DATA_PATH="$(cd "$DATA_PATH" && pwd)"
+# Detect remote DATA_PATH (s3:// / SeaweedFS / MinIO / R2, gs://, azure://) and
+# emit the matching DuckDB extension + SECRET so the ATTACH below can read/write
+# parquet against the bucket. Skips mkdir + canonicalize for remote schemes.
+IS_REMOTE=0
+STORAGE_SQL=""
+case "$DATA_PATH" in
+  s3://*|s3a://*|gs://*|r2://*)
+    IS_REMOTE=1
+    STORAGE_SQL="INSTALL httpfs; LOAD httpfs;"
+    if [[ -n "${SL_QUACK_S3_ACCESS_KEY_ID:-}" && -n "${SL_QUACK_S3_SECRET_ACCESS_KEY:-}" ]]; then
+      ep="${SL_QUACK_S3_ENDPOINT:-}"
+      ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
+      STORAGE_SQL="$STORAGE_SQL
+CREATE OR REPLACE SECRET quack_s3 (
+  TYPE s3,
+  KEY_ID '${SL_QUACK_S3_ACCESS_KEY_ID}',
+  SECRET '${SL_QUACK_S3_SECRET_ACCESS_KEY}',
+  REGION '${SL_QUACK_S3_REGION:-us-east-1}',
+  ENDPOINT '${ep}',
+  URL_STYLE '${SL_QUACK_S3_URL_STYLE:-path}',
+  USE_SSL ${SL_QUACK_S3_USE_SSL:-true}
+);"
+    fi
+    ;;
+  az://*|azure://*|abfss://*)
+    IS_REMOTE=1
+    STORAGE_SQL="INSTALL azure; LOAD azure;"
+    if [[ -n "${SL_QUACK_AZURE_CONNECTION_STRING:-}" ]]; then
+      STORAGE_SQL="$STORAGE_SQL
+CREATE OR REPLACE SECRET quack_azure (
+  TYPE azure,
+  CONNECTION_STRING '${SL_QUACK_AZURE_CONNECTION_STRING}'
+);"
+    fi
+    ;;
+esac
 
-# Detect "I'm probably running on a host that will later run Docker" and
-# emit a heads-up. Heuristic: DATA_PATH doesn't start with /app/, but the
-# manager's Dockerfile defaults SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake.
-if [[ "$DATA_PATH" != /app/ducklake/* ]] && [[ -e /.dockerenv || "${IN_DOCKER:-}" == "1" ]]; then
-  : # we're inside Docker but DATA_PATH isn't /app/* - caller probably knows
-elif [[ "$DATA_PATH" != /app/ducklake/* ]]; then
-  echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
-  echo "If you plan to run the manager in Docker, the container will look for the" >&2
-  echo "data files at /app/ducklake/$DB_NAME (its bind-mount target), NOT at" >&2
-  echo "'$DATA_PATH'. Use 'docker compose exec quack /app/scripts/load-tpch-dbgen.sh'" >&2
-  echo "to load TPC-H from inside the container (paths match by construction)." >&2
-  echo "" >&2
+if [[ "$IS_REMOTE" == "0" ]]; then
+  mkdir -p "$DATA_PATH"
+  # Canonicalize - DuckLake persists this exact string in the catalog.
+  DATA_PATH="$(cd "$DATA_PATH" && pwd)"
+
+  # Detect "I'm probably running on a host that will later run Docker" and
+  # emit a heads-up. Heuristic: DATA_PATH doesn't start with /app/, but the
+  # manager's Dockerfile defaults SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake.
+  if [[ "$DATA_PATH" != /app/ducklake/* ]] && [[ -e /.dockerenv || "${IN_DOCKER:-}" == "1" ]]; then
+    : # we're inside Docker but DATA_PATH isn't /app/* - caller probably knows
+  elif [[ "$DATA_PATH" != /app/ducklake/* ]]; then
+    echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
+    echo "If you plan to run the manager in Docker, the container will look for the" >&2
+    echo "data files at /app/ducklake/$DB_NAME (its bind-mount target), NOT at" >&2
+    echo "'$DATA_PATH'. Use 'docker compose exec quack /app/scripts/load-tpch-dbgen.sh'" >&2
+    echo "to load TPC-H from inside the container (paths match by construction)." >&2
+    echo "" >&2
+  fi
 fi
 
 echo "postgres:    $PG_USER@$PG_HOST:$PG_PORT/$DB_NAME"
@@ -115,6 +154,7 @@ PROBE_SQL="$(mktemp -t load-tpch-probe.XXXXXX.sql)"
 cat > "$PROBE_SQL" <<SQL
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
+$STORAGE_SQL
 ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
   (DATA_PATH '$DATA_PATH');
 .mode csv
@@ -137,6 +177,7 @@ cat > "$INIT_SQL" <<SQL
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
 INSTALL tpch;     LOAD tpch;
+$STORAGE_SQL
 
 ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
   (DATA_PATH '$DATA_PATH');
