@@ -39,7 +39,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: quack-on-demand:dev
+    # Single image name for both flows: `docker compose up --build` writes
+    # this tag locally; `docker compose pull` fetches it from Docker Hub.
+    # Pin to a specific snapshot/release via QUACK_VERSION (e.g.
+    # QUACK_VERSION=0.1.0 docker compose pull).
+    image: starlakeai/quack-on-demand:${QUACK_VERSION:-latest}
     container_name: quack-on-demand
     restart: unless-stopped
     depends_on:
@@ -62,7 +66,7 @@ services:
       SL_QUACK_DUCKLAKE_DATA_PATH: /app/ducklake/${PG_DBNAME:-tpch}
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
-      SL_QUACK_AUTH_DB_ENABLED: ${AUTH:-false}
+      SL_QUACK_AUTH_DB_ENABLED: ${AUTH:-true}
       SL_QUACK_ADMIN_USERNAME:  ${ADMIN_USERNAME:-admin}
       SL_QUACK_ADMIN_PASSWORD:  ${ADMIN_PASSWORD:-admin}
       SL_QUACK_API_KEY:         ${API_KEY:-}
@@ -91,7 +95,7 @@ services:
       - ./certs:/app/certs
 
 # TPC-H seeding is done by `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
-# (driven by scripts/start-docker-compose.sh when LOAD_TPCH=true). The loader is
+# (driven by scripts/run-docker-compose.sh when LOAD_TPCH=true). The loader is
 # baked into the image (see Dockerfile) and sees the same /app/ducklake bind-mount
 # the manager spawns nodes against, so the absolute DATA_PATH the catalog persists
 # matches what nodes later resolve. No separate compose service required.

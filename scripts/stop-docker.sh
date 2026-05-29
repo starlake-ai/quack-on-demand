@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Stop the quack-on-demand Docker container started by scripts/start-docker.sh.
+# Stop the quack-on-demand Docker container started by scripts/run-docker.sh.
 #
 # Idempotent: exits 0 cleanly when the container is already stopped or
-# never started. Because start-docker.sh uses `docker run --rm`, the
+# never started. Because run-docker.sh uses `docker run --rm`, the
 # container is auto-deleted once it exits; this script only needs to
 # send the stop signal.
 #
 # Env vars (with defaults):
-#   CONTAINER_NAME   docker --name (default quack-on-demand — match start-docker.sh)
+#   CONTAINER_NAME   docker --name (default quack-on-demand — match run-docker.sh)
 #   STOP_TIMEOUT     SIGTERM grace period before SIGKILL (default 30s)
 #                    The JVM uses this to drain in-flight FlightSQL
 #                    sessions and terminate child Quack node processes,

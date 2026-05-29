@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Stop the quack-on-demand docker-compose stack started by
-# scripts/start-docker-compose.sh.
+# scripts/run-docker-compose.sh.
 #
 # Default: `docker compose kill -s SIGKILL` — terminates immediately.
 # The manager JVM has no graceful shutdown hook today, so the SIGTERM
@@ -64,7 +64,7 @@ fi
 if [[ "$NUKE" == "1" ]]; then
   echo "wiping host state directories (./pgdata, ./ducklake, ./certs)..."
   rm -rf "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
-  echo "wiped. next start-docker-compose.sh will boot from a clean slate."
+  echo "wiped. next run-docker-compose.sh will boot from a clean slate."
 fi
 
 echo "done."

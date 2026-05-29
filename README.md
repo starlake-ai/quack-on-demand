@@ -90,8 +90,9 @@ Three paths, increasing in flexibility:
 **1. `docker compose` (recommended for first run)** brings up Postgres + the manager together, with all persistent state bind-mounted to the host:
 
 ```bash
-cp .env.example .env       # tweak ports / auth / admin password
-docker compose up --build  # detached with `-d` once you're happy
+cp .env.example .env                          # tweak ports / auth / admin password
+./scripts/run-docker-compose.sh               # pulls starlakeai/quack-on-demand:latest from Docker Hub
+BUILD=1 ./scripts/run-docker-compose.sh       # local Dockerfile build instead (dev mode)
 ```
 
 Bind mounts created next to the compose file:
@@ -102,8 +103,8 @@ Bind mounts created next to the compose file:
 To seed the metastore with a TPCH dataset (uses DuckDB's `dbgen()` — no input files needed), either start with the loader flag or exec the loader against a running stack:
 
 ```bash
-LOAD_TPCH=true ./scripts/start-docker-compose.sh                # SF=1 → ~6M lineitem rows
-LOAD_TPCH=true TPCH_SF=10 ./scripts/start-docker-compose.sh
+LOAD_TPCH=true ./scripts/run-docker-compose.sh                # SF=1 → ~6M lineitem rows
+LOAD_TPCH=true TPCH_SF=10 ./scripts/run-docker-compose.sh
 
 # Or against a stack that is already up:
 docker compose exec quack /app/scripts/load-tpch-dbgen.sh
@@ -111,14 +112,18 @@ docker compose exec quack /app/scripts/load-tpch-dbgen.sh
 
 Tables land in `tpch.tpch1.{region,nation,customer,supplier,part,partsupp,orders,lineitem}` by default. Override `TPCH_SF` / `TPCH_SCHEMA` in `.env`.
 
-**2. `scripts/start-docker.sh` (against an existing Postgres)** runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.):
+**2. `scripts/run-docker.sh` (against an existing Postgres)** runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.). Default pulls `starlakeai/quack-on-demand:latest`; `BUILD=1` builds the local Dockerfile and tags the result under the same name:
 
 ```bash
-docker build -t quack-on-demand:dev .
-
 PG_HOST=my-rds.amazonaws.com PG_PASSWORD=*** \
   AUTH=true ADMIN_PASSWORD=change-me TLS=true \
-  ./scripts/start-docker.sh
+  ./scripts/run-docker.sh
+
+# Pin a specific tag (release or snapshot)
+QUACK_VERSION=0.1.0 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
+
+# Build locally instead of pulling
+BUILD=1 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
 ```
 
 `AUTH`, `TLS`, `ADMIN_*`, `API_KEY`, `DATA_PATH`, `CERTS_DIR`, port mappings — all overridable via env. Defaults to no-auth, no-TLS for fast smoke tests. DuckLake data persists at `$PWD/ducklake/` by default.
@@ -132,7 +137,7 @@ docker run --rm -p 20900:20900 -p 31338:31338 \
   -e SL_QUACK_ADMIN_PASSWORD=change-me \
   -v $(pwd)/ducklake:/app/ducklake \
   -v $(pwd)/certs:/app/certs \
-  quack-on-demand:dev
+  starlakeai/quack-on-demand:latest
 ```
 
 The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
@@ -156,7 +161,7 @@ docker build --network=host \
   --build-arg HTTP_PROXY=http://localhost:3128 \
   --build-arg HTTPS_PROXY=http://localhost:3128 \
   --build-arg NO_PROXY=localhost,127.0.0.1 \
-  -t quack-on-demand:dev .
+  -t starlakeai/quack-on-demand:latest .
 ```
 
 (The lowercase `http_proxy` / `https_proxy` form is also honoured; pass both if you're unsure — some tools only read one variant.)
@@ -170,7 +175,7 @@ docker run -d --name quack-on-demand --network=host \
   -e NO_PROXY=localhost,127.0.0.1 \
   -e SL_QUACK_PG_HOST=localhost \
   -e SL_QUACK_PG_PASSWORD=*** \
-  quack-on-demand:dev
+  starlakeai/quack-on-demand:latest
 ```
 
 **Configure the Docker daemon globally** instead — once, in `~/.docker/config.json` — so every `docker build` and `docker run` inherit the proxy without per-command flags:
@@ -197,23 +202,29 @@ The downloaded extensions live under `$HOME/.duckdb/extensions/` and the runtime
 
 ### Native Run Prerequisites
 
-- JDK 17+
-- `sbt` 1.x and `npm` 18+
+- JDK 17+ (to run the jar)
 - A running Postgres instance (`localhost:5432`, default user `postgres` / password `azizam` — both overridable)
 - The `duckdb` CLI on `$PATH` (for spawning Quack nodes locally)
+- `psql` on `$PATH` (catalog DB auto-create)
 - `openssl` (for auto-generated TLS certs)
+- **`sbt` 1.x and `npm` 18+** — only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
 
 ### Boot the manager
 
 ```bash
-# Build the uber-jar + start the manager (defaults: REST :20900, FlightSQL :31338, TLS on)
-./scripts/start-quack-on-demand.sh
+# Default: download latest release from Maven Central, cache under
+# ~/.cache/quack-on-demand/, run it. REST :20900, FlightSQL :31338, TLS on.
+./scripts/run-jar.sh
 
-# Or build first and then start
-BUILD=1 ./scripts/start-quack-on-demand.sh
+# Pin a specific version (release or -SNAPSHOT)
+QUACK_VERSION=0.1.0           ./scripts/run-jar.sh
+QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh
+
+# Local source build (requires sbt + npm)
+BUILD=1 ./scripts/run-jar.sh
 ```
 
-The script auto-generates a self-signed TLS cert at `certs/server-{cert,key}.pem` if missing, probes Postgres reachability, and prints the URLs.
+The script auto-generates a self-signed TLS cert at `certs/server-{cert,key}.pem` if missing, probes Postgres reachability, creates the catalog DB if it doesn't exist, and prints the URLs.
 
 ### Log in to the admin console
 
@@ -417,7 +428,7 @@ src/main/scala/ai/starlake/
 │   └── route/                     # StatementClassifier + Router + RoleMatcher
 └── acl/                           # SQL parser + ACL model + multi-tenant store
 scripts/
-├── start-quack-on-demand.sh       # Boot the manager from the uber-jar
+├── run-jar.sh       # Boot the manager from the uber-jar
 ├── stop-quack-on-demand.sh        # Graceful SIGTERM → SIGKILL escalation
 ├── start-quack-ducklake.sh        # Standalone single-node Quack for testing
 ├── load-tpch-dbgen.sh             # Generate TPC-H (SF override via $SF) into the metastore via DuckDB's dbgen()
