@@ -80,7 +80,11 @@ services:
       # <root>/<db>. Without this override the Dockerfile default
       # `/app/ducklake` is used and the seed fails with "DATA_PATH does
       # not match existing data path in the catalog".
-      SL_QUACK_DUCKLAKE_DATA_PATH: /app/ducklake/${PG_DBNAME:-tpch}
+      #
+      # Honor a user-supplied override (.env / shell) so switching to s3://
+      # storage works without editing this file. Falls back to the
+      # filesystem default when SL_QUACK_DUCKLAKE_DATA_PATH is unset.
+      SL_QUACK_DUCKLAKE_DATA_PATH: ${SL_QUACK_DUCKLAKE_DATA_PATH:-/app/ducklake/${PG_DBNAME:-tpch}}
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
       SL_QUACK_AUTH_DB_ENABLED: ${AUTH:-true}
@@ -92,6 +96,29 @@ services:
       # ----- Local-mode Quack node port range -----
       SL_QUACK_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
       SL_QUACK_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
+
+      # ----- DuckLake on S3-compatible object storage (optional) -----
+      # When SL_QUACK_DUCKLAKE_DATA_PATH starts with s3:// (or gs://, az://,
+      # azure://, abfss://), spawn-quack-node.sh + load-tpch-dbgen.sh skip
+      # the local mkdir and configure DuckDB's httpfs/azure extensions via
+      # CREATE SECRET so DuckLake reads/writes parquet directly against the
+      # bucket. Leave SL_QUACK_DUCKLAKE_DATA_PATH at its filesystem default
+      # to keep using the ./ducklake bind-mount; set it to s3://bucket/path
+      # (or s3a://, etc.) to switch to object storage.
+      #
+      # The bundled `seaweedfs` profile (docker compose --profile seaweedfs
+      # up -d) brings up a single-node SeaweedFS exposing an S3 API at
+      # seaweedfs:8333 and creates the bucket named by S3_BUCKET. Pair it
+      # with SL_QUACK_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>, point
+      # SL_QUACK_S3_ENDPOINT at seaweedfs:8333, and the stack runs end-to-end
+      # without touching ./ducklake. For external S3 (AWS, R2, MinIO, GCS
+      # HMAC) leave the profile off and fill in the endpoint + credentials.
+      SL_QUACK_S3_ENDPOINT:          ${SL_QUACK_S3_ENDPOINT:-}
+      SL_QUACK_S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-}
+      SL_QUACK_S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-}
+      SL_QUACK_S3_REGION:            ${SL_QUACK_S3_REGION:-us-east-1}
+      SL_QUACK_S3_URL_STYLE:         ${SL_QUACK_S3_URL_STYLE:-path}
+      SL_QUACK_S3_USE_SSL:           ${SL_QUACK_S3_USE_SSL:-false}
 
       # ----- Corporate proxy passthrough (optional) -----
       # Forward host proxy env vars into the container so DuckDB extension
@@ -131,8 +158,146 @@ services:
       - ./ducklake:/app/ducklake
       - ./certs:/app/certs
 
+  # ----- Optional: SeaweedFS as an in-compose S3 backend -----
+  #
+  # Opt in with:
+  #   docker compose --profile seaweedfs up -d
+  #
+  # SeaweedFS runs "server -s3" in single-node mode (master + volume + filer +
+  # s3 gateway) so the whole object store is one container. The S3 API listens
+  # on :8333; the manager + quack nodes reach it as `seaweedfs:8333` on the
+  # compose network, and host clients can hit it on the same port.
+  #
+  # Persistence: ./seaweedfs on the host (bind-mount), same pattern as the
+  # postgres/ducklake/certs volumes.
+  #
+  # Credentials are baked in via /etc/seaweedfs/s3.json. Defaults match the
+  # SL_QUACK_S3_* env vars on the quack service. Override S3_ACCESS_KEY_ID /
+  # S3_SECRET_ACCESS_KEY / S3_BUCKET in .env if you change them.
+  # Pre-init: write /etc/seaweedfs/s3.json BEFORE seaweedfs starts so the S3
+  # gateway loads our credentials on first boot. Without this, seaweedfs boots
+  # with default (no-auth) IAM and only picks up s3.json on a restart, which
+  # makes the bucket appear unauthenticated to any client racing the restart.
+  seaweedfs-config:
+    image: alpine:3
+    container_name: quack-on-demand-seaweedfs-config
+    profiles: ["seaweedfs"]
+    environment:
+      S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-quack}
+      S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-quackquack}
+    volumes:
+      - ./seaweedfs-config:/etc/seaweedfs
+    # $$VAR escapes compose's variable substitution so the in-container shell
+    # resolves the env vars set above; bare $VAR would be expanded by compose
+    # against .env and arrive empty.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        cat > /etc/seaweedfs/s3.json <<JSON
+        {
+          "identities": [
+            {
+              "name": "quack",
+              "credentials": [
+                { "accessKey": "$${S3_ACCESS_KEY_ID}", "secretKey": "$${S3_SECRET_ACCESS_KEY}" }
+              ],
+              "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+            }
+          ]
+        }
+        JSON
+        echo "wrote /etc/seaweedfs/s3.json"
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: quack-on-demand-seaweedfs
+    profiles: ["seaweedfs"]
+    restart: unless-stopped
+    depends_on:
+      seaweedfs-config:
+        condition: service_completed_successfully
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      # 8333 = S3 API. 9333 = master, 8080 = volume, 8888 = filer - exposed
+      # too so `weed shell` / Web UIs work from the host when debugging.
+      - "${SEAWEEDFS_S3_PORT:-8333}:8333"
+      - "${SEAWEEDFS_MASTER_PORT:-9333}:9333"
+      - "${SEAWEEDFS_VOLUME_PORT:-8080}:8080"
+      - "${SEAWEEDFS_FILER_PORT:-8888}:8888"
+    volumes:
+      - ./seaweedfs:/data
+      - ./seaweedfs-config:/etc/seaweedfs
+    healthcheck:
+      # /status returns JSON on the master once volume + filer + s3 are up.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      interval: 5s
+      timeout:  3s
+      retries:  30
+
+  # One-shot bucket bootstrap. SeaweedFS auto-creates buckets on first PUT,
+  # but the DuckLake catalog's CREATE TABLE issues a HeadBucket first - if
+  # the bucket doesn't yet exist that 404 surfaces as a confusing "S3 error"
+  # to DuckDB. Create it explicitly before the quack manager starts touching
+  # the path. Also writes /etc/seaweedfs/s3.json on the first boot so the
+  # credentials the quack service uses actually exist on the gateway.
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:latest
+    container_name: quack-on-demand-seaweedfs-init
+    profiles: ["seaweedfs"]
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      S3_BUCKET:            ${S3_BUCKET:-ducklake}
+      S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-quack}
+      S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-quackquack}
+    volumes:
+      - ./seaweedfs-config:/etc/seaweedfs
+    entrypoint: ["/bin/sh", "-c"]
+    # $$VAR escapes compose's variable substitution so the in-container shell
+    # resolves the env vars set under `environment:` above. A single $VAR
+    # would be expanded by compose at YAML-load time (against .env) and
+    # arrive empty.
+    command:
+      - |
+        set -eu
+        # Seed s3.json on first boot so the gateway recognises our keys.
+        if [ ! -f /etc/seaweedfs/s3.json ]; then
+          cat > /etc/seaweedfs/s3.json <<JSON
+        {
+          "identities": [
+            {
+              "name": "quack",
+              "credentials": [
+                { "accessKey": "$${S3_ACCESS_KEY_ID}", "secretKey": "$${S3_SECRET_ACCESS_KEY}" }
+              ],
+              "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+            }
+          ]
+        }
+        JSON
+          echo "seeded /etc/seaweedfs/s3.json (restart seaweedfs to pick up auth)."
+        fi
+        # Create the bucket through the filer-backed S3 API. PUT is idempotent
+        # in SeaweedFS - second call returns 200, not 409.
+        echo "ensuring bucket s3://$${S3_BUCKET}/ on seaweedfs:8333..."
+        echo "s3.bucket.create -name $${S3_BUCKET}" | weed shell -master=seaweedfs:9333 \
+          || echo "bucket create returned non-zero (already exists?); continuing."
+        echo "seaweedfs bucket ready: $${S3_BUCKET}"
+
 # TPC-H seeding is done by `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
 # (driven by scripts/run-docker-compose.sh when LOAD_TPCH=true). The loader is
 # baked into the image (see Dockerfile) and sees the same /app/ducklake bind-mount
 # the manager spawns nodes against, so the absolute DATA_PATH the catalog persists
 # matches what nodes later resolve. No separate compose service required.
+#
+# When using the seaweedfs profile, set SL_QUACK_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>
+# (and SL_QUACK_S3_ENDPOINT=seaweedfs:8333) so the same loader writes parquet
+# to the bucket instead of /app/ducklake. The path the catalog persists is the
+# s3:// URL, which every Quack node resolves identically regardless of host.
