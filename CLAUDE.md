@@ -18,7 +18,7 @@ Boot the manager from the uber-jar (with TLS cert auto-gen + Postgres reachabili
 ```bash
 ./scripts/run-jar.sh           # foreground
 BUILD=1 ./scripts/run-jar.sh   # sbt assembly first
-./scripts/stop-quack-on-demand.sh            # SIGTERM → wait → SIGKILL
+./scripts/stop-jar.sh            # SIGTERM → wait → SIGKILL
 ```
 
 UI dev loop (proxies `/api/*` to `localhost:20900`):
