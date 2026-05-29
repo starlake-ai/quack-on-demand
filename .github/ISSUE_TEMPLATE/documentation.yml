@@ -1,0 +1,29 @@
+name: "Documentation"
+description: "Docs are wrong, missing, or confusing."
+title: "[docs] "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: where
+    attributes:
+      label: "Where"
+      description: "File path, section heading, or URL of the affected doc."
+      placeholder: "RUNNING.md - Path 3 / Seed with TPC-H and Run"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "What's wrong or missing"
+      description: "What did you expect to find? What did you find instead?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: "Suggested fix"
+      description: "Optional. A draft sentence, a link, or just 'I can send a PR'."
+    validations:
+      required: false

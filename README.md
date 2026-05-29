@@ -272,6 +272,17 @@ See [`docs/superpowers/FOLLOWUPS.md`](docs/superpowers/FOLLOWUPS.md) for the ful
 
 Apache 2.0.
 
+## Community
+
+- **Questions / discussion** -> [GitHub Discussions](https://github.com/starlake-ai/quack-on-demand/discussions)
+- **Bug or feature** -> file an issue using the templates (the blank-issue path is disabled on purpose)
+- **Security report (private)** -> email `hayssam.saleh@starlake.ai`
+- **Roadmap** -> see [docs/ROADMAP.md](docs/ROADMAP.md); items are tracked as issues with the `roadmap` label
+
 ## Contributing
 
-Issues + PRs welcome.
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop
+(build, test, commit conventions, PR flow) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the community standards we
+follow. Start with an issue labelled `good first issue` if you'd like a
+small, well-scoped task.

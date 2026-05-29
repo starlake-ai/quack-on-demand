@@ -1,0 +1,81 @@
+name: "Bug report"
+description: "Something behaves unexpectedly or fails."
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in the sections below so we
+        can reproduce it quickly. If the problem is operational
+        (deployment, config), the [RUNNING.md](https://github.com/starlake-ai/quack-on-demand/blob/main/RUNNING.md)
+        recovery recipes often help.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: "What happened"
+      description: "Short summary. One or two sentences."
+      placeholder: "FlightSQL queries return TLS handshake error against the compose stack."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: "How to reproduce"
+      description: "The exact commands you ran. Copy-paste friendly."
+      render: shell
+      placeholder: |
+        cp .env.example .env
+        ./scripts/run-docker-compose.sh
+        ./scripts/loadtest/loadtest.py -w 2 -i 5
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "What you expected"
+      description: "What should have happened instead?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs / output"
+      description: "Manager logs (`docker compose logs quack`) and the actual error message."
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: "Version"
+      description: "Output of `docker run starlakeai/quack-on-demand:latest --version` or the tag you booted from."
+      placeholder: "0.1.0-SNAPSHOT (commit abc1234)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: "Deployment mode"
+      options:
+        - "Native (run-jar.sh)"
+        - "Docker (run-docker.sh)"
+        - "Docker Compose (run-docker-compose.sh)"
+        - "Kubernetes"
+        - "Other / not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: "OS / arch"
+      placeholder: "macOS 14.5 (arm64) / Ubuntu 22.04 (amd64) / ..."
+    validations:
+      required: true
