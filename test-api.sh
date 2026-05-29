@@ -9,7 +9,7 @@ curl -fsS "http://$HOST:$PORT/health"
 echo
 
 echo "==> ensure tenant acme exists (idempotent: 409 is OK)"
-# Tenants are first-class — pool creation requires the tenant to be registered.
+# Tenants are first-class - pool creation requires the tenant to be registered.
 # `-f` would fail the script on 409, so use a plain curl and tolerate that case.
 HTTP=$(curl -s -o /tmp/test-api-tenant.out -w '%{http_code}' \
   -X POST "$BASE/tenant/create" -H 'Content-Type: application/json' \

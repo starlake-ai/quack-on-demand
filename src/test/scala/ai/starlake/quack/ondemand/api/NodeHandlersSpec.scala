@@ -34,7 +34,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(backend, tracker,
                                  StateStore(Files.createTempFile("nh-", ".json")))
-    // Tenants are first-class — must exist before a pool can be created.
+    // Tenants are first-class - must exist before a pool can be created.
     sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
     sup.createPool(PoolKey("acme", "sales"),
                    RoleDistribution(0, 1, 1), Map.empty, Map.empty).unsafeRunSync()

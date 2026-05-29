@@ -77,7 +77,7 @@ export interface ClientConfigResponse {
   tenantClaim: string;
   // When false, no auth providers are configured server-side and the UI
   // skips the login screen entirely. The REST API may still require an
-  // X-API-Key — that's a separate gate.
+  // X-API-Key - that's a separate gate.
   authEnabled: boolean;
 }
 

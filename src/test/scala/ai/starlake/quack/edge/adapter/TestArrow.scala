@@ -11,7 +11,7 @@ import java.sql.DriverManager
   * Quack node. */
 object TestArrow:
 
-  // One root allocator for the whole test JVM. Plenty of headroom — readers
+  // One root allocator for the whole test JVM. Plenty of headroom - readers
   // built here are tiny.
   val sharedAllocator = new RootAllocator()
 

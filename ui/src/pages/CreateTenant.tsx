@@ -36,7 +36,7 @@ export default function CreateTenant() {
       {err && <p style={{ color: 'red' }}>{err}</p>}
       <label>Name <input value={name} onChange={e => setName(e.target.value)} required /></label>
       <fieldset>
-        <legend>Per-tenant metastore overrides — leave blank to inherit global defaults</legend>
+        <legend>Per-tenant metastore overrides - leave blank to inherit global defaults</legend>
         <label>Host       <input value={pgHost}   onChange={e => setPgHost(e.target.value)}   placeholder="(global default)" /></label><br/>
         <label>Port       <input value={pgPort}   onChange={e => setPgPort(e.target.value)}   placeholder="(global default)" /></label><br/>
         <label>User       <input value={pgUser}   onChange={e => setPgUser(e.target.value)}   placeholder="(global default)" /></label><br/>

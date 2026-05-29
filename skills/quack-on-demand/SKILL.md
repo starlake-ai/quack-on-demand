@@ -1,6 +1,6 @@
 ---
 name: quack-on-demand
-description: Operate a quack-on-demand FlightSQL gateway — boot/stop the manager, manage tenants/pools/ACLs, inspect nodes, run load tests
+description: Operate a quack-on-demand FlightSQL gateway - boot/stop the manager, manage tenants/pools/ACLs, inspect nodes, run load tests
 ---
 
 # Quack on Demand
@@ -18,14 +18,14 @@ Use this skill when the user wants to:
 
 ## Repo layout (the bits operators touch)
 
-- `scripts/run-jar.sh` — boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
-- `scripts/stop-quack-on-demand.sh` — SIGTERM → wait → SIGKILL
-- `scripts/loadtest/loadtest.py` — Python FlightSQL load tester (ADBC driver)
-- `scripts/start-quack-ducklake.sh` — standalone single-node Quack for testing (no manager)
-- `scripts/load-tpch-dbgen.sh` — generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
-- `src/main/resources/application.conf` — config (every key has a `SL_QUACK_*` env-var override)
-- `docs/superpowers/FOLLOWUPS.md` — triaged backlog
-- `README.md` — full feature list + operational notes
+- `scripts/run-jar.sh` - boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
+- `scripts/stop-quack-on-demand.sh` - SIGTERM → wait → SIGKILL
+- `scripts/loadtest/loadtest.py` - Python FlightSQL load tester (ADBC driver)
+- `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
+- `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
+- `src/main/resources/application.conf` - config (every key has a `SL_QUACK_*` env-var override)
+- `docs/superpowers/FOLLOWUPS.md` - triaged backlog
+- `README.md` - full feature list + operational notes
 
 ## Booting
 
@@ -48,7 +48,7 @@ PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 
 The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `SL_QUACK_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
 
-On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent — already-existing tenant/pool are left alone. Override with `SL_QUACK_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `SL_QUACK_BOOTSTRAP_ENABLED=false`.
+On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent - already-existing tenant/pool are left alone. Override with `SL_QUACK_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `SL_QUACK_BOOTSTRAP_ENABLED=false`.
 
 ## Auth flow (REST + UI)
 
@@ -67,7 +67,7 @@ TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
 curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
 ```
 
-If `SL_QUACK_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic — fine for local dev, never for prod.
+If `SL_QUACK_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic - fine for local dev, never for prod.
 
 ## Tenant + pool management
 
@@ -125,7 +125,7 @@ curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenan
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/delete/7
 ```
 
-Principal format is `type:name` — `user:alice`, `group:engineers`, `role:admin`. At validation time the authenticated session expands into `user:<username>` + `group:<g>` per group + `role:<r>`; a grant matches any of them.
+Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`. At validation time the authenticated session expands into `user:<username>` + `group:<g>` per group + `role:<r>`; a grant matches any of them.
 
 ACL is *off* by default (`acl.enabled=false`). Flip with `SL_QUACK_ACL_ENABLED=true` to actually enforce.
 
@@ -145,11 +145,11 @@ curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/node/statements?limi
 ```
 
 Per-node fields surfaced via `/api/pool/list`:
-- `inFlight` — currently executing statements
-- `totalServed` — lifetime counter since manager start
-- `avgDurationMs` — EWMA latency
-- `p50Ms`/`p95Ms`/`p99Ms` — rolling 256-sample window
-- `healthy` / `draining` — tracker flags
+- `inFlight` - currently executing statements
+- `totalServed` - lifetime counter since manager start
+- `avgDurationMs` - EWMA latency
+- `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
+- `healthy` / `draining` - tracker flags
 
 ## Load testing
 
@@ -181,24 +181,24 @@ The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager p
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/stop` + `pool/create` |
 | Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |
-| Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy — DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See README "Behind a corporate proxy". |
+| Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See README "Behind a corporate proxy". |
 
 ## Where state lives
 
-- **Tenants + pools** — `slkstate_pool_state` (single JSONB row) in the Postgres database named by `defaultMetastore.dbName` (default `tpch`)
-- **Admin users** — `slkstate_user` (bcrypt-hashed passwords)
-- **ACL grants** — `slkstate_acl_grant`
-- **DuckLake catalog metadata** — `ducklake_*` tables in the same database
-- **DuckLake data files** — `defaultMetastore.dataPath` on disk (or s3://, gs://, az://)
-- **Self-signed TLS cert** — `certs/server-{cert,key}.pem` (auto-generated by `openssl req -x509` on first boot if missing)
-- **Manager log on startup script invocation** — `/tmp/quack-startup.log`
+- **Tenants + pools** - `slkstate_pool_state` (single JSONB row) in the Postgres database named by `defaultMetastore.dbName` (default `tpch`)
+- **Admin users** - `slkstate_user` (bcrypt-hashed passwords)
+- **ACL grants** - `slkstate_acl_grant`
+- **DuckLake catalog metadata** - `ducklake_*` tables in the same database
+- **DuckLake data files** - `defaultMetastore.dataPath` on disk (or s3://, gs://, az://)
+- **Self-signed TLS cert** - `certs/server-{cert,key}.pem` (auto-generated by `openssl req -x509` on first boot if missing)
+- **Manager log on startup script invocation** - `/tmp/quack-startup.log`
 
 ## When operating
 
 - The default admin password is `admin`. Rotate via `SL_QUACK_ADMIN_PASSWORD` before exposing the edge.
 - The REST API is OPEN by default (no `SL_QUACK_API_KEY` set). Set the env var or restrict the listening interface before going beyond localhost.
 - All scalars in `application.conf` have matching `SL_QUACK_*` env-var overrides. Prefer env vars over editing the file (the conf is bundled into the jar at build time).
-- When in doubt about state, check `docs/superpowers/FOLLOWUPS.md` — it's the authoritative list of known issues and recently-closed work, headed by a `HEAD <sha>` line so you can see the baseline.
+- When in doubt about state, check `docs/superpowers/FOLLOWUPS.md` - it's the authoritative list of known issues and recently-closed work, headed by a `HEAD <sha>` line so you can see the baseline.
 
 ## Common UI URLs
 

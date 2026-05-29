@@ -38,7 +38,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
     new PoolHandlers(sup, tracker)
 
-  /** Variant without the pre-registered tenant — for the missing-tenant test. */
+  /** Variant without the pre-registered tenant - for the missing-tenant test. */
   private def handlersWithoutTenant =
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(stubBackend, tracker,

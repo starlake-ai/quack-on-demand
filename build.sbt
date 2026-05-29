@@ -7,7 +7,7 @@ ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
 // ----- Sonatype Central Portal publishing (snapshot + release-ready) -----
-// The published artifact is the assembly uber-jar — quack-on-demand is an
+// The published artifact is the assembly uber-jar - quack-on-demand is an
 // app, not an embed-style library, so consumers run `java -jar` rather
 // than pulling transitive deps via Maven resolution. The regular -classes
 // jar is disabled for the same reason (would be misleading without deps).
@@ -149,13 +149,13 @@ lazy val root = (project in file("."))
     ),
 
     // For `java -jar distrib/...assembly.jar`: the Add-Opens manifest attribute
-    // (JEP 261) makes the JVM apply the same opens automatically — users don't
+    // (JEP 261) makes the JVM apply the same opens automatically - users don't
     // have to pass --add-opens on the command line.
     assembly / packageOptions += Package.ManifestAttributes(
       "Add-Opens" -> "java.base/java.nio java.base/sun.nio.ch"
     ),
 
-    // sbt-release flow — mirrors starlake-core's `sbt 'release with-defaults'`
+    // sbt-release flow - mirrors starlake-core's `sbt 'release with-defaults'`
     // dance: bump version (drop -SNAPSHOT), commit, tag, sign+publish to
     // Central Portal, release the bundle, bump to next snapshot, commit,
     // push. Tests + clean are skipped because the assembly already does

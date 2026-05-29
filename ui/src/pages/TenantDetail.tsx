@@ -24,7 +24,7 @@ export default function TenantDetail() {
   async function handleDelete() {
     if (!tenant || !data) return;
     if (data.pools.length > 0) {
-      alert(`Cannot delete — tenant has ${data.pools.length} active pool(s). Stop them first.`);
+      alert(`Cannot delete - tenant has ${data.pools.length} active pool(s). Stop them first.`);
       return;
     }
     if (!confirm(`Delete tenant '${tenant}'?`)) return;
@@ -74,7 +74,7 @@ export default function TenantDetail() {
       <div className="card">
         <div className="card-title">Tenant overrides</div>
         {Object.keys(data.metastore).length === 0 ? (
-          <div className="empty">(none — this tenant inherits all storage settings from global defaults)</div>
+          <div className="empty">(none - this tenant inherits all storage settings from global defaults)</div>
         ) : (
           <table>
             <tbody>

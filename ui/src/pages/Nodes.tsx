@@ -30,7 +30,7 @@ export default function Nodes() {
   function refresh() {
     api.statementHistory(50)
       .then(r => setHistory(r.statements))
-      .catch(() => { /* best effort — pools still useful even if history fails */ });
+      .catch(() => { /* best effort - pools still useful even if history fails */ });
     api.listPools()
       .then((r: { pools: PoolResponse[] }) => {
         const now = Date.now();
@@ -68,7 +68,7 @@ export default function Nodes() {
   const avgLat = visible.length === 0
     ? 0
     : visible.reduce((s, n) => s + n.avgDurationMs, 0) / visible.length;
-  // Cluster p95 = max of per-node p95s (worst tail across the fleet —
+  // Cluster p95 = max of per-node p95s (worst tail across the fleet -
   // operators want to see the worst, not the average of percentiles).
   const clusterP95 = visible.reduce((m, n) => Math.max(m, n.p95Ms), 0);
   const healthyCount = visible.filter(n => n.healthy && !n.draining).length;

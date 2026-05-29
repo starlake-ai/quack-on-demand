@@ -5,7 +5,7 @@ import ai.starlake.quack.model.StatementKind
 object StatementClassifier:
 
   /** Cheap keyword-based classification. JSQLParser is overkill for routing
-    * decisions — we only need the verb. Returns Other if the first non-blank
+    * decisions - we only need the verb. Returns Other if the first non-blank
     * token doesn't match a known verb. */
   def classify(sql: String): StatementKind =
     firstToken(sql).map(_.toUpperCase) match

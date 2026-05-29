@@ -1,14 +1,14 @@
 name: snapshot
 
 # Build + publish snapshot artifacts:
-#   1. publish-jar   — assembly uber-jar -> Sonatype OSSRH snapshots
+#   1. publish-jar   - assembly uber-jar -> Sonatype OSSRH snapshots
 #                      (https://s01.oss.sonatype.org/content/repositories/snapshots/ai/starlake/...)
-#   2. docker-build  — multi-arch Docker image (linux/amd64 + linux/arm64),
+#   2. docker-build  - multi-arch Docker image (linux/amd64 + linux/arm64),
 #                      pushed by digest to Docker Hub `starlakeai/quack-on-demand`.
 #                      Runs in a 2-platform matrix so each arch builds in
 #                      parallel; the merge job below stitches them into one
 #                      manifest list under the snapshot tag.
-#   3. docker-merge  — collects both digests, publishes the manifest list
+#   3. docker-merge  - collects both digests, publishes the manifest list
 #                      as `starlakeai/quack-on-demand:<version>` and
 #                      `:latest-snapshot`.
 #
@@ -88,7 +88,7 @@ jobs:
     needs: publish-jar
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    # Each platform builds on its own native runner — `ubuntu-latest` is
+    # Each platform builds on its own native runner - `ubuntu-latest` is
     # amd64, `ubuntu-24.04-arm` is native arm64 (free on public repos
     # since 2024). Previously both matrix legs ran on amd64 with QEMU
     # emulating arm64, which made the arm64 leg take ~10x longer than
@@ -122,7 +122,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Docker metadata (labels only — tags applied in merge step)
+      - name: Docker metadata (labels only - tags applied in merge step)
         id: meta
         uses: docker/metadata-action@v5
         with:

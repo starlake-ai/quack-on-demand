@@ -3,10 +3,10 @@
 # Run the quack-on-demand stack via docker compose.
 #
 # Two modes, picked via BUILD:
-#   BUILD=0 (default) — `docker compose pull` the published image
+#   BUILD=0 (default) - `docker compose pull` the published image
 #                       starlakeai/quack-on-demand:$QUACK_VERSION, then up.
 #                       No git checkout, sbt, or node toolchain required.
-#   BUILD=1           — `docker compose up -d --build` against this repo's
+#   BUILD=1           - `docker compose up -d --build` against this repo's
 #                       Dockerfile. The build tags the image as
 #                       starlakeai/quack-on-demand:$QUACK_VERSION (same name
 #                       as the published one), so this script's wait/seed/
@@ -71,7 +71,7 @@ docker compose version >/dev/null 2>&1 || {
 if [[ ! -f "$ENV_FILE" ]]; then
   if [[ -f "$ENV_SEED" ]]; then
     cp "$ENV_SEED" "$ENV_FILE"
-    echo "scaffolded $ENV_FILE from $ENV_SEED — edit before exposing the stack publicly."
+    echo "scaffolded $ENV_FILE from $ENV_SEED - edit before exposing the stack publicly."
   else
     echo "WARN: $ENV_FILE missing and no $ENV_SEED to copy from; relying on compose defaults." >&2
   fi

@@ -76,7 +76,7 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     val dbName     = Option(table.getUnquotedDatabaseName)
 
     (dbName, schemaName) match
-      // Three-part: fully qualified — use as-is
+      // Three-part: fully qualified - use as-is
       case (Some(_), Some(_)) =>
         AnsiDialectMapper.toTableRef(table, config)
 
@@ -89,7 +89,7 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
       case (None, None) =>
         AnsiDialectMapper.toTableRef(table, config)
 
-      // dbName set without schema — unlikely from JSqlParser but handle gracefully
+      // dbName set without schema - unlikely from JSqlParser but handle gracefully
       case (Some(_), None) =>
         AnsiDialectMapper.toTableRef(table, config)
 

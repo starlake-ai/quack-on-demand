@@ -55,7 +55,7 @@ export default function ScalePool() {
       {isShrink && (
         <label style={{ display: 'block', marginTop: '1rem', color: 'crimson' }}>
           <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} />
-          {' '}Force (skip graceful drain — outstanding queries fail)
+          {' '}Force (skip graceful drain - outstanding queries fail)
         </label>
       )}
       <button type="submit" disabled={target === 0}>Apply</button>

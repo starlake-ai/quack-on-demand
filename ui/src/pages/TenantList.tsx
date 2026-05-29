@@ -45,10 +45,10 @@ export default function TenantList() {
               <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
                 <td><Link to={`/tenant/${t.name}`}>{t.name}</Link></td>
                 <td>{t.pools.length}</td>
-                <td>{eff.dataPath   ? <code>{eff.dataPath}</code>   : <em style={{ color: '#888' }}>—</em>}</td>
-                <td>{eff.dbName     ? <code>{eff.dbName}</code>     : <em style={{ color: '#888' }}>—</em>}</td>
-                <td>{eff.schemaName ? <code>{eff.schemaName}</code> : <em style={{ color: '#888' }}>—</em>}</td>
-                <td>{pg             ? <code>{pg}</code>             : <em style={{ color: '#888' }}>—</em>}</td>
+                <td>{eff.dataPath   ? <code>{eff.dataPath}</code>   : <em style={{ color: '#888' }}>-</em>}</td>
+                <td>{eff.dbName     ? <code>{eff.dbName}</code>     : <em style={{ color: '#888' }}>-</em>}</td>
+                <td>{eff.schemaName ? <code>{eff.schemaName}</code> : <em style={{ color: '#888' }}>-</em>}</td>
+                <td>{pg             ? <code>{pg}</code>             : <em style={{ color: '#888' }}>-</em>}</td>
                 <td>
                   {overrideCount === 0
                     ? <em style={{ color: '#888' }}>inherits all defaults</em>

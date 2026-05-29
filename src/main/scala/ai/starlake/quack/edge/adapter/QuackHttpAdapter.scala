@@ -6,7 +6,7 @@ import cats.effect.IO
 final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
 
   /** Send `sql` to `node`. Records load, EWMA, and health side-effects on the
-    * tracker. Returns the raw response — the caller is responsible for closing
+    * tracker. Returns the raw response - the caller is responsible for closing
     * any streaming reader inside [[QuackResponse.Ok]]. */
   def send(node: RunningNode, sql: String, session: Option[String]): IO[QuackResponse] =
     // Quack's URI scheme; DuckDB's `quack_query` parses it.

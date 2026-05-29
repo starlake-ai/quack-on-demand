@@ -8,9 +8,9 @@
 # seconds if anything is still listening.
 #
 # Overrides via env vars:
-#   SL_QUACK_ON_DEMAND_PORT    (default 20900 — manager REST + UI)
-#   PROXY_PORT                 (default 31338 — FlightSQL edge)
-#   FORCE_AFTER                (default 10 — seconds before SIGKILL)
+#   SL_QUACK_ON_DEMAND_PORT    (default 20900 - manager REST + UI)
+#   PROXY_PORT                 (default 31338 - FlightSQL edge)
+#   FORCE_AFTER                (default 10 - seconds before SIGKILL)
 #
 # Usage:
 #   ./scripts/stop-quack-on-demand.sh
@@ -24,7 +24,7 @@ FORCE_AFTER="${FORCE_AFTER:-10}"
 # ---- Discover processes ----
 # Manager owns BOTH the REST port and the FlightSQL edge port (same JVM).
 # Spawned quack nodes listen on their own ports (21900+), but the easiest
-# handle is the spawn-quack-node.sh PID — killing the script trips its
+# handle is the spawn-quack-node.sh PID - killing the script trips its
 # trap which terminates the duckdb child.
 mgr_pid=$(lsof -nP -iTCP:"$MGR_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)
 edge_pid=$(lsof -nP -iTCP:"$EDGE_PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)

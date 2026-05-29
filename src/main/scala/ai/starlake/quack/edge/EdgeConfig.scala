@@ -10,7 +10,7 @@ final case class EdgeConfig(
     defaultTenant: String,
     defaultPool: String,
     // After this many seconds the cached session for a Flight client
-    // expires and the next RPC forces a fresh handshake — re-validating
+    // expires and the next RPC forces a fresh handshake - re-validating
     // the Basic credentials or the external Bearer token. Bounds the
     // "revoked credential still works" window without paying a JWKS
     // round-trip on every Flight call.

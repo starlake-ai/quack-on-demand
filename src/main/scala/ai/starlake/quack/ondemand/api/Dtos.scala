@@ -26,7 +26,7 @@ final case class NodeInfo(
     // totalServed = lifetime counter since manager start, avgDurationMs =
     // EWMA of completed-statement latency. healthy/draining mirror the
     // tracker for UI status badges. p50/p95/p99 are sampled over a
-    // rolling 256-statement window per node — see LatencyRing.
+    // rolling 256-statement window per node - see LatencyRing.
     inFlight: Int = 0,
     totalServed: Long = 0L,
     avgDurationMs: Double = 0.0,
@@ -59,7 +59,7 @@ final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
 final case class ClientConfigResponse(
-    flightSqlHost: String,    // may be "0.0.0.0" — UI should substitute window.location.hostname
+    flightSqlHost: String,    // may be "0.0.0.0" - UI should substitute window.location.hostname
     flightSqlPort: Int,
     flightSqlTls: Boolean,
     tenantClaim: String,       // JWT claim name the edge uses
@@ -243,7 +243,7 @@ object Dtos:
   given Codec[SetMaxConcurrentRequest] = deriveCodec
   given Codec[NodeOpRequest]           = deriveCodec
   given Codec[ErrorResponse]           = deriveCodec
-  // Hand-rolled so `metastore` defaults to Map.empty when absent — matches the
+  // Hand-rolled so `metastore` defaults to Map.empty when absent - matches the
   // CreatePoolRequest pattern. Lets a client POST `{"name":"acme"}` alone.
   given Codec[TenantRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>

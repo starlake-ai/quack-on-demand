@@ -65,7 +65,7 @@ object TenantLoader extends LazyLogging:
   @deprecated("Use load(store, tenantId) instead", "2.0")
   def load(basePath: Path, tenantId: TenantId): ValidatedNel[AclError, AclPolicy] =
     // Creates a new LocalAclStore per call. LocalAclStore.close() is a no-op,
-    // so the unclosed instance is benign — no resources to leak.
+    // so the unclosed instance is benign - no resources to leak.
     load(new LocalAclStore(basePath), tenantId)
 
   /** Load ACL policy for a tenant with a custom environment resolver.

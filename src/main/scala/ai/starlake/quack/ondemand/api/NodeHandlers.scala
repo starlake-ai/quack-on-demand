@@ -27,7 +27,7 @@ final class NodeHandlers(
         IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_role", msg))))
       case Right(_role) =>
         // Role mutation is metadata-only at runtime (the router reads role from
-        // RunningNode). For v1 we don't restart the node — just acknowledge.
+        // RunningNode). For v1 we don't restart the node - just acknowledge.
         // A future task may add a CRD-style restart that re-syncs the role label.
         withNode(req.tenant, req.pool, req.nodeId)(IO.unit)
 

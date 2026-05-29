@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
   * Thread-safety: all JDBC operations are synchronized on connectionLock since DuckDB in-process
   * mode does not support concurrent queries on the same connection.
   *
-  * The tenantId parameter is accepted but not used for catalog lookups — the resolver connects to a
+  * The tenantId parameter is accepted but not used for catalog lookups - the resolver connects to a
   * single DuckLake catalog defined by SessionConfig. The parameter is part of the ViewResolver
   * callback signature for future multi-tenant catalog support.
   */
@@ -51,7 +51,7 @@ class DuckLakeCatalogResolver(
     val now = System.currentTimeMillis()
     if cached != null && (now - cached.loadedAt) < cacheTtlMs then return cached.result
 
-    // Cache miss or expired — query catalog under lock
+    // Cache miss or expired - query catalog under lock
     try
       val result = connectionLock.synchronized {
         // Double-check cache inside lock to avoid redundant queries when
@@ -73,7 +73,7 @@ class DuckLakeCatalogResolver(
         logger.warn(s"Catalog lookup failed for ${tableRef.canonical}: ${e.getMessage}", e)
         // Reset connection so next call attempts reconnection
         resetConnection()
-        // Don't cache errors — retry on next call.
+        // Don't cache errors - retry on next call.
         // Return Unknown: in strict mode → denied (secure). In permissive → admin chose to allow.
         ResourceLookupResult.Unknown
 
@@ -104,7 +104,7 @@ class DuckLakeCatalogResolver(
     }
 
   // Note: this method acquires connectionLock internally. When called from resolve(),
-  // the caller already holds the lock — this is safe because JVM synchronized is reentrant.
+  // the caller already holds the lock - this is safe because JVM synchronized is reentrant.
   // The internal lock is kept because tests call this method directly without holding the lock.
   private[catalog] def getOrCreateConnection(): Connection =
     connectionLock.synchronized {

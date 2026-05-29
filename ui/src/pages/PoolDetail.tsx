@@ -62,7 +62,7 @@ export default function PoolDetail() {
       <section>
         <h3>Storage</h3>
         {Object.keys(data.metastore).length === 0 ? (
-          <p style={{ color: '#888' }}>(no effective metastore — manager defaults apply)</p>
+          <p style={{ color: '#888' }}>(no effective metastore - manager defaults apply)</p>
         ) : (
           <table>
             <tbody>
@@ -115,7 +115,7 @@ export default function PoolDetail() {
                   Route clients through the FlightSQL edge for capacity-aware,
                   role-respecting load balancing. The username encodes the pool you target:
                   <code> {tenant}/{pool}/&lt;user&gt;</code>.
-                  {' '}You can also bypass the edge and talk to one specific Quack node — see "Direct node URIs" below.
+                  {' '}You can also bypass the edge and talk to one specific Quack node - see "Direct node URIs" below.
                 </p>
                 <table>
                   <tbody>
@@ -129,7 +129,7 @@ export default function PoolDetail() {
                   {data.nodes.map(n => (
                     <li key={n.nodeId}>
                       <code>ATTACH 'quack:{n.host}:{n.port}' AS remote (TYPE quack, TOKEN '&lt;token&gt;');</code>
-                      {' — token visible in '}<code>state/quack-on-demand-state.json</code>
+                      {' - token visible in '}<code>state/quack-on-demand-state.json</code>
                     </li>
                   ))}
                 </ul>

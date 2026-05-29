@@ -16,10 +16,10 @@ import javax.crypto.spec.SecretKeySpec
   * for browser-based ADBC/CLI clients.
   *
   * Endpoints:
-  *   GET /oauth/initiate         — start a session, return UUID + auth URL
-  *   GET /oauth/start?session=X  — browser redirect to IdP
-  *   GET /oauth/callback         — IdP redirects here with authorization code
-  *   GET /oauth/token/{uuid}     — poll for completed token
+  *   GET /oauth/initiate         - start a session, return UUID + auth URL
+  *   GET /oauth/start?session=X  - browser redirect to IdP
+  *   GET /oauth/callback         - IdP redirects here with authorization code
+  *   GET /oauth/token/{uuid}     - poll for completed token
   */
 class OAuthHttpServer(
     oauthConfig: OAuthConfig,

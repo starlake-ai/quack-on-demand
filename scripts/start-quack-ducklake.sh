@@ -10,11 +10,11 @@
 #   PG_HOST   PG_PORT   PG_USER   PG_PASS
 #   DATA_PATH
 #   QUACK_URI         (e.g. quack:0.0.0.0:9494)
-#   DB_NAME           (Postgres database AND DuckDB catalog name —
+#   DB_NAME           (Postgres database AND DuckDB catalog name -
 #                      the script creates the Postgres DB if it doesn't exist)
 #   SCHEMA_NAME       (DuckLake schema under $DB_NAME; defaults to `main`.
 #                      MUST differ from DB_NAME or DuckDB will reject 2-part
-#                      identifiers like "db1"."customer" as ambiguous —
+#                      identifiers like "db1"."customer" as ambiguous -
 #                      that's a real problem for JDBC clients (DBeaver etc.)
 #                      that don't include the catalog prefix.)
 #   PG_ADMIN_DB       (DB used to bootstrap CREATE DATABASE; default `postgres`)
@@ -27,7 +27,7 @@
 #
 # The script stays foreground inside the duckdb REPL. Ctrl-D (or `.exit`)
 # shuts down Quack. The auth token Quack generates at startup is printed
-# on stdout — clients need it via `TOKEN := '...'`.
+# on stdout - clients need it via `TOKEN := '...'`.
 
 set -euo pipefail
 
@@ -54,7 +54,7 @@ command -v duckdb >/dev/null 2>&1 || {
 if [[ "$SCHEMA_NAME" == "$DB_NAME" ]]; then
   echo "ERROR: SCHEMA_NAME ($SCHEMA_NAME) must differ from DB_NAME ($DB_NAME)." >&2
   echo "       DuckDB rejects 2-part identifiers like \"$DB_NAME\".<table> as ambiguous" >&2
-  echo "       when a catalog and a schema share a name — JDBC clients hit this." >&2
+  echo "       when a catalog and a schema share a name - JDBC clients hit this." >&2
   exit 1
 fi
 
@@ -94,7 +94,7 @@ fi
 INIT_SQL="$(mktemp -t quack-init.XXXXXX.sql)"
 trap 'rm -f "$INIT_SQL"' EXIT
 
-# If SCHEMA_NAME is the DuckLake default ('main'), we don't need CREATE SCHEMA —
+# If SCHEMA_NAME is the DuckLake default ('main'), we don't need CREATE SCHEMA -
 # it's already there. Otherwise we create it idempotently.
 SCHEMA_CREATE=""
 if [[ "$SCHEMA_NAME" != "main" ]]; then

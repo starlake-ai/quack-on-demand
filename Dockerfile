@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # =========================================================================
-#  Stage 1 — Build the uber-jar (UI + Scala)
+#  Stage 1 - Build the uber-jar (UI + Scala)
 # =========================================================================
 FROM eclipse-temurin:17-jdk AS build
 
@@ -23,7 +23,7 @@ EOF
 
 WORKDIR /src
 
-# Pre-fetch deps using only the build descriptors — keeps the layer cached
+# Pre-fetch deps using only the build descriptors - keeps the layer cached
 # across source-only changes.
 COPY build.sbt /src/
 COPY project/  /src/project/
@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/root/.sbt \
     (cd /src/ui && npm ci)
 
 COPY . /src/
-# UiBuild.scala skips `npm ci` when ui/node_modules already exists — and the
+# UiBuild.scala skips `npm ci` when ui/node_modules already exists - and the
 # cache-mount target above is always an existing (possibly empty) directory,
 # so we re-run `npm ci` here to guarantee the tsc/vite binaries are present
 # before `sbt assembly` invokes `npm run build`.
@@ -67,7 +67,7 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # =========================================================================
-#  Stage 2 — Runtime
+#  Stage 2 - Runtime
 # =========================================================================
 FROM eclipse-temurin:17-jre
 
@@ -75,10 +75,10 @@ ARG DUCKDB_VERSION=1.5.3
 ARG TARGETARCH
 
 # Runtime deps:
-#   duckdb              — required by spawn-quack-node.sh to host each Quack node
-#   postgresql-client   — psql, bootstraps the catalog DB if missing
-#   openssl             — auto-generates the self-signed TLS cert on first boot
-#   bash + tini         — script interpreter + PID 1 signal forwarder
+#   duckdb              - required by spawn-quack-node.sh to host each Quack node
+#   postgresql-client   - psql, bootstraps the catalog DB if missing
+#   openssl             - auto-generates the self-signed TLS cert on first boot
+#   bash + tini         - script interpreter + PID 1 signal forwarder
 RUN <<EOF
 set -eu
 apt-get update
@@ -101,7 +101,7 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # Non-root runtime user. Newer Ubuntu base images (24.04+) ship with an
-# `ubuntu` user already at UID 1000 — remove it first so this useradd
+# `ubuntu` user already at UID 1000 - remove it first so this useradd
 # can claim the same UID.
 RUN if id -u 1000 >/dev/null 2>&1; then userdel -r "$(id -un 1000)" 2>/dev/null || true; fi && \
     useradd --create-home --shell /bin/bash --uid 1000 quack

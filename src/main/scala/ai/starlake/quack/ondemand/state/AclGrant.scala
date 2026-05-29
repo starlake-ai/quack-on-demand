@@ -6,7 +6,7 @@ import java.time.Instant
   * table set. Any of `catalog/schema/table` may be `None` to act as a
   * wildcard (e.g. all tables in a schema, or all schemas in a catalog).
   *
-  * `principal` is a free-form string with a `type:name` convention —
+  * `principal` is a free-form string with a `type:name` convention -
   * `user:alice`, `group:engineers`, `role:admin`. The validator at
   * enforcement time (Phase 2) will match against the authenticated
   * profile's username, groups, and role with the same convention. */

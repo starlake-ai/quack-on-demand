@@ -8,7 +8,7 @@ case class ValidationContext(
     statement: String,
     peer: String,
     claims: Map[String, Claim],
-    // Per-pool defaults for SQL parser qualification — when an unqualified
+    // Per-pool defaults for SQL parser qualification - when an unqualified
     // table is referenced in the statement, the parser fills these in to
     // produce a fully-qualified TableRef. Falls back to global config when
     // a validator instance was built with its own defaults.
@@ -34,5 +34,5 @@ object AllowAllValidator extends StatementValidator:
   override def validate(context: ValidationContext): ValidationResult = Allowed
 
 object StatementValidator:
-  /** No-op factory — short alias for [[AllowAllValidator]]. */
+  /** No-op factory - short alias for [[AllowAllValidator]]. */
   def allowAll: StatementValidator = AllowAllValidator

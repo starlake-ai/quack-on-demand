@@ -14,7 +14,7 @@ import com.typesafe.scalalogging.LazyLogging
   *
   * Uses fs2-blobstore `Store[IO, B]` with type parameter `B <: FsObject` to
   * preserve access to blob metadata (lastModified, isDir) from list results.
-  * All operations go through the blobstore Store trait — no NIO.
+  * All operations go through the blobstore Store trait - no NIO.
   *
   * Bridges effectful fs2-blobstore operations to the synchronous AclStore
   * interface via `IO.unsafeRunSync()` with a dedicated IORuntime, following
@@ -112,7 +112,7 @@ class CloudAclStore[B <: FsObject](
     try
       val url = tenantUrl(tenantId)
       // Single API call: list all items, check tenant existence from result
-      // Cloud list() returns Url[B] with FsObject metadata populated —
+      // Cloud list() returns Url[B] with FsObject metadata populated -
       // no separate stat() call needed (unlike BlobAclStore for local filesystem).
       val allItems = run(
         store

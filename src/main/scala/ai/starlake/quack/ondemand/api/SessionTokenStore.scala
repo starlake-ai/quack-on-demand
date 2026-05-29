@@ -11,7 +11,7 @@ import scala.collection.concurrent.TrieMap
   * admin-only middleware can decide whether to admit a request without
   * re-validating credentials on every call.
   *
-  * Tokens live in memory — manager restart invalidates all sessions. v1
+  * Tokens live in memory - manager restart invalidates all sessions. v1
   * doesn't expire tokens; the UI logout drops the row and the user is
   * expected to log in again after a restart. */
 final class SessionTokenStore:

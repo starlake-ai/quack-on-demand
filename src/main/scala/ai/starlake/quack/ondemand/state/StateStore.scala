@@ -10,7 +10,7 @@ import java.nio.file.{Files, Path, StandardCopyOption}
 import java.time.Instant
 
 /** Persistence layer for tenant + pool definitions. Implementations atomically
-  * read and write the whole [[StoredState]] blob — the supervisor calls
+  * read and write the whole [[StoredState]] blob - the supervisor calls
   * `save` on every mutation, so partial-write recovery is the implementation's
   * responsibility. */
 trait StateStore:
@@ -41,7 +41,7 @@ final class FileStateStore(path: Path) extends StateStore:
 object StateStore:
 
   /** Default factory keeps the file-based store reachable as `StateStore(path)`
-    * — preserves the call shape that tests and earlier Main code rely on. */
+    * - preserves the call shape that tests and earlier Main code rely on. */
   def apply(path: Path): StateStore = new FileStateStore(path)
 
   given Codec[Role] = Codec.from(
@@ -63,7 +63,7 @@ object StateStore:
   given Codec[RunningNode]      = deriveCodec
   given Codec[StoredPool]       = deriveCodec
   given Codec[StoredTenant]     = deriveCodec
-  // Hand-rolled so the `tenants` field is optional in the wire JSON — back-compat
+  // Hand-rolled so the `tenants` field is optional in the wire JSON - back-compat
   // with state files written before tenants became first-class.
   given Codec[StoredState] = Codec.from(
     Decoder.instance { c =>

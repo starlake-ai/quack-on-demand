@@ -266,7 +266,7 @@ object AclEvaluator:
         denyReason = None,
         grantType = Some(GrantType.UnknownButAllowed),
         isView = isView,
-        warnings = warnings :+ s"Table '${table.canonical}' has no grants — allowed in defaultAllow mode"
+        warnings = warnings :+ s"Table '${table.canonical}' has no grants - allowed in defaultAllow mode"
       ))
 
   private def walkResolution(
@@ -311,7 +311,7 @@ object AclEvaluator:
               denyReason = None,
               grantType = Some(GrantType.UnknownButAllowed),
               isView = false,
-              warnings = List(s"Table '${table.canonical}' has no grants — allowed in defaultAllow mode")
+              warnings = List(s"Table '${table.canonical}' has no grants - allowed in defaultAllow mode")
             ))
           case GrantMatchResult.NoMatch =>
             List(TableAccess(
@@ -409,7 +409,7 @@ object AclEvaluator:
         // First check if user has a grant on the view itself
         index.checkAccess(table, user) match
           case GrantMatchResult.NoMatch if mode == ResolutionMode.DefaultAllow && !index.hasAnyGrant(table) =>
-            // DefaultAllow: view has no grants at all — allow and check base tables
+            // DefaultAllow: view has no grants at all - allow and check base tables
             val viewAccess = TableAccess(
               table = table,
               decision = Decision.Allowed,
@@ -417,7 +417,7 @@ object AclEvaluator:
               denyReason = None,
               grantType = Some(GrantType.UnknownButAllowed),
               isView = true,
-              warnings = List(s"View '${table.canonical}' has no grants — allowed in defaultAllow mode")
+              warnings = List(s"View '${table.canonical}' has no grants - allowed in defaultAllow mode")
             )
             val depAccesses = resolved.toList.flatMap { case (depRef, depResolution) =>
               walkResolution(depRef, depResolution, index, user, mode)

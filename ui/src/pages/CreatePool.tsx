@@ -110,7 +110,7 @@ export default function CreatePool() {
         <label>Dual      <input type="number" min={0} value={dual} onChange={e => setDual(+e.target.value)} /></label>
       </fieldset>
       <fieldset>
-        <legend>Metastore overrides — blank inherits from above</legend>
+        <legend>Metastore overrides - blank inherits from above</legend>
         <label>Host       <input value={pgHost}   onChange={e => setPgHost(e.target.value)}   placeholder={inherited.pgHost   || '(default)'} /></label><br/>
         <label>Port       <input value={pgPort}   onChange={e => setPgPort(e.target.value)}   placeholder={inherited.pgPort   || '(default)'} /></label><br/>
         <label>User       <input value={pgUser}   onChange={e => setPgUser(e.target.value)}   placeholder={inherited.pgUser   || '(default)'} /></label><br/>

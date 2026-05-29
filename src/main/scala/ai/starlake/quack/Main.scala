@@ -26,7 +26,7 @@ object Main extends IOApp.Simple with LazyLogging:
   // Match the camelCase keys used in application.conf rather than pureconfig's
   // default kebab-case mapping. Affects our own ManagerConfig / FlightConfig
   // AND the edge AuthenticationConfig types (which `derives ConfigReader`
-  // at class-definition time — we shadow those defaults here).
+  // at class-definition time - we shadow those defaults here).
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
   given ProductHint[K8sConfig]              = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]            = ProductHint[AdminConfig](camelMapping)
@@ -86,7 +86,7 @@ object Main extends IOApp.Simple with LazyLogging:
       val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
       val admins = mgrCfg.admin.usernameList
       if admins.isEmpty then
-        logger.warn("quack-on-demand.admin.username is empty — no admin user seeded.")
+        logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
       else
         admins.foreach { name =>
           val inserted = userStore.upsertUser(name, mgrCfg.admin.password, mgrCfg.admin.role)
@@ -122,7 +122,7 @@ object Main extends IOApp.Simple with LazyLogging:
     val tenants  = new TenantHandlers(sup)
     val health   = new HealthHandler(sup)
 
-    // ACL handlers are only available with a Postgres state backend — that's
+    // ACL handlers are only available with a Postgres state backend - that's
     // the same connection the relational grant store reuses. File-mode
     // deploys skip them; the endpoints won't be mounted and return 404.
     val aclHandlers: Option[AclHandlers] =
@@ -177,7 +177,7 @@ object Main extends IOApp.Simple with LazyLogging:
     // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
     // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
     // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
-    // — IO.attempt routes that, but treats raw `Error`s as fatal.
+    // - IO.attempt routes that, but treats raw `Error`s as fatal.
     val edgeIO: IO[FlightEdgeServer] = IO.delay {
       try
         val srv = new FlightEdgeServer(

@@ -3,7 +3,7 @@
 # Stop the quack-on-demand docker-compose stack started by
 # scripts/run-docker-compose.sh.
 #
-# Default: `docker compose kill -s SIGKILL` — terminates immediately.
+# Default: `docker compose kill -s SIGKILL` - terminates immediately.
 # The manager JVM has no graceful shutdown hook today, so the SIGTERM
 # grace period is dead time; Docker Desktop on macOS also adds ~30s of
 # its own latency per container during graceful stop. Fast kill is the

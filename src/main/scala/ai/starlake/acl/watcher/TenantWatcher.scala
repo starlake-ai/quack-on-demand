@@ -76,7 +76,7 @@ final class TenantWatcher(
       if waitAttempt > maxWaitAttempts then
         logger.warn(
           s"ACL base path '$basePath' does not exist after $waitAttempt/$maxWaitAttempts attempts. " +
-            "ACL enforcement is disabled — all queries will be allowed."
+            "ACL enforcement is disabled - all queries will be allowed."
         )
         return
       logger.info(s"Waiting for base path to exist: $basePath (attempt $waitAttempt/$maxWaitAttempts)")
@@ -99,7 +99,7 @@ final class TenantWatcher(
       try
         if watcher == null then initializeWatcher()
         if watcher == null then
-          // basePath never appeared — stop the watch thread silently
+          // basePath never appeared - stop the watch thread silently
           logger.info("TenantWatcher stopping: base path not available")
           return
 

@@ -28,7 +28,7 @@ final class FlightProducerImpl(
   /** Cache of prepare-time QueryResult instances keyed by handle. Arrow JDBC
     * (and DBeaver) requires `dataset_schema` to be populated in
     * ActionCreatePreparedStatementResult to dispatch as a query rather than an
-    * update — so we have to know the schema at prepare time. We pre-execute
+    * update - so we have to know the schema at prepare time. We pre-execute
     * the SQL through the router on prepare, cache the resulting
     * [[QueryResult]], serialize its schema into `dataset_schema`, then replay
     * the cached reader from getStreamPreparedStatement. Caller closes on
@@ -145,7 +145,7 @@ final class FlightProducerImpl(
         finally result.close()
 
   // -----------------------------------------------------------------
-  //  Metadata endpoints — DBeaver / JDBC clients walk these to populate
+  //  Metadata endpoints - DBeaver / JDBC clients walk these to populate
   //  the catalog browser. Each handler translates the Flight SQL request
   //  into a SQL query against the Quack node's information_schema and
   //  forwards through the router, so column types and schemas use the
@@ -249,7 +249,7 @@ final class FlightProducerImpl(
     * `table_schema` column. We fetch the table list through the router,
     * then probe each table with `SELECT * ... LIMIT 0` to capture its schema,
     * and emit a single VectorSchemaRoot built locally (not streamed from
-    * Quack — the per-table-schema shape isn't expressible as one SQL). */
+    * Quack - the per-table-schema shape isn't expressible as one SQL). */
   private def streamTablesWithSchema(
       listSql: String,
       context: FlightProducer.CallContext,
@@ -410,7 +410,7 @@ final class FlightProducerImpl(
     )
 
   // -----------------------------------------------------------------
-  //  Key-metadata endpoints — DBeaver's "Properties" tab polls these.
+  //  Key-metadata endpoints - DBeaver's "Properties" tab polls these.
   //  DuckLake/DuckDB doesn't enforce primary/foreign keys, so we return
   //  empty result sets conforming to the Flight SQL canonical schemas
   //  rather than UNIMPLEMENTED. Empty + correct schema is what JDBC
@@ -576,7 +576,7 @@ final class FlightProducerImpl(
         )
 
   /** Read batches from `reader` and push them to the Flight `listener`.
-    * Reuses `reader.getVectorSchemaRoot()` directly — the listener flushes
+    * Reuses `reader.getVectorSchemaRoot()` directly - the listener flushes
     * the current state of the root on each `putNext()`. */
   private def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
