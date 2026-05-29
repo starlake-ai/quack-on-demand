@@ -34,6 +34,18 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 QUACK_VERSION="${QUACK_VERSION:-latest}"
+
+# If the user didn't pin a version and is on the pull path (not BUILD=1),
+# probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
+# fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
+# smooth before 0.1.0 ships.
+if [[ "${BUILD:-0}" != "1" ]] && [[ "$QUACK_VERSION" == "latest" ]]; then
+  registry_image="starlakeai/quack-on-demand"
+  if ! docker manifest inspect "$registry_image:latest" >/dev/null 2>&1; then
+    echo "starlakeai/quack-on-demand:latest not on Docker Hub yet; falling back to :latest-snapshot"
+    QUACK_VERSION="latest-snapshot"
+  fi
+fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
 LOAD_TPCH="${LOAD_TPCH:-false}"

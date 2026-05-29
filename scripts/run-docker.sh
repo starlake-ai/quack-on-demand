@@ -62,6 +62,17 @@ set -euo pipefail
 IMAGE="${IMAGE:-starlakeai/quack-on-demand}"
 QUACK_VERSION="${QUACK_VERSION:-latest}"
 
+# If the user didn't pin a version and is on the pull path (not BUILD=1),
+# probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
+# fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
+# smooth before 0.1.0 ships.
+if [[ "${BUILD:-0}" != "1" ]] && [[ "$QUACK_VERSION" == "latest" ]]; then
+  if ! docker manifest inspect "$IMAGE:latest" >/dev/null 2>&1; then
+    echo "$IMAGE:latest not on Docker Hub yet; falling back to :latest-snapshot"
+    QUACK_VERSION="latest-snapshot"
+  fi
+fi
+
 PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 PG_DBNAME="${PG_DBNAME:-tpch}"
