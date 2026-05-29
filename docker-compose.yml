@@ -126,12 +126,18 @@ services:
       # the manager + child Quack nodes go through the corporate proxy.
       # Each var defaults to empty; compose only sets it when it has a
       # value, so non-proxied environments are unaffected.
+      #
+      # Bundled in-network hostnames are always added to NO_PROXY so the
+      # manager/seeder/Quack nodes reach `postgres` and `seaweedfs:8333`
+      # directly. Without this, libcurl in DuckDB's httpfs routes the
+      # s3:// PUTs through the corporate proxy and they come back as
+      # 407 Proxy Authentication Required / 502 Bad Gateway.
       HTTP_PROXY:  ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY:    ${NO_PROXY:-}
+      NO_PROXY:    "localhost,127.0.0.1,postgres,seaweedfs${NO_PROXY:+,${NO_PROXY}}"
       http_proxy:  ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy:    ${no_proxy:-}
+      no_proxy:    "localhost,127.0.0.1,postgres,seaweedfs${no_proxy:+,${no_proxy}}"
 
     ports:
       - "${MANAGER_PORT:-20900}:20900"   # REST + UI

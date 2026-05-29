@@ -218,15 +218,29 @@ if [[ "$PG_PORT_EFFECTIVE" == "5432" ]] && lsof -nP -iTCP:5432 -sTCP:LISTEN 2>/d
   fi
 fi
 
+# ---- Auto-activate the seaweedfs profile when .env wires DuckLake at it ----
+# When SL_QUACK_S3_ENDPOINT references the in-compose `seaweedfs` service
+# (i.e. the user opted into the bundled S3 backend via .env), bring the
+# profile up alongside the default services. Without this the manager would
+# come up trying to write to s3://… but the seaweedfs container would never
+# start. Detected purely from .env so it's transparent on the filesystem path.
+COMPOSE_PROFILES=()
+s3_endpoint="$(grep -E '^[[:space:]]*SL_QUACK_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+  | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*SL_QUACK_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
+if [[ "$s3_endpoint" == seaweedfs:* ]]; then
+  echo "detected SL_QUACK_S3_ENDPOINT=$s3_endpoint -> activating 'seaweedfs' compose profile"
+  COMPOSE_PROFILES=("--profile" "seaweedfs")
+fi
+
 # ---- Acquire image + up ----
 if [[ "${BUILD:-0}" == "1" ]]; then
   echo "BUILD=1: starting stack with 'docker compose up -d --build'..."
-  docker compose -f "$COMPOSE_FILE" up -d --build
+  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d --build
 else
   echo "pulling starlakeai/quack-on-demand:$QUACK_VERSION + postgres:16-alpine..."
-  docker compose -f "$COMPOSE_FILE" pull
+  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" pull
   echo "starting stack..."
-  docker compose -f "$COMPOSE_FILE" up -d
+  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d
 fi
 
 # ---- Wait for manager ----
