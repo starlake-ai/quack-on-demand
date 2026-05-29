@@ -197,10 +197,7 @@ object Main extends IOApp.Simple with LazyLogging:
     // updates the tracker.
     val healthProbe = new HealthProbe(
       tracker,
-      n => adapter.send(n, "SELECT 1", None).map {
-        case QuackResponse.Ok(_, _, close) => close(); true
-        case _                             => false
-      },
+      n => adapter.probe(n),
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds
     )
 

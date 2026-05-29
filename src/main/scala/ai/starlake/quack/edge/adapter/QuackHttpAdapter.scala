@@ -27,3 +27,15 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
           resp
         }
       }
+
+  /** Fire-and-forget liveness probe. Performs the same wire round-trip as
+    * [[send]] but skips all tracker bookkeeping (inFlight, totalServed,
+    * EWMA, p50/p95/p99) so background health checks don't inflate the
+    * UI counters or skew the latency percentiles. Closes any streaming
+    * reader on success. Returns `true` iff the query came back Ok. */
+  def probe(node: RunningNode, sql: String = "SELECT 1"): IO[Boolean] =
+    val endpoint = s"quack:${node.host}:${node.port}"
+    client.query(endpoint, node.token, sql, None).map {
+      case QuackResponse.Ok(_, _, close) => close(); true
+      case _                             => false
+    }
