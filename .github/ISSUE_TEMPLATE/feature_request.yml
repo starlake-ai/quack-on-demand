@@ -7,9 +7,9 @@ body:
     attributes:
       value: |
         Thanks for the proposal. Before opening a feature issue, please
-        check [docs/ROADMAP.md](https://github.com/starlake-ai/quack-on-demand/blob/main/docs/ROADMAP.md)
-        - it may already be tracked, in which case comment on the
-        existing issue instead.
+        search existing issues (especially those with the `roadmap`
+        label) - it may already be tracked, in which case comment on
+        the existing issue instead.
 
   - type: textarea
     id: problem

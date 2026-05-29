@@ -277,7 +277,6 @@ Apache 2.0.
 - **Questions / discussion** -> [GitHub Discussions](https://github.com/starlake-ai/quack-on-demand/discussions)
 - **Bug or feature** -> file an issue using the templates (the blank-issue path is disabled on purpose)
 - **Security report (private)** -> email `hayssam.saleh@starlake.ai`
-- **Roadmap** -> see [docs/ROADMAP.md](docs/ROADMAP.md); items are tracked as issues with the `roadmap` label
 
 ## Contributing
 
