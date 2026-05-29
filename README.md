@@ -270,15 +270,41 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
        "metastore":{}}'
 ```
 
-### Connect a FlightSQL client
+### Connect clients
+
+Four entry points, all served by the same manager process:
+
+| Surface | URL | Use case |
+|---|---|---|
+| Admin UI | `http://localhost:20900/ui/` | tenant/pool CRUD, ACL editor, live node dashboard. Log in with `admin@localhost.local` / `admin` (or whatever you set in `.env`). |
+| FlightSQL (JDBC/ADBC) | `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true` | SQL clients (DBeaver, intellij DataGrip, Spark, custom apps). |
+| REST API | `http://localhost:20900/api/*` | scripting tenant/pool/ACL changes. Login via `POST /api/auth/login` to get a session token. |
+| Python load tester | `./scripts/loadtest/loadtest.py` | ADBC-based concurrency + latency benchmark. Defaults to a TPC-H mix; pair with the seeding step above. |
+
+**FlightSQL credentials** — same as the admin user:
 
 ```
-URL:      jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true
-User:     admin@localhost.local
+User:     admin@localhost.local      # or admin
 Password: admin
 ```
 
-Or with TLS verification, import `certs/server-cert.pem` into your JDBC client's trust store and drop `disableCertificateVerification`.
+> **URL scheme must match the server's TLS setting.** Native and the shipped compose `.env.example` default to TLS **on** → use `grpc+tls://` (JDBC) / `useEncryption=true`. The `run-docker.sh` path defaults to TLS **off** → use `grpc://` / `useEncryption=false`. Mismatch surfaces as *"tls: first record does not look like a TLS handshake"* (client-TLS against plaintext server) or *"connection reset"* (the inverse).
+
+**Smoke-test the FlightSQL edge with the Python load tester** (the same one we use in CI):
+
+```bash
+pip install adbc_driver_flightsql adbc_driver_manager
+
+# Default TLS-on server (native + shipped compose)
+./scripts/loadtest/loadtest.py -w 2 -i 5
+
+# Plaintext server (run-docker.sh default, or TLS=false in .env)
+./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+```
+
+For TLS verification instead of `disableCertificateVerification`, import `certs/server-cert.pem` into your JDBC client's trust store. The cert is auto-generated on first boot and reused across restarts.
+
+See [`RUNNING.md`](RUNNING.md#connecting-clients) for the full loadtest parameter table (workers, iterations, warmup, schema, custom query) and the heavy/stress example ladder.
 
 ### Stop everything
 
