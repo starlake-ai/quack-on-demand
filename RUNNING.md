@@ -274,10 +274,7 @@ single-node SeaweedFS (master + volume + filer + S3 gateway) and a
 one-shot bucket bootstrap.
 
 ```bash
-# 1. Bring up SeaweedFS first so the bucket exists before the manager attaches.
-docker compose --profile seaweedfs up -d seaweedfs seaweedfs-init
-
-# 2. Uncomment Option A in .env (or paste these in):
+# 1. Add the S3 settings to .env (or uncomment the Option A block in .env.example):
 cat >> .env <<'EOF'
 SL_QUACK_DUCKLAKE_DATA_PATH=s3://ducklake/tpch
 SL_QUACK_S3_ENDPOINT=seaweedfs:8333
@@ -288,17 +285,24 @@ SL_QUACK_S3_URL_STYLE=path
 S3_BUCKET=ducklake
 EOF
 
-# 3. Boot the rest of the stack (postgres + quack) against SeaweedFS.
-./scripts/run-docker-compose.sh
-# or, to seed TPC-H onto S3 in the same step:
+# 2. Bring everything up in one command. The wrapper detects
+#    SL_QUACK_S3_ENDPOINT=seaweedfs:* and auto-activates the `seaweedfs`
+#    compose profile; LOAD_TPCH=true seeds TPC-H onto S3 in the same step.
 LOAD_TPCH=true ./scripts/run-docker-compose.sh
+
+# 3. Smoke-test the FlightSQL edge end-to-end.
+./scripts/loadtest/loadtest.py -w 2 -i 5
 ```
 
+Verified path on a fresh boot: TPC-H SF=1 -> ~313 MB of parquet under
+`./seaweedfs/`, loadtest 10/10 OK at p50 ~40 ms over TLS.
+
 Persistence: `./seaweedfs/` on the host (parquet) and
-`./seaweedfs-config/s3.json` (gateway credentials). Tear down + wipe with
-`NUKE=1 ./scripts/stop-docker-compose.sh` like the filesystem path; the
-`seaweedfs/` dir is owned by the container's uid, so the same ephemeral
-root-container wipe handles it.
+`./seaweedfs-config/s3.json` (gateway credentials). `NUKE=1
+./scripts/run-docker-compose.sh` tears the stack down, wipes
+`pgdata/ducklake/certs/seaweedfs/seaweedfs-config` via an ephemeral
+root container (handles the container-uid ownership), and re-boots
+from a clean slate.
 
 The S3 API is also exposed on the host at `localhost:8333` for
 `aws --endpoint-url` smoke tests:
