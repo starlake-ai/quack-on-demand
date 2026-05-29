@@ -447,6 +447,52 @@ Once the manager is up:
 - **Admin console:** `http://localhost:20900/ui/`
 - **FlightSQL JDBC:**
   `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true`
+- **FlightSQL ODBC** (Apache Arrow Flight SQL ODBC Driver from
+  [arrow-adbc](https://arrow.apache.org/adbc/main/driver/flight_sql.html#odbc)
+  or the [Dremio ODBC connector](https://github.com/apache/arrow-adbc/tree/main/c/driver/flightsql)):
+
+  Register the driver in `/etc/odbcinst.ini` (Linux/macOS) - point at
+  the `.so` / `.dylib` from the package:
+
+  ```ini
+  [Apache Arrow Flight SQL ODBC Driver]
+  Description = Apache Arrow Flight SQL
+  Driver      = /usr/local/lib/libarrow-odbc.so
+  ```
+
+  Then either use a DSN-less connection string:
+
+  ```
+  Driver={Apache Arrow Flight SQL ODBC Driver};
+  HOST=localhost;PORT=31338;
+  UseEncryption=true;DisableCertificateVerification=true;
+  UID=admin;PWD=admin
+  ```
+
+  Or define a DSN in `~/.odbc.ini`:
+
+  ```ini
+  [quack]
+  Driver       = Apache Arrow Flight SQL ODBC Driver
+  HOST         = localhost
+  PORT         = 31338
+  UseEncryption                 = true
+  DisableCertificateVerification = true
+  UID          = admin
+  PWD          = admin
+  ```
+
+  Smoke test with `isql`:
+
+  ```bash
+  isql -v quack         # uses the DSN above
+  ```
+
+  Use `grpc://` semantics (no TLS) by setting `UseEncryption=false`
+  when the edge runs plaintext (`run-docker.sh` default or
+  `TLS=false`). Drop `DisableCertificateVerification` once you replace
+  the auto-generated self-signed cert with a CA-signed one.
+
 - **REST API:** `http://localhost:20900/api/*` (login first via
   `POST /api/auth/login` to get an `X-API-Key` session token when
   `AUTH=true`)
