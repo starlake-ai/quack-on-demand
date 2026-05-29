@@ -1,0 +1,63 @@
+name: "Feature request"
+description: "Propose a new feature, capability, or change in behaviour."
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the proposal. Before opening a feature issue, please
+        check [docs/ROADMAP.md](https://github.com/starlake-ai/quack-on-demand/blob/main/docs/ROADMAP.md)
+        - it may already be tracked, in which case comment on the
+        existing issue instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem"
+      description: "What pain point does this solve? Concrete scenarios, not just 'it would be nice'."
+      placeholder: |
+        When I try to do X, today I have to Y, which is awkward because Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed solution"
+      description: "Your suggested approach. Code shape, env vars, REST endpoint, whatever fits."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: "What else did you think about, and why is the proposed approach better?"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: "Scope"
+      description: "Roughly where the change would land."
+      options:
+        - "Manager / REST API"
+        - "FlightSQL edge / router"
+        - "Auth + ACL"
+        - "Admin UI"
+        - "Operations (Docker, K8s, scripts)"
+        - "Docs"
+        - "Other / cross-cutting"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: "Are you willing to implement this?"
+      options:
+        - label: "Yes, I'd like to send a PR."
+        - label: "Maybe, with maintainer guidance."
+        - label: "No, just suggesting."
