@@ -19,7 +19,7 @@ Use this skill when the user wants to:
 ## Repo layout (the bits operators touch)
 
 - `scripts/run-jar.sh` - boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
-- `scripts/stop-quack-on-demand.sh` - SIGTERM → wait → SIGKILL
+- `scripts/stop-jar.sh` - SIGTERM → wait → SIGKILL
 - `scripts/loadtest/loadtest.py` - Python FlightSQL load tester (ADBC driver)
 - `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
 - `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
@@ -43,7 +43,7 @@ SL_QUACK_AUTH_DB_ENABLED=false ./scripts/run-jar.sh
 PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 
 # Stop everything
-./scripts/stop-quack-on-demand.sh
+./scripts/stop-jar.sh
 ```
 
 The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `SL_QUACK_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.

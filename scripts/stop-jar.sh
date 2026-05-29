@@ -13,7 +13,7 @@
 #   FORCE_AFTER                (default 10 - seconds before SIGKILL)
 #
 # Usage:
-#   ./scripts/stop-quack-on-demand.sh
+#   ./scripts/stop-jar.sh
 
 set -euo pipefail
 

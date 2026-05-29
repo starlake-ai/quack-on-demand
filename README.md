@@ -246,7 +246,7 @@ src/main/scala/ai/starlake/
 └── acl/                           # SQL parser + ACL model + multi-tenant store
 scripts/
 ├── run-jar.sh       # Boot the manager from the uber-jar
-├── stop-quack-on-demand.sh        # Graceful SIGTERM → SIGKILL escalation
+├── stop-jar.sh        # Graceful SIGTERM → SIGKILL escalation
 ├── start-quack-ducklake.sh        # Standalone single-node Quack for testing
 ├── load-tpch-dbgen.sh             # Generate TPC-H (SF override via $SF) into the metastore via DuckDB's dbgen()
 └── spawn-quack-node.sh            # Called by LocalQuackBackend; do not invoke directly

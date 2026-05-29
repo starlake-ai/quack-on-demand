@@ -53,7 +53,7 @@ BUILD=1 ./scripts/run-jar.sh
 Default ports: `:20900` (REST + admin UI) and `:31338` (FlightSQL edge,
 TLS on). Override with `SL_QUACK_ON_DEMAND_PORT` / `PROXY_PORT`.
 
-To stop: `./scripts/stop-quack-on-demand.sh`.
+To stop: `./scripts/stop-jar.sh`.
 
 ### Seed with TPC-H and Run
 
