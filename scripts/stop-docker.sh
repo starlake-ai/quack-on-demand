@@ -44,3 +44,10 @@ case "$state" in
     docker stop --time "$STOP_TIMEOUT" "$CONTAINER_NAME" >/dev/null
     ;;
 esac
+
+# Tear down any proxy bridge containers spawned by run-docker.sh.
+bridges="$(docker ps -q -f "name=^quack-proxy-bridge-" 2>/dev/null || true)"
+if [[ -n "$bridges" ]]; then
+  echo "stopping proxy bridge container(s)..."
+  docker stop $bridges >/dev/null
+fi
