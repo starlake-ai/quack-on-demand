@@ -266,8 +266,6 @@ Defaults and design choices an operator should be aware of before going to produ
 - **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
 - **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.
 
-See [`docs/superpowers/FOLLOWUPS.md`](docs/superpowers/FOLLOWUPS.md) for the full triaged list, including recently-closed items (admin user seeding, ACL Phase 2, Postgres state store, reconcile-on-restart, group/role propagation, etc.).
-
 ---
 
 ## License
