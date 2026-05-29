@@ -50,3 +50,29 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
     adapter.send(node("n3"), "BAD", None).unsafeRunSync()
     tracker.snapshot("n3").healthy shouldBe true
+
+  "probe" should "return true on Ok without touching tracker counters" in:
+    val client = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L))))
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    adapter.probe(node("p1")).unsafeRunSync() shouldBe true
+    val snap = tracker.snapshot("p1")
+    snap.inFlight    shouldBe 0
+    snap.totalServed shouldBe 0L
+    snap.ewmaMs      shouldBe 0.0
+
+  it should "return false on transient failure without touching tracker counters" in:
+    val client = new FakeClient(Map("quack:127.0.0.1:0" ->
+      (() => QuackResponse.Failed(QuackError.Transient("connection refused"), 1))))
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    adapter.probe(node("p2")).unsafeRunSync() shouldBe false
+    tracker.snapshot("p2").totalServed shouldBe 0L
+
+  it should "return false on permanent failure without touching tracker counters" in:
+    val client = new FakeClient(Map("quack:127.0.0.1:0" ->
+      (() => QuackResponse.Failed(QuackError.Permanent("400"), 1))))
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    adapter.probe(node("p3")).unsafeRunSync() shouldBe false
+    tracker.snapshot("p3").totalServed shouldBe 0L
