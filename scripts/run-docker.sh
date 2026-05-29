@@ -180,6 +180,7 @@ rewrite_loopback_proxy() {
   fi
 }
 NEED_HOST_GATEWAY=0
+LOOPBACK_PROXY_PORTS=()
 for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
   original="${!var:-}"
   [[ -z "$original" ]] && continue
@@ -187,9 +188,51 @@ for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
   if [[ "$rewritten" != "$original" ]]; then
     echo "rewriting $var: $original -> $rewritten"
     printf -v "$var" '%s' "$rewritten"
+    if [[ "$rewritten" =~ :([0-9]+) ]]; then
+      LOOPBACK_PROXY_PORTS+=("${BASH_REMATCH[1]}")
+    fi
     NEED_HOST_GATEWAY=1
   fi
 done
+
+# ---- Auto-bridge loopback-only proxies onto the docker bridge ----
+# cntlm/squid often bind 127.0.0.1 only; the URL rewrite above makes
+# the container LOOK UP the right name but the proxy still refuses
+# connections from the docker bridge IP. Spawn a socat passthrough
+# that listens on the bridge IP and forwards to host loopback, but
+# only when the proxy is reachable from loopback AND not yet from
+# the bridge. stop-docker.sh tears down these `quack-proxy-bridge-*`
+# containers.
+BRIDGE_IP="172.17.0.1"
+DOCKER_BRIDGE_GATEWAY="$(docker network inspect bridge \
+  -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+[[ -n "$DOCKER_BRIDGE_GATEWAY" ]] && BRIDGE_IP="$DOCKER_BRIDGE_GATEWAY"
+
+probe_tcp() { (echo > "/dev/tcp/$1/$2") >/dev/null 2>&1; }
+
+if (( ${#LOOPBACK_PROXY_PORTS[@]} > 0 )); then
+  IFS=$'\n' read -r -d '' -a UNIQ_PORTS < <(
+    printf '%s\n' "${LOOPBACK_PROXY_PORTS[@]}" | sort -u && printf '\0'
+  )
+  for port in "${UNIQ_PORTS[@]}"; do
+    name="quack-proxy-bridge-$port"
+    if [[ -n "$(docker ps -q -f "name=^${name}$" 2>/dev/null)" ]]; then
+      echo "proxy bridge already running: $name ($BRIDGE_IP:$port -> 127.0.0.1:$port)"
+      continue
+    fi
+    if probe_tcp "$BRIDGE_IP" "$port"; then
+      continue
+    fi
+    if ! probe_tcp "127.0.0.1" "$port"; then
+      echo "WARN: no proxy reachable on 127.0.0.1:$port; container will likely fail to reach it" >&2
+      continue
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    echo "starting proxy bridge: $BRIDGE_IP:$port -> 127.0.0.1:$port (container=$name)"
+    docker run -d --rm --name "$name" --network host alpine/socat \
+      "TCP-LISTEN:$port,bind=$BRIDGE_IP,fork,reuseaddr" "TCP:127.0.0.1:$port" >/dev/null
+  done
+fi
 
 # ---- Run ----
 # host.docker.internal works on Docker Desktop (Mac/Windows). On Linux,
