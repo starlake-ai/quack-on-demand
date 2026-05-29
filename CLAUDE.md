@@ -16,8 +16,8 @@ sbt scalafmtAll         # format (scalafmt 3.10, scala3 dialect, maxColumn 100)
 Boot the manager from the uber-jar (with TLS cert auto-gen + Postgres reachability probe):
 
 ```bash
-./scripts/start-quack-on-demand.sh           # foreground
-BUILD=1 ./scripts/start-quack-on-demand.sh   # sbt assembly first
+./scripts/run-jar.sh           # foreground
+BUILD=1 ./scripts/run-jar.sh   # sbt assembly first
 ./scripts/stop-quack-on-demand.sh            # SIGTERM → wait → SIGKILL
 ```
 

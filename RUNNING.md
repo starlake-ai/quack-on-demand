@@ -20,31 +20,34 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 ## Path 1 — Native run, against an external Postgres
 
 ### Prerequisites
-- JDK 17+
-- `sbt` 1.x and `npm` 18+ (to build the uber-jar once)
+- JDK 17+ (to run the jar)
 - `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)
 - A reachable Postgres — the catalog DB and the slkstate_* control-plane tables both live there
   (the catalog DB itself is auto-created on first boot if your `$SL_QUACK_PG_USER` has `CREATEDB`)
-
-### One-time build
-
-```bash
-sbt assembly
-# -> distrib/quack-on-demand-assembly-<version>.jar
-```
+- **`sbt` 1.x and `npm` 18+** — only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
 
 ### Run
 
-The start script picks the latest jar in `distrib/`, anchors the working
-directory at the repo root, and pins Arrow's allocator.
+`run-jar.sh` resolves the jar in one of two ways, then anchors the working
+directory at the repo root, probes Postgres, and exec's `java -jar` with
+Arrow's allocator pinned:
 
 ```bash
+# Default: download latest release from Maven Central, cache under
+# ~/.cache/quack-on-demand/, run it.
 SL_QUACK_PG_HOST=db.internal      \
 SL_QUACK_PG_PASSWORD=hunter2      \
 SL_QUACK_ADMIN_PASSWORD=change-me \
-./scripts/start-quack-on-demand.sh
+./scripts/run-jar.sh
+
+# Pin a specific version (release or -SNAPSHOT)
+QUACK_VERSION=0.1.0           ./scripts/run-jar.sh
+QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh
+
+# Local source build (requires sbt + npm); writes distrib/<...>.jar
+BUILD=1 ./scripts/run-jar.sh
 ```
 
 Default ports: `:20900` (REST + admin UI) and `:31338` (FlightSQL edge,
@@ -63,12 +66,12 @@ is already there.
 ```bash
 # Default SF=1 (~6M lineitem rows, ≈ 10s)
 SL_QUACK_BOOTSTRAP_LOAD_TPCH=true \
-  ./scripts/start-quack-on-demand.sh
+  ./scripts/run-jar.sh
 
 # Larger scale
 SL_QUACK_BOOTSTRAP_LOAD_TPCH=true \
 SL_QUACK_BOOTSTRAP_TPCH_SF=10 \
-  ./scripts/start-quack-on-demand.sh
+  ./scripts/run-jar.sh
 ```
 
 Standalone (without booting the manager):
@@ -119,27 +122,27 @@ Every scalar in `application.conf` has a matching `SL_QUACK_*` /
 - Docker
 - A reachable Postgres (any host the container can route to)
 
-### Build the image
-
-```bash
-docker build -t quack-on-demand:dev .
-```
-
-The multi-stage Dockerfile compiles the UI + the Scala uber-jar in stage 1,
-then ships only the JRE + `duckdb` + `psql` + `openssl` in stage 2.
-
 ### Run
 
-A wrapper script handles the env-var pass-through, port mapping, and
-volume mounts:
+`run-docker.sh` either pulls the published image from Docker Hub (default)
+or builds it from this checkout's `Dockerfile` (`BUILD=1`), then `docker
+run`s it with port mappings + bind mounts + env vars wired up:
 
 ```bash
+# Default: pull starlakeai/quack-on-demand:latest and run
 PG_HOST=my-rds.amazonaws.com      \
 PG_PASSWORD=hunter2               \
 AUTH=true                         \
 ADMIN_PASSWORD=change-me          \
 TLS=true                          \
-./scripts/start-docker.sh
+./scripts/run-docker.sh
+
+# Pin a specific tag (release or snapshot)
+QUACK_VERSION=0.1.0           PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
+QUACK_VERSION=latest-snapshot PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
+
+# Local Dockerfile build (writes the same image name, tagged $QUACK_VERSION)
+BUILD=1 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
 ```
 
 What it does internally:
@@ -149,7 +152,7 @@ What it does internally:
 - maps the lease range `21900-22500` for in-container Quack node ports
 
 To stop: `./scripts/stop-docker.sh` (graceful SIGTERM → SIGKILL after 30s,
-matching the `CONTAINER_NAME` from `start-docker.sh`; override the timeout
+matching the `CONTAINER_NAME` from `run-docker.sh`; override the timeout
 with `STOP_TIMEOUT=60`).
 
 ### Seed with TPC-H and Run
@@ -172,7 +175,7 @@ returns immediately when `tpch1.lineitem` is already populated.
 
 ### Override knobs
 
-Env vars at `start-docker.sh` invocation time:
+Env vars at `run-docker.sh` invocation time:
 
 | Env var | Default | Notes |
 |---|---|---|
@@ -210,15 +213,21 @@ Env vars at `start-docker.sh` invocation time:
 
 ```bash
 cp .env.example .env       # edit if you want; defaults work
-docker compose up --build  # add `-d` once you trust the boot
+./scripts/run-docker-compose.sh                 # default = pull from Docker Hub
+BUILD=1 ./scripts/run-docker-compose.sh         # local Dockerfile build instead
 ```
+
+(Equivalent to `docker compose pull && docker compose up -d` for the
+pull path, or `docker compose up -d --build` for the BUILD path. The
+script also handles host-port collisions on 5432 and the optional
+TPC-H seed — see the next two subsections.)
 
 This brings up two services on the compose-default network:
 
 | Service | Image | Volumes |
 |---|---|---|
 | `postgres`   | `postgres:16-alpine`     | `./pgdata` → `/var/lib/postgresql/data` |
-| `quack`      | `quack-on-demand:dev`    | `./ducklake` → `/app/ducklake`, `./certs` → `/app/certs` |
+| `quack`      | `starlakeai/quack-on-demand:latest`    | `./ducklake` → `/app/ducklake`, `./certs` → `/app/certs` |
 
 The manager waits on Postgres's `pg_isready` healthcheck before starting,
 so no race conditions. Inside the network it reaches the metastore at the
@@ -248,12 +257,12 @@ API_KEY=my-rest-key
 
 ### Seed with TPC-H and Run
 
-`scripts/start-docker-compose.sh` will boot the stack and run the seed
+`scripts/run-docker-compose.sh` will boot the stack and run the seed
 in one step when `LOAD_TPCH=true`:
 
 ```bash
-LOAD_TPCH=true ./scripts/start-docker-compose.sh                # SF=1
-LOAD_TPCH=true TPCH_SF=10 ./scripts/start-docker-compose.sh     # SF=10
+LOAD_TPCH=true ./scripts/run-docker-compose.sh                # SF=1
+LOAD_TPCH=true TPCH_SF=10 ./scripts/run-docker-compose.sh     # SF=10
 ```
 
 Under the hood it does `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
@@ -335,10 +344,10 @@ that the current manager can't see. Two options:
 psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
 rm -rf ducklake/tpch                    # the on-disk parquet files
 # Re-boot with SL_QUACK_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
-# LOAD_TPCH=true ./scripts/start-docker-compose.sh (Path 3).
+# LOAD_TPCH=true ./scripts/run-docker-compose.sh (Path 3).
 
 # Option B — keep the data, use a fresh catalog DB.
-SL_QUACK_PG_DBNAME=tpch_native ./scripts/start-quack-on-demand.sh
+SL_QUACK_PG_DBNAME=tpch_native ./scripts/run-jar.sh
 ```
 
 ---
@@ -360,7 +369,7 @@ Once the manager is up:
   > **URL scheme must match the server's TLS setting.** Native and the
   > shipped compose `.env.example` both default to TLS **on**, so
   > `grpc+tls://localhost:31338` (the loadtest default) works out of the
-  > box. The `start-docker.sh` path defaults to TLS **off** — pass
+  > box. The `run-docker.sh` path defaults to TLS **off** — pass
   > `--url grpc://localhost:31338` against it. Mismatch surfaces as
   > *"tls: first record does not look like a TLS handshake"* (client TLS
   > against plaintext server) or *"connection reset"* (the inverse). Same
@@ -372,7 +381,7 @@ Once the manager is up:
   # Tiny smoke test (TLS-on default — works for native and shipped compose)
   ./scripts/loadtest/loadtest.py -w 2 -i 5
 
-  # Same against a plaintext server (start-docker.sh default, or TLS=false)
+  # Same against a plaintext server (run-docker.sh default, or TLS=false)
   ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
 
   # Slightly heavier (with seeded auth)
@@ -398,7 +407,7 @@ Once the manager is up:
 
   | Flag | Env var | Default | What it does |
   |---|---|---|---|
-  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint. Use `grpc+tls://` against a TLS-on server (native + shipped compose default), `grpc://` against plaintext (`start-docker.sh` default, or `TLS=false`). Scheme **must match** what the server is listening for — see callout above. |
+  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint. Use `grpc+tls://` against a TLS-on server (native + shipped compose default), `grpc://` against plaintext (`run-docker.sh` default, or `TLS=false`). Scheme **must match** what the server is listening for — see callout above. |
   | `-u`, `--user` | `LT_USER` | `admin` | DB auth username (only used when the edge requires auth) |
   | `-p`, `--password` | `LT_PASSWORD` | `admin` | DB auth password |
   | `-w`, `--workers` | `LT_WORKERS` | `8` | concurrent client threads; each opens its own ADBC session |

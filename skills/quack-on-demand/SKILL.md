@@ -18,7 +18,7 @@ Use this skill when the user wants to:
 
 ## Repo layout (the bits operators touch)
 
-- `scripts/start-quack-on-demand.sh` — boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
+- `scripts/run-jar.sh` — boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
 - `scripts/stop-quack-on-demand.sh` — SIGTERM → wait → SIGKILL
 - `scripts/loadtest/loadtest.py` — Python FlightSQL load tester (ADBC driver)
 - `scripts/start-quack-ducklake.sh` — standalone single-node Quack for testing (no manager)
@@ -31,16 +31,16 @@ Use this skill when the user wants to:
 
 ```bash
 # Default: TLS edge, DB auth on, Postgres state, admin user seeded
-./scripts/start-quack-on-demand.sh
+./scripts/run-jar.sh
 
 # Build the uber-jar first
-BUILD=1 ./scripts/start-quack-on-demand.sh
+BUILD=1 ./scripts/run-jar.sh
 
 # Disable DB auth (UI then skips the login screen)
-SL_QUACK_AUTH_DB_ENABLED=false ./scripts/start-quack-on-demand.sh
+SL_QUACK_AUTH_DB_ENABLED=false ./scripts/run-jar.sh
 
 # Disable TLS on the FlightSQL edge
-PROXY_TLS_ENABLED=false ./scripts/start-quack-on-demand.sh
+PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 
 # Stop everything
 ./scripts/stop-quack-on-demand.sh

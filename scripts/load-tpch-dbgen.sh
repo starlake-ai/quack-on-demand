@@ -19,7 +19,7 @@
 #     container. Quack nodes fail to read the data files.
 #
 #   - Docker manager + Docker loader   -> works, paths match by construction
-#     Use `LOAD_TPCH=true ./scripts/start-docker-compose.sh` (or
+#     Use `LOAD_TPCH=true ./scripts/run-docker-compose.sh` (or
 #     `docker compose exec quack /app/scripts/load-tpch-dbgen.sh` against
 #     a running stack) so the loader runs inside the same /app/ducklake
 #     mount as the manager.
@@ -59,7 +59,7 @@ DB_NAME="${DB_NAME:-tpch}"
 SCHEMA_NAME="${SCHEMA_NAME:-tpch1}"
 SF="${SF:-1}"
 
-# Default DATA_PATH matches `scripts/start-docker.sh` (CWD-anchored, not
+# Default DATA_PATH matches `scripts/run-docker.sh` (CWD-anchored, not
 # repo-anchored) so a native loader and a same-CWD `docker run` agree on
 # the same absolute string. Override DATA_PATH to point at any location
 # that BOTH the loader and the manager will see (see warning above).
