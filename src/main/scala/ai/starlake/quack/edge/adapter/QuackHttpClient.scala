@@ -10,7 +10,7 @@ import java.sql.{DriverManager, PreparedStatement, SQLException}
 
 /** Forwards SQL to a Quack node through an embedded DuckDB.
   *
-  * Quack's wire format is `application/duckdb` (binary), not JSON — the only
+  * Quack's wire format is `application/duckdb` (binary), not JSON - the only
   * supported way to talk to a Quack server from a non-DuckDB process is to
   * embed DuckDB and use its `quack` extension's `quack_query()` table function:
   *
@@ -83,7 +83,7 @@ open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
         QuackResponse.Failed(err, elapsed)
   }
 
-  /** Best-effort classifier — DuckDB's SQLException doesn't always carry a
+  /** Best-effort classifier - DuckDB's SQLException doesn't always carry a
     * structured error code, so we sniff the message. */
   private def isTransient(sql: SQLException): Boolean =
     val msg = Option(sql.getMessage).getOrElse("").toLowerCase

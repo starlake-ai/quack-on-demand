@@ -8,7 +8,7 @@ final case class Resolved(poolKey: PoolKey, user: String)
 
 object TenantSelector:
 
-  /** Decode a JWT body (no signature check — that's the auth module's job).
+  /** Decode a JWT body (no signature check - that's the auth module's job).
     * Returns the named claim value if present. */
   private def claimFromJwt(token: String, claim: String): Option[String] =
     token.split('.') match

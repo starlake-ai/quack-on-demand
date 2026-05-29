@@ -20,7 +20,7 @@ final class PoolSupervisor(
   private val pools   = TrieMap.empty[PoolKey, PoolState]
   private val tenants = TrieMap.empty[String, Tenant]
 
-  /** Replay state from disk on construction (local mode). Direct sync —
+  /** Replay state from disk on construction (local mode). Direct sync -
     * called once at boot before serving. */
   def restore(): Unit =
     val s = store.load()
@@ -36,7 +36,7 @@ final class PoolSupervisor(
   /** After `restore()`, walk every persisted node and check whether its
     * child process + listening port are still alive. Dead records are
     * respawned through the backend (the new process gets a fresh port +
-    * token; everything else — nodeId, role, metastore — is preserved).
+    * token; everything else - nodeId, role, metastore - is preserved).
     *
     * Closes the bite documented as followup #20: before this, a manager
     * restart after `kill -9` left phantom node records that the router
@@ -56,7 +56,7 @@ final class PoolSupervisor(
     state.nodes.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
       acc.flatMap { kept =>
         if isReachable(n) then
-          // Keep — but register with the backend so subsequent stop()
+          // Keep - but register with the backend so subsequent stop()
           // and port-allocation operations see this node. Without this,
           // a stop after reconcile silently no-ops (Local mode) and the
           // port allocator hands out the already-in-use port on the
@@ -66,7 +66,7 @@ final class PoolSupervisor(
           logger.warn(
             s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
             "is dead; respawning")
-          // Reset tracker — same logic as createPool — so any leftover
+          // Reset tracker - same logic as createPool - so any leftover
           // draining/unhealthy state from the prior incarnation doesn't
           // carry over into the new process.
           IO.delay(tracker.remove(n.nodeId)) *>
@@ -91,7 +91,7 @@ final class PoolSupervisor(
     * connect.
     *
     * K8s mode stores `pid = None` (the backend tracks pod names, not
-    * Linux PIDs). Reconciliation for K8s is a separate concern — pod
+    * Linux PIDs). Reconciliation for K8s is a separate concern - pod
     * liveness is the K8s control plane's job, and re-spawning a pod
     * that's already alive would 409 the apiserver. So when `pid.isEmpty`
     * we conservatively trust the persisted record and let the
@@ -105,7 +105,7 @@ final class PoolSupervisor(
   private def isReachable(n: RunningNode): Boolean =
     n.pid match
       case None =>
-        true // K8s — defer to control-plane liveness + HealthProbe.
+        true // K8s - defer to control-plane liveness + HealthProbe.
       case Some(p) =>
         val pidAlive = Option(java.lang.ProcessHandle.of(p))
           .flatMap(o => if o.isPresent then Some(o.get()) else None)
@@ -225,7 +225,7 @@ final class PoolSupervisor(
         if targetSize > state.size then
           val toAdd  = targetSize - state.size
           val roles  = newDist.asRoleList.drop(state.size).take(toAdd)
-          // state.metastore is already the merged map from createPool — reuse
+          // state.metastore is already the merged map from createPool - reuse
           // it verbatim so scale-up doesn't drift if tenant metastore changed.
           val specs = roles.zipWithIndex.map { case (role, i) =>
             NodeSpec(key, s"quack-${key.tenant}-${key.pool}-${state.size + i + 1}",

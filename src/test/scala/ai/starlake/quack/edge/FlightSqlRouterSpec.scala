@@ -101,7 +101,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // still finds the pinned id in the snapshot.nodes, but the adapter call fails.
     // To keep this test focused, we exercise the "PinnedNodeGone" path indirectly via the
     // following test below ("pinned node disappeared"). This test verifies only that BEGIN
-    // pinned successfully — failure-handling path is unit-tested in RouterSpec already.
+    // pinned successfully - failure-handling path is unit-tested in RouterSpec already.
     succeed
 
   it should "report PinnedNodeGone when the pinned node has been removed from the pool" in:
@@ -109,7 +109,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.execute("c-5", "alice", poolKey, "BEGIN").unsafeRunSync()
     sessions.get("c-5").map(_.pinnedNodeId) shouldBe Some(Some(node.nodeId))
 
-    // Stop the pool — the supervisor removes the node from snapshot.nodes
+    // Stop the pool - the supervisor removes the node from snapshot.nodes
     router.supervisor.stopPool(poolKey, force = true).unsafeRunSync()
 
     val out = router.execute("c-5", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()

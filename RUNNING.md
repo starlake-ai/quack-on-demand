@@ -5,28 +5,28 @@ that matches what you already have on hand.
 
 | | Postgres | Quack manager | Use when |
 |---|---|---|---|
-| **[Path 1 — Native](#path-1--native-run-against-an-external-postgres)** | external | bare JVM (`java -jar`) | you already have Postgres locally or in your network, and want the fastest dev loop |
-| **[Path 2 — Docker, external Postgres](#path-2--docker-container-against-an-external-postgres)** | external | container | you want the manager isolated (Docker) but Postgres is somewhere else (RDS, Cloud SQL, hosted, host-installed) |
-| **[Path 3 — Docker compose](#path-3--docker-compose-bundled-postgres--host-volumes)** | container | container | you want one command to bring up the whole stack; Postgres + DuckLake files persist on the host |
+| **[Path 1 - Native](#path-1--native-run-against-an-external-postgres)** | external | bare JVM (`java -jar`) | you already have Postgres locally or in your network, and want the fastest dev loop |
+| **[Path 2 - Docker, external Postgres](#path-2--docker-container-against-an-external-postgres)** | external | container | you want the manager isolated (Docker) but Postgres is somewhere else (RDS, Cloud SQL, hosted, host-installed) |
+| **[Path 3 - Docker compose](#path-3--docker-compose-bundled-postgres--host-volumes)** | container | container | you want one command to bring up the whole stack; Postgres + DuckLake files persist on the host |
 
-All three paths use **the same `application.conf`** at runtime — knobs are
+All three paths use **the same `application.conf`** at runtime - knobs are
 flipped via `SL_QUACK_*` env vars. None require the loading of any dataset.
 Each path below has a **Seed with TPC-H and Run** subsection if you want benchmark
-data — the loader probes DuckLake first and self-skips when `tpch1.lineitem`
+data - the loader probes DuckLake first and self-skips when `tpch1.lineitem`
 is already populated, so it's safe to leave the seeding flag on across reboots.
 
 ---
 
-## Path 1 — Native run, against an external Postgres
+## Path 1 - Native run, against an external Postgres
 
 ### Prerequisites
 - JDK 17+ (to run the jar)
 - `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)
-- A reachable Postgres — the catalog DB and the slkstate_* control-plane tables both live there
+- A reachable Postgres - the catalog DB and the slkstate_* control-plane tables both live there
   (the catalog DB itself is auto-created on first boot if your `$SL_QUACK_PG_USER` has `CREATEDB`)
-- **`sbt` 1.x and `npm` 18+** — only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
+- **`sbt` 1.x and `npm` 18+** - only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
 
 ### Run
 
@@ -106,7 +106,7 @@ Every scalar in `application.conf` has a matching `SL_QUACK_*` /
 
 ---
 
-## Path 2 — Docker container, against an external Postgres
+## Path 2 - Docker container, against an external Postgres
 
 > ⚠️ **Don't share a catalog DB between Docker and native runs.** DuckLake
 > bakes the absolute `DATA_PATH` into Postgres metadata. Inside the
@@ -115,7 +115,7 @@ Every scalar in `application.conf` has a matching `SL_QUACK_*` /
 > future manager reading that catalog must see the same string or every
 > query will fail with *"could not open file ..."*. If you've already
 > booted natively against `PG_DBNAME=tpch`, point Docker at a different
-> DB (e.g. `PG_DBNAME=tpch_docker`) — see the [Path-matching gotcha](#path-matching-gotcha-ducklake)
+> DB (e.g. `PG_DBNAME=tpch_docker`) - see the [Path-matching gotcha](#path-matching-gotcha-ducklake)
 > below for the why and the recovery steps.
 
 ### Prerequisites
@@ -194,10 +194,10 @@ Env vars at `run-docker.sh` invocation time:
 
 ---
 
-## Path 3 — Docker compose, bundled Postgres + host volumes
+## Path 3 - Docker compose, bundled Postgres + host volumes
 
 ### Prerequisites
-- Docker (with the compose plugin — `docker compose`, not `docker-compose`)
+- Docker (with the compose plugin - `docker compose`, not `docker-compose`)
 
 ### First run
 
@@ -206,7 +206,7 @@ Env vars at `run-docker.sh` invocation time:
 > 5432, `docker compose up` fails with *"failed to bind host port … address
 > already in use"* before the stack starts. The manager talks to Postgres
 > over the compose-internal network (hostname `postgres`, container port
-> 5432) so it does **not** depend on the host publication — bumping
+> 5432) so it does **not** depend on the host publication - bumping
 > `PG_PORT=15432` in `.env` is enough; external `psql` would then connect
 > via `localhost:15432`. Alternatives: stop the host Postgres, or delete
 > the `postgres` service's `ports:` block if you never need external access.
@@ -220,7 +220,7 @@ BUILD=1 ./scripts/run-docker-compose.sh         # local Dockerfile build instead
 (Equivalent to `docker compose pull && docker compose up -d` for the
 pull path, or `docker compose up -d --build` for the BUILD path. The
 script also handles host-port collisions on 5432 and the optional
-TPC-H seed — see the next two subsections.)
+TPC-H seed - see the next two subsections.)
 
 This brings up two services on the compose-default network:
 
@@ -231,18 +231,18 @@ This brings up two services on the compose-default network:
 
 The manager waits on Postgres's `pg_isready` healthcheck before starting,
 so no race conditions. Inside the network it reaches the metastore at the
-hostname `postgres` — no `host.docker.internal` workaround needed.
+hostname `postgres` - no `host.docker.internal` workaround needed.
 
 ### Where state lives
 
 After the first boot, three directories appear next to `docker-compose.yml`:
 
-- **`pgdata/`** — Postgres data dir. Contains the catalog DB, all
+- **`pgdata/`** - Postgres data dir. Contains the catalog DB, all
   `slkstate_*` control-plane tables, and the `ducklake_*` metadata tables.
   Persists across `docker compose down`.
-- **`ducklake/`** — DuckLake Parquet files written by Quack nodes.
+- **`ducklake/`** - DuckLake Parquet files written by Quack nodes.
   Same persistence guarantee.
-- **`certs/`** — Auto-generated self-signed TLS cert + key, reused on subsequent boots.
+- **`certs/`** - Auto-generated self-signed TLS cert + key, reused on subsequent boots.
 
 ### Configuration
 
@@ -266,11 +266,11 @@ LOAD_TPCH=true TPCH_SF=10 ./scripts/run-docker-compose.sh     # SF=10
 ```
 
 Under the hood it does `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
-— same pattern as Path 2. The loader is baked into the image (so no
+- same pattern as Path 2. The loader is baked into the image (so no
 bind-mounted scripts dir) and sees the same `/app/ducklake` mount the
 manager spawns Quack nodes against, so the absolute `DATA_PATH` the
 catalog persists matches what the nodes later resolve. Re-running is
-cheap — the loader self-skips when `tpch1.lineitem` is already populated.
+cheap - the loader self-skips when `tpch1.lineitem` is already populated.
 
 To seed against a stack that's already up (no restart needed):
 
@@ -316,7 +316,7 @@ problem case is **mixing deployment modes against one catalog DB**:
 | Native from `/home/a/…` | Native from `/home/b/…` | Second `$PWD` doesn't match catalog |
 
 The `slkstate_*` control-plane tables (tenants, pools, ACLs, admin
-users) don't store paths so they're not the problem — the breakage is
+users) don't store paths so they're not the problem - the breakage is
 strictly in the DuckLake `__ducklake_*` metadata.
 
 ### How to avoid it
@@ -340,13 +340,13 @@ A "stuck" catalog has rows in `__ducklake_data_file` pinned to a path
 that the current manager can't see. Two options:
 
 ```bash
-# Option A — start fresh: drop the catalog DB + the data dir.
+# Option A - start fresh: drop the catalog DB + the data dir.
 psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
 rm -rf ducklake/tpch                    # the on-disk parquet files
 # Re-boot with SL_QUACK_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
 # LOAD_TPCH=true ./scripts/run-docker-compose.sh (Path 3).
 
-# Option B — keep the data, use a fresh catalog DB.
+# Option B - keep the data, use a fresh catalog DB.
 SL_QUACK_PG_DBNAME=tpch_native ./scripts/run-jar.sh
 ```
 
@@ -363,13 +363,13 @@ Once the manager is up:
   `POST /api/auth/login` to get an `X-API-Key` session token when
   `AUTH=true`)
 - **Load tester (Python ADBC):** drives the FlightSQL edge concurrently and
-  reports throughput + latency percentiles. Defaults to a TPC-H query mix —
+  reports throughput + latency percentiles. Defaults to a TPC-H query mix -
   pair it with [Seed with TPC-H and Run](#seed-with-tpc-h-and-run) above.
 
   > **URL scheme must match the server's TLS setting.** Native and the
   > shipped compose `.env.example` both default to TLS **on**, so
   > `grpc+tls://localhost:31338` (the loadtest default) works out of the
-  > box. The `run-docker.sh` path defaults to TLS **off** — pass
+  > box. The `run-docker.sh` path defaults to TLS **off** - pass
   > `--url grpc://localhost:31338` against it. Mismatch surfaces as
   > *"tls: first record does not look like a TLS handshake"* (client TLS
   > against plaintext server) or *"connection reset"* (the inverse). Same
@@ -378,7 +378,7 @@ Once the manager is up:
   ```bash
   pip install adbc_driver_flightsql adbc_driver_manager
 
-  # Tiny smoke test (TLS-on default — works for native and shipped compose)
+  # Tiny smoke test (TLS-on default - works for native and shipped compose)
   ./scripts/loadtest/loadtest.py -w 2 -i 5
 
   # Same against a plaintext server (run-docker.sh default, or TLS=false)
@@ -407,7 +407,7 @@ Once the manager is up:
 
   | Flag | Env var | Default | What it does |
   |---|---|---|---|
-  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint. Use `grpc+tls://` against a TLS-on server (native + shipped compose default), `grpc://` against plaintext (`run-docker.sh` default, or `TLS=false`). Scheme **must match** what the server is listening for — see callout above. |
+  | `--url` | `LT_URL` | `grpc+tls://localhost:31338` | FlightSQL endpoint. Use `grpc+tls://` against a TLS-on server (native + shipped compose default), `grpc://` against plaintext (`run-docker.sh` default, or `TLS=false`). Scheme **must match** what the server is listening for - see callout above. |
   | `-u`, `--user` | `LT_USER` | `admin` | DB auth username (only used when the edge requires auth) |
   | `-p`, `--password` | `LT_PASSWORD` | `admin` | DB auth password |
   | `-w`, `--workers` | `LT_WORKERS` | `8` | concurrent client threads; each opens its own ADBC session |

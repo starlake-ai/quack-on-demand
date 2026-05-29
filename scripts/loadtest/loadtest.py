@@ -31,7 +31,7 @@ from typing import List
 
 # Default workload: a curated TPCH-H subset. These are the canonical
 # benchmark queries (Q1, Q3, Q5, Q6, Q10, Q12, Q14) with the standard
-# parameter values from the spec — see https://www.tpc.org/tpch/. They
+# parameter values from the spec - see https://www.tpc.org/tpch/. They
 # exercise a variety of plan shapes: per-group aggregation, 3- to 6-way
 # joins, lineitem filtering, CASE expressions, ORDER BY + LIMIT.
 #
@@ -184,7 +184,7 @@ def connect(args: argparse.Namespace):
         raise SystemExit(2) from e
 
     db_kwargs = {
-        DatabaseOptions.AUTHORIZATION_HEADER.value: None,  # unused — we pass user/pass
+        DatabaseOptions.AUTHORIZATION_HEADER.value: None,  # unused - we pass user/pass
         "username": args.user,
         "password": args.password,
     }

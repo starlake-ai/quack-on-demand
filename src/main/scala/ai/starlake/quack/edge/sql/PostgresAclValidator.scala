@@ -14,7 +14,7 @@ import com.typesafe.scalalogging.LazyLogging
   *     with permission `SELECT` or `ALL` for one of the user's principals.
   *   - Non-SELECT (DDL/DML) or `ParseError`: deny unless the user has a
   *     wildcard `ALL` grant on `*.*.*`. The strict default is intentional
-  *     — JSqlParser doesn't enumerate writes the same way as reads, so
+  *     - JSqlParser doesn't enumerate writes the same way as reads, so
   *     we err on the side of "explicit grant required".
   *
   * Principals come from `ValidationContext.username` (as `user:<name>`).

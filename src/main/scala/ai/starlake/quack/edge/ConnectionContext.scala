@@ -12,11 +12,11 @@ import scala.collection.concurrent.TrieMap
   * provider claimed the credentials; for unauthenticated (trust-the-client)
   * sessions they're `Set.empty` / `""` respectively. The ACL validator
   * expands them into `group:<g>` and `role:<r>` principals so grants
-  * targeted at groups / roles match — not just `user:<name>`.
+  * targeted at groups / roles match - not just `user:<name>`.
   *
   * Sessions carry an `expiresAt`. Once past, every accessor pretends the
   * entry doesn't exist and the auth handler falls through to a full
-  * handshake — which re-validates the original Basic/Bearer credentials
+  * handshake - which re-validates the original Basic/Bearer credentials
   * against the configured providers. This bounds the "revoked JWT still
   * works" window to `sessionTtlSec`. */
 object ConnectionContext:
@@ -36,7 +36,7 @@ object ConnectionContext:
   private val byPeer = TrieMap.empty[String, Entry]
 
   /** Default 1 hour. Overridable via `EdgeConfig.sessionTtlSec` at the
-    * binding site — kept here as a fallback for tests that build entries
+    * binding site - kept here as a fallback for tests that build entries
     * directly. */
   private val DefaultTtlSec: Long = 3600
 
@@ -60,7 +60,7 @@ object ConnectionContext:
       else true
     }
 
-  // Back-compat accessors for the existing call sites — all go through
+  // Back-compat accessors for the existing call sites - all go through
   // `entry` so they share the TTL eviction.
   def poolFor(peer: String):         Option[PoolKey] = entry(peer).map(_.poolKey)
   def connectionIdFor(peer: String): Option[String]  = entry(peer).map(_.connectionId)

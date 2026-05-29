@@ -28,7 +28,7 @@ final class ManagerServer(
     statementHistory: StatementHistoryHandlers
 ) extends LazyLogging:
 
-  /** Path is unauthenticated — the UI needs these before login. */
+  /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/config/client"
 

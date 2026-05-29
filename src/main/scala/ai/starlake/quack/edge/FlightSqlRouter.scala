@@ -86,7 +86,7 @@ final class FlightSqlRouter(
       case Some(snap) =>
         val pinned = s.pinnedNodeId.filter(_ => s.txOpen)
         // Each quack_query lands in a fresh DuckDB session on the remote, so
-        // an unqualified `SELECT * FROM customer` would 404 — we wrap the user
+        // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
         // initial schema) when the pool's metastore advertises a dbName.
         val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
@@ -128,7 +128,7 @@ final class FlightSqlRouter(
     * in the pool's catalog+schema, letting unqualified table names AND
     * 2-part `"schema"."table"` paths resolve. `schemaName` comes from the
     * pool's metastore (defaults to `main`). It MUST differ from the catalog
-    * name — same-named catalog+schema is an ambiguous reference in DuckDB,
+    * name - same-named catalog+schema is an ambiguous reference in DuckDB,
     * which JDBC clients hit on 2-part identifier resolution. Skipped for
     * explicit USE / SET / BEGIN / COMMIT / ROLLBACK / ATTACH / DETACH. */
   private def wrapWithDefaultSchema(
@@ -171,7 +171,7 @@ final class FlightSqlRouter(
                     // COMMIT/ROLLBACK lands on the same Quack instance.
                     // Without this, a BEGIN that retried onto node B
                     // would have its COMMIT routed by load and likely
-                    // hit node A — breaking transaction consistency.
+                    // hit node A - breaking transaction consistency.
                     sessions.onStatement(connectionId, kind, nodeId)
                     Right(QueryResult(reader, close))
                   case QuackResponse.Failed(QuackError.Transient(m), _) =>

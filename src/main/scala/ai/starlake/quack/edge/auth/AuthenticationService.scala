@@ -96,7 +96,7 @@ class AuthenticationService(config: AuthenticationConfig, sessionConfig: Session
         config.keycloak.clientId, config.keycloak.clientSecret,
         config.roleClaim
       )
-    // Google does not support ROPC (grant_type=password) — no basic auth provider for Google.
+    // Google does not support ROPC (grant_type=password) - no basic auth provider for Google.
     // Google users must authenticate via Bearer token or browser-based OAuth/SSO.
     if config.azure.enabled then
       val tokenEndpoint =

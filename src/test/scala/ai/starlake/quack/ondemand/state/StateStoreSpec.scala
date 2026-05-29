@@ -45,7 +45,7 @@ class StateStoreSpec extends AnyFlatSpec with Matchers:
     intercept[RuntimeException](StateStore(path).load())
 
   it should "read legacy state files that lack the `tenants` field" in:
-    // Pre-tenants format — only `pools`. Decoder must default `tenants` to empty.
+    // Pre-tenants format - only `pools`. Decoder must default `tenants` to empty.
     val path = tmpFile
     Files.writeString(path,
       """{"pools":{"acme/sales":{"key":"acme/sales","size":1,

@@ -17,7 +17,7 @@ import java.sql.{Connection, DriverManager}
   * }}}
   *
   * Upserts a single row keyed on `id = 1`. Matches the file store's semantics
-  * (write the whole blob atomically on every mutation) — Postgres gives us
+  * (write the whole blob atomically on every mutation) - Postgres gives us
   * crash-safety + concurrent-reader visibility for free.
   *
   * All tables in this control-plane share the `slkstate_` prefix so they

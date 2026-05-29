@@ -4,7 +4,7 @@ package ai.starlake.quack.edge.adapter
   * node. Used by [[NodeLoadTracker]] to expose p50/p95/p99 to the UI
   * without hauling a full histogram across the wire.
   *
-  * Capacity defaults to 256 samples — about 2 KiB per node, sorting a
+  * Capacity defaults to 256 samples - about 2 KiB per node, sorting a
   * snapshot takes a few µs. Plenty for surface metrics; if you need
   * higher fidelity later, swap in a t-digest or HDR histogram. */
 final class LatencyRing(capacity: Int = 256):

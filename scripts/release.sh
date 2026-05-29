@@ -4,7 +4,7 @@
 #
 # What this does:
 #   1. Preflight: clean working tree, on `main`, required env vars present.
-#   2. `sbt 'release with-defaults'` — sbt-release plugin:
+#   2. `sbt 'release with-defaults'` - sbt-release plugin:
 #        - strips -SNAPSHOT from version.sbt
 #        - commits the version bump
 #        - creates a git tag `v<version>`
@@ -64,9 +64,9 @@ if [[ "$branch" != "main" ]]; then
   [[ "$ans" =~ ^[Yy]$ ]] || exit 1
 fi
 
-: "${SONATYPE_USERNAME:?SONATYPE_USERNAME is required — Central Portal user-token name}"
-: "${SONATYPE_PASSWORD:?SONATYPE_PASSWORD is required — Central Portal user-token secret}"
-: "${PGP_PASSPHRASE:?PGP_PASSPHRASE is required — GPG signing key passphrase}"
+: "${SONATYPE_USERNAME:?SONATYPE_USERNAME is required - Central Portal user-token name}"
+: "${SONATYPE_PASSWORD:?SONATYPE_PASSWORD is required - Central Portal user-token secret}"
+: "${PGP_PASSPHRASE:?PGP_PASSPHRASE is required - GPG signing key passphrase}"
 
 if ! command -v gpg >/dev/null 2>&1; then
   echo "ERROR: gpg not on PATH. Install GnuPG before releasing." >&2
@@ -123,7 +123,7 @@ else
       echo "$DOCKER_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
     fi
 
-    # Set up buildx (idempotent — `create --use` errors if it already exists).
+    # Set up buildx (idempotent - `create --use` errors if it already exists).
     docker buildx create --use --name quack-release-builder >/dev/null 2>&1 || \
       docker buildx use quack-release-builder
 

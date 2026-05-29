@@ -7,4 +7,4 @@ enum StatementKind:
   case Begin
   case Commit
   case Rollback
-  case Other        // SET, SHOW, PRAGMA, etc. — treated like a read by default
+  case Other        // SET, SHOW, PRAGMA, etc. - treated like a read by default

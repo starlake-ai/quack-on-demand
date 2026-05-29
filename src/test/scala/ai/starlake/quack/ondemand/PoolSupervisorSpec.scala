@@ -18,7 +18,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   private val key: PoolKey = PoolKey("acme", "sales")
   private val ms  = Map("pgHost" -> "localhost")
 
-  /** Captures NodeSpecs as the backend sees them — used to assert the
+  /** Captures NodeSpecs as the backend sees them - used to assert the
     * merged metastore that PoolSupervisor passes through. */
   private final class CapturingBackend extends QuackBackend:
     private val nodes = TrieMap.empty[String, RunningNode]

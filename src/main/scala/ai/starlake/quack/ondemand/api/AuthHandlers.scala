@@ -11,7 +11,7 @@ import sttp.model.StatusCode
   * success it mints an opaque session token, registers it with the
   * SessionTokenStore, and returns it to the browser. The browser
   * stores the token in localStorage and sends it as `X-API-Key` on
-  * subsequent calls — the manager's middleware then admits the
+  * subsequent calls - the manager's middleware then admits the
   * request when the token resolves to a profile with role=admin.
   *
   * Only admin users can mint a token. Other roles get 403 here so

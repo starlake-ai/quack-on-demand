@@ -137,7 +137,7 @@ final class FlightEdgeServer(
       ): CallHeaderAuthenticator.AuthResult =
         val validation: Either[String, Option[AuthenticatedProfile]] =
           if !authService.hasProviders then
-            // No backends configured — keep v1 trust-the-client.
+            // No backends configured - keep v1 trust-the-client.
             Right(None)
           else
             // Real auth chain. Bearer validated through JWT/OIDC providers;

@@ -48,7 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           .finally(() => setLoading(false));
       })
       .catch(() => {
-        // Network failure or 5xx — fall back to the login screen so the
+        // Network failure or 5xx - fall back to the login screen so the
         // user gets a clear error rather than a silent skip.
         setLoading(false);
       });
@@ -62,7 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function logout() {
-    // No-op when auth is disabled — there's no session to revoke.
+    // No-op when auth is disabled - there's no session to revoke.
     if (!authEnabled) return;
     try { await api.logout(); } catch { /* best effort */ }
     session.clear();

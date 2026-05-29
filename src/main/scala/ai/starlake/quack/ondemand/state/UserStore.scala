@@ -23,7 +23,7 @@ import java.sql.{Connection, DriverManager}
   *
   * On manager startup we upsert the configured admin user so the DB auth
   * backend has at least one credential, and so rotating the admin password
-  * is just an env-var + restart. Re-hashing on every boot is fine — bcrypt
+  * is just an env-var + restart. Re-hashing on every boot is fine - bcrypt
   * is intentionally slow but a one-shot at startup is unnoticeable. */
 final class UserStore(jdbcUrl: String, user: String, password: String) extends LazyLogging:
 

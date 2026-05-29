@@ -1,4 +1,4 @@
-# Keep the build context small — exclude generated + IDE clutter.
+# Keep the build context small - exclude generated + IDE clutter.
 .git
 .gitignore
 .idea
@@ -20,7 +20,7 @@ ui/*.tsbuildinfo
 ui/vite.config.d.ts
 ui/vite.config.js
 
-# Local runtime state — never bake credentials/data into images
+# Local runtime state - never bake credentials/data into images
 certs
 state
 ducklake

@@ -3,10 +3,10 @@
 # Run the quack-on-demand manager from the assembly uber-jar.
 #
 # Two modes, picked via BUILD:
-#   BUILD=0 (default) — download the jar from Maven Central
+#   BUILD=0 (default) - download the jar from Maven Central
 #                       (ai.starlake:quack-on-demand_3:<QUACK_VERSION>),
 #                       cache it under $JAR_CACHE_DIR, run `java -jar`.
-#   BUILD=1           — run `sbt assembly` from this checkout and use the
+#   BUILD=1           - run `sbt assembly` from this checkout and use the
 #                       freshly-built jar in distrib/.
 #
 # Boot extras: Postgres reachability probe, idempotent CREATE DATABASE
@@ -177,7 +177,7 @@ echo ""
 # ---- Run ----
 # The assembly jar carries `Add-Opens` in its manifest (JEP 261) so Arrow's
 # unsafe allocator works on Java 17+ without extra flags. The system
-# property pins Arrow's allocator — without it Arrow picks netty and
+# property pins Arrow's allocator - without it Arrow picks netty and
 # crashes with NoSuchFieldError: chunkSize.
 exec "${JAVA_BIN:-java}" \
   -Darrow.allocation.manager.type=Unsafe \

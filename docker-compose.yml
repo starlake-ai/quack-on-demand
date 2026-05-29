@@ -1,4 +1,4 @@
-# docker-compose.yml — local quack-on-demand stack
+# docker-compose.yml - local quack-on-demand stack
 #
 # Two services:
 #   - postgres : metastore + control-plane state (slkstate_*) + DuckLake metadata (ducklake_*)
@@ -9,7 +9,7 @@
 #   ./ducklake -> DuckLake data files (Parquet / etc. created by Quack nodes)
 #   ./certs    -> self-signed TLS cert + key (auto-generated on first boot)
 #
-# Settings live in `.env` (or env vars at compose time) — see .env.example.
+# Settings live in `.env` (or env vars at compose time) - see .env.example.
 # Bring everything up with:
 #   docker compose up --build
 
@@ -83,7 +83,7 @@ services:
 
     # Disable IPv6 inside the container. Docker's default bridge network
     # doesn't route IPv6, but the embedded DNS resolver still returns AAAA
-    # records for hosts like extensions.duckdb.org — connection then times
+    # records for hosts like extensions.duckdb.org - connection then times
     # out trying to reach an unreachable IPv6 address. Forcing v4-only
     # makes the resolver skip AAAA and DuckDB's httpfs reaches the CDN.
     sysctls:

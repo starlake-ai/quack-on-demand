@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Seed the DuckLake metastore with a TPC-H dataset using DuckDB's built-in
-# `dbgen()` function — no external CSV/JSON files required, no datasets/
+# `dbgen()` function - no external CSV/JSON files required, no datasets/
 # directory to ship. Works for any of the three deployment paths (native,
 # Docker single container, Docker compose).
 #
@@ -38,7 +38,7 @@
 #   DB_NAME       Postgres DB + DuckLake catalog name (default tpch)
 #   SCHEMA_NAME   DuckLake schema (must differ from DB_NAME)  (default tpch1)
 #   DATA_PATH     DuckLake data dir                   (default ducklake/$DB_NAME)
-#   SF            scale factor — controls row counts  (default 1)
+#   SF            scale factor - controls row counts  (default 1)
 #                 SF=1  -> ~6M lineitem rows
 #                 SF=10 -> ~60M lineitem rows (much heavier)
 #
@@ -80,14 +80,14 @@ if [[ "$SCHEMA_NAME" == "$DB_NAME" ]]; then
 fi
 
 mkdir -p "$DATA_PATH"
-# Canonicalize — DuckLake persists this exact string in the catalog.
+# Canonicalize - DuckLake persists this exact string in the catalog.
 DATA_PATH="$(cd "$DATA_PATH" && pwd)"
 
 # Detect "I'm probably running on a host that will later run Docker" and
 # emit a heads-up. Heuristic: DATA_PATH doesn't start with /app/, but the
 # manager's Dockerfile defaults SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake.
 if [[ "$DATA_PATH" != /app/ducklake/* ]] && [[ -e /.dockerenv || "${IN_DOCKER:-}" == "1" ]]; then
-  : # we're inside Docker but DATA_PATH isn't /app/* — caller probably knows
+  : # we're inside Docker but DATA_PATH isn't /app/* - caller probably knows
 elif [[ "$DATA_PATH" != /app/ducklake/* ]]; then
   echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
   echo "If you plan to run the manager in Docker, the container will look for the" >&2
@@ -106,7 +106,7 @@ echo ""
 # ---- Idempotency probe ----
 # Check whether $DB_NAME.$SCHEMA_NAME.lineitem already exists with rows. Use
 # DuckDB itself (not psql against information_schema) because DuckLake tables
-# are not visible to Postgres's catalog — their metadata lives in
+# are not visible to Postgres's catalog - their metadata lives in
 # `__ducklake_*` tables and their data in parquet on disk. Running the probe
 # through DuckDB matches what any client will actually see. stderr is
 # silenced so the expected "table does not exist" path is quiet on first

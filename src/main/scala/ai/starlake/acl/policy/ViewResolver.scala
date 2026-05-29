@@ -83,7 +83,7 @@ class ViewResolver(tenant: TenantId, lookup: (TenantId, TableRef) => ResourceLoo
             // would silently bypass transparent-view dependency checks.
             val nonSelectErrors = extraction.statements.collect {
               case StatementResult.NonSelect(_, _, stmtType) =>
-                s"View SQL parsed as non-SELECT statement ($stmtType) — view_definition may not have been properly stripped"
+                s"View SQL parsed as non-SELECT statement ($stmtType) - view_definition may not have been properly stripped"
             }
             val allErrors = parseErrors ++ nonSelectErrors
             if allErrors.nonEmpty then

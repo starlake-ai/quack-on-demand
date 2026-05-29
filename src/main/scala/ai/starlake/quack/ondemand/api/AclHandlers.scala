@@ -80,7 +80,7 @@ final class AclHandlers(store: AclGrantStore):
     }
 
   /** Best-effort bulk insert. Rows are inserted one at a time so a single
-    * conflict / validation error doesn't roll back the whole upload — the
+    * conflict / validation error doesn't roll back the whole upload - the
     * response lists the rows that landed. */
   def uploadGrants(req: AclGrantBulkRequest): Out[AclGrantListResponse] = IO.blocking {
     val landed = scala.collection.mutable.ListBuffer.empty[AclGrant]

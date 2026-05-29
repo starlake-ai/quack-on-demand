@@ -21,7 +21,7 @@ final class LocalQuackBackend(
   private val processes    = TrieMap.empty[String, Process]
   private val tokens       = TrieMap.empty[String, String]
   private val nodePorts    = TrieMap.empty[String, Int]
-  // PIDs of nodes recovered via `adopt()` — we don't have a Process
+  // PIDs of nodes recovered via `adopt()` - we don't have a Process
   // handle for those (parent JVM didn't fork them), but we can still
   // SIGTERM via ProcessHandle on stop().
   private val adoptedPids  = TrieMap.empty[String, Long]
@@ -86,7 +86,7 @@ final class LocalQuackBackend(
     * record its token, and attach a ProcessHandle so a future `stop()`
     * actually kills the right OS process. We can't recover the original
     * `java.lang.Process` (the child wasn't a JVM-spawned subprocess
-    * anymore) — `processes` keeps a `Process` map, so we only stash
+    * anymore) - `processes` keeps a `Process` map, so we only stash
     * what we have. `stop()` falls back to `ProcessHandle.of(pid)` when
     * the entry is adopt-only. */
   override def adopt(node: RunningNode): IO[Unit] = IO.blocking {

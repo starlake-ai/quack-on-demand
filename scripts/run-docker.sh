@@ -3,9 +3,9 @@
 # Run quack-on-demand from a Docker image, against an EXTERNAL Postgres.
 #
 # Two modes, picked via BUILD:
-#   BUILD=0 (default) — `docker pull` the published image
+#   BUILD=0 (default) - `docker pull` the published image
 #                       starlakeai/quack-on-demand:$QUACK_VERSION
-#   BUILD=1           — `docker build` this repo's Dockerfile and tag the
+#   BUILD=1           - `docker build` this repo's Dockerfile and tag the
 #                       result as starlakeai/quack-on-demand:$QUACK_VERSION
 #                       (same name as the published image so the rest of
 #                       this script is identical for both flows)
@@ -26,7 +26,7 @@
 #   AUTH             "true" to enable FlightSQL DB auth     (default true)
 #                    Required for the admin UI to log in.
 #   ADMIN_USERNAME   admin login (when AUTH=true)           (default admin)
-#   ADMIN_PASSWORD   admin password (when AUTH=true)        (default admin — rotate!)
+#   ADMIN_PASSWORD   admin password (when AUTH=true)        (default admin - rotate!)
 #   API_KEY          REST API X-API-Key                     (unset = open API + warning)
 #
 #   TLS              "true" to enable FlightSQL edge TLS    (default false)
@@ -41,7 +41,7 @@
 #   CONTAINER_NAME   docker --name                          (default quack-on-demand)
 #
 # *** DO NOT MIX DOCKER AND NATIVE AGAINST THE SAME CATALOG DB ***
-# DuckLake bakes the absolute DATA_PATH into the Postgres metadata —
+# DuckLake bakes the absolute DATA_PATH into the Postgres metadata -
 # inside the container that path is /app/ducklake/$PG_DBNAME; natively
 # it is $PWD/ducklake/$PG_DBNAME on the host. Use a different PG_DBNAME
 # per mode, or wipe ducklake/<db>/ between switches. See RUNNING.md for
@@ -95,7 +95,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-quack-on-demand}"
 # data lives next to wherever you invoked the script; override DATA_PATH
 # to point at any host directory (NFS share, external SSD, etc.). The
 # directory is created if missing and the path is canonicalized to an
-# absolute one — `docker run -v` requires it.
+# absolute one - `docker run -v` requires it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_PATH="${DATA_PATH:-$PWD/ducklake}"
@@ -132,7 +132,7 @@ echo ""
 
 # ---- Run ----
 # host.docker.internal works on Docker Desktop (Mac/Windows). On Linux, the
-# caller should pass the host's actual IP (or use --network=host) — this
+# caller should pass the host's actual IP (or use --network=host) - this
 # script doesn't add `--add-host=host.docker.internal:host-gateway` so the
 # user keeps control over networking.
 exec docker run --rm \

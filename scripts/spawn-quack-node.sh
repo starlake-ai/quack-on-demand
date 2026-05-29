@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Spawn one Quack node — invoked by LocalQuackBackend.
+# Spawn one Quack node - invoked by LocalQuackBackend.
 #
 # Usage:
 #   spawn-quack-node.sh <port> <token>
@@ -49,7 +49,7 @@ command -v duckdb >/dev/null 2>&1 || {
 
 # Ensure the Postgres database $dbName exists. Connects to PG_ADMIN_DB (default
 # `postgres`) as admin and runs CREATE DATABASE if missing. Skipped when psql
-# isn't available — the DuckLake ATTACH below will fail loudly in that case.
+# isn't available - the DuckLake ATTACH below will fail loudly in that case.
 if command -v psql >/dev/null 2>&1; then
   ADMIN_DB="${PG_ADMIN_DB:-postgres}"
   EXISTS=$(PGPASSWORD="$pgPassword" psql -h "$pgHost" -p "$pgPort" -U "$pgUser" \
@@ -69,7 +69,7 @@ FIFO_DIR="$(mktemp -d -t quack-fifo.XXXXXX)"
 FIFO="$FIFO_DIR/in"
 mkfifo "$FIFO"
 
-# Start duckdb first — open() on FIFO blocks until the writer side appears.
+# Start duckdb first - open() on FIFO blocks until the writer side appears.
 duckdb < "$FIFO" &
 DUCK_PID=$!
 
@@ -85,7 +85,7 @@ cleanup() {
 trap cleanup TERM INT EXIT
 
 # DuckDB does NOT honour the HTTP_PROXY / HTTPS_PROXY env vars for
-# `INSTALL <extension>` downloads — those have to be set via the SQL
+# `INSTALL <extension>` downloads - those have to be set via the SQL
 # `SET http_proxy=...` setting (duckdb forwards to libcurl through that
 # setting only). Without this, behind a corporate proxy the very first
 # INSTALL hangs and the node never reaches `quack_serve`. We emit the
