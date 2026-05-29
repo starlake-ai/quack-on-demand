@@ -8,15 +8,15 @@ for new contributors and operational for adopters.
 
 `quack-on-demand` is a multi-tenant FlightSQL gateway in front of DuckDB
 Quack + DuckLake. The [README](README.md) is the elevator pitch;
-[RUNNING.md](RUNNING.md) is the deployment guide;
-[docs/ROADMAP.md](docs/ROADMAP.md) is the public plan. Issues labelled
+[RUNNING.md](RUNNING.md) is the deployment guide. Issues labelled
 `roadmap` are tracked work; `good first issue` is what to start with if
 you want a small, well-scoped task.
 
 ## Before you start
 
-- Check existing issues + PRs. If a roadmap item interests you, comment
-  to claim it before you start writing code.
+- Check existing issues + PRs. If a tracked item (e.g. labelled
+  `roadmap`) interests you, comment to claim it before you start
+  writing code.
 - For larger work, open a discussion or draft PR early so we can align
   on direction before you sink hours into it.
 - All contributions are licensed under [Apache License 2.0](LICENSE),
@@ -73,9 +73,8 @@ Prefer one commit per logical unit. Squash before merge if a PR drifts.
    build all pass.
 6. A maintainer reviews. We aim for a first response within a few days.
 
-If you're working on a roadmap issue, also update
-[docs/ROADMAP.md](docs/ROADMAP.md) in the same PR (move the bullet from
-:white_large_square: to :hourglass: or :white_check_mark:).
+If you're working on a tracked `roadmap` issue, also mark the bullet
+done on the issue itself (close it with `Fixes #N` from your PR).
 
 ## What we look for in a PR
 
@@ -91,7 +90,6 @@ If you're working on a roadmap issue, also update
 ## Releasing
 
 Releases are cut by maintainers via `./scripts/release.sh` (see the
-[release.yml workflow plan in docs/ROADMAP.md](docs/ROADMAP.md) and the
 script's header for the full flow). Contributors don't need to worry
 about versioning; just merge to `main` and the snapshot CI takes care
 of publishing `:latest-snapshot` and the matching Maven snapshot.
