@@ -315,31 +315,50 @@ aws --endpoint-url http://localhost:8333 \
 
 #### Option B - external S3 (AWS, MinIO, R2, GCS HMAC)
 
-Leave the `seaweedfs` profile off, point the same env vars at your
-endpoint, and run compose normally. Omit `SL_QUACK_S3_ENDPOINT` to use
-AWS's default (`s3.amazonaws.com`).
+Leave the `seaweedfs` profile off and point the same `SL_QUACK_S3_*`
+env vars at your external endpoint. Same wrapper, same flow as Option A
+- it just doesn't bring up the in-compose SeaweedFS service because
+`SL_QUACK_S3_ENDPOINT` no longer starts with `seaweedfs:`.
 
-```ini
-# .env
+**Pre-flight (manual, one-time):** the bucket must exist before the
+first boot. DuckLake's `CREATE TABLE` issues a `HeadBucket` before any
+PUT; on a 404 the manager fails with a confusing "S3 error" instead of
+auto-creating. Create it with your provider's console / CLI (e.g.
+`aws s3 mb s3://my-bucket --region us-east-1`).
+
+```bash
+# 1. Add the S3 settings to .env. Per-vendor knobs in the comments.
+cat >> .env <<'EOF'
 SL_QUACK_DUCKLAKE_DATA_PATH=s3://my-bucket/quack/tpch
 SL_QUACK_S3_ACCESS_KEY_ID=AKIA...
 SL_QUACK_S3_SECRET_ACCESS_KEY=...
 SL_QUACK_S3_REGION=us-east-1
 SL_QUACK_S3_USE_SSL=true
 SL_QUACK_S3_URL_STYLE=vhost
+# Omit SL_QUACK_S3_ENDPOINT for AWS (defaults to s3.amazonaws.com).
+# MinIO:    SL_QUACK_S3_ENDPOINT=minio.local:9000   SL_QUACK_S3_URL_STYLE=path
+# R2:       SL_QUACK_S3_ENDPOINT=<account>.r2.cloudflarestorage.com
+# GCS HMAC: SL_QUACK_S3_ENDPOINT=storage.googleapis.com
+EOF
+
+# 2. Boot the stack + seed in one step (no seaweedfs profile needed).
+LOAD_TPCH=true ./scripts/run-docker-compose.sh
+
+# 3. Smoke-test the FlightSQL edge.
+./scripts/loadtest/loadtest.py -w 2 -i 5
 ```
 
-```bash
-./scripts/run-docker-compose.sh
-```
+`spawn-quack-node.sh` and `load-tpch-dbgen.sh` use the same S3-secret
+codepath as Option A - the only difference between the two recipes is
+the endpoint and whether the seaweedfs profile is activated.
 
 > **Path-matching still applies.** The catalog persists whichever
 > `SL_QUACK_DUCKLAKE_DATA_PATH` string was active on the first write. If
-> you toggle between `./ducklake` and `s3://…` against the **same**
-> `PG_DBNAME`, the second boot fails to open the previously-written
-> parquet. Use a separate `PG_DBNAME` per storage backend - same
-> isolation pattern as the [path-matching gotcha](#path-matching-gotcha-ducklake)
-> below.
+> you toggle between `./ducklake`, `s3://seaweedfs/...`, and
+> `s3://external/...` against the **same** `PG_DBNAME`, the second boot
+> fails to open the previously-written parquet. Use a separate
+> `PG_DBNAME` per storage backend - same isolation pattern as the
+> [path-matching gotcha](#path-matching-gotcha-ducklake) below.
 
 ### Seed with TPC-H and Run
 
