@@ -39,6 +39,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # HTTP_PROXY / HTTPS_PROXY / NO_PROXY (and lowercase) are BuildKit
+      # predefined args: declaring them here automatically exposes the
+      # values to RUN inside the Dockerfile, so apt-get + curl behind a
+      # corporate proxy work without touching the Dockerfile. Empty
+      # defaults make them no-ops on non-proxied hosts.
+      args:
+        HTTP_PROXY:  ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY:    ${NO_PROXY:-}
+        http_proxy:  ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy:    ${no_proxy:-}
+      # Same host-gateway alias the runtime uses, so the build container
+      # can reach a host-loopback proxy (cntlm/squid) after the URL
+      # rewrite in scripts/run-docker-compose.sh.
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
     # Single image name for both flows: `docker compose up --build` writes
     # this tag locally; `docker compose pull` fetches it from Docker Hub.
     # Pin to a specific snapshot/release via QUACK_VERSION (e.g.
@@ -76,10 +93,30 @@ services:
       SL_QUACK_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
       SL_QUACK_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
 
+      # ----- Corporate proxy passthrough (optional) -----
+      # Forward host proxy env vars into the container so DuckDB extension
+      # downloads (extensions.duckdb.org) and any other outbound HTTP from
+      # the manager + child Quack nodes go through the corporate proxy.
+      # Each var defaults to empty; compose only sets it when it has a
+      # value, so non-proxied environments are unaffected.
+      HTTP_PROXY:  ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY:    ${NO_PROXY:-}
+      http_proxy:  ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy:    ${no_proxy:-}
+
     ports:
       - "${MANAGER_PORT:-20900}:20900"   # REST + UI
       - "${EDGE_PORT:-31338}:31338"      # FlightSQL edge
       - "${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}:${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}"
+
+    # Make the host reachable as `host.docker.internal` so a corporate
+    # proxy listening on the host's loopback (e.g. cntlm at 127.0.0.1:3128)
+    # is reachable from inside the container. No-op on macOS/Windows where
+    # the name already resolves; needed on Linux where it does not.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     # Disable IPv6 inside the container. Docker's default bridge network
     # doesn't route IPv6, but the embedded DNS resolver still returns AAAA

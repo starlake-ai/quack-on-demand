@@ -33,6 +33,14 @@ open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
     val c = DriverManager.getConnection("jdbc:duckdb:").asInstanceOf[DuckDBConnection]
     val stmt = c.createStatement()
     try
+      // DuckDB ignores HTTP_PROXY/HTTPS_PROXY env vars for `INSTALL` - the
+      // download goes through libcurl with the `http_proxy` setting. Mirror
+      // what `spawn-quack-node.sh` does for child Quack nodes so a corporate
+      // proxy reaches both the manager-side embed and the child supervisors.
+      QuackHttpClient.proxyHostPort.foreach { hp =>
+        stmt.execute(s"SET http_proxy = '$hp'")
+        logger.info(s"DuckDB http_proxy set to $hp for extension downloads")
+      }
       stmt.execute("INSTALL quack")
       stmt.execute("LOAD quack")
     finally stmt.close()
@@ -93,3 +101,27 @@ open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
       msg.contains("503") ||
       msg.contains("502") ||
       msg.contains("504")
+
+object QuackHttpClient:
+  /** First non-empty proxy URL from the standard env-var chain, normalised
+    * to `host:port` (DuckDB's `SET http_proxy` wants no scheme and no
+    * trailing slash). Returns `None` when no proxy is configured so the
+    * INSTALL path is unchanged in the common case. */
+  private[adapter] def proxyHostPort: Option[String] =
+    proxyHostPortFrom(sys.env)
+
+  /** Pure variant for testing - reads the proxy URL out of an arbitrary
+    * env map and applies the same normalisation as [[proxyHostPort]]. */
+  private[adapter] def proxyHostPortFrom(env: Map[String, String]): Option[String] =
+    List("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
+      .iterator
+      .flatMap(env.get)
+      .map(_.trim)
+      .find(_.nonEmpty)
+      .map(normaliseProxyUrl)
+
+  private[adapter] def normaliseProxyUrl(url: String): String =
+    url
+      .stripPrefix("http://")
+      .stripPrefix("https://")
+      .stripSuffix("/")
