@@ -41,11 +41,18 @@ QUACK_VERSION="${QUACK_VERSION:-latest}"
 NUKE="${NUKE:-0}"
 
 # ---- Optional nuke: tear down + wipe before starting ----
+# Container uids (postgres uid 70, root) own the bind-mount contents, so
+# a plain `rm -rf` from the host user fails with EACCES. Wipe via an
+# ephemeral root container that has write access to the mount.
 if [[ "$NUKE" == "1" ]]; then
-  echo "NUKE=1: tearing down any existing stack and wiping host state..."
+  echo "NUKE=1: tearing down any existing stack..."
   docker compose -f docker-compose.yml down --remove-orphans 2>/dev/null || true
-  rm -rf "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
-  echo "wiped ./pgdata, ./ducklake, ./certs - booting from a clean slate."
+  if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" ]]; then
+    echo "wiping ./pgdata, ./ducklake, ./certs via ephemeral container..."
+    docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
+      'rm -rf /work/pgdata /work/ducklake /work/certs'
+  fi
+  echo "booting from a clean slate."
 fi
 
 # If the user didn't pin a version and is on the pull path (not BUILD=1),

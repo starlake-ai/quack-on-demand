@@ -134,12 +134,16 @@ fi
 # they must drop $PG_DBNAME on the remote server themselves; otherwise
 # stale `__ducklake_*` rows will point at parquet files that no longer
 # exist and the next mutation will fail.
+#
+# Wipe via an ephemeral root container - the manager container writes
+# files as its internal uid, so a host-side `rm -rf` from the invoking
+# user gets EACCES on TLS keys and parquet files.
 if [[ "$NUKE" == "1" ]]; then
-  echo "NUKE=1: wiping $DATA_PATH and $CERTS_DIR ..."
-  rm -rf "$DATA_PATH" "$CERTS_DIR"
-  mkdir -p "$DATA_PATH" "$CERTS_DIR"
-  DATA_PATH="$(cd "$DATA_PATH" && pwd)"
-  CERTS_DIR="$(cd "$CERTS_DIR" && pwd)"
+  echo "NUKE=1: wiping contents of $DATA_PATH and $CERTS_DIR via ephemeral container..."
+  docker run --rm \
+    -v "$DATA_PATH:/wipe-data" \
+    -v "$CERTS_DIR:/wipe-certs" \
+    alpine sh -c 'find /wipe-data /wipe-certs -mindepth 1 -delete 2>/dev/null; true'
   echo "wiped. NOTE: remote Postgres catalog ($PG_USER@$PG_HOST/$PG_DBNAME) was NOT touched -"
   echo "      drop the DB on the remote server if you need a truly clean catalog."
 fi
