@@ -81,12 +81,10 @@ DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`
 
 ```bash
 cp .env.example .env                            # tweak ports / auth / admin password
-./scripts/run-docker-compose.sh                 # pulls starlakeai/quack-on-demand:latest
-# or, for local development:
-BUILD=1 ./scripts/run-docker-compose.sh         # build the image from this checkout
+LOAD_TPCH=true ./scripts/run-docker-compose.sh  # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
 ```
 
-That brings up Postgres + the manager. The admin UI is on `http://localhost:20900/ui/` (default login `admin` / `admin` - change it in `.env`); the FlightSQL edge on `localhost:31338`.
+That brings up Postgres + the manager and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/` (default login `admin` / `admin` - change it in `.env`); the FlightSQL edge on `localhost:31338`.
 
 Smoke-test the FlightSQL edge with the Python load tester:
 
