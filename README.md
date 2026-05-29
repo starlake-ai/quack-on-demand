@@ -2,7 +2,11 @@
 
 **A production-grade FlightSQL gateway in front of [DuckDB Quack](https://duckdb.org/docs/current/core_extensions/quack) + [DuckLake](https://duckdb.org/docs/extensions/ducklake.html).**
 
-DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`, generates a random auth token at startup, and explicitly recommends a reverse proxy in front of it for TLS, external auth, and authorization. Quack on Demand is that proxy with multi-tenancy, pluggable identity, table-level ACLs, role-aware routing, health probes, and a live admin UI built in.
+DuckDB just shipped [Quack](https://duckdb.org/docs/current/core_extensions/quack), a new client-server protocol that lets DuckDB instances talk to each other over HTTP/2. This is a big deal: DuckDB is no longer just an embedded library, it can now be deployed as a shared server.
+
+But Quack is intentionally minimal. It ships with a single static token for auth, no multi-tenancy, no authorization model, and the client side is DuckDB-specific. The docs themselves recommend putting infrastructure in front of it before any serious deployment.
+
+Quack on Demand is that infrastructure: an **Arrow Flight SQL** edge (any JDBC/ODBC/ADBC client works, not just DuckDB), **multi-tenant pools** with role-aware routing, **pluggable identity** (DB / JWT / OIDC), **table-level ACLs** enforced per statement, and a **live admin UI**. All in a single uber-jar that shares Postgres with DuckLake.
 
 ![Admin console - live per-node metrics, statement history, ACL editor](assets/metrics.jpg)
 
@@ -92,7 +96,7 @@ Smoke-test the FlightSQL edge with the Python load tester:
 pip install adbc_driver_flightsql adbc_driver_manager
 
 # TLS-on server (compose default)
-./scripts/loadtest/loadtest.py -w 2 -i 5
+python ./scripts/loadtest/loadtest.py -w 2 -i 5
 
 # Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
 ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
