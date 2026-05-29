@@ -46,6 +46,13 @@
 #                    truly clean slate, drop PG_DBNAME on the remote
 #                    server yourself. Irreversible.         (default 0)
 #
+#   HTTP_PROXY       optional corporate proxy. When set in the invoking
+#   HTTPS_PROXY      shell, all six standard proxy vars are forwarded
+#   NO_PROXY         into the container so DuckDB extension downloads
+#   http_proxy       and any other outbound HTTP go through the proxy.
+#   https_proxy      Leave unset on non-proxied networks.
+#   no_proxy
+#
 # *** DO NOT MIX DOCKER AND NATIVE AGAINST THE SAME CATALOG DB ***
 # DuckLake bakes the absolute DATA_PATH into the Postgres metadata -
 # inside the container that path is /app/ducklake/$PG_DBNAME; natively
@@ -158,13 +165,43 @@ echo "ducklake:     $DATA_PATH  (host) -> /app/ducklake  (container)"
 echo "certs:        $CERTS_DIR  (host) -> /app/certs     (container)"
 echo ""
 
+# ---- Rewrite host-loopback proxy URLs ----
+# Inside the container, 127.0.0.1 is the container's own loopback, not
+# the host. When the proxy lives on the host's loopback (cntlm etc.),
+# rewrite it to host.docker.internal and add an extra_hosts entry so the
+# name resolves on Linux too (it's automatic on Docker Desktop).
+rewrite_loopback_proxy() {
+  local raw="${1:-}"
+  [[ -z "$raw" ]] && { echo ""; return; }
+  if [[ "$raw" =~ ^([a-zA-Z]+://)(127\.0\.0\.1|localhost)(.*)$ ]]; then
+    echo "${BASH_REMATCH[1]}host.docker.internal${BASH_REMATCH[3]}"
+  else
+    echo "$raw"
+  fi
+}
+NEED_HOST_GATEWAY=0
+for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+  original="${!var:-}"
+  [[ -z "$original" ]] && continue
+  rewritten="$(rewrite_loopback_proxy "$original")"
+  if [[ "$rewritten" != "$original" ]]; then
+    echo "rewriting $var: $original -> $rewritten"
+    printf -v "$var" '%s' "$rewritten"
+    NEED_HOST_GATEWAY=1
+  fi
+done
+
 # ---- Run ----
-# host.docker.internal works on Docker Desktop (Mac/Windows). On Linux, the
-# caller should pass the host's actual IP (or use --network=host) - this
-# script doesn't add `--add-host=host.docker.internal:host-gateway` so the
-# user keeps control over networking.
+# host.docker.internal works on Docker Desktop (Mac/Windows). On Linux,
+# we add it explicitly via --add-host so a host-loopback proxy is
+# reachable after the rewrite above.
+HOST_GATEWAY_ARG=()
+[[ "$NEED_HOST_GATEWAY" == "1" ]] && \
+  HOST_GATEWAY_ARG=(--add-host "host.docker.internal:host-gateway")
+
 exec docker run --rm \
   --name "$CONTAINER_NAME" \
+  "${HOST_GATEWAY_ARG[@]}" \
   -p "$MANAGER_PORT:20900" \
   -p "$EDGE_PORT:31338" \
   -p "$QUACK_MIN_PORT-$QUACK_MAX_PORT:$QUACK_MIN_PORT-$QUACK_MAX_PORT" \
@@ -182,6 +219,12 @@ exec docker run --rm \
   -e PROXY_TLS_ENABLED="$TLS" \
   -e SL_QUACK_MIN_PORT="$QUACK_MIN_PORT" \
   -e SL_QUACK_MAX_PORT="$QUACK_MAX_PORT" \
+  ${HTTP_PROXY:+-e HTTP_PROXY="$HTTP_PROXY"} \
+  ${HTTPS_PROXY:+-e HTTPS_PROXY="$HTTPS_PROXY"} \
+  ${NO_PROXY:+-e NO_PROXY="$NO_PROXY"} \
+  ${http_proxy:+-e http_proxy="$http_proxy"} \
+  ${https_proxy:+-e https_proxy="$https_proxy"} \
+  ${no_proxy:+-e no_proxy="$no_proxy"} \
   -v "$DATA_PATH:/app/ducklake" \
   -v "$CERTS_DIR:/app/certs" \
   "$IMAGE:$QUACK_VERSION"

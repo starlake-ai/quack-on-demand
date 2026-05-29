@@ -52,6 +52,17 @@ if [[ "$NUKE" == "1" ]]; then
     docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
       'rm -rf /work/pgdata /work/ducklake /work/certs'
   fi
+  # Pre-create the bind-mount dirs with the right ownership. Without
+  # this, docker auto-creates them root-owned on `up`, and the
+  # manager's `quack` user (uid 1000, set in the Dockerfile) gets
+  # EACCES on `./certs` (TLS cert write fails -> FlightSQL edge
+  # silently dies) and `./ducklake` (TPC-H seed `mkdir` fails). Chown
+  # via the ephemeral container so it works even when the host user
+  # is not uid 1000. Postgres re-chowns ./pgdata to uid 70 on its own
+  # init, so we leave that one root-owned.
+  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
+  docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
+    'chown 1000:1000 /work/ducklake /work/certs'
   echo "booting from a clean slate."
 fi
 
@@ -100,6 +111,37 @@ fi
 # Ensure QUACK_VERSION is in the env compose will read. We set it as a
 # process env var, which compose picks up before reading the .env file.
 export QUACK_VERSION
+
+# ---- Rewrite host-loopback proxy URLs for container reachability ----
+# A common corporate setup runs cntlm/squid on the host's loopback (e.g.
+# http://127.0.0.1:3128). Inside the container 127.0.0.1 is the
+# container's own loopback, not the host - the proxy is unreachable.
+# Rewrite to host.docker.internal so the extra_hosts entry in compose
+# resolves to the host gateway. Touches only loopback addresses; remote
+# proxy URLs pass through unchanged.
+rewrite_loopback_proxy() {
+  local raw="${1:-}"
+  [[ -z "$raw" ]] && { echo ""; return; }
+  if [[ "$raw" =~ ^([a-zA-Z]+://)(127\.0\.0\.1|localhost)(.*)$ ]]; then
+    echo "${BASH_REMATCH[1]}host.docker.internal${BASH_REMATCH[3]}"
+  else
+    echo "$raw"
+  fi
+}
+for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+  original="${!var:-}"
+  [[ -z "$original" ]] && continue
+  rewritten="$(rewrite_loopback_proxy "$original")"
+  if [[ "$rewritten" != "$original" ]]; then
+    echo "rewriting $var: $original -> $rewritten (container can't reach host loopback directly)"
+    export "$var=$rewritten"
+  else
+    export "$var"
+  fi
+done
+for var in NO_PROXY no_proxy; do
+  [[ -n "${!var:-}" ]] && export "$var"
+done
 
 # ---- Port-conflict auto-bump ----
 declare_pg_port() {

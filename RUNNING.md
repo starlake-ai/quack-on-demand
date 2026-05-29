@@ -286,9 +286,102 @@ docker compose exec \
 ### Teardown
 
 ```bash
-docker compose down            # stops containers, keeps volumes
-rm -rf pgdata ducklake certs   # nuke from orbit (irreversible)
+docker compose down                          # stops containers, keeps volumes
+NUKE=1 ./scripts/stop-docker-compose.sh      # kill + down + wipe host state
 ```
+
+The bind-mount contents (`./pgdata`, `./ducklake`, `./certs`) are owned
+by container uids (postgres uid 70, root for TLS keys), so a host-side
+`rm -rf` from a non-root user fails. `NUKE=1` wipes via an ephemeral
+root container.
+
+---
+
+## Behind a corporate proxy
+
+Three layers need configuring; they are independent and each is opt-in.
+
+### 1. Docker daemon (for `docker pull` / `docker compose pull`)
+
+The daemon ignores your shell's `HTTP_PROXY`. Configure it once,
+system-wide. Either add to `~/.docker/config.json`:
+
+```json
+{
+  "proxies": {
+    "default": {
+      "httpProxy":  "http://proxy.corp.example:3128",
+      "httpsProxy": "http://proxy.corp.example:3128",
+      "noProxy":    "localhost,127.0.0.1,.corp.example"
+    }
+  }
+}
+```
+
+Or drop a systemd unit override at
+`/etc/systemd/system/docker.service.d/http-proxy.conf`:
+
+```ini
+[Service]
+Environment="HTTP_PROXY=http://proxy.corp.example:3128"
+Environment="HTTPS_PROXY=http://proxy.corp.example:3128"
+Environment="NO_PROXY=localhost,127.0.0.1,.corp.example"
+```
+
+then `sudo systemctl daemon-reload && sudo systemctl restart docker`.
+
+### 2. The manager + child Quack nodes
+
+Export the standard vars in your shell, then run the script normally.
+`scripts/run-docker-compose.sh` and `scripts/run-docker.sh` both forward
+them into the container, and `docker-compose.yml` plumbs them into
+BuildKit so `BUILD=1` works behind the proxy too:
+
+```bash
+export HTTP_PROXY=http://proxy.corp.example:3128
+export HTTPS_PROXY=http://proxy.corp.example:3128
+export NO_PROXY=localhost,127.0.0.1,postgres,.corp.example
+./scripts/run-docker-compose.sh
+```
+
+Inside the container, `QuackHttpClient` translates `HTTP_PROXY` into
+DuckDB's `SET http_proxy = '<host:port>'` before `INSTALL quack`, and
+`scripts/spawn-quack-node.sh` does the same for each child Quack node.
+Without these, DuckDB hangs trying to reach
+`extensions.duckdb.org` and the manager crashes at boot.
+
+You can also put the proxy in `.env` instead of exporting it - compose
+reads `.env` on each `up`. See `.env.example`.
+
+### 3. Proxy on host loopback (cntlm, squid, …)
+
+When the proxy listens on `127.0.0.1:3128` of the host, the scripts
+auto-rewrite the URL to `http://host.docker.internal:3128` (and add
+`host.docker.internal:host-gateway` to the container's `extra_hosts`)
+so the name resolves to the docker bridge on Linux. But the proxy
+**itself** still has to accept connections from the bridge. Pick one:
+
+- **Reconfigure the proxy** to listen on `0.0.0.0:3128` (or on the
+  docker bridge IP, typically `172.17.0.1:3128`).
+- **Forward via socat** if you can't touch the proxy config:
+
+  ```bash
+  docker run -d --rm --name proxy-bridge --network host alpine/socat \
+    TCP-LISTEN:3128,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:3128
+  ```
+
+  This binds a passthrough on the docker bridge IP that forwards to
+  the loopback proxy; nothing on the host loopback is changed.
+
+A quick sanity check before you start the stack:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' --connect-timeout 3 \
+  -x http://172.17.0.1:3128 http://archive.ubuntu.com
+```
+
+`200` means the docker bridge can reach the proxy; `Connection refused`
+means you still need to apply one of the two fixes above.
 
 ---
 

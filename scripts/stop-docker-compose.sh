@@ -63,7 +63,11 @@ fi
 
 if [[ "$NUKE" == "1" ]]; then
   echo "wiping host state directories (./pgdata, ./ducklake, ./certs)..."
-  rm -rf "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
+  # Container uids (postgres uid 70, root for TLS keys) own the bind-mount
+  # contents, so a host-side `rm -rf` from a non-root user gets EACCES.
+  # Wipe via an ephemeral root container that has write access.
+  docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
+    'rm -rf /work/pgdata /work/ducklake /work/certs'
   echo "wiped. next run-docker-compose.sh will boot from a clean slate."
 fi
 
