@@ -79,239 +79,28 @@ DuckDB ships with Quack, a minimal HTTP SQL endpoint that listens on `localhost`
 
 ## Quick start
 
-For a full walkthrough of every deployment path (native, Docker against an
-external Postgres, full compose stack) and the optional TPC-H seed step,
-see **[`RUNNING.md`](RUNNING.md)**.
-
-### Docker Run
-
-Three paths, increasing in flexibility:
-
-**1. `docker compose` (recommended for first run)** brings up Postgres + the manager together, with all persistent state bind-mounted to the host:
-
 ```bash
-cp .env.example .env                          # tweak ports / auth / admin password
-./scripts/run-docker-compose.sh               # pulls starlakeai/quack-on-demand:latest from Docker Hub
-BUILD=1 ./scripts/run-docker-compose.sh       # local Dockerfile build instead (dev mode)
+cp .env.example .env                            # tweak ports / auth / admin password
+./scripts/run-docker-compose.sh                 # pulls starlakeai/quack-on-demand:latest
+# or, for local development:
+BUILD=1 ./scripts/run-docker-compose.sh         # build the image from this checkout
 ```
 
-Bind mounts created next to the compose file:
-- `./pgdata/`   — Postgres data dir (`slkstate_*` + `ducklake_*` tables)
-- `./ducklake/` — DuckLake Parquet files written by Quack nodes
-- `./certs/`    — auto-generated self-signed TLS cert + key
+That brings up Postgres + the manager. The admin UI is on `http://localhost:20900/ui/` (default login `admin` / `admin` — change it in `.env`); the FlightSQL edge on `localhost:31338`.
 
-To seed the metastore with a TPCH dataset (uses DuckDB's `dbgen()` — no input files needed), either start with the loader flag or exec the loader against a running stack:
-
-```bash
-LOAD_TPCH=true ./scripts/run-docker-compose.sh                # SF=1 → ~6M lineitem rows
-LOAD_TPCH=true TPCH_SF=10 ./scripts/run-docker-compose.sh
-
-# Or against a stack that is already up:
-docker compose exec quack /app/scripts/load-tpch-dbgen.sh
-```
-
-Tables land in `tpch.tpch1.{region,nation,customer,supplier,part,partsupp,orders,lineitem}` by default. Override `TPCH_SF` / `TPCH_SCHEMA` in `.env`.
-
-**2. `scripts/run-docker.sh` (against an existing Postgres)** runs only the manager container, points it at an already-running Postgres (RDS, Cloud SQL, host-installed, etc.). Default pulls `starlakeai/quack-on-demand:latest`; `BUILD=1` builds the local Dockerfile and tags the result under the same name:
-
-```bash
-PG_HOST=my-rds.amazonaws.com PG_PASSWORD=*** \
-  AUTH=true ADMIN_PASSWORD=change-me TLS=true \
-  ./scripts/run-docker.sh
-
-# Pin a specific tag (release or snapshot)
-QUACK_VERSION=0.1.0 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
-
-# Build locally instead of pulling
-BUILD=1 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
-```
-
-`AUTH`, `TLS`, `ADMIN_*`, `API_KEY`, `DATA_PATH`, `CERTS_DIR`, port mappings — all overridable via env. Defaults to no-auth, no-TLS for fast smoke tests. DuckLake data persists at `$PWD/ducklake/` by default.
-
-**3. Raw `docker run`** — for one-off invocations:
-
-```bash
-docker run --rm -p 20900:20900 -p 31338:31338 \
-  -e SL_QUACK_PG_HOST=host.docker.internal \
-  -e SL_QUACK_PG_PASSWORD=azizam \
-  -e SL_QUACK_ADMIN_PASSWORD=change-me \
-  -v $(pwd)/ducklake:/app/ducklake \
-  -v $(pwd)/certs:/app/certs \
-  starlakeai/quack-on-demand:latest
-```
-
-The runtime image bundles the `duckdb` CLI (so spawned Quack nodes can serve), `psql` (catalog bootstrap), and `openssl` (auto-generates the self-signed TLS cert on first boot). All `SL_QUACK_*` / `PROXY_*` env vars from `application.conf` are accepted. The default exposed ports are `20900` (REST + UI), `31338` (FlightSQL), and `21900–22500` (lease range for in-container Quack nodes).
-
-### Behind a corporate proxy
-
-Both the **image build** and the **container runtime** need outbound HTTP/HTTPS access. Three sources of egress traffic to be aware of:
-
-| Step                  | What it fetches                                                                          | Where to set proxy                  |
-|-----------------------|------------------------------------------------------------------------------------------|-------------------------------------|
-| `docker build`        | Ubuntu apt mirrors, NodeSource, sbt/Maven, npm registry, the DuckDB CLI zip from GitHub  | `--build-arg` on the build          |
-| Manager + node boot   | `INSTALL quack` (and the `tpch` / `ducklake` / `postgres` extensions) from `extensions.duckdb.org` | container env vars (`HTTP(S)_PROXY`)|
-| Outbound from spawned Quack nodes | Same DuckDB extension registry on first node start                            | inherited from the container env    |
-
-If your proxy is reachable on the host's loopback (e.g. `localhost:3128`), the container won't see it unless you give it host networking. On Linux that's `--network=host`; on Docker Desktop, use `host.docker.internal:<port>`.
-
-**Build the image behind a proxy:**
-
-```bash
-docker build --network=host \
-  --build-arg HTTP_PROXY=http://localhost:3128 \
-  --build-arg HTTPS_PROXY=http://localhost:3128 \
-  --build-arg NO_PROXY=localhost,127.0.0.1 \
-  -t starlakeai/quack-on-demand:latest .
-```
-
-(The lowercase `http_proxy` / `https_proxy` form is also honoured; pass both if you're unsure — some tools only read one variant.)
-
-**Run the container behind a proxy** — without these env vars, the manager (and every Quack node it spawns) will hang on the first `INSTALL quack` call:
-
-```bash
-docker run -d --name quack-on-demand --network=host \
-  -e HTTP_PROXY=http://localhost:3128 \
-  -e HTTPS_PROXY=http://localhost:3128 \
-  -e NO_PROXY=localhost,127.0.0.1 \
-  -e SL_QUACK_PG_HOST=localhost \
-  -e SL_QUACK_PG_PASSWORD=*** \
-  starlakeai/quack-on-demand:latest
-```
-
-**Configure the Docker daemon globally** instead — once, in `~/.docker/config.json` — so every `docker build` and `docker run` inherit the proxy without per-command flags:
-
-```json
-{
-  "proxies": {
-    "default": {
-      "httpProxy":  "http://localhost:3128",
-      "httpsProxy": "http://localhost:3128",
-      "noProxy":    "localhost,127.0.0.1"
-    }
-  }
-}
-```
-
-**Bake the extensions into the image** if you want offline-capable nodes (no proxy required at runtime). Add the install step to the build stage of `Dockerfile`:
-
-```dockerfile
-RUN duckdb -c "INSTALL quack; INSTALL tpch; INSTALL ducklake; INSTALL postgres;"
-```
-
-The downloaded extensions live under `$HOME/.duckdb/extensions/` and the runtime image will use them in place of fetching from the registry.
-
-### Native Run Prerequisites
-
-- JDK 17+ (to run the jar)
-- A running Postgres instance (`localhost:5432`, default user `postgres` / password `azizam` — both overridable)
-- The `duckdb` CLI on `$PATH` (for spawning Quack nodes locally)
-- `psql` on `$PATH` (catalog DB auto-create)
-- `openssl` (for auto-generated TLS certs)
-- **`sbt` 1.x and `npm` 18+** — only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
-
-### Boot the manager
-
-```bash
-# Default: download latest release from Maven Central, cache under
-# ~/.cache/quack-on-demand/, run it. REST :20900, FlightSQL :31338, TLS on.
-./scripts/run-jar.sh
-
-# Pin a specific version (release or -SNAPSHOT)
-QUACK_VERSION=0.1.0           ./scripts/run-jar.sh
-QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh
-
-# Local source build (requires sbt + npm)
-BUILD=1 ./scripts/run-jar.sh
-```
-
-The script auto-generates a self-signed TLS cert at `certs/server-{cert,key}.pem` if missing, probes Postgres reachability, creates the catalog DB if it doesn't exist, and prints the URLs.
-
-### Log in to the admin console
-
-Open `http://localhost:20900/ui/`. The default admin credentials are:
-
-```
-admin@localhost.local / admin   (or just `admin` / `admin`)
-```
-
-Set `SL_QUACK_ADMIN_USERNAME=alice,bob` and `SL_QUACK_ADMIN_PASSWORD=…` to seed your own. Multiple comma-separated usernames are supported; all get the same password + role.
-
-### Starter tenant + pool (auto-bootstrapped)
-
-On every boot the manager creates a starter tenant `acme` with a pool `sales` (3 nodes: 1 WriteOnly + 1 ReadOnly + 1 Dual) if they don't already exist. `defaultTenant` / `defaultPool` are pointed at the same `acme` / `sales`, so a FlightSQL client that doesn't pass a tenant or `X-Pool` header lands on this pool out of the box. The bootstrap is idempotent — a restart with the same config is a no-op.
-
-Override or disable via `SL_QUACK_BOOTSTRAP_*` env vars:
-
-| Env var                          | Default | Purpose                                  |
-|----------------------------------|---------|------------------------------------------|
-| `SL_QUACK_BOOTSTRAP_ENABLED`     | `true`  | Set to `false` to skip the bootstrap.    |
-| `SL_QUACK_BOOTSTRAP_TENANT`      | `acme`  | Tenant name.                             |
-| `SL_QUACK_BOOTSTRAP_POOL`        | `sales` | Pool name.                               |
-| `SL_QUACK_BOOTSTRAP_WRITEONLY`   | `1`     | WriteOnly nodes in the bootstrap pool.   |
-| `SL_QUACK_BOOTSTRAP_READONLY`    | `1`     | ReadOnly nodes.                          |
-| `SL_QUACK_BOOTSTRAP_DUAL`        | `1`     | Dual nodes.                              |
-
-### Create a pool from the UI or the CLI
-
-```bash
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' | jq -r .token)
-
-# Tenant + pool
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme"}'
-
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1},
-       "metastore":{}}'
-```
-
-### Connect clients
-
-Four entry points, all served by the same manager process:
-
-| Surface | URL | Use case |
-|---|---|---|
-| Admin UI | `http://localhost:20900/ui/` | tenant/pool CRUD, ACL editor, live node dashboard. Log in with `admin@localhost.local` / `admin` (or whatever you set in `.env`). |
-| FlightSQL (JDBC/ADBC) | `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true` | SQL clients (DBeaver, intellij DataGrip, Spark, custom apps). |
-| REST API | `http://localhost:20900/api/*` | scripting tenant/pool/ACL changes. Login via `POST /api/auth/login` to get a session token. |
-| Python load tester | `./scripts/loadtest/loadtest.py` | ADBC-based concurrency + latency benchmark. Defaults to a TPC-H mix; pair with the seeding step above. |
-
-**FlightSQL credentials** — same as the admin user:
-
-```
-User:     admin@localhost.local      # or admin
-Password: admin
-```
-
-> **URL scheme must match the server's TLS setting.** Native and the shipped compose `.env.example` default to TLS **on** → use `grpc+tls://` (JDBC) / `useEncryption=true`. The `run-docker.sh` path defaults to TLS **off** → use `grpc://` / `useEncryption=false`. Mismatch surfaces as *"tls: first record does not look like a TLS handshake"* (client-TLS against plaintext server) or *"connection reset"* (the inverse).
-
-**Smoke-test the FlightSQL edge with the Python load tester** (the same one we use in CI):
+Smoke-test the FlightSQL edge with the Python load tester:
 
 ```bash
 pip install adbc_driver_flightsql adbc_driver_manager
 
-# Default TLS-on server (native + shipped compose)
+# TLS-on server (compose default)
 ./scripts/loadtest/loadtest.py -w 2 -i 5
 
-# Plaintext server (run-docker.sh default, or TLS=false in .env)
+# Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
 ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
 ```
 
-For TLS verification instead of `disableCertificateVerification`, import `certs/server-cert.pem` into your JDBC client's trust store. The cert is auto-generated on first boot and reused across restarts.
-
-See [`RUNNING.md`](RUNNING.md#connecting-clients) for the full loadtest parameter table (workers, iterations, warmup, schema, custom query) and the heavy/stress example ladder.
-
-### Stop everything
-
-```bash
-./scripts/stop-quack-on-demand.sh
-```
-
+Everything else — native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, REST API recipes, the full loadtest parameter table — lives in **[`RUNNING.md`](RUNNING.md)**.
 
 ---
 
