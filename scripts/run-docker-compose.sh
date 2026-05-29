@@ -18,6 +18,9 @@
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
 #   LOAD_TPCH           "true" to seed TPC-H      (default false)
+#   NUKE                "1" tears down any existing stack and wipes
+#                       ./pgdata, ./ducklake, ./certs before starting.
+#                       Irreversible.            (default 0)
 #   AUTO_BUMP_PG_PORT   "true" auto-bumps to 15432 when host:5432 busy
 #                                                 (default true)
 #   WAIT_TIMEOUT        manager readiness wait    (default 90 s)
@@ -27,6 +30,7 @@
 #   QUACK_VERSION=0.1.0 ./scripts/run-docker-compose.sh        # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
 #   LOAD_TPCH=true ./scripts/run-docker-compose.sh             # + TPC-H
+#   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
 
 set -euo pipefail
 
@@ -34,6 +38,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 QUACK_VERSION="${QUACK_VERSION:-latest}"
+NUKE="${NUKE:-0}"
+
+# ---- Optional nuke: tear down + wipe before starting ----
+if [[ "$NUKE" == "1" ]]; then
+  echo "NUKE=1: tearing down any existing stack and wiping host state..."
+  docker compose -f docker-compose.yml down --remove-orphans 2>/dev/null || true
+  rm -rf "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
+  echo "wiped ./pgdata, ./ducklake, ./certs - booting from a clean slate."
+fi
 
 # If the user didn't pin a version and is on the pull path (not BUILD=1),
 # probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
