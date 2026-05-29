@@ -40,6 +40,12 @@
 #   CERTS_DIR        host dir for auto-generated TLS cert   (default <CWD>/certs)
 #   CONTAINER_NAME   docker --name                          (default quack-on-demand)
 #
+#   NUKE             "1" stops the prior container and wipes DATA_PATH +
+#                    CERTS_DIR before starting. Does NOT drop the remote
+#                    Postgres DuckLake catalog tables - if you want a
+#                    truly clean slate, drop PG_DBNAME on the remote
+#                    server yourself. Irreversible.         (default 0)
+#
 # *** DO NOT MIX DOCKER AND NATIVE AGAINST THE SAME CATALOG DB ***
 # DuckLake bakes the absolute DATA_PATH into the Postgres metadata -
 # inside the container that path is /app/ducklake/$PG_DBNAME; natively
@@ -51,6 +57,7 @@
 #   PG_HOST=db.internal PG_PASSWORD=*** ./scripts/run-docker.sh
 #   QUACK_VERSION=0.1.0 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
 #   QUACK_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
+#   NUKE=1 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh   # wipe local mounts first
 
 set -euo pipefail
 
@@ -89,6 +96,7 @@ EDGE_PORT="${EDGE_PORT:-31338}"
 QUACK_MIN_PORT="${QUACK_MIN_PORT:-21900}"
 QUACK_MAX_PORT="${QUACK_MAX_PORT:-22500}"
 CONTAINER_NAME="${CONTAINER_NAME:-quack-on-demand}"
+NUKE="${NUKE:-0}"
 
 # The DuckLake data files are bind-mounted from the host so they survive
 # `docker rm` / `docker run` cycles. Defaults to `<CWD>/ducklake` so the
@@ -118,6 +126,22 @@ fi
 if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
   echo "stopping previous container: $CONTAINER_NAME"
   docker rm -f "$CONTAINER_NAME" >/dev/null
+fi
+
+# ---- Optional nuke: wipe local bind mounts before starting ----
+# The remote Postgres DuckLake catalog is OUT OF SCOPE here - we only own
+# what's on the local filesystem. If the user wants a fully clean slate
+# they must drop $PG_DBNAME on the remote server themselves; otherwise
+# stale `__ducklake_*` rows will point at parquet files that no longer
+# exist and the next mutation will fail.
+if [[ "$NUKE" == "1" ]]; then
+  echo "NUKE=1: wiping $DATA_PATH and $CERTS_DIR ..."
+  rm -rf "$DATA_PATH" "$CERTS_DIR"
+  mkdir -p "$DATA_PATH" "$CERTS_DIR"
+  DATA_PATH="$(cd "$DATA_PATH" && pwd)"
+  CERTS_DIR="$(cd "$CERTS_DIR" && pwd)"
+  echo "wiped. NOTE: remote Postgres catalog ($PG_USER@$PG_HOST/$PG_DBNAME) was NOT touched -"
+  echo "      drop the DB on the remote server if you need a truly clean catalog."
 fi
 
 echo "image:        $IMAGE"
