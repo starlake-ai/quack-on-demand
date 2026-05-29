@@ -60,10 +60,16 @@ jobs:
         with:
           sbt-runner-version: '1.12.11'
 
-      - name: Extract version from build.sbt
+      - name: Extract version from version.sbt
         id: extract-version
         run: |
-          version=$(grep -E '^ThisBuild / version' build.sbt | sed -E 's/.*"([^"]+)".*/\1/')
+          # Version lives in version.sbt since the sbt-release wiring;
+          # build.sbt no longer carries `ThisBuild / version`.
+          version=$(grep -E '^ThisBuild / version' version.sbt | sed -E 's/.*"([^"]+)".*/\1/')
+          if [[ -z "$version" ]]; then
+            echo "::error::Failed to extract version from version.sbt" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publishing version: $version"
 
