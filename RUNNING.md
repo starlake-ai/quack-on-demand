@@ -358,30 +358,25 @@ reads `.env` on each `up`. See `.env.example`.
 When the proxy listens on `127.0.0.1:3128` of the host, the scripts
 auto-rewrite the URL to `http://host.docker.internal:3128` (and add
 `host.docker.internal:host-gateway` to the container's `extra_hosts`)
-so the name resolves to the docker bridge on Linux. But the proxy
-**itself** still has to accept connections from the bridge. Pick one:
+so the name resolves to the docker bridge on Linux. The proxy itself
+also has to accept connections from the bridge - if it only binds the
+host loopback (cntlm's default), `run-docker-compose.sh` detects this
+and **spawns a `quack-proxy-bridge-<port>` socat container that
+listens on the docker bridge IP and forwards to `127.0.0.1`**. The
+bridge is torn down by `stop-docker-compose.sh`.
 
-- **Reconfigure the proxy** to listen on `0.0.0.0:3128` (or on the
-  docker bridge IP, typically `172.17.0.1:3128`).
-- **Forward via socat** if you can't touch the proxy config:
+If you'd rather skip the sidecar, reconfigure the proxy to listen on
+`0.0.0.0` (or the docker bridge IP `172.17.0.1`); the script then
+detects the proxy is already reachable and doesn't start the bridge.
 
-  ```bash
-  docker run -d --rm --name proxy-bridge --network host alpine/socat \
-    TCP-LISTEN:3128,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:3128
-  ```
-
-  This binds a passthrough on the docker bridge IP that forwards to
-  the loopback proxy; nothing on the host loopback is changed.
-
-A quick sanity check before you start the stack:
+Sanity check what containers see:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' --connect-timeout 3 \
   -x http://172.17.0.1:3128 http://archive.ubuntu.com
 ```
 
-`200` means the docker bridge can reach the proxy; `Connection refused`
-means you still need to apply one of the two fixes above.
+`200` means the docker bridge can reach the proxy.
 
 ---
 

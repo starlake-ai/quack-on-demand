@@ -61,6 +61,15 @@ if [[ "$REMOVE" == "1" ]]; then
   docker compose down
 fi
 
+# Tear down any proxy bridge containers spawned by run-docker-compose.sh.
+# Match by the `quack-proxy-bridge-` prefix so we don't touch unrelated
+# socat sidecars the user may be running.
+bridges="$(docker ps -q -f "name=^quack-proxy-bridge-" 2>/dev/null || true)"
+if [[ -n "$bridges" ]]; then
+  echo "stopping proxy bridge container(s)..."
+  docker stop $bridges >/dev/null
+fi
+
 if [[ "$NUKE" == "1" ]]; then
   echo "wiping host state directories (./pgdata, ./ducklake, ./certs)..."
   # Container uids (postgres uid 70, root for TLS keys) own the bind-mount
