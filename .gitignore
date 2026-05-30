@@ -54,6 +54,9 @@ ui/dist/
 # Local state file
 /state/
 
+# Runtime logs from run-jar.sh
+/logs/
+
 # IDE / OS
 .bsp/
 .metals/
