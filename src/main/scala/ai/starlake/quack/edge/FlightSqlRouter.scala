@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, Validati
 import ai.starlake.quack.model.{PoolKey, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
 
 /** Carries a streaming result back through the router. The caller MUST invoke
@@ -20,7 +21,8 @@ final class FlightSqlRouter(
     val adapter: QuackHttpAdapter,
     val tenantClaim: String,
     val validator: StatementValidator = StatementValidator.allowAll,
-    val history: StatementHistoryStore = new StatementHistoryStore()
+    val history: StatementHistoryStore = new StatementHistoryStore(),
+    val stmtInstruments: StatementInstruments = StatementInstruments.noop
 ):
 
   private def record(
@@ -33,6 +35,7 @@ final class FlightSqlRouter(
       nodeId = nodeId, sql = sql, durationMs = durationMs,
       status = status, error = error
     ))
+    stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
 
   def session(connectionId: String) = sessions.get(connectionId)
 
