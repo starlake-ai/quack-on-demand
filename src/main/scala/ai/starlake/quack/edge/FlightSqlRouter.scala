@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, Validati
 import ai.starlake.quack.model.{PoolKey, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
 
 /** Carries a streaming result back through the router. The caller MUST invoke
@@ -21,10 +22,7 @@ final class FlightSqlRouter(
     val tenantClaim: String,
     val validator: StatementValidator = StatementValidator.allowAll,
     val history: StatementHistoryStore = new StatementHistoryStore(),
-    val stmtInstruments: ai.starlake.quack.observability.metrics.StatementInstruments =
-      new ai.starlake.quack.observability.metrics.StatementInstruments(
-        new io.micrometer.core.instrument.composite.CompositeMeterRegistry()
-      )
+    val stmtInstruments: StatementInstruments = StatementInstruments.noop
 ):
 
   private def record(
