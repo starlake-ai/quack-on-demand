@@ -154,13 +154,24 @@ else
         | grep -oE '<release>[^<]+</release>' | sed 's/<[^>]*>//g' | head -1; } || true
   }
   resolve_latest_snapshot() {
+    # First try the standard maven-metadata.xml index. The snapshots repo at
+    # central.sonatype.com (Nexus 3) does not always materialise that index
+    # even when artifacts are present, so this can legitimately return empty
+    # and the caller must have a second strategy (see `local_snapshot_version`).
     { curl -fsSL "https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" 2>/dev/null \
         | grep -oE '<latest>[^<]+</latest>' | sed 's/<[^>]*>//g' | head -1; } || true
   }
+  # Fall-back: read the SNAPSHOT version pinned in version.sbt. Used when
+  # the snapshots-repo metadata index is missing — we still know which
+  # snapshot the source tree corresponds to and can probe its jar URL.
+  local_snapshot_version() {
+    [[ -f "$REPO_DIR/version.sbt" ]] || return 0
+    awk -F'"' '/ThisBuild *\/ *version *:=/ { print $2 }' "$REPO_DIR/version.sbt" | head -1
+  }
 
-  # Belt-and-suspenders: also wrap the substitution with `|| true`, so an
+  # Belt-and-suspenders: also wrap each substitution with `|| true`, so an
   # accidental non-zero from the function never aborts the script under
-  # `set -e`. The fall-back branch below picks up the empty result.
+  # `set -e`. The empty-version fall-back branch below picks up the result.
   version="${QUACK_VERSION:-latest}"
   case "$version" in
     latest)
@@ -168,15 +179,26 @@ else
       if [[ -n "$version" ]]; then
         echo "resolved latest release: $version"
       else
-        echo "WARN: no release found on Maven Central for ${GROUP_PATH}/${ARTIFACT}; falling back to local build." >&2
+        # No release on Maven Central; try the project's own SNAPSHOT.
+        version="$(local_snapshot_version)"
+        if [[ -n "$version" && "$version" == *-SNAPSHOT ]]; then
+          echo "no release on Maven Central; trying snapshot $version (from version.sbt)"
+        else
+          echo "WARN: no release on Maven Central and no snapshot version detected; falling back to local jar / build." >&2
+          version=""
+        fi
       fi
       ;;
     latest-snapshot)
       version="$(resolve_latest_snapshot || true)"
+      if [[ -z "$version" ]]; then
+        # snapshot index missing -> fall back to version.sbt.
+        version="$(local_snapshot_version)"
+      fi
       if [[ -n "$version" ]]; then
         echo "resolved latest snapshot: $version"
       else
-        echo "WARN: no snapshot found in Central snapshots repo; falling back to local build." >&2
+        echo "WARN: no snapshot found and no version.sbt detected; falling back to local jar / build." >&2
       fi
       ;;
   esac
