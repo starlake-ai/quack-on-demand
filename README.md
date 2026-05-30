@@ -96,7 +96,7 @@ Smoke-test the FlightSQL edge with the Python load tester:
 pip install adbc_driver_flightsql adbc_driver_manager
 
 # TLS-on server (compose default)
-python ./scripts/loadtest/loadtest.py -w 2 -i 5
+python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
 
 # Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
 ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5

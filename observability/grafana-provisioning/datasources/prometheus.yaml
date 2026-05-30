@@ -1,0 +1,14 @@
+# Auto-provisioned Prometheus datasource. The UID matches the
+# `${datasource}` variable in grafana-dashboard.json so the dashboard
+# renders without manual datasource selection on first open.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus-local
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

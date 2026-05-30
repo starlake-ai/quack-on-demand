@@ -1,0 +1,19 @@
+# Local Prometheus scrape config for the quack-on-demand manager.
+# The manager exposes /metrics on :20900 (its REST/UI port); a 5-second
+# interval is fine for local poking and lets `rate()` panels respond
+# quickly without burning CPU.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    deployment: local
+    region: dev
+
+scrape_configs:
+  - job_name: quack-on-demand
+    static_configs:
+      - targets: ['host.docker.internal:20900']
+        labels:
+          instance: manager
+    metrics_path: /metrics
