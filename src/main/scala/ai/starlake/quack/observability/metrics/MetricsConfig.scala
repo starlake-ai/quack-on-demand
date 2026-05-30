@@ -1,30 +1,29 @@
 package ai.starlake.quack.observability.metrics
 
-final case class PrometheusConfig(enabled: Boolean = true)
-
-final case class GcpMetricsConfig(
-    enabled: Boolean = false,
-    projectId: Option[String] = None,
-    stepSeconds: Int = 60
-)
-
-final case class AzureMetricsConfig(
-    enabled: Boolean = false,
-    instrumentationKey: Option[String] = None,
-    stepSeconds: Int = 60
-)
-
-final case class AwsMetricsConfig(
-    enabled: Boolean = false,
+final case class AwsSinkConfig(
     namespace: String = "quack-on-demand",
-    stepSeconds: Int = 60
+    stepSeconds: Int  = 60
 )
 
+final case class AzureSinkConfig(
+    instrumentationKey: Option[String] = None,
+    stepSeconds: Int                   = 60
+)
+
+final case class GcpSinkConfig(
+    projectId: Option[String] = None,
+    stepSeconds: Int          = 60
+)
+
+/** Single-knob metrics config. `sink` selects exactly one observability
+  * target; the per-sink sub-configs (`aws`, `azure`, `gcp`) hold that
+  * sink's parameters. `"prometheus"` exposes a `/metrics` pull endpoint;
+  * the cloud values push to that provider's monitoring API; `"none"`
+  * disables metrics entirely. */
 final case class MetricsConfig(
-    enabled: Boolean = true,
-    prometheus: PrometheusConfig = PrometheusConfig(),
+    sink: String = "prometheus",
     commonTags: Map[String, String] = Map.empty,
-    gcp: GcpMetricsConfig = GcpMetricsConfig(),
-    azure: AzureMetricsConfig = AzureMetricsConfig(),
-    aws: AwsMetricsConfig = AwsMetricsConfig()
+    aws:   AwsSinkConfig   = AwsSinkConfig(),
+    azure: AzureSinkConfig = AzureSinkConfig(),
+    gcp:   GcpSinkConfig   = GcpSinkConfig()
 )
