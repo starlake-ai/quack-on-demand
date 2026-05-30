@@ -65,3 +65,43 @@ class MetricsRegistrySpec extends AnyFlatSpec with Matchers:
         reg.composite.getRegistries.asScala.exists(_.getClass.getSimpleName.contains("CloudWatch")) shouldBe false
       }
     }.unsafeRunSync()
+
+  it should "attach Azure Monitor when azure.enabled=true and instrumentationKey present" in:
+    val cfg = MetricsConfig(
+      prometheus = PrometheusConfig(enabled = false),
+      azure      = AzureMetricsConfig(enabled = true, instrumentationKey = Some("00000000-0000-0000-0000-000000000000"), stepSeconds = 60)
+    )
+    MetricsRegistry.resource(cfg).use { reg =>
+      cats.effect.IO {
+        reg.composite.getRegistries.iterator.next.getClass.getSimpleName should include ("AzureMonitor")
+      }
+    }.unsafeRunSync()
+
+  it should "skip Azure Monitor when instrumentationKey is missing (WARN, no throw)" in:
+    val cfg = MetricsConfig(
+      azure = AzureMetricsConfig(enabled = true, instrumentationKey = None)
+    )
+    MetricsRegistry.resource(cfg).use { reg =>
+      cats.effect.IO {
+        reg.composite.getRegistries.asScala.exists(_.getClass.getSimpleName.contains("AzureMonitor")) shouldBe false
+      }
+    }.unsafeRunSync()
+
+  it should "attach Stackdriver when gcp.enabled=true and projectId present" in:
+    val cfg = MetricsConfig(
+      prometheus = PrometheusConfig(enabled = false),
+      gcp        = GcpMetricsConfig(enabled = true, projectId = Some("test-proj"), stepSeconds = 60)
+    )
+    MetricsRegistry.resource(cfg).use { reg =>
+      cats.effect.IO {
+        reg.composite.getRegistries.iterator.next.getClass.getSimpleName should include ("Stackdriver")
+      }
+    }.unsafeRunSync()
+
+  it should "skip Stackdriver when projectId is missing (WARN, no throw)" in:
+    val cfg = MetricsConfig(gcp = GcpMetricsConfig(enabled = true, projectId = None))
+    MetricsRegistry.resource(cfg).use { reg =>
+      cats.effect.IO {
+        reg.composite.getRegistries.asScala.exists(_.getClass.getSimpleName.contains("Stackdriver")) shouldBe false
+      }
+    }.unsafeRunSync()
