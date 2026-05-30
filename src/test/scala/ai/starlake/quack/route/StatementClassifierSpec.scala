@@ -35,3 +35,18 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
   it should "be case-insensitive and tolerate whitespace" in:
     StatementClassifier.classify("  select 1") shouldBe StatementKind.Select
     StatementClassifier.classify("\nINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "strip a leading single-line comment before classifying" in:
+    StatementClassifier.classify("-- a comment\nSELECT 1") shouldBe StatementKind.Select
+    StatementClassifier.classify("-- noop\n-- another\nINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "strip a leading block comment before classifying" in:
+    StatementClassifier.classify("/* preamble */ SELECT 1")           shouldBe StatementKind.Select
+    StatementClassifier.classify("/* multi\n   line */\nCREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+
+  it should "strip mixed comments interleaved with the statement" in:
+    StatementClassifier.classify("-- pre\n/* mid */ UPDATE t SET x = 1 -- trailing") shouldBe StatementKind.Dml
+
+  it should "preserve quoted strings that look like comments" in:
+    // The `--` is inside a string literal and must NOT be treated as a comment.
+    StatementClassifier.classify("INSERT INTO t VALUES ('-- not a comment')") shouldBe StatementKind.Dml
