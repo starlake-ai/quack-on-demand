@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { PoolResponse } from '../api/types';
+import Breadcrumb from '../components/Breadcrumb';
 
 export default function ScalePool() {
   const { tenant, pool } = useParams<{ tenant: string; pool: string }>();
@@ -43,6 +44,14 @@ export default function ScalePool() {
 
   return (
     <form onSubmit={submit}>
+      <Breadcrumb
+        items={[
+          { label: 'Tenants', to: '/tenants' },
+          { label: tenant!,   to: `/tenant/${encodeURIComponent(tenant!)}` },
+          { label: pool!,     to: `/pool/${encodeURIComponent(tenant!)}/${encodeURIComponent(pool!)}` },
+          { label: 'Scale' },
+        ]}
+      />
       <h2>Scale {tenant}/{pool}</h2>
       {err && <p style={{ color: 'red' }}>{err}</p>}
       <p>Current size: {current.nodes.length}. Target size: {target}.</p>
