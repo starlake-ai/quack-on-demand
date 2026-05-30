@@ -175,3 +175,41 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // The second node should still see v1, captured at pool-create time.
     backend.specs.size shouldBe 2
     backend.specs.last.metastore("pgHost") shouldBe "v1"
+
+  // ---------- Per-tenant data residency (issue #20) ----------
+  //
+  // Two tenants in the same manager, each pinned to a different dataPath.
+  // Together these three cases cover the v1.x residency acceptance criteria:
+  //   1. per-tenant dataPath overrides the global default
+  //   2. a tenant with no override inherits the global default
+  //   3. distinct tenants in the same JVM resolve to distinct paths
+
+  private def supWithDefault(default: Map[String, String]): (PoolSupervisor, CapturingBackend) =
+    val stateFile = Files.createTempFile("quack-sup-", ".json")
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, StateStore(stateFile), default)
+    (sup, b)
+
+  "PoolSupervisor.effectiveMetastoreFor" should
+    "return each tenant's overridden dataPath when two tenants coexist" in:
+    val (sup, _) = supWithDefault(Map("dataPath" -> "/data/global"))
+    sup.createTenant(Tenant("eu", Map("dataPath" -> "/data/eu-west"))).unsafeRunSync()
+    sup.createTenant(Tenant("us", Map("dataPath" -> "s3://us-east-data/"))).unsafeRunSync()
+    sup.effectiveMetastoreFor("eu")("dataPath") shouldBe "/data/eu-west"
+    sup.effectiveMetastoreFor("us")("dataPath") shouldBe "s3://us-east-data/"
+
+  it should "fall back to the global default dataPath when a tenant has no override" in:
+    val (sup, _) = supWithDefault(Map("dataPath" -> "/data/global"))
+    sup.createTenant(Tenant("legacy", Map.empty)).unsafeRunSync()
+    sup.effectiveMetastoreFor("legacy")("dataPath") shouldBe "/data/global"
+
+  "PoolSupervisor.createPool" should
+    "pass each tenant's effective dataPath through to the NodeSpec when two tenants share a manager" in:
+    val (sup, backend) = supWithDefault(Map("dataPath" -> "/data/global"))
+    sup.createTenant(Tenant("eu", Map("dataPath" -> "/data/eu-west"))).unsafeRunSync()
+    sup.createTenant(Tenant("us", Map("dataPath" -> "s3://us-east-data/"))).unsafeRunSync()
+    sup.createPool(PoolKey("eu", "sales"), RoleDistribution(0, 0, 1), Map.empty, Map.empty).unsafeRunSync()
+    sup.createPool(PoolKey("us", "sales"), RoleDistribution(0, 0, 1), Map.empty, Map.empty).unsafeRunSync()
+    val byTenant = backend.specs.groupBy(_.poolKey.tenant).view.mapValues(_.head).toMap
+    byTenant("eu").metastore("dataPath") shouldBe "/data/eu-west"
+    byTenant("us").metastore("dataPath") shouldBe "s3://us-east-data/"
