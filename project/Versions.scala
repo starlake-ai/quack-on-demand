@@ -23,4 +23,5 @@ object Versions {
   val jsqlTranspiler = "1.8"
   val starlakeJdbc   = "0.7"
   val duckdb         = "1.5.3.0"
+  val micrometer     = "1.13.6"
 }
