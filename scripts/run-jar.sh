@@ -79,9 +79,48 @@ fi
 # published yet (pre-release / dev), so a fresh clone of the source
 # tree works with the documented invocation regardless of release state.
 
+# Ensure `sbt` is callable. If it isn't on PATH, fetch the official
+# distribution into `.sbt-bootstrap/` under the repo root so a fresh
+# clone can build with zero prior setup. The actual sbt version used by
+# the project comes from `project/build.properties`; we just need any
+# modern launcher.
+SBT_BOOTSTRAP_VERSION="${SBT_BOOTSTRAP_VERSION:-1.12.11}"
+SBT_BOOTSTRAP_ROOT="$REPO_DIR/.sbt-bootstrap"
+SBT_CMD="sbt"
+
+ensure_sbt() {
+  if command -v sbt >/dev/null 2>&1; then
+    SBT_CMD="sbt"
+    return
+  fi
+  local sbt_dir="$SBT_BOOTSTRAP_ROOT/sbt-$SBT_BOOTSTRAP_VERSION"
+  SBT_CMD="$sbt_dir/bin/sbt"
+  if [[ -x "$SBT_CMD" ]]; then
+    echo "using bootstrapped sbt: $SBT_CMD"
+    return
+  fi
+  echo "sbt not on PATH; downloading sbt-$SBT_BOOTSTRAP_VERSION into $SBT_BOOTSTRAP_ROOT/ ..."
+  mkdir -p "$SBT_BOOTSTRAP_ROOT"
+  local tarball="$SBT_BOOTSTRAP_ROOT/sbt-$SBT_BOOTSTRAP_VERSION.tgz"
+  if ! curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_BOOTSTRAP_VERSION}/sbt-${SBT_BOOTSTRAP_VERSION}.tgz" -o "$tarball"; then
+    echo "ERROR: failed to download sbt-$SBT_BOOTSTRAP_VERSION from GitHub releases." >&2
+    rm -f "$tarball"
+    exit 1
+  fi
+  tar xzf "$tarball" -C "$SBT_BOOTSTRAP_ROOT"
+  # The tarball expands to ./sbt/{bin,conf,lib}; pin it by renaming with the version.
+  if [[ -d "$SBT_BOOTSTRAP_ROOT/sbt" ]]; then
+    mv "$SBT_BOOTSTRAP_ROOT/sbt" "$sbt_dir"
+  fi
+  rm -f "$tarball"
+  [[ -x "$SBT_CMD" ]] || { echo "ERROR: bootstrapped sbt did not produce $SBT_CMD" >&2; exit 1; }
+  echo "bootstrapped sbt -> $SBT_CMD"
+}
+
 build_locally() {
-  echo "running 'sbt assembly' (local build)..."
-  sbt assembly
+  ensure_sbt
+  echo "running '$SBT_CMD assembly' (local build)..."
+  "$SBT_CMD" assembly
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
 }
