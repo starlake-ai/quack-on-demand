@@ -33,12 +33,22 @@
 #   SL_QUACK_BOOTSTRAP_TPCH_SF    TPC-H scale factor                       (default 1)
 #   SL_QUACK_BOOTSTRAP_TPCH_SCHEMA DuckLake schema for the seed            (default tpch1)
 #
+#   NUKE=1                        wipe local state (Postgres DB, ducklake/,
+#                                 state/, certs/) before booting. Irreversible.
+#                                 Mirrors run-docker-compose.sh's NUKE flag for
+#                                 the native-jar path.                  (default 0)
+#   SF=N                          shortcut for the TPC-H seed: implies
+#                                 SL_QUACK_BOOTSTRAP_LOAD_TPCH=true and
+#                                 SL_QUACK_BOOTSTRAP_TPCH_SF=N. Works in either
+#                                 BUILD=0 or BUILD=1.                   (default unset)
+#
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
 #   QUACK_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
 #   QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
 #   BUILD=1 ./scripts/run-jar.sh                           # local source build
 #   SL_QUACK_BOOTSTRAP_LOAD_TPCH=true ./scripts/run-jar.sh
+#   NUKE=1 SF=1 ./scripts/run-jar.sh                       # wipe + fresh boot + TPC-H SF=1
 
 set -euo pipefail
 
@@ -51,9 +61,17 @@ DISTRIB_DIR="$REPO_DIR/distrib"
 cd "$REPO_DIR"
 
 BUILD="${BUILD:-0}"
+NUKE="${NUKE:-0}"
 GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
+
+# SF=N is a shortcut for the TPC-H seed: implies SL_QUACK_BOOTSTRAP_LOAD_TPCH=true
+# and SL_QUACK_BOOTSTRAP_TPCH_SF=N. Explicit env vars still win if both are set.
+if [[ -n "${SF:-}" ]]; then
+  export SL_QUACK_BOOTSTRAP_LOAD_TPCH="${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-true}"
+  export SL_QUACK_BOOTSTRAP_TPCH_SF="${SL_QUACK_BOOTSTRAP_TPCH_SF:-$SF}"
+fi
 
 # ---- Resolve jar ----
 if [[ "$BUILD" == "1" ]]; then
@@ -86,6 +104,7 @@ else
       echo "resolved latest snapshot: $version"
       ;;
   esac
+
 
   if [[ "$version" == *-SNAPSHOT ]]; then
     base_url="https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/${version}"
@@ -134,6 +153,38 @@ if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
     echo "WARN: cannot reach Postgres at $pg_user@$pg_host:$pg_port; manager will fail at startup if it cannot persist state." >&2
     echo "      Either start Postgres, set SL_QUACK_STATE_STORAGE=file, or override SL_QUACK_PG_*." >&2
   fi
+fi
+
+# ---- Optional nuke: tear down + wipe before starting ----
+# Mirrors run-docker-compose.sh's NUKE flag for the native-jar path. Stops a
+# running manager (if any), drops the Postgres catalog DB, and wipes local
+# state directories (ducklake/, state/, certs/). Idempotent: missing pieces
+# are skipped silently.
+if [[ "$NUKE" == "1" ]]; then
+  echo "NUKE=1: tearing down state..."
+  # Stop any running manager via the project's own stop script.
+  if curl -sS --max-time 2 "http://${SL_QUACK_ON_DEMAND_HOST:-localhost}:${SL_QUACK_ON_DEMAND_PORT:-20900}/health" >/dev/null 2>&1; then
+    echo "  stopping running manager"
+    "$REPO_DIR/scripts/stop-jar.sh" >/dev/null 2>&1 || true
+  fi
+  # Drop the Postgres catalog DB (will be recreated below). Requires
+  # Postgres to be reachable; otherwise warn and continue with the local
+  # wipes — they're still useful and the Postgres side is harmless when
+  # the DB is later recreated by the bootstrap step.
+  if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
+    echo "  dropping Postgres database: $pg_dbname"
+    PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
+       -tAc "DROP DATABASE IF EXISTS \"$pg_dbname\"" >/dev/null
+  elif [[ "$state_mode" == "postgres" ]]; then
+    echo "  WARN: Postgres unreachable; skipping DB drop (local wipes still proceed)" >&2
+  fi
+  # Wipe local state directories that the JVM and child quack nodes write to.
+  for d in "$REPO_DIR/ducklake" "$REPO_DIR/state" "$REPO_DIR/certs"; do
+    if [[ -d "$d" ]]; then
+      echo "  wiping $d"
+      rm -rf "$d"
+    fi
+  done
 fi
 
 # ---- Bootstrap catalog DB (idempotent) ----
