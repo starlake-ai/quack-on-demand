@@ -9,6 +9,9 @@ import ai.starlake.quack.edge.config.{
   OAuthConfig, SessionConfig
 }
 import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.observability.metrics.{
+  MetricsBindings, MetricsConfig, MetricsConfigCodec, MetricsEndpoint, MetricsRegistry, StatementInstruments
+}
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -58,6 +61,7 @@ object Main extends IOApp.Simple with LazyLogging:
   given ConfigReader[JwtAuthConfig]        = deriveReader[JwtAuthConfig]
   given ConfigReader[OAuthConfig]          = deriveReader[OAuthConfig]
   given ConfigReader[AuthenticationConfig] = deriveReader[AuthenticationConfig]
+  import MetricsConfigCodec.given
 
   def run: IO[Unit] =
     val source  = ConfigSource.default
@@ -65,6 +69,7 @@ object Main extends IOApp.Simple with LazyLogging:
     val edgeCfg = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val authCfg = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
+    val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
     val sessionCfg = SessionConfig(
       slProjectId  = "",
@@ -155,8 +160,6 @@ object Main extends IOApp.Simple with LazyLogging:
     val authHandlers      = new AuthHandlers(authService, sessionTokens)
     val stmtHistory       = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers   = new StatementHistoryHandlers(stmtHistory)
-    val mgr      = new ManagerServer(mgrCfg, edgeCfg, pools, nodes, tenants, health, aclHandlers, authHandlers, sessionTokens, authService.hasProviders, historyHandlers, catalogHandlers)
-
     val sessions = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
     val client   = new QuackHttpClient(arrowAllocator)
@@ -258,7 +261,16 @@ object Main extends IOApp.Simple with LazyLogging:
         createTenantIO *> createPoolIO
     }
 
-    val program =
+    def runWithMetrics(
+        metricsReg: MetricsRegistry,
+        metricsEndpoint: MetricsEndpoint,
+        stmtInstruments: StatementInstruments
+    ): IO[Unit] =
+      val mgr = new ManagerServer(
+        mgrCfg, edgeCfg, pools, nodes, tenants, health,
+        aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
+        historyHandlers, catalogHandlers, metricsEndpoint
+      )
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
       bootstrapIO *>
@@ -277,5 +289,21 @@ object Main extends IOApp.Simple with LazyLogging:
             IO.never[Unit]
         }
       }
+
+    val program: IO[Unit] =
+      if !metricsCfg.enabled then
+        // Master toggle off — pass a no-op registry so the rest of the
+        // pipeline stays total. The /metrics route also surfaces as 404
+        // because dummy.prometheus = None.
+        val noopEndpoint = new MetricsEndpoint(MetricsRegistry.dummy.prometheus, () => ())
+        val noopInstruments = new StatementInstruments(MetricsRegistry.dummy.composite)
+        runWithMetrics(MetricsRegistry.dummy, noopEndpoint, noopInstruments)
+      else
+        MetricsRegistry.resource(metricsCfg).use { metricsReg =>
+          val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
+          val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
+          val stmtInstruments = new StatementInstruments(metricsReg.composite)
+          runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
+        }
 
     program
