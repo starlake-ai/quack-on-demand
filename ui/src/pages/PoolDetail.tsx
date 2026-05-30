@@ -97,11 +97,16 @@ export default function PoolDetail() {
             const host = effectiveHost(cfg.flightSqlHost);
             const port = cfg.flightSqlPort;
             const scheme = cfg.flightSqlTls ? 'arrow-flight-sql' : 'arrow-flight-sql';
+            // Encode tenant/pool individually so `<user>` (and the `/`
+            // separators) stay literal in the URL — encoding the whole
+            // string would turn `<user>` into `%3Cuser%3E` and confuse
+            // operators copy-pasting the template.
+            const userQuery = `${encodeURIComponent(tenant!)}/${encodeURIComponent(pool!)}/<user>`;
             const user = `${tenant}/${pool}/<user>`;
             const tlsQuery = cfg.flightSqlTls
               ? 'useEncryption=true&disableCertificateVerification=true'
               : 'useEncryption=false';
-            const jdbc = `jdbc:${scheme}://${host}:${port}?${tlsQuery}&user=${encodeURIComponent(user)}&password=<password>`;
+            const jdbc = `jdbc:${scheme}://${host}:${port}?${tlsQuery}&user=${userQuery}&password=<password>`;
             const adbcScheme = cfg.flightSqlTls ? 'grpc+tls' : 'grpc';
             const adbcUri = `${adbcScheme}://${host}:${port}`;
             const odbc = `Driver={Arrow Flight SQL ODBC Driver};Host=${host};Port=${port};UseEncryption=${cfg.flightSqlTls ? '1' : '0'};UID=${user};PWD=<password>`;
