@@ -22,6 +22,39 @@ scrape_configs:
     metrics_path: /metrics
 ```
 
+### 2.1 Local stack (Prometheus + Grafana via docker compose)
+
+For testing on a laptop, this directory ships a tiny compose stack that
+scrapes the manager running on the host and serves a Grafana with the
+dashboard auto-loaded.
+
+```bash
+# 1. Start the manager on the host (Prometheus sink is the default).
+./scripts/run-jar.sh                       # or NUKE=1 SF=1 ./scripts/run-jar.sh
+
+# 2. Bring up Prometheus + Grafana.
+docker compose -f observability/docker-compose.yml up -d
+
+# 3. Open the UIs.
+# Prometheus:    http://localhost:9090           (try query: up)
+# Grafana:       http://localhost:3000           (anonymous admin; no login)
+#                Dashboard: "Quack-on-Demand — Operator Overview"
+```
+
+Both containers reach the host's `:20900` via `host.docker.internal`,
+which resolves automatically on Docker Desktop and is mapped through
+`extra_hosts` for Linux. Grafana is preprovisioned with the Prometheus
+datasource (UID `prometheus-local`) so the bundled dashboard renders
+without manual selection.
+
+```bash
+# Stop the stack (keeps data volumes; metrics history is preserved).
+docker compose -f observability/docker-compose.yml down
+
+# Wipe data volumes too (fresh start).
+docker compose -f observability/docker-compose.yml down -v
+```
+
 ## 3. Cloud push (`sink = "aws" | "azure" | "gcp"`)
 
 When a cloud sink is selected the manager pushes metrics on a fixed cadence (default 60 s) using the respective cloud SDK. The `/metrics` Prometheus endpoint is **not** exposed in cloud-push mode.

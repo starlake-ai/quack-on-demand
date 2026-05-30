@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry } from '../api/types';
 
@@ -19,13 +19,24 @@ const POLL_MS = 2000;
   * from the backend's rolling-window per-node histogram; QPS is derived
   * client-side from the delta in totalServed between polls. */
 export default function Nodes() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr]   = useState<string | null>(null);
   const [tenants, setTenants] = useState<string[]>([]);
-  const [filter, setFilter]   = useState<string>('');
+  // Seed the tenant filter from `?tenant=` so links from TenantDetail
+  // ("Live nodes for this tenant") land on a pre-filtered view.
+  const [filter, setFilter]   = useState<string>(searchParams.get('tenant') ?? '');
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
   const prev = useRef<Record<string, Sample>>({});
+
+  // Keep the URL and the filter dropdown in sync so a deep-linked view
+  // stays shareable and the back button works.
+  function applyFilter(next: string) {
+    setFilter(next);
+    if (next) setSearchParams({ tenant: next });
+    else setSearchParams({});
+  }
 
   function refresh() {
     api.statementHistory(50)
@@ -79,7 +90,7 @@ export default function Nodes() {
         <h1>Quack Nodes</h1>
         <label style={{ marginBottom: 0 }}>
           Tenant filter
-          <select value={filter} onChange={e => setFilter(e.target.value)} style={{ minWidth: 160 }}>
+          <select value={filter} onChange={e => applyFilter(e.target.value)} style={{ minWidth: 160 }}>
             <option value="">All tenants</option>
             {tenants.map(t => <option key={t} value={t}>{t}</option>)}
           </select>

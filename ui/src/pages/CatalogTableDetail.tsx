@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CatalogTableDetailResponse } from '../api/types';
+import Breadcrumb from '../components/Breadcrumb';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -29,17 +30,24 @@ export default function CatalogTableDetail() {
 
   const totalBytes = detail.dataFiles.reduce((s, f) => s + f.sizeBytes, 0);
 
+  const tEnc = encodeURIComponent(tenant!);
+  const sEnc = encodeURIComponent(schema!);
   return (
     <div>
-      <nav style={{ marginBottom: 12, color: '#555' }}>
-        <Link to={`/catalog?tenant=${encodeURIComponent(tenant!)}`}>{tenant}</Link>
-        {' / '}
-        <Link to={`/catalog?tenant=${encodeURIComponent(tenant!)}&schema=${encodeURIComponent(schema!)}`}>
-          {schema}
-        </Link>
-        {' / '}
-        <strong>{table}</strong>
-      </nav>
+      <Breadcrumb
+        items={[
+          { label: 'Catalog', to: '/catalog' },
+          { label: tenant!,   to: `/catalog?tenant=${tEnc}` },
+          { label: schema!,   to: `/catalog?tenant=${tEnc}&schema=${sEnc}` },
+          { label: table! },
+        ]}
+      />
+
+      <div style={{ marginBottom: 16, fontSize: '0.9rem' }}>
+        <Link to={`/tenant/${tEnc}`}>Open tenant {tenant} →</Link>
+        <span style={{ color: '#bbb', margin: '0 8px' }}>·</span>
+        <Link to={`/nodes?tenant=${tEnc}`}>Live nodes for this tenant</Link>
+      </div>
 
       <section style={{ marginBottom: 24 }}>
         <h3 style={{ marginTop: 0 }}>Summary</h3>
