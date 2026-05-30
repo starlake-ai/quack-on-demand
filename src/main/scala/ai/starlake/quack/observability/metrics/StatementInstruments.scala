@@ -39,3 +39,11 @@ final class StatementInstruments(registry: MeterRegistry):
         "tenant", tenant, "pool", pool, "status", status
       ).increment()
     resolveTimer(tenant, pool, status).record(Duration.ofMillis(durationMs))
+
+object StatementInstruments:
+
+  /** Singleton no-op used when callers don't need real metric recording.
+    * Backed by an empty `CompositeMeterRegistry` so `record(...)` is a
+    * silent fan-out to zero children. Allocated once at class load. */
+  val noop: StatementInstruments =
+    new StatementInstruments(new io.micrometer.core.instrument.composite.CompositeMeterRegistry())
