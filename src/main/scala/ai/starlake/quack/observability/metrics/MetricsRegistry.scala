@@ -55,4 +55,20 @@ object MetricsRegistry extends LazyLogging:
         Some(p)
       else None
 
+    if cfg.aws.enabled then
+      try
+        import io.micrometer.cloudwatch2.{CloudWatchConfig, CloudWatchMeterRegistry}
+        import software.amazon.awssdk.services.cloudwatch.CloudWatchAsyncClient
+
+        val awsCfg = new CloudWatchConfig:
+          override def get(key: String): String = null
+          override def namespace(): String = cfg.aws.namespace
+          override def step(): java.time.Duration = java.time.Duration.ofSeconds(cfg.aws.stepSeconds)
+
+        val client = CloudWatchAsyncClient.builder().build()
+        val cw     = new CloudWatchMeterRegistry(awsCfg, io.micrometer.core.instrument.Clock.SYSTEM, client)
+        composite.add(cw)
+      catch case t: Throwable =>
+        logger.warn(s"aws CloudWatch metrics disabled: ${t.getMessage}")
+
     new MetricsRegistry(composite, prom)
