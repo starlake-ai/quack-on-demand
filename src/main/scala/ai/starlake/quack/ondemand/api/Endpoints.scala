@@ -93,3 +93,30 @@ object Endpoints:
     base.get.in("node" / "statements")
         .in(query[Option[Int]]("limit"))
         .out(jsonBody[StatementHistoryResponse])
+
+  // ----- Catalog browser -----
+
+  val listSchemasEndpoint: PublicEndpoint[String, Unit, List[CatalogSchemaEntry], Any] =
+    endpoint
+      .get
+      .in("api" / "catalog" / "tenant" / path[String]("tenant") / "schemas")
+      .out(jsonBody[List[CatalogSchemaEntry]])
+      .description("List schemas in the DuckLake catalog backing the tenant.")
+
+  val listTablesEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogTableEntry], Any] =
+    endpoint
+      .get
+      .in("api" / "catalog" / "tenant" / path[String]("tenant") /
+          "schemas" / path[String]("schema") / "tables")
+      .out(jsonBody[List[CatalogTableEntry]])
+      .description("List tables in a schema of the tenant's catalog.")
+
+  val getTableEndpoint: PublicEndpoint[(String, String, String), String, CatalogTableDetailResponse, Any] =
+    endpoint
+      .get
+      .in("api" / "catalog" / "tenant" / path[String]("tenant") /
+          "schemas" / path[String]("schema") /
+          "tables"  / path[String]("table"))
+      .out(jsonBody[CatalogTableDetailResponse])
+      .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
+      .description("Get one table's columns + parquet data files.")
