@@ -107,6 +107,11 @@ lazy val root = (project in file("."))
       Dependencies.blobstoreGcs,
       Dependencies.blobstoreAzure,
       Dependencies.duckdbJdbc,
+      Dependencies.micrometerCore,
+      Dependencies.micrometerPrometheus,
+      Dependencies.micrometerCloudwatch,
+      Dependencies.micrometerAzure,
+      Dependencies.micrometerStackdriver,
       Dependencies.scalaTest,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test

@@ -34,3 +34,10 @@ final class SessionRegistry:
       case Some(s) => Some(s.copy(pinnedNodeId = None, txOpen = false))
       case None    => None
     }
+
+  /** Current number of open sessions. */
+  def size: Int = sessions.size
+
+  /** Current number of open sessions inside an explicit transaction. */
+  def inTransactionCount: Int =
+    sessions.values.count(_.txOpen)

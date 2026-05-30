@@ -9,6 +9,9 @@ import ai.starlake.quack.edge.config.{
   OAuthConfig, SessionConfig
 }
 import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.observability.metrics.{
+  MetricsBindings, MetricsConfig, MetricsConfigCodec, MetricsEndpoint, MetricsRegistry, StatementInstruments
+}
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -58,6 +61,7 @@ object Main extends IOApp.Simple with LazyLogging:
   given ConfigReader[JwtAuthConfig]        = deriveReader[JwtAuthConfig]
   given ConfigReader[OAuthConfig]          = deriveReader[OAuthConfig]
   given ConfigReader[AuthenticationConfig] = deriveReader[AuthenticationConfig]
+  import MetricsConfigCodec.given
 
   def run: IO[Unit] =
     val source  = ConfigSource.default
@@ -65,6 +69,7 @@ object Main extends IOApp.Simple with LazyLogging:
     val edgeCfg = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val authCfg = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
+    val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
     val sessionCfg = SessionConfig(
       slProjectId  = "",
@@ -155,8 +160,6 @@ object Main extends IOApp.Simple with LazyLogging:
     val authHandlers      = new AuthHandlers(authService, sessionTokens)
     val stmtHistory       = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers   = new StatementHistoryHandlers(stmtHistory)
-    val mgr      = new ManagerServer(mgrCfg, edgeCfg, pools, nodes, tenants, health, aclHandlers, authHandlers, sessionTokens, authService.hasProviders, historyHandlers, catalogHandlers)
-
     val sessions = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
     val client   = new QuackHttpClient(arrowAllocator)
@@ -189,26 +192,6 @@ object Main extends IOApp.Simple with LazyLogging:
       else
         logger.info(s"SQL ACL enabled (file-based, base-path=${aclCfg.basePath}, dialect=${aclCfg.dialect})")
         new AclStatementValidator(aclCfg, sessionCfg)
-
-    val fsRouter = new FlightSqlRouter(sup, sessions, tracker, adapter, edgeCfg.tenantClaim, aclValidator, stmtHistory)
-
-    // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
-    // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
-    // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
-    // - IO.attempt routes that, but treats raw `Error`s as fatal.
-    val edgeIO: IO[FlightEdgeServer] = IO.delay {
-      try
-        val srv = new FlightEdgeServer(
-          EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
-                     edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
-                     edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
-          fsRouter,
-          authService)
-        srv.start()
-        srv
-      catch case t: Throwable =>
-        throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
-    }
 
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
@@ -258,7 +241,36 @@ object Main extends IOApp.Simple with LazyLogging:
         createTenantIO *> createPoolIO
     }
 
-    val program =
+    def runWithMetrics(
+        metricsReg: MetricsRegistry,
+        metricsEndpoint: MetricsEndpoint,
+        stmtInstruments: StatementInstruments
+    ): IO[Unit] =
+      val fsRouter = new FlightSqlRouter(sup, sessions, tracker, adapter, edgeCfg.tenantClaim, aclValidator, stmtHistory, stmtInstruments)
+
+      // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
+      // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
+      // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
+      // - IO.attempt routes that, but treats raw `Error`s as fatal.
+      val edgeIO: IO[FlightEdgeServer] = IO.delay {
+        try
+          val srv = new FlightEdgeServer(
+            EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
+                       edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
+                       edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
+            fsRouter,
+            authService)
+          srv.start()
+          srv
+        catch case t: Throwable =>
+          throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
+      }
+
+      val mgr = new ManagerServer(
+        mgrCfg, edgeCfg, pools, nodes, tenants, health,
+        aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
+        historyHandlers, catalogHandlers, metricsEndpoint
+      )
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
       bootstrapIO *>
@@ -276,6 +288,14 @@ object Main extends IOApp.Simple with LazyLogging:
             logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
             IO.never[Unit]
         }
+      }
+
+    val program: IO[Unit] =
+      MetricsRegistry.resource(metricsCfg).use { metricsReg =>
+        val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
+        val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
+        val stmtInstruments = new StatementInstruments(metricsReg.composite)
+        IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
       }
 
     program

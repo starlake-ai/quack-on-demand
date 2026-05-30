@@ -2,11 +2,13 @@ package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode}
+import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.StateStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -17,6 +19,9 @@ import scala.collection.concurrent.TrieMap
 class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private val poolKey: PoolKey = PoolKey("acme", "sales")
+
+  private val mmReg = new SimpleMeterRegistry
+  private val si    = new StatementInstruments(mmReg)
 
   /** Builds a fresh stub response each call so tests don't share ArrowReader
     * instances (each reader is single-use). */
@@ -53,13 +58,18 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
 
     val sessions = new SessionRegistry
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter, tenantClaim = "tenant")
+    val router = new FlightSqlRouter(sup, sessions, tracker, adapter, tenantClaim = "tenant",
+                                     stmtInstruments = si)
     (router, sessions, node)
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
+    val beforeCount = mmReg.counter("statements_total",
+        "tenant", "acme", "pool", "sales", "status", "ok").count()
     val (router, _, node) = setup()
     val out = router.execute("c-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
     out shouldBe a [Right[_, _]]
+    mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok")
+      .count() shouldBe (beforeCount + 1.0)
 
   it should "pin the session inside a BEGIN…COMMIT block" in:
     val (router, sessions, node) = setup()
