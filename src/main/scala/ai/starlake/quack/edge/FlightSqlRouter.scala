@@ -20,7 +20,11 @@ final class FlightSqlRouter(
     val adapter: QuackHttpAdapter,
     val tenantClaim: String,
     val validator: StatementValidator = StatementValidator.allowAll,
-    val history: StatementHistoryStore = new StatementHistoryStore()
+    val history: StatementHistoryStore = new StatementHistoryStore(),
+    val stmtInstruments: ai.starlake.quack.observability.metrics.StatementInstruments =
+      new ai.starlake.quack.observability.metrics.StatementInstruments(
+        new io.micrometer.core.instrument.composite.CompositeMeterRegistry()
+      )
 ):
 
   private def record(
@@ -33,6 +37,7 @@ final class FlightSqlRouter(
       nodeId = nodeId, sql = sql, durationMs = durationMs,
       status = status, error = error
     ))
+    stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
 
   def session(connectionId: String) = sessions.get(connectionId)
 
