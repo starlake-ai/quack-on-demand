@@ -64,4 +64,11 @@ object Dependencies {
 
   // DuckDB JDBC (for catalog resolver)
   val duckdbJdbc            = "org.duckdb" % "duckdb_jdbc" % Versions.duckdb
+
+  // Micrometer metrics (prometheus, cloudwatch, azure, stackdriver registries)
+  val micrometerCore        = "io.micrometer" % "micrometer-core"                   % Versions.micrometer
+  val micrometerPrometheus  = "io.micrometer" % "micrometer-registry-prometheus"    % Versions.micrometer
+  val micrometerCloudwatch  = "io.micrometer" % "micrometer-registry-cloudwatch2"   % Versions.micrometer
+  val micrometerAzure       = "io.micrometer" % "micrometer-registry-azure-monitor" % Versions.micrometer
+  val micrometerStackdriver = "io.micrometer" % "micrometer-registry-stackdriver"   % Versions.micrometer
 }
