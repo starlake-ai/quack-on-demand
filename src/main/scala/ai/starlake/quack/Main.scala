@@ -193,26 +193,6 @@ object Main extends IOApp.Simple with LazyLogging:
         logger.info(s"SQL ACL enabled (file-based, base-path=${aclCfg.basePath}, dialect=${aclCfg.dialect})")
         new AclStatementValidator(aclCfg, sessionCfg)
 
-    val fsRouter = new FlightSqlRouter(sup, sessions, tracker, adapter, edgeCfg.tenantClaim, aclValidator, stmtHistory)
-
-    // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
-    // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
-    // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
-    // - IO.attempt routes that, but treats raw `Error`s as fatal.
-    val edgeIO: IO[FlightEdgeServer] = IO.delay {
-      try
-        val srv = new FlightEdgeServer(
-          EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
-                     edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
-                     edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
-          fsRouter,
-          authService)
-        srv.start()
-        srv
-      catch case t: Throwable =>
-        throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
-    }
-
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
     // updates the tracker.
@@ -266,6 +246,26 @@ object Main extends IOApp.Simple with LazyLogging:
         metricsEndpoint: MetricsEndpoint,
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
+      val fsRouter = new FlightSqlRouter(sup, sessions, tracker, adapter, edgeCfg.tenantClaim, aclValidator, stmtHistory, stmtInstruments)
+
+      // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
+      // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
+      // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
+      // - IO.attempt routes that, but treats raw `Error`s as fatal.
+      val edgeIO: IO[FlightEdgeServer] = IO.delay {
+        try
+          val srv = new FlightEdgeServer(
+            EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
+                       edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
+                       edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
+            fsRouter,
+            authService)
+          srv.start()
+          srv
+        catch case t: Throwable =>
+          throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
+      }
+
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, health,
         aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
