@@ -32,6 +32,12 @@ object MetricsRegistry extends LazyLogging:
   def resource(cfg: MetricsConfig): Resource[IO, MetricsRegistry] =
     Resource.make(IO.delay(create(cfg)))(reg => IO.delay(reg.close()))
 
+  /** A no-op registry — used when `metrics.enabled=false` so callers can keep
+    * a single constructor signature. The composite has no children, so
+    * counters/timers/gauges registered against it are silently discarded. */
+  val dummy: MetricsRegistry =
+    new MetricsRegistry(new CompositeMeterRegistry(), prometheus = None)
+
   private def create(cfg: MetricsConfig): MetricsRegistry =
     val composite = new CompositeMeterRegistry()
 

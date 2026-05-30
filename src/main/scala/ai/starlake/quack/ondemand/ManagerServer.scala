@@ -26,7 +26,8 @@ final class ManagerServer(
     sessions: SessionTokenStore,
     authEnabled: Boolean,
     statementHistory: StatementHistoryHandlers,
-    catalog: Option[CatalogHandlers]
+    catalog: Option[CatalogHandlers],
+    metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -111,6 +112,8 @@ final class ManagerServer(
       Endpoints.statementHistory.serverLogic(statementHistory.recent)
     )
 
+    val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
+
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       Endpoints.createPool.serverLogic(pools.createPool),
       Endpoints.scalePool.serverLogic(pools.scalePool),
@@ -135,7 +138,7 @@ final class ManagerServer(
           authEnabled   = authEnabled
         )
       )))
-    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints
+    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 
