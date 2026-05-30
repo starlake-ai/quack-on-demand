@@ -57,6 +57,9 @@ ui/dist/
 # Runtime logs from run-jar.sh
 /logs/
 
+# Bootstrapped sbt (run-jar.sh downloads here when sbt is not on PATH)
+/.sbt-bootstrap/
+
 # IDE / OS
 .bsp/
 .metals/
