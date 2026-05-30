@@ -86,6 +86,19 @@ build_locally() {
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
 }
 
+# Used in the Maven-Central-fallback path only. Reuses an existing assembly
+# jar if one is sitting in distrib/, saving ~30-45s of sbt assembly. `BUILD=1`
+# bypasses this and always rebuilds.
+use_local_jar_or_build() {
+  JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
+  if [[ -n "$JAR" ]]; then
+    echo "using existing local jar: $JAR"
+    echo "  (BUILD=1 ./scripts/run-jar.sh to force a fresh build)"
+  else
+    build_locally
+  fi
+}
+
 if [[ "$BUILD" == "1" ]]; then
   echo "BUILD=1: local build"
   build_locally
@@ -130,16 +143,16 @@ else
   esac
 
   if [[ -z "$version" ]]; then
-    # Resolution failed -> local build fallback.
-    build_locally
+    # Resolution failed -> reuse local jar if present, else build.
+    use_local_jar_or_build
   elif [[ "$version" == *-SNAPSHOT ]]; then
     base_url="https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/${version}"
     JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
     # Snapshots: always re-download (same version label can ship new bits).
     echo "downloading snapshot $version (always refreshed)..."
     if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
-      echo "WARN: snapshot download failed; falling back to local build." >&2
-      build_locally
+      echo "WARN: snapshot download failed; falling back to local jar / build." >&2
+      use_local_jar_or_build
     fi
   else
     base_url="https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${version}"
@@ -147,8 +160,8 @@ else
     if [[ ! -f "$JAR" ]]; then
       echo "downloading $version from Maven Central..."
       if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
-        echo "WARN: release download failed; falling back to local build." >&2
-        build_locally
+        echo "WARN: release download failed; falling back to local jar / build." >&2
+        use_local_jar_or_build
       fi
     else
       echo "using cached jar: $JAR"
