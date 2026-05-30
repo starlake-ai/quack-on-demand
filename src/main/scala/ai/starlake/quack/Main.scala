@@ -303,7 +303,10 @@ object Main extends IOApp.Simple with LazyLogging:
           val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
           val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
           val stmtInstruments = new StatementInstruments(metricsReg.composite)
-          runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
+          // Warm the MultiGauges once so the first /metrics scrape returns
+          // non-empty rows even if it arrives before the first scraper-triggered
+          // refresh (e.g. immediately after manager start).
+          IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
         }
 
     program
