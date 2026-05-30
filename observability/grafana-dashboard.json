@@ -651,7 +651,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "jvm_threads_live",
+          "expr": "jvm_threads_live_threads",
           "legendFormat": "Live Threads",
           "refId": "A"
         }

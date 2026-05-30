@@ -102,5 +102,5 @@ export SL_QUACK_METRICS_REGION=eu-west-1
 - `flightsql_sessions_active` — gauge
 - `jvm_memory_used_bytes` — gauge (Micrometer JVM binder)
 - `jvm_gc_pause_seconds_sum` — counter (Micrometer JVM binder)
-- `jvm_threads_live` — gauge (Micrometer JVM binder)
+- `jvm_threads_live_threads` — gauge (Micrometer JVM binder)
 - `process_uptime_seconds` — gauge (Micrometer process binder)
