@@ -13,24 +13,29 @@ import java.time.Duration
   * cleanly in CloudWatch / Stackdriver / Azure as count+sum statistics. */
 final class StatementInstruments(registry: MeterRegistry):
 
-  private val timerBuilder: (String, String, String) => Timer = (tenant, pool, status) =>
-    Timer.builder("statement_duration_seconds")
-      .tag("tenant", tenant)
-      .tag("pool",   pool)
-      .tag("status", status)
-      .publishPercentileHistogram()
-      .serviceLevelObjectives(
-        Duration.ofMillis(1),
-        Duration.ofMillis(10),
-        Duration.ofMillis(100),
-        Duration.ofSeconds(1),
-        Duration.ofSeconds(10)
-      )
-      .register(registry)
+  private val timerCache = new java.util.concurrent.ConcurrentHashMap[(String, String, String), Timer]()
+
+  private def resolveTimer(tenant: String, pool: String, status: String): Timer =
+    timerCache.computeIfAbsent(
+      (tenant, pool, status),
+      _ => Timer.builder("statement_duration_seconds")
+        .tag("tenant", tenant)
+        .tag("pool",   pool)
+        .tag("status", status)
+        .publishPercentileHistogram()
+        .serviceLevelObjectives(
+          Duration.ofMillis(1),
+          Duration.ofMillis(10),
+          Duration.ofMillis(100),
+          Duration.ofSeconds(1),
+          Duration.ofSeconds(10)
+        )
+        .register(registry)
+    )
 
   /** Record one completed statement: increment the counter, observe the timer. */
   def record(tenant: String, pool: String, status: String, durationMs: Long): Unit =
     registry.counter("statements_total",
         "tenant", tenant, "pool", pool, "status", status
       ).increment()
-    timerBuilder(tenant, pool, status).record(Duration.ofMillis(durationMs))
+    resolveTimer(tenant, pool, status).record(Duration.ofMillis(durationMs))
