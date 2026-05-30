@@ -74,50 +74,82 @@ if [[ -n "${SF:-}" ]]; then
 fi
 
 # ---- Resolve jar ----
-if [[ "$BUILD" == "1" ]]; then
-  echo "BUILD=1: running 'sbt assembly'..."
+# BUILD=1 always builds locally. BUILD=0 (default) tries Maven Central
+# first and falls back to `sbt assembly` if the artifact hasn't been
+# published yet (pre-release / dev), so a fresh clone of the source
+# tree works with the documented invocation regardless of release state.
+
+build_locally() {
+  echo "running 'sbt assembly' (local build)..."
   sbt assembly
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
+}
+
+if [[ "$BUILD" == "1" ]]; then
+  echo "BUILD=1: local build"
+  build_locally
 else
   mkdir -p "$JAR_CACHE_DIR"
 
+  # Resolve the latest published version. The trailing `|| true` keeps
+  # the function exit code at 0 even when curl 404s or grep finds nothing
+  # (otherwise `set -e` + `pipefail` would kill the script before the
+  # empty-result fallback can fire). `2>/dev/null` silences curl's error
+  # messages so the "no published release" path stays clean.
   resolve_latest_release() {
-    curl -fsSL "https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" \
-      | grep -oE '<release>[^<]+</release>' | sed 's/<[^>]*>//g' | head -1
+    { curl -fsSL "https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" 2>/dev/null \
+        | grep -oE '<release>[^<]+</release>' | sed 's/<[^>]*>//g' | head -1; } || true
   }
   resolve_latest_snapshot() {
-    curl -fsSL "https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" \
-      | grep -oE '<latest>[^<]+</latest>' | sed 's/<[^>]*>//g' | head -1
+    { curl -fsSL "https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" 2>/dev/null \
+        | grep -oE '<latest>[^<]+</latest>' | sed 's/<[^>]*>//g' | head -1; } || true
   }
 
+  # Belt-and-suspenders: also wrap the substitution with `|| true`, so an
+  # accidental non-zero from the function never aborts the script under
+  # `set -e`. The fall-back branch below picks up the empty result.
   version="${QUACK_VERSION:-latest}"
   case "$version" in
     latest)
-      version="$(resolve_latest_release)"
-      [[ -n "$version" ]] || { echo "ERROR: failed to resolve latest release from Maven Central." >&2; exit 1; }
-      echo "resolved latest release: $version"
+      version="$(resolve_latest_release || true)"
+      if [[ -n "$version" ]]; then
+        echo "resolved latest release: $version"
+      else
+        echo "WARN: no release found on Maven Central for ${GROUP_PATH}/${ARTIFACT}; falling back to local build." >&2
+      fi
       ;;
     latest-snapshot)
-      version="$(resolve_latest_snapshot)"
-      [[ -n "$version" ]] || { echo "ERROR: failed to resolve latest snapshot from Central snapshots repo." >&2; exit 1; }
-      echo "resolved latest snapshot: $version"
+      version="$(resolve_latest_snapshot || true)"
+      if [[ -n "$version" ]]; then
+        echo "resolved latest snapshot: $version"
+      else
+        echo "WARN: no snapshot found in Central snapshots repo; falling back to local build." >&2
+      fi
       ;;
   esac
 
-
-  if [[ "$version" == *-SNAPSHOT ]]; then
+  if [[ -z "$version" ]]; then
+    # Resolution failed -> local build fallback.
+    build_locally
+  elif [[ "$version" == *-SNAPSHOT ]]; then
     base_url="https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/${version}"
     JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
     # Snapshots: always re-download (same version label can ship new bits).
     echo "downloading snapshot $version (always refreshed)..."
-    curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR"
+    if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
+      echo "WARN: snapshot download failed; falling back to local build." >&2
+      build_locally
+    fi
   else
     base_url="https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${version}"
     JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
     if [[ ! -f "$JAR" ]]; then
       echo "downloading $version from Maven Central..."
-      curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR"
+      if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
+        echo "WARN: release download failed; falling back to local build." >&2
+        build_locally
+      fi
     else
       echo "using cached jar: $JAR"
     fi
