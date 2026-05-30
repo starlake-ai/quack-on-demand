@@ -20,30 +20,35 @@ trait PostgresFixture:
   def withCatalog[A](catalogPrefix: String)(test: (DuckLakeCatalogReader, Path) => A): A =
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
-
-    createDatabase(dbName)
-    var reader: DuckLakeCatalogReader = null
     try
-      seedCatalog(dbName, dataPath)
-      val meta = Map(
-        "pgHost"     -> pgHost,
-        "pgPort"     -> pgPort.toString,
-        "pgUser"     -> pgUser,
-        "pgPassword" -> pgPass,
-        "dbName"     -> dbName,
-        "schemaName" -> "main",
-        "dataPath"   -> dataPath.toString
-      )
-      reader = DuckLakeCatalogReader(meta)
-      test(reader, dataPath)
+      createDatabase(dbName)
+      try
+        seedCatalog(dbName, dataPath)
+        val meta = Map(
+          "pgHost"     -> pgHost,
+          "pgPort"     -> pgPort.toString,
+          "pgUser"     -> pgUser,
+          "pgPassword" -> pgPass,
+          "dbName"     -> dbName,
+          "schemaName" -> "main",
+          "dataPath"   -> dataPath.toString
+        )
+        val reader = DuckLakeCatalogReader(meta)
+        try test(reader, dataPath)
+        finally quietly(reader.close())
+      finally quietly(dropDatabase(dbName))
     finally
-      if reader != null then reader.close()
-      dropDatabase(dbName)
-      if Files.exists(dataPath) then
-        Files
-          .walk(dataPath)
-          .sorted(java.util.Comparator.reverseOrder())
-          .forEach(p => Files.deleteIfExists(p))
+      quietly {
+        if Files.exists(dataPath) then
+          Files
+            .walk(dataPath)
+            .sorted(java.util.Comparator.reverseOrder())
+            .forEach(p => Files.deleteIfExists(p))
+      }
+
+  private def quietly(op: => Unit): Unit =
+    try op
+    catch case _: Throwable => ()
 
   private def createDatabase(dbName: String): Unit =
     runPsql("postgres", s"""CREATE DATABASE "$dbName"""")
