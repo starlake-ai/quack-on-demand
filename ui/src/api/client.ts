@@ -18,6 +18,9 @@ import type {
   LoginResponse,
   WhoamiResponse,
   StatementHistoryResponse,
+  CatalogSchemaEntry,
+  CatalogTableEntry,
+  CatalogTableDetailResponse,
 } from './types';
 
 const BASE = '/api';
@@ -105,4 +108,16 @@ export const api = {
   // Recent statement history (newest first)
   statementHistory: (limit = 50) =>
     get<StatementHistoryResponse>(`/node/statements?limit=${limit}`),
+
+  // Catalog browser
+  listCatalogSchemas: (tenant: string) =>
+    get<CatalogSchemaEntry[]>(`/catalog/tenant/${encodeURIComponent(tenant)}/schemas`),
+  listCatalogTables: (tenant: string, schema: string) =>
+    get<CatalogTableEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables`
+    ),
+  getCatalogTable: (tenant: string, schema: string, table: string) =>
+    get<CatalogTableDetailResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
+    ),
 };

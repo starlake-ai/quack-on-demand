@@ -25,7 +25,8 @@ final class ManagerServer(
     auth: AuthHandlers,
     sessions: SessionTokenStore,
     authEnabled: Boolean,
-    statementHistory: StatementHistoryHandlers
+    statementHistory: StatementHistoryHandlers,
+    catalog: Option[CatalogHandlers]
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -83,6 +84,26 @@ final class ManagerServer(
       )
     }
 
+    val catalogEndpoints: List[ServerEndpoint[Any, IO]] = catalog.toList.flatMap { h =>
+      // Same gating as ACL: DuckLake catalog reads only make sense with a
+      // Postgres metastore. JDBC calls go on `IO.blocking` since Hikari
+      // semantics are synchronous.
+      List[ServerEndpoint[Any, IO]](
+        Endpoints.listSchemasEndpoint.serverLogicSuccess { tenant =>
+          IO.blocking(h.listSchemas(tenant))
+        },
+        Endpoints.listTablesEndpoint.serverLogicSuccess { case (tenant, schema) =>
+          IO.blocking(h.listTables(tenant, schema))
+        },
+        Endpoints.getTableEndpoint.serverLogic { case (tenant, schema, table) =>
+          IO.blocking(h.getTable(tenant, schema, table)).map {
+            case Some(d) => Right(d)
+            case None    => Left(s"table $schema.$table not found")
+          }
+        }
+      )
+    }
+
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       Endpoints.login.serverLogic(auth.login),
       Endpoints.logout.serverLogic(auth.logout),
@@ -114,7 +135,7 @@ final class ManagerServer(
           authEnabled   = authEnabled
         )
       )))
-    ) ++ aclEndpoints ++ authEndpoints
+    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

@@ -145,3 +145,37 @@ export interface StatementHistoryEntry {
 export interface StatementHistoryResponse {
   statements: StatementHistoryEntry[];
 }
+
+// ----- Catalog browser -----
+export interface CatalogSchemaEntry {
+  name: string;
+  tableCount: number;
+}
+
+export interface CatalogTableEntry {
+  schema: string;
+  name: string;
+  rowCount: number;        // -1 when DuckLake stats are unavailable
+  dataFileCount: number;
+}
+
+export interface CatalogColumnEntry {
+  ordinal: number;
+  name: string;
+  typeName: string;
+  nullable: boolean;
+  isPrimaryKey: boolean;
+}
+
+export interface CatalogDataFileEntry {
+  path: string;            // absolute file path or s3:// URL
+  sizeBytes: number;
+  rowCount: number;
+  snapshotId: number;
+}
+
+export interface CatalogTableDetailResponse {
+  table: CatalogTableEntry;
+  columns: CatalogColumnEntry[];
+  dataFiles: CatalogDataFileEntry[];
+}
