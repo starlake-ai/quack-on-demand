@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
+import Breadcrumb from '../components/Breadcrumb';
 
 export default function CreatePool() {
   const nav = useNavigate();
@@ -71,6 +72,13 @@ export default function CreatePool() {
 
   return (
     <form onSubmit={submit}>
+      <Breadcrumb
+        items={[
+          { label: 'Tenants', to: '/tenants' },
+          { label: tenant!,   to: `/tenant/${encodeURIComponent(tenant!)}` },
+          { label: 'New pool' },
+        ]}
+      />
       <h2>Create pool in {tenant}</h2>
       {err && <p style={{ color: 'red' }}>{err}</p>}
 
