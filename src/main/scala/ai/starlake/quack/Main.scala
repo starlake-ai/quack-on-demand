@@ -291,22 +291,11 @@ object Main extends IOApp.Simple with LazyLogging:
       }
 
     val program: IO[Unit] =
-      if !metricsCfg.enabled then
-        // Master toggle off — pass a no-op registry so the rest of the
-        // pipeline stays total. The /metrics route also surfaces as 404
-        // because dummy.prometheus = None.
-        val noopEndpoint = new MetricsEndpoint(MetricsRegistry.dummy.prometheus, () => ())
-        val noopInstruments = new StatementInstruments(MetricsRegistry.dummy.composite)
-        runWithMetrics(MetricsRegistry.dummy, noopEndpoint, noopInstruments)
-      else
-        MetricsRegistry.resource(metricsCfg).use { metricsReg =>
-          val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
-          val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
-          val stmtInstruments = new StatementInstruments(metricsReg.composite)
-          // Warm the MultiGauges once so the first /metrics scrape returns
-          // non-empty rows even if it arrives before the first scraper-triggered
-          // refresh (e.g. immediately after manager start).
-          IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
-        }
+      MetricsRegistry.resource(metricsCfg).use { metricsReg =>
+        val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
+        val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
+        val stmtInstruments = new StatementInstruments(metricsReg.composite)
+        IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
+      }
 
     program
