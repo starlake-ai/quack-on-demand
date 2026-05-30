@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { TenantResponse } from '../api/types';
 import AclSection from '../components/AclSection';
+import Breadcrumb from '../components/Breadcrumb';
 
 export default function TenantDetail() {
   const { tenant } = useParams<{ tenant: string }>();
@@ -38,14 +39,29 @@ export default function TenantDetail() {
   if (!data)  return <div className="loading">Loading…</div>;
 
   const eff = data.effectiveMetastore;
+  const tEnc = encodeURIComponent(data.name);
   return (
     <>
+      <Breadcrumb
+        items={[
+          { label: 'Tenants', to: '/tenants' },
+          { label: data.name },
+        ]}
+      />
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: '1rem' }}>
         <h1>{data.name}</h1>
         <div className="row">
           <Link to={`/tenant/${data.name}/create-pool`}><button>+ New pool</button></Link>
           <button className="danger" onClick={handleDelete}>Delete tenant</button>
         </div>
+      </div>
+
+      <div className="row" style={{ gap: 12, marginBottom: '1rem', flexWrap: 'wrap' }}>
+        <Link to={`/catalog?tenant=${tEnc}`}>Browse catalog</Link>
+        <span style={{ color: '#bbb' }}>·</span>
+        <Link to={`/nodes?tenant=${tEnc}`}>Live nodes for this tenant</Link>
+        <span style={{ color: '#bbb' }}>·</span>
+        <Link to={`/nodes?tenant=${tEnc}#statements`}>Recent statements</Link>
       </div>
 
       <div className="card">

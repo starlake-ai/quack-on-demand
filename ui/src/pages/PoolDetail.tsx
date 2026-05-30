@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { ClientConfigResponse, PoolResponse } from '../api/types';
+import Breadcrumb from '../components/Breadcrumb';
 
 export default function PoolDetail() {
   const { tenant, pool } = useParams<{ tenant: string; pool: string }>();
@@ -47,9 +48,18 @@ export default function PoolDetail() {
 
   return (
     <div>
+      <Breadcrumb
+        items={[
+          { label: 'Tenants', to: '/tenants' },
+          { label: data.tenant, to: `/tenant/${encodeURIComponent(data.tenant)}` },
+          { label: data.pool },
+        ]}
+      />
       <header style={{ display: 'flex', justifyContent: 'space-between' }}>
         <h2>{data.tenant} / {data.pool}</h2>
         <div>
+          <Link to={`/catalog?tenant=${encodeURIComponent(data.tenant)}`}>Browse catalog</Link>
+          {' | '}
           <Link to={`/pool/${data.tenant}/${data.pool}/scale`}>Scale</Link>
           {' | '}
           <button onClick={() => handleStop(false)}>Stop (drain)</button>

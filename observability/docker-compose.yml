@@ -1,0 +1,54 @@
+# Local Prometheus + Grafana for testing the manager's /metrics endpoint.
+#
+# Usage:
+#   1. Boot the manager on the host (./scripts/run-jar.sh - listens on :20900).
+#   2. docker compose -f observability/docker-compose.yml up -d
+#   3. Prometheus UI:  http://localhost:9090
+#      Grafana UI:     http://localhost:3000   (anonymous admin, no login)
+#
+# Both containers reach the host's :20900 via host.docker.internal which
+# resolves automatically on Docker Desktop (macOS / Windows). On Linux the
+# `extra_hosts` entry maps it to the docker0 bridge IP.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: qod-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: qod-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Skip the login screen for local testing - the container is on a
+      # private port and the dashboard is read-only by provisioning.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
