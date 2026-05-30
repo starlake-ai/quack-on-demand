@@ -11,6 +11,7 @@ import ai.starlake.quack.edge.config.{
 import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{AclGrantStore, PostgresStateStore, StateStore, UserStore}
 import cats.effect.{IO, IOApp}
@@ -133,11 +134,28 @@ object Main extends IOApp.Simple with LazyLogging:
         Some(new AclHandlers(grantStore))
       else None
 
+    // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
+    // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
+    // Postgres metastore. One reader per tenant, cached so we don't reopen
+    // Hikari on every request. The resolver reads the effective metastore
+    // (default <- tenant overrides) the same way PoolSupervisor does for
+    // spawn-node.
+    val catalogHandlers: Option[CatalogHandlers] =
+      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+        val cache = new java.util.concurrent.ConcurrentHashMap[String, DuckLakeCatalogReader]()
+        def reader(tenant: String): DuckLakeCatalogReader =
+          cache.computeIfAbsent(
+            tenant,
+            t => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t))
+          )
+        Some(new CatalogHandlers(reader))
+      else None
+
     val sessionTokens     = new SessionTokenStore
     val authHandlers      = new AuthHandlers(authService, sessionTokens)
     val stmtHistory       = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers   = new StatementHistoryHandlers(stmtHistory)
-    val mgr      = new ManagerServer(mgrCfg, edgeCfg, pools, nodes, tenants, health, aclHandlers, authHandlers, sessionTokens, authService.hasProviders, historyHandlers)
+    val mgr      = new ManagerServer(mgrCfg, edgeCfg, pools, nodes, tenants, health, aclHandlers, authHandlers, sessionTokens, authService.hasProviders, historyHandlers, catalogHandlers)
 
     val sessions = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
