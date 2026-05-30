@@ -23,19 +23,29 @@ export default function Nodes() {
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr]   = useState<string | null>(null);
   const [tenants, setTenants] = useState<string[]>([]);
-  // Seed the tenant filter from `?tenant=` so links from TenantDetail
-  // ("Live nodes for this tenant") land on a pre-filtered view.
+  // Seed filters from URL so deep links from TenantDetail / PoolDetail
+  // land pre-filtered. The two filters compose: ?tenant=acme&node=ro1
+  // narrows both axes simultaneously.
   const [filter, setFilter]   = useState<string>(searchParams.get('tenant') ?? '');
+  const [nodeFilter, setNodeFilter] = useState<string>(searchParams.get('node') ?? '');
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
   const prev = useRef<Record<string, Sample>>({});
 
-  // Keep the URL and the filter dropdown in sync so a deep-linked view
-  // stays shareable and the back button works.
+  // Keep the URL and the filter dropdown in sync so deep-linked views
+  // stay shareable and the back button works.
   function applyFilter(next: string) {
     setFilter(next);
-    if (next) setSearchParams({ tenant: next });
-    else setSearchParams({});
+    const params: Record<string, string> = {};
+    if (next) params.tenant = next;
+    if (nodeFilter) params.node = nodeFilter;
+    setSearchParams(params);
+  }
+  function clearNodeFilter() {
+    setNodeFilter('');
+    const params: Record<string, string> = {};
+    if (filter) params.tenant = filter;
+    setSearchParams(params);
   }
 
   function refresh() {
@@ -72,7 +82,9 @@ export default function Nodes() {
     return () => clearInterval(id);
   }, []);
 
-  const visible = filter ? rows.filter(r => r.tenant === filter) : rows;
+  const visible = rows
+    .filter(r => !filter || r.tenant === filter)
+    .filter(r => !nodeFilter || r.nodeId === nodeFilter);
   const sumTotal    = visible.reduce((s, n) => s + n.totalServed, 0);
   const sumInFlight = visible.reduce((s, n) => s + n.inFlight, 0);
   const sumQps      = visible.reduce((s, n) => s + n.qps, 0);
@@ -96,6 +108,18 @@ export default function Nodes() {
           </select>
         </label>
       </div>
+
+      {nodeFilter && (
+        <div className="card" style={{ padding: '8px 12px', marginBottom: '1rem' }}>
+          Filtered to node <code>{nodeFilter}</code>
+          <button
+            onClick={clearNodeFilter}
+            style={{ marginLeft: 12, fontSize: '0.85rem' }}
+          >
+            Clear node filter
+          </button>
+        </div>
+      )}
 
       {err && <div className="login-err">{err}</div>}
 
@@ -154,7 +178,14 @@ export default function Nodes() {
               <tr><td colSpan={13} className="empty">No nodes running.</td></tr>
             ) : visible.map(n => (
               <tr key={`${n.tenant}/${n.pool}/${n.nodeId}`}>
-                <td><code>{n.nodeId}</code></td>
+                <td>
+                  <Link
+                    to={`/nodes?${filter ? `tenant=${encodeURIComponent(filter)}&` : ''}node=${encodeURIComponent(n.nodeId)}`}
+                    style={{ textDecoration: 'none' }}
+                  >
+                    <code>{n.nodeId}</code>
+                  </Link>
+                </td>
                 <td>
                   <Link to={`/tenant/${n.tenant}`}>{n.tenant}</Link>
                   {' / '}
@@ -199,6 +230,7 @@ export default function Nodes() {
               <tr><td colSpan={7} className="empty">No statements recorded yet.</td></tr>
             ) : history
                 .filter(h => !filter || h.tenant === filter)
+                .filter(h => !nodeFilter || h.nodeId === nodeFilter)
                 .map((h, i) => {
                   const isOpen = expanded === i;
                   return (
@@ -210,7 +242,15 @@ export default function Nodes() {
                         {' / '}
                         <Link to={`/pool/${h.tenant}/${h.pool}`}>{h.pool}</Link>
                       </td>
-                      <td><code>{h.nodeId}</code></td>
+                      <td>
+                        <Link
+                          to={`/nodes?${filter ? `tenant=${encodeURIComponent(filter)}&` : ''}node=${encodeURIComponent(h.nodeId)}`}
+                          style={{ textDecoration: 'none' }}
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <code>{h.nodeId}</code>
+                        </Link>
+                      </td>
                       <td><StatusBadge status={h.status} /></td>
                       <td style={{ textAlign: 'right' }}>{h.durationMs} ms</td>
                       <td>

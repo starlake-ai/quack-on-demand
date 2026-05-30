@@ -164,7 +164,14 @@ export default function PoolDetail() {
         <tbody>
           {data.nodes.map(n => (
             <tr key={n.nodeId} style={{ borderTop: '1px solid #eee' }}>
-              <td><code>{n.nodeId}</code></td>
+              <td>
+                <Link
+                  to={`/nodes?tenant=${encodeURIComponent(data.tenant)}&node=${encodeURIComponent(n.nodeId)}`}
+                  style={{ textDecoration: 'none' }}
+                >
+                  <code>{n.nodeId}</code>
+                </Link>
+              </td>
               <td>{n.role}</td>
               <td>{n.host}</td>
               <td>{n.port}</td>
