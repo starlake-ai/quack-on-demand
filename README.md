@@ -265,6 +265,7 @@ Defaults and design choices an operator should be aware of before going to produ
 - **DML grants in ACL mode are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant. Per-table DML grants need the ACL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
 - **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
 - **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.
+- **Metrics, dashboards and cloud monitoring.** Manager exposes Prometheus metrics at `/metrics` by default, or pushes to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring instead (one sink at a time, picked via `metrics.sink`). See [observability/README.md](observability/README.md) for the sink selector, env vars, credential discovery chains, cardinality budget, and the Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json).
 
 ---
 
