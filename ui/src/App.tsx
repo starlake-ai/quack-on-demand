@@ -8,6 +8,8 @@ import CreatePool from './pages/CreatePool';
 import PoolDetail from './pages/PoolDetail';
 import ScalePool from './pages/ScalePool';
 import Nodes from './pages/Nodes';
+import Catalog from './pages/Catalog';
+import CatalogTableDetail from './pages/CatalogTableDetail';
 
 function Shell() {
   const { username, role, logout, authEnabled } = useAuth();
@@ -17,6 +19,7 @@ function Shell() {
         <span className="brand">🦆 Quack on Demand</span>
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
+        <NavLink to="/catalog"     className={({ isActive }) => isActive ? 'active' : ''}>Catalog</NavLink>
         <span className="spacer" />
         {authEnabled ? (
           <>
@@ -41,6 +44,8 @@ function Shell() {
           <Route path="/pool/:tenant/:pool"               element={<PoolDetail />} />
           <Route path="/pool/:tenant/:pool/scale"         element={<ScalePool />} />
           <Route path="/nodes"                            element={<Nodes />} />
+          <Route path="/catalog"                          element={<Catalog />} />
+          <Route path="/catalog/:tenant/:schema/:table"   element={<CatalogTableDetail />} />
         </Routes>
       </main>
     </>
