@@ -1,14 +1,17 @@
 package ai.starlake.quack.route
 
 import ai.starlake.quack.model.StatementKind
+import ai.starlake.sql.SqlCommentStripper
 
 object StatementClassifier:
 
   /** Cheap keyword-based classification. JSQLParser is overkill for routing
     * decisions - we only need the verb. Returns Other if the first non-blank
-    * token doesn't match a known verb. */
+    * token doesn't match a known verb. SQL comments (`--`, `/* */`) are
+    * stripped before classification so leading comments don't make a query
+    * look like Other. */
   def classify(sql: String): StatementKind =
-    firstToken(sql).map(_.toUpperCase) match
+    firstToken(SqlCommentStripper.stripComments(sql)).map(_.toUpperCase) match
       case Some("SELECT") | Some("WITH") | Some("VALUES") | Some("SHOW") |
            Some("DESCRIBE") | Some("EXPLAIN")                            => StatementKind.Select
       case Some("INSERT") | Some("UPDATE") | Some("DELETE") | Some("MERGE") |
