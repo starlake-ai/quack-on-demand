@@ -127,6 +127,40 @@ final case class StatementHistoryEntry(
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
+// ----- Catalog browser DTOs -----
+final case class CatalogSchemaDto(
+    name: String,
+    tableCount: Int
+)
+
+final case class CatalogTableDto(
+    schema: String,
+    name: String,
+    rowCount: Long,         // best-effort; -1 when DuckLake stats are missing
+    dataFileCount: Int      // count of __ducklake_data_file rows
+)
+
+final case class CatalogColumnDto(
+    ordinal: Int,
+    name: String,
+    typeName: String,
+    nullable: Boolean,
+    isPrimaryKey: Boolean
+)
+
+final case class CatalogDataFileDto(
+    path: String,           // absolute file path or s3:// URL
+    sizeBytes: Long,
+    rowCount: Long,
+    snapshotId: Long
+)
+
+final case class CatalogTableDetailDto(
+    table: CatalogTableDto,
+    columns: List[CatalogColumnDto],
+    dataFiles: List[CatalogDataFileDto]
+)
+
 object Dtos:
   given Codec[RoleDistribution]  = deriveCodec
   // Custom codec for CreatePoolRequest so that optional fields with case-class
@@ -297,3 +331,10 @@ object Dtos:
   given Codec[WhoamiResponse]       = deriveCodec
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
+
+  // Catalog browser
+  given Codec[CatalogSchemaDto]      = deriveCodec
+  given Codec[CatalogTableDto]       = deriveCodec
+  given Codec[CatalogColumnDto]      = deriveCodec
+  given Codec[CatalogDataFileDto]    = deriveCodec
+  given Codec[CatalogTableDetailDto] = deriveCodec
