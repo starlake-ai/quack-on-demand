@@ -118,13 +118,22 @@ echo "quack node pods spawned: $NODE_COUNT"
 kubectl -n "$NAMESPACE" get pods -l managed-by=quack-on-demand 2>/dev/null || true
 
 if [[ "$NODE_COUNT" -ge 1 ]]; then
+  # Helm prepends the chart name to the release name (per qod.fullname helper)
+  # unless the release name already contains the chart name. Resolve the
+  # real service name from the cluster so these copy-paste commands work.
+  REST_SVC=$(kubectl -n "$NAMESPACE" get svc \
+    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  FS_SVC=$(kubectl -n "$NAMESPACE" get svc \
+    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=flightsql" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
   echo
   echo "smoke OK - manager is up, RBAC works, K8s pod-spawn path works."
   echo "  Quack node pods will ImagePullBackOff until you provide a real"
   echo "  Quack image: helm upgrade ... --set quackNode.image=<your-image>"
   echo
-  echo "  port-forward UI:        kubectl -n $NAMESPACE port-forward svc/$RELEASE 20900:20900"
-  echo "  port-forward FlightSQL: kubectl -n $NAMESPACE port-forward svc/$RELEASE-flightsql 31338:31338"
+  echo "  port-forward UI:        kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900"
+  echo "  port-forward FlightSQL: kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338"
   echo "  tear down:              kind delete cluster --name $KIND_CLUSTER"
 else
   echo
