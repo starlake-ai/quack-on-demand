@@ -83,24 +83,37 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --wait --timeout=300s
 
 # 6. /health
+# Always go via port-forward + local curl. The manager image is JRE-only
+# (no curl/wget), so an in-pod probe needs an extra package install which
+# isn't worth the complexity. The trap guarantees the port-forward dies
+# even if curl below fails under `set -e`.
 echo "[6/7] verifying /health..."
 kubectl -n "$NAMESPACE" wait --for=condition=Ready \
   pod -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
   --timeout=180s
-MANAGER_POD=$(kubectl -n "$NAMESPACE" get pod \
+REST_SVC=$(kubectl -n "$NAMESPACE" get svc \
   -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
   -o jsonpath='{.items[0].metadata.name}')
-kubectl -n "$NAMESPACE" exec "$MANAGER_POD" -- \
-  sh -c 'apk add --no-cache curl >/dev/null 2>&1 || true; curl -fsS http://localhost:20900/health' \
-  || kubectl -n "$NAMESPACE" port-forward "$MANAGER_POD" 20900:20900 &
+
+# Best-effort: kill any prior port-forward holding the port from a
+# previous run of this script.
+pkill -f "port-forward.*${REST_SVC}.*20900:20900" 2>/dev/null || true
+sleep 1
+
+kubectl -n "$NAMESPACE" port-forward "svc/$REST_SVC" 20900:20900 \
+  > /tmp/qod-smoke-pf.log 2>&1 &
 PF_PID=$!
-sleep 3
+# Clean up the forwarder on any exit path (success, set -e, ctrl-C).
+trap 'kill $PF_PID 2>/dev/null; pkill -P $PF_PID 2>/dev/null; wait $PF_PID 2>/dev/null' EXIT
+sleep 4
 HEALTH=$(curl -fsS http://localhost:20900/health 2>/dev/null || true)
-kill $PF_PID 2>/dev/null || true
 echo "manager /health: $HEALTH"
 echo "$HEALTH" | grep -q '"status":"ok"' || {
   echo "ERROR: /health did not report OK"
   echo "--- manager logs (last 40 lines) ---"
+  MANAGER_POD=$(kubectl -n "$NAMESPACE" get pod \
+    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
+    -o jsonpath='{.items[0].metadata.name}')
   kubectl -n "$NAMESPACE" logs "$MANAGER_POD" --tail=40
   exit 1
 }
