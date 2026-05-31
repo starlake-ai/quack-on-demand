@@ -1,4 +1,4 @@
-# 🦆 Quack on Demand
+# Quack on Demand
 
 **A production-grade FlightSQL gateway in front of [DuckDB Quack](https://duckdb.org/docs/current/core_extensions/quack) + [DuckLake](https://duckdb.org/docs/extensions/ducklake.html).**
 
