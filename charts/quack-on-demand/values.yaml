@@ -146,10 +146,14 @@ storage:
   dataPath: /var/quack/ducklake
 
 # --- Admin credentials -------------------------------------------------------
-# Initial admin user seeded into slkstate_user on every boot. Re-applied on
-# every restart so changing the password and re-deploying rotates.
+# Initial admin user(s) seeded into slkstate_user on every boot. Re-applied
+# on every restart so changing the password and re-deploying rotates.
+# `username` accepts a comma-separated list: every entry gets the same
+# password + admin role. Default seeds BOTH the project's documented
+# convention (`admin@localhost.local`) AND the short form (`admin`) so
+# operators can log in with either.
 admin:
-  username: admin
+  username: "admin@localhost.local,admin"
   # Either inline (dev) or via an externally-managed secret (prod).
   password: ""
   existingSecret: ""
