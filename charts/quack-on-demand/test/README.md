@@ -38,20 +38,22 @@ This:
 
 ## Verify by hand
 
-After the script reports `smoke OK`:
+After the script reports `smoke OK` (the script prints the exact port-forward commands at the end). The full names that Helm renders for the default release/chart combo are:
 
 ```bash
-# Port-forward the admin UI
-kubectl -n qod port-forward svc/qod 20900:20900
+# Port-forward the admin UI (REST + UI on :20900)
+kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
 # Open http://localhost:20900/ui/  (login admin / admin)
 
-# Port-forward FlightSQL
-kubectl -n qod port-forward svc/qod-flightsql 31338:31338
+# Port-forward FlightSQL (gRPC on :31338)
+kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
 # JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=false&user=acme/sales/<user>&password=<password>
 
 # Watch the quack node pods the manager spawns
 kubectl -n qod get pods -l managed-by=quack-on-demand -w
 ```
+
+Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod`) unless the release name already contains it. So services land at `qod-quack-on-demand`, not `qod`. The script's tail message resolves this from the cluster so its copy-paste lines always match what's actually there.
 
 ## Tear down
 
