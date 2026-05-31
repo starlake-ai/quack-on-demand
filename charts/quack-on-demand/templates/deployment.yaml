@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qod.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+spec:
+  # Default replicas=1 — multi-manager active-active is not yet safe.
+  # See RESILIENCE.md and issue #11.
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "qod.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "qod.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force a rolling restart on Secret / ConfigMap content change so
+        # env-var updates land without operator intervention.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if or (not .Values.postgres.existingSecret) .Values.postgres.password }}
+        checksum/postgres-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "qod.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          image: {{ include "qod.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: rest-ui
+              containerPort: 20900
+              protocol: TCP
+            - name: flightsql
+              containerPort: 31338
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "qod.fullname" . }}
+          env:
+            - name: SL_QUACK_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.postgresPasswordSecretName" . | quote }}
+                  key:  {{ include "qod.postgresPasswordSecretKey" . | quote }}
+            {{- if or .Values.admin.existingSecret .Values.admin.password }}
+            - name: SL_QUACK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.adminPasswordSecretName" . | quote }}
+                  key:  {{ include "qod.adminPasswordSecretKey" . | quote }}
+            {{- end }}
+            {{- if or .Values.apiKey.existingSecret .Values.apiKey.value }}
+            - name: SL_QUACK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.apiKeySecretName" . | quote }}
+                  key:  {{ .Values.apiKey.existingSecretKey | default "apiKey" | quote }}
+            {{- end }}
+            # Pod injects its own namespace + name so the K8s backend can scope
+            # pod create/list calls correctly even when default-ns differs.
+            - name: SL_QUACK_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: rest-ui
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds:       {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds:      {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold:    {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: rest-ui
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds:       {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds:      {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold:    {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

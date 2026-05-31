@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qod.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+  {{- with .Values.service.rest.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.rest.type }}
+  selector:
+    {{- include "qod.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rest-ui
+      port: {{ .Values.service.rest.port }}
+      targetPort: rest-ui
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qod.fullname" . }}-flightsql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flightsql
+  {{- with .Values.service.flightsql.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.flightsql.type }}
+  selector:
+    {{- include "qod.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: flightsql
+      port: {{ .Values.service.flightsql.port }}
+      targetPort: flightsql
+      protocol: TCP

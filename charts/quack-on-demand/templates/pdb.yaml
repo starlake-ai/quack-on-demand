@@ -1,0 +1,14 @@
+{{- if and .Values.pdb.enabled (gt (.Values.replicaCount | int) 1) -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "qod.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "qod.selectorLabels" . | nindent 6 }}
+{{- end }}

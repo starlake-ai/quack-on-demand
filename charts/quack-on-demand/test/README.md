@@ -1,0 +1,66 @@
+# Local test rig (kind + Helm)
+
+End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) cluster. The rig is intentionally self-contained — it does not require an external Postgres or a published image.
+
+## Prerequisites
+
+- `kind` 0.20+
+- `kubectl`
+- `helm` 3.12+
+- `docker`
+- ~8 GB free RAM (the manager image + Postgres + kind nodes)
+
+## One command
+
+```bash
+./charts/quack-on-demand/test/install-local.sh
+```
+
+This:
+
+1. Creates a kind cluster named `qod-test` (reused if it already exists).
+2. Builds the manager image (`quack-on-demand:local`) from the current source tree.
+3. Loads the image into the kind cluster.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)): single Pod + Service, ephemeral `emptyDir`. **Not production-grade** — that's the point. The chart itself expects an external Postgres; this manifest exists only to satisfy the smoke.
+5. `helm install`s the chart pointing at that Postgres + the local image, with TLS off and an inline admin password.
+6. Waits for the manager pod to be `Ready` and `/health` to return OK.
+7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
+
+## Env knobs
+
+| Var | Default | Purpose |
+|---|---|---|
+| `KIND_CLUSTER` | `qod-test` | kind cluster name |
+| `IMAGE` | `quack-on-demand:local` | manager image ref |
+| `NAMESPACE` | `qod` | install namespace |
+| `RELEASE` | `qod` | helm release name |
+| `SKIP_BUILD` | unset | set to `1` to skip `docker build` (faster reruns) |
+
+## Verify by hand
+
+After the script reports `smoke OK`:
+
+```bash
+# Port-forward the admin UI
+kubectl -n qod port-forward svc/qod 20900:20900
+# Open http://localhost:20900/ui/  (login admin / admin)
+
+# Port-forward FlightSQL
+kubectl -n qod port-forward svc/qod-flightsql 31338:31338
+# JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=false&user=acme/sales/<user>&password=<password>
+
+# Watch the quack node pods the manager spawns
+kubectl -n qod get pods -l managed-by=quack-on-demand -w
+```
+
+## Tear down
+
+```bash
+kind delete cluster --name qod-test
+```
+
+## Known limitations
+
+- Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state — that's a feature for a smoke rig.
+- The manager image is built on every run unless `SKIP_BUILD=1`. The Dockerfile uses cached layers, so reruns are fast once the JDK + sbt deps are cached.
+- TLS is disabled for the smoke; production deploys should keep `flightsql.tls.enabled=true` and either let the manager auto-generate or mount a CA-signed cert.
