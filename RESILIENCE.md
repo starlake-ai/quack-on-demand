@@ -11,16 +11,16 @@ issue is linked inline.
 
 ## TL;DR
 
-| Aspect | Posture |
-|---|---|
-| Single-manager cold restart | ✅ Pool / tenant / ACL state restored from Postgres; nodes reconciled on boot |
-| Quack node crash | ✅ Detected by `HealthProbe`; respawned (local) / left to kubelet (K8s) |
-| In-transaction node death | ✅ Session pin invalidated; client sees error and retries from BEGIN |
-| Postgres brief outage | ⚠️ No retry wrapper — first transient failure may bubble up to a 500 |
-| Statement history across restarts | ❌ Ring buffer is in-memory only (in-flight 256 entries) |
-| Graceful shutdown (SIGTERM) | ❌ No JVM-level handler; in-flight queries dropped on `kill` |
-| Multi-manager active-active | ❌ Not supported ([#11](https://github.com/starlake-ai/quack-on-demand/issues/11) — v0.4) |
-| FlightSQL session continuity across manager restart | ❌ All clients reconnect (Arrow Flight has no resumption) |
+| Aspect | Status | Notes |
+|---|---|---|
+| Single-manager cold restart | **Yes** | Pool / tenant / ACL state restored from Postgres; nodes reconciled on boot |
+| Quack node crash | **Yes** | Detected by `HealthProbe`; respawned (local) / left to kubelet (K8s) |
+| In-transaction node death | **Yes** | Session pin invalidated; client sees error and retries from BEGIN |
+| Postgres brief outage | **Partial** | No retry wrapper — first transient failure may bubble up to a 500 |
+| Statement history across restarts | **No** | Ring buffer is in-memory only (in-flight 256 entries) |
+| Graceful shutdown (SIGTERM) | **No** | No JVM-level handler; in-flight queries dropped on `kill` |
+| Multi-manager active-active | **No** | Not supported ([#11](https://github.com/starlake-ai/quack-on-demand/issues/11) — v0.4) |
+| FlightSQL session continuity across manager restart | **No** | All clients reconnect (Arrow Flight has no resumption) |
 
 **Bottom line:** the manager is designed to be **safely restartable**, not highly available.
 A single instance recovers cleanly from crashes; an SLA that forbids ~30 s of FlightSQL
