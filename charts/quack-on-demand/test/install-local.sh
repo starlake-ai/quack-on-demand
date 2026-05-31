@@ -12,13 +12,22 @@
 #   7. Verify the manager spawned the bootstrap Quack node pods.
 #
 # Env:
-#   KIND_CLUSTER   kind cluster name        (default qod-test)
-#   IMAGE          local image ref          (default quack-on-demand:local)
-#   NAMESPACE      install namespace        (default qod)
-#   RELEASE        helm release name        (default qod)
-#   SKIP_BUILD     "1" to skip docker build (default unset)
+#   KIND_CLUSTER   kind cluster name              (default qod-test)
+#   IMAGE          local image ref                (default quack-on-demand:local)
+#   NAMESPACE      install namespace              (default qod)
+#   RELEASE        helm release name              (default qod)
+#   BUILD          "1" to docker build the manager image, "0" to reuse a
+#                  pre-loaded image in the kind cluster. Same convention as
+#                  scripts/run-jar.sh and run-docker-compose.sh.   (default 1)
+#   NUKE           "1" to delete the namespace before reinstalling (wipes
+#                  Postgres ephemeral data, the helm release, and any
+#                  orphan quack node pods).                       (default 0)
+#   SF             TPC-H scale factor to seed into the in-cluster Postgres
+#                  before the manager boots (mirrors SF in run-jar.sh).
+#                  Requires `duckdb` CLI on the host. SF=1 ≈ 6M lineitem
+#                  rows. Unset to skip the seed.                  (default unset)
 #
-# Requires: kind, kubectl, helm, docker.
+# Requires: kind, kubectl, helm, docker. SF requires duckdb on the host.
 
 set -euo pipefail
 
@@ -26,7 +35,9 @@ KIND_CLUSTER="${KIND_CLUSTER:-qod-test}"
 IMAGE="${IMAGE:-quack-on-demand:local}"
 NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
-SKIP_BUILD="${SKIP_BUILD:-0}"
+BUILD="${BUILD:-1}"
+NUKE="${NUKE:-0}"
+SF="${SF:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -36,7 +47,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: $1 not on PATH" >&2; 
 need kind
 need kubectl
 need helm
-[[ "$SKIP_BUILD" == "1" ]] || need docker
+[[ "$BUILD" == "1" ]] && need docker
 
 # 1. kind cluster
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
@@ -48,8 +59,8 @@ fi
 kubectl config use-context "kind-${KIND_CLUSTER}" >/dev/null
 
 # 2. build the manager image
-if [[ "$SKIP_BUILD" == "1" ]]; then
-  echo "[2/7] SKIP_BUILD=1, assuming '$IMAGE' is already loadable"
+if [[ "$BUILD" == "0" ]]; then
+  echo "[2/7] BUILD=0, assuming '$IMAGE' is already loaded in the kind cluster"
 else
   echo "[2/7] docker build -t $IMAGE ..."
   ( cd "$REPO_DIR" && docker build -t "$IMAGE" . )
@@ -63,10 +74,56 @@ echo "[3/7] loading manager image into kind cluster..."
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
 
 # 4. namespace + Postgres
+# NUKE=1: wipe the whole namespace first so Postgres's emptyDir,
+# spawned quack node pods, the helm release secret, and the manager
+# Deployment all go together. Idempotent: missing namespace is fine.
+if [[ "$NUKE" == "1" ]]; then
+  echo "[4/7] NUKE=1: deleting namespace '$NAMESPACE' to wipe all state..."
+  kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
+fi
 echo "[4/7] applying minimal in-cluster Postgres..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/local-postgres.yaml"
 kubectl -n "$NAMESPACE" rollout status deploy/postgres --timeout=120s
+
+# 4b. optional TPC-H seed (mirrors SF in scripts/run-jar.sh). Connects
+# to the in-cluster Postgres via a short-lived port-forward and shells
+# out to scripts/load-tpch-dbgen.sh on the host.
+if [[ -n "$SF" ]]; then
+  if ! command -v duckdb >/dev/null 2>&1; then
+    echo "WARN: SF=$SF set but duckdb CLI not on PATH; skipping seed." >&2
+  else
+    echo "[4b/7] seeding TPC-H SF=$SF into in-cluster Postgres..."
+    # Pick a free local port so this composes with other port-forwards
+    # the user might have on :5432.
+    SEED_PORT=15432
+    pkill -f "port-forward.*postgres.*$SEED_PORT:5432" 2>/dev/null || true
+    kubectl -n "$NAMESPACE" port-forward svc/postgres "$SEED_PORT:5432" \
+      > /tmp/qod-seed-pf.log 2>&1 &
+    SEED_PF_PID=$!
+    trap 'kill $SEED_PF_PID 2>/dev/null; pkill -P $SEED_PF_PID 2>/dev/null' EXIT
+    sleep 3
+    DATA_PATH="${DATA_PATH:-$REPO_DIR/ducklake/qod-test}" \
+    PG_HOST=localhost PG_PORT="$SEED_PORT" PG_USER=postgres PG_PASS=azizam \
+    DB_NAME=tpch SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$SF" \
+      "$REPO_DIR/scripts/load-tpch-dbgen.sh"
+    kill $SEED_PF_PID 2>/dev/null || true
+    trap - EXIT
+    echo "TPC-H SF=$SF seed complete."
+  fi
+fi
+
+# 4c. clean orphan Quack node pods. If a previous bootstrap got
+# part-way (e.g. quack node image was bad and ImagePullBackOff prevented
+# Ready), the manager rolled back the pool record in Postgres but the
+# K8s pod object stuck around. The next bootstrap then fails with 409
+# Conflict on pod create. Wipe any orphans before reinstalling. Idempotent.
+ORPHANS=$(kubectl -n "$NAMESPACE" get pods -l managed-by=quack-on-demand \
+  -o name 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$ORPHANS" -gt 0 ]]; then
+  echo "[4c/7] cleaning $ORPHANS orphan quack node pod(s) from a prior run..."
+  kubectl -n "$NAMESPACE" delete pods,services -l managed-by=quack-on-demand --grace-period=0 --force 2>&1 | tail -5 || true
+fi
 
 # 5. helm install
 echo "[5/7] helm install $RELEASE..."
