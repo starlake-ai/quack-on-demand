@@ -61,8 +61,18 @@ open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
     var ps: PreparedStatement = null
     var rs: DuckDBResultSet    = null
     try
+      // The spawn-quack-node.sh script calls quack_serve without TLS options,
+      // so the node serves plain HTTP on its port. The DuckDB `quack` client
+      // defaults to HTTPS, so without disable_ssl the probe / query path
+      // fails with "SSL connect error" and the manager marks every node
+      // unhealthy. Default `disable_ssl = true` to match the spawn script.
+      // Operators fronting Quack nodes with TLS (e.g. service mesh mTLS or
+      // app-level certs added to spawn-quack-node.sh) should set
+      // `SL_QUACK_NODE_DISABLE_SSL=false`.
+      val disableSsl =
+        sys.env.getOrElse("SL_QUACK_NODE_DISABLE_SSL", "true").equalsIgnoreCase("true")
       ps = conn.prepareStatement(
-        "SELECT * FROM quack_query(?, ?, token := ?)"
+        s"SELECT * FROM quack_query(?, ?, token := ?, disable_ssl := $disableSsl)"
       )
       ps.setString(1, endpoint)
       ps.setString(2, sql)

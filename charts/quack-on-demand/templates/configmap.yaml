@@ -18,6 +18,9 @@ data:
   # SL_QUACK_K8S_NAMESPACE is injected via fieldRef in the Deployment so it
   # always tracks the manager pod's own namespace.
   SL_QUACK_K8S_IMAGE:           {{ .Values.quackNode.image | quote }}
+  # disable_ssl flag passed to quack_query in QuackHttpClient. Plain HTTP
+  # by default; true means TLS NOT used on the manager<->node wire.
+  SL_QUACK_NODE_DISABLE_SSL:    {{ not .Values.quackNode.tls.enabled | quote }}
   SL_QUACK_K8S_SERVICE_ACCOUNT: {{ include "qod.serviceAccountName" . | quote }}
 
   # ---- Admin bootstrap (idempotent) ----------------------------------------

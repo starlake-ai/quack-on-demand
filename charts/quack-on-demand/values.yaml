@@ -138,6 +138,18 @@ postgres:
 # docker/quack-node/Dockerfile in this repo.
 quackNode:
   image: starlakeai/quack-on-demand-node:latest
+  tls:
+    # By default the spawn-quack-node.sh script runs quack_serve without TLS,
+    # so the manager's quack_query client must use disable_ssl=true to talk
+    # to nodes over plain HTTP. The Quack auth token is still required and
+    # enforced; the wire is just unencrypted.
+    #
+    # Set `enabled: true` ONLY when the spawned node pods actually terminate
+    # TLS — e.g. when running behind a service mesh that injects mTLS, or
+    # after extending spawn-quack-node.sh to call quack_serve with a cert
+    # (tracked as a follow-up). Without those, flipping this to true breaks
+    # all node health checks.
+    enabled: false
 
 # --- DuckLake storage --------------------------------------------------------
 # Path inside the spawned Quack node pods where parquet files land. For
