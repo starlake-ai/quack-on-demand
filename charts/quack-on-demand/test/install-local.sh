@@ -59,19 +59,19 @@ fi
 kubectl config use-context "kind-${KIND_CLUSTER}" >/dev/null
 
 # 2. build the manager image
+NODE_IMAGE="${NODE_IMAGE:-starlakeai/quack-on-demand-node:local}"
+
 if [[ "$BUILD" == "0" ]]; then
-  echo "[2/7] BUILD=0, assuming '$IMAGE' is already loaded in the kind cluster"
+  echo "[2/7] BUILD=0, assuming '$IMAGE' and '$NODE_IMAGE' are already loaded in the kind cluster"
 else
-  echo "[2/7] docker build -t $IMAGE ..."
+  echo "[2/7] docker build -t $IMAGE (manager) and -t $NODE_IMAGE (quack node)..."
   ( cd "$REPO_DIR" && docker build -t "$IMAGE" . )
+  ( cd "$REPO_DIR" && docker build -t "$NODE_IMAGE" -f docker/quack-node/Dockerfile . )
 fi
 
-# 3. load the manager image into kind. The DuckDB Quack node image
-# (referenced by `quackNode.image` in values.yaml) is operator-supplied
-# and not part of this smoke - the spawned node pods will ImagePullBackOff
-# until you set `--set quackNode.image=...` to something the cluster can pull.
-echo "[3/7] loading manager image into kind cluster..."
-kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
+# 3. load both images into kind.
+echo "[3/7] loading images into kind cluster..."
+kind load docker-image "$IMAGE" "$NODE_IMAGE" --name "$KIND_CLUSTER"
 
 # 4. namespace + Postgres
 # NUKE=1: wipe the whole namespace first so Postgres's emptyDir,
@@ -137,6 +137,7 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --set postgres.existingSecretKey=POSTGRES_PASSWORD \
   --set admin.password=admin \
   --set flightsql.tls.enabled=false \
+  --set "quackNode.image=$NODE_IMAGE" \
   --wait --timeout=300s
 
 # 6. /health

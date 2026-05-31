@@ -134,9 +134,10 @@ postgres:
 
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB
-# Quack server, NOT the manager — they're separate processes.
+# Quack server, NOT the manager — they're separate processes. Built from
+# docker/quack-node/Dockerfile in this repo.
 quackNode:
-  image: starlakeai/quack:latest
+  image: starlakeai/quack-on-demand-node:latest
 
 # --- DuckLake storage --------------------------------------------------------
 # Path inside the spawned Quack node pods where parquet files land. For
