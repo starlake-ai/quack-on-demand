@@ -122,6 +122,12 @@ lazy val root = (project in file("."))
         xs match {
           case "MANIFEST.MF" :: Nil => MergeStrategy.discard
           case "services" :: _      => MergeStrategy.concat
+          // Vert.x ships its version file under META-INF/vertx/. The
+          // fabric8-kubernetes-client vert.x HTTP backend (used by
+          // KubernetesQuackBackend) loads it on first .build() and dies
+          // with "Cannot find vertx-version.txt on classpath" if the
+          // assembly merge strategy discards it.
+          case "vertx" :: _         => MergeStrategy.first
           case _                    => MergeStrategy.discard
         }
       case "module-info.class"       => MergeStrategy.discard
