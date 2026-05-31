@@ -34,7 +34,22 @@ This:
 | `IMAGE` | `quack-on-demand:local` | manager image ref |
 | `NAMESPACE` | `qod` | install namespace |
 | `RELEASE` | `qod` | helm release name |
-| `SKIP_BUILD` | unset | set to `1` to skip `docker build` (faster reruns) |
+| `BUILD` | `1` | `1` runs `docker build`; `0` reuses an already-loaded image. Same convention as `scripts/run-jar.sh`. |
+| `NUKE` | `0` | `1` deletes the namespace before reinstalling — wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
+| `SF` | unset | TPC-H scale factor. When set, seeds TPC-H into the in-cluster Postgres before the manager boots — same `scripts/load-tpch-dbgen.sh` flow `run-jar.sh` uses. Requires `duckdb` on the host. `SF=1` ≈ 6M lineitem rows. |
+
+```bash
+# Fresh boot from a clean Postgres + TPC-H SF=1 seeded:
+NUKE=1 SF=1 ./charts/quack-on-demand/test/install-local.sh
+
+# Just nuke and reinstall without seeding:
+NUKE=1 ./charts/quack-on-demand/test/install-local.sh
+
+# Iterate on the chart without rebuilding the image:
+BUILD=0 ./charts/quack-on-demand/test/install-local.sh
+```
+
+The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing — so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
 
 ## Verify by hand
 
