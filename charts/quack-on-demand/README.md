@@ -1,0 +1,101 @@
+# quack-on-demand Helm chart
+
+Deploys the [quack-on-demand](https://github.com/starlake-ai/quack-on-demand) manager onto Kubernetes. The manager serves the admin REST/UI on `:20900` and the FlightSQL edge on `:31338`, and supervises Quack node pods in the same namespace via its built-in `KubernetesQuackBackend`.
+
+## Prerequisites
+
+- Kubernetes 1.25+
+- Helm 3.12+
+- An **external Postgres** reachable from the cluster. The manager and the spawned Quack nodes use it for the DuckLake metadata + the `slkstate_*` control-plane tables.
+
+The chart does **not** bundle Postgres. Production deploys should point at a managed Postgres (RDS, Cloud SQL, AlloyDB, Azure Database for PostgreSQL). For local kind testing, see [`test/`](test/).
+
+## Quick install
+
+```bash
+helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand \
+  --namespace qod --create-namespace \
+  --set postgres.host=postgres.example.svc \
+  --set postgres.existingSecret=qod-pg \
+  --set admin.existingSecret=qod-admin
+```
+
+Or from this checkout:
+
+```bash
+helm install qod charts/quack-on-demand \
+  --namespace qod --create-namespace \
+  --set postgres.host=postgres.example.svc \
+  --set postgres.existingSecret=qod-pg \
+  --set admin.existingSecret=qod-admin
+```
+
+## What the chart creates
+
+| Object | Purpose |
+|---|---|
+| `Deployment` | The manager pod. Default `replicas: 1` (see RESILIENCE.md and #11). |
+| `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
+| `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
+| `ServiceAccount` | Bound to the `Role` below. |
+| `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** — the manager only ever talks to its own namespace. |
+| `ConfigMap` | `SL_QUACK_*` / `PROXY_*` env-var overrides — everything in `application.conf` that isn't a secret. |
+| `Secret` | Chart-managed only when `postgres.password` / `admin.password` / `apiKey.value` are inline. Production deploys should use `existingSecret` references instead. |
+| `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here — front it with a Gateway / Envoy / Istio. |
+| `ServiceMonitor` | Optional, for the Prometheus Operator. |
+| `PodDisruptionBudget` | Optional, only created when `replicaCount > 1`. |
+
+## Key values
+
+See [`values.yaml`](values.yaml) for the full list. The most-used:
+
+| Key | Default | Notes |
+|---|---|---|
+| `image.repository` | `starlakeai/quack-on-demand` | |
+| `image.tag` | `""` (uses `Chart.AppVersion`) | |
+| `replicaCount` | `1` | Keep at 1 until multi-manager HA lands (#11). |
+| `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
+| `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
+| `admin.existingSecret` | `""` | Recommended for prod. Inline `admin.password` is dev-only. |
+| `apiKey.value` | `""` | Static `X-API-Key` for `/api/*`. Optional — UI login still works without it. |
+| `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
+| `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
+| `ingress.enabled` | `false` | REST/UI only. |
+| `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |
+| `metrics.sink` | `prometheus` | One of `prometheus` \| `aws` \| `azure` \| `gcp` \| `none`. |
+| `bootstrap.enabled` | `true` | Auto-create `acme/sales` tenant + pool on every boot. Disable when tenants are managed externally. |
+
+## Quack node image (operator-supplied)
+
+The chart's `quackNode.image` value points at the DuckDB Quack server image — a **different artifact** from the manager image. The manager spawns one pod per Quack node and references this image in the pod spec. The default `starlakeai/quack:latest` is a placeholder; the project does not yet publish a public Quack server image. For now, operators must:
+
+1. Build (or otherwise obtain) a Docker image that runs a DuckDB Quack server listening on port `8080` (or override `SL_QUACK_K8S_QUACK_PORT`).
+2. Push it to a registry the cluster can pull from.
+3. Override the chart value:
+
+   ```bash
+   helm upgrade qod charts/quack-on-demand \
+     --set quackNode.image=registry.example.com/quack:1.5
+   ```
+
+Until then, the manager comes up healthy but the spawned node pods will `ImagePullBackOff` and the FlightSQL edge will report no compatible nodes.
+
+## Operational notes
+
+- **Replicas** — keep at 1 until `roadmap:v0.4 #11` (Postgres advisory-lock leader election) lands. Two managers against the same Postgres will race on pod create/delete.
+- **K8s API scope** — manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `SL_QUACK_K8S_NAMESPACE` and grant the equivalent `Role` there.
+- **TLS** — leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
+- **Probes** — both liveness and readiness target `/health`. Readiness gates traffic until `PoolSupervisor.restore() + reconcile()` finish, so a rolling restart doesn't briefly 503.
+- **terminationGracePeriodSeconds** — default 60 s. Gives in-flight FlightSQL statements a chance to finish before the JVM is killed.
+
+## Local test (kind)
+
+See [`test/README.md`](test/README.md) for a self-contained kind + helm + minimal-Postgres rig.
+
+## Uninstall
+
+```bash
+helm uninstall qod --namespace qod
+# The Quack node pods the manager spawned outlive the manager. Clean up:
+kubectl --namespace qod delete pods,services -l managed-by=quack-on-demand
+```

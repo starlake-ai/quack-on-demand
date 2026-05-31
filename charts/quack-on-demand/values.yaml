@@ -1,0 +1,203 @@
+# ============================================================================
+# quack-on-demand chart values
+# ============================================================================
+#
+# Reference for every knob the manager honors. Anything under `env:` is passed
+# through to the manager pod verbatim as SL_QUACK_* / PROXY_* env vars and
+# overrides the corresponding key in application.conf. See the project's
+# RUNNING.md for the full env-var table.
+
+# --- Image ------------------------------------------------------------------
+image:
+  repository: starlakeai/quack-on-demand
+  tag: ""                  # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# --- Replicas ---------------------------------------------------------------
+# Multi-manager active-active is not yet safe (see RESILIENCE.md and #11).
+# Keep replicas=1 until Postgres advisory-lock leader election lands.
+replicaCount: 1
+
+# Optional override for the rendered names. `fullnameOverride` wins if set.
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Service accounts and RBAC ----------------------------------------------
+serviceAccount:
+  create: true
+  name: ""                 # defaults to the release fullname
+  annotations: {}
+
+rbac:
+  # Manager calls the K8s API to create/watch/delete pods + services in its
+  # own namespace (KubernetesQuackBackend). A Role is sufficient; never
+  # ClusterRole.
+  create: true
+
+# --- Pod-level ---------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: false   # JVM writes to /tmp and the manager auto-generates TLS certs at runtime
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 60   # gives in-flight FlightSQL statements time to finish (see RESILIENCE.md)
+
+# --- Services (REST/UI + FlightSQL) -----------------------------------------
+service:
+  # Admin REST + UI listener
+  rest:
+    type: ClusterIP
+    port: 20900
+    annotations: {}
+  # FlightSQL edge (gRPC). Default ClusterIP. To expose externally, switch
+  # to LoadBalancer / NodePort, OR front it with a Gateway / Envoy.
+  flightsql:
+    type: ClusterIP
+    port: 31338
+    annotations: {}
+
+# --- Ingress (REST/UI only — FlightSQL is gRPC and not handled here) --------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: quack.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- Probes ------------------------------------------------------------------
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# --- ServiceMonitor (Prometheus Operator) -----------------------------------
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# --- PodDisruptionBudget -----------------------------------------------------
+# Only created when replicaCount > 1 — single-manager deploys have no peer
+# to fail over to.
+pdb:
+  enabled: false
+  minAvailable: 1
+
+# --- Postgres (external) -----------------------------------------------------
+# The manager and the spawned Quack nodes all talk to this Postgres for the
+# DuckLake metadata + slkstate_* control-plane tables. Production deploys
+# should point at a managed Postgres (RDS / Cloud SQL / AlloyDB / Azure DB).
+postgres:
+  host: ""                 # REQUIRED — e.g. "rds.example.com" or "postgres.svc"
+  port: 5432
+  user: postgres
+  dbName: tpch
+  # Pick exactly ONE secret strategy:
+  #   1. inline password (dev / kind only — discouraged for prod)
+  #   2. existing secret reference (recommended)
+  password: ""             # DEV ONLY: inline plaintext, rendered into a Secret by the chart
+  existingSecret: ""       # PROD: reference an externally-managed Secret containing the key below
+  existingSecretKey: pgPassword
+
+# --- Quack node image --------------------------------------------------------
+# Image used for the Quack node pods the manager spawns. This is the DuckDB
+# Quack server, NOT the manager — they're separate processes.
+quackNode:
+  image: starlakeai/quack:latest
+
+# --- DuckLake storage --------------------------------------------------------
+# Path inside the spawned Quack node pods where parquet files land. For
+# real deployments this is usually an object store URL (s3://, gs://,
+# azure://); for kind tests an emptyDir-backed filesystem path is fine.
+storage:
+  dataPath: /var/quack/ducklake
+
+# --- Admin credentials -------------------------------------------------------
+# Initial admin user seeded into slkstate_user on every boot. Re-applied on
+# every restart so changing the password and re-deploying rotates.
+admin:
+  username: admin
+  # Either inline (dev) or via an externally-managed secret (prod).
+  password: ""
+  existingSecret: ""
+  existingSecretKey: adminPassword
+
+# --- REST API gate ----------------------------------------------------------
+# Optional static X-API-Key for the /api/* admin endpoints. When unset
+# AND admin password is set, the UI's session-token flow still works for
+# the admin user. Leave empty for dev kind tests.
+apiKey:
+  value: ""
+  existingSecret: ""
+  existingSecretKey: apiKey
+
+# --- FlightSQL edge auth / TLS ---------------------------------------------
+flightsql:
+  tls:
+    enabled: true
+    # Leave both empty to let the manager auto-generate a self-signed cert at
+    # boot (saved under /tmp/certs inside the pod). For real deployments,
+    # mount a Secret containing the chain + key.
+    existingSecret: ""
+    certKey: server-cert.pem
+    keyKey: server-key.pem
+
+# --- Metrics sink -----------------------------------------------------------
+# One of: "prometheus" | "aws" | "azure" | "gcp" | "none". Defaults to
+# "prometheus" so /metrics is exposed on the REST service.
+metrics:
+  sink: prometheus
+
+# --- Bootstrap tenant / pool ------------------------------------------------
+# Idempotent at startup. Disable when tenants are managed externally.
+bootstrap:
+  enabled: true
+  tenant: acme
+  pool: sales
+  roleDistribution:
+    writeonly: 1
+    readonly: 1
+    dual: 1
+
+# --- Arbitrary env-var passthrough ------------------------------------------
+# Anything under `env` lands as an env var on the manager pod, taking
+# precedence over the chart's own templating. Use this for SL_QUACK_* knobs
+# the chart doesn't model explicitly yet.
+env: {}
+
+# --- Extra volume mounts (for cert secrets, custom config, etc.) ------------
+extraVolumes: []
+extraVolumeMounts: []

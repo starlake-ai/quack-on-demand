@@ -1,0 +1,24 @@
+apiVersion: v2
+name: quack-on-demand
+description: |
+  A production-grade FlightSQL gateway in front of DuckDB Quack + DuckLake.
+  This chart deploys the manager process which serves the admin REST/UI and
+  the FlightSQL edge, and supervises Quack node pods in the same namespace
+  via the manager's built-in KubernetesQuackBackend.
+type: application
+version: 0.1.0
+appVersion: 0.1.0-SNAPSHOT
+home: https://github.com/starlake-ai/quack-on-demand
+sources:
+  - https://github.com/starlake-ai/quack-on-demand
+maintainers:
+  - name: Starlake
+    url: https://starlake.ai
+keywords:
+  - duckdb
+  - ducklake
+  - flightsql
+  - arrow
+  - sql
+  - analytics
+icon: https://raw.githubusercontent.com/starlake-ai/quack-on-demand/main/assets/icon.png

@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qod.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+data:
+  # ---- Runtime + Postgres ---------------------------------------------------
+  SL_QUACK_RUNTIME_TYPE:        "kubernetes"
+  SL_QUACK_PG_HOST:             {{ .Values.postgres.host | quote }}
+  SL_QUACK_PG_PORT:             {{ .Values.postgres.port | quote }}
+  SL_QUACK_PG_USER:             {{ .Values.postgres.user | quote }}
+  SL_QUACK_PG_DBNAME:           {{ .Values.postgres.dbName | quote }}
+  SL_QUACK_DUCKLAKE_DATA_PATH:  {{ .Values.storage.dataPath | quote }}
+
+  # ---- K8s backend ----------------------------------------------------------
+  # SL_QUACK_K8S_NAMESPACE is injected via fieldRef in the Deployment so it
+  # always tracks the manager pod's own namespace.
+  SL_QUACK_K8S_IMAGE:           {{ .Values.quackNode.image | quote }}
+  SL_QUACK_K8S_SERVICE_ACCOUNT: {{ include "qod.serviceAccountName" . | quote }}
+
+  # ---- Admin bootstrap (idempotent) ----------------------------------------
+  SL_QUACK_ADMIN_USERNAME:      {{ .Values.admin.username | quote }}
+
+  # ---- Bootstrap tenant + pool ---------------------------------------------
+  SL_QUACK_BOOTSTRAP_ENABLED:   {{ .Values.bootstrap.enabled | quote }}
+  SL_QUACK_BOOTSTRAP_TENANT:    {{ .Values.bootstrap.tenant | quote }}
+  SL_QUACK_BOOTSTRAP_POOL:      {{ .Values.bootstrap.pool | quote }}
+  SL_QUACK_BOOTSTRAP_WRITEONLY: {{ .Values.bootstrap.roleDistribution.writeonly | quote }}
+  SL_QUACK_BOOTSTRAP_READONLY:  {{ .Values.bootstrap.roleDistribution.readonly  | quote }}
+  SL_QUACK_BOOTSTRAP_DUAL:      {{ .Values.bootstrap.roleDistribution.dual      | quote }}
+
+  # ---- FlightSQL edge TLS ---------------------------------------------------
+  PROXY_TLS_ENABLED:            {{ .Values.flightsql.tls.enabled | quote }}
+
+  # ---- Metrics sink ---------------------------------------------------------
+  SL_QUACK_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
