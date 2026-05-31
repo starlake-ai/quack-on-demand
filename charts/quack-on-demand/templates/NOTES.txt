@@ -11,13 +11,14 @@ Quack on Demand has been installed.
     svc/{{ include "qod.fullname" . }} {{ .Values.service.rest.port }}:{{ .Values.service.rest.port }}
 
   Then open http://localhost:{{ .Values.service.rest.port }}/ui/
+
+  Seeded admin user(s): {{ .Values.admin.username }}
 {{- if .Values.admin.password }}
-  Login: {{ .Values.admin.username }} / (chart-managed admin password)
+  Password: (chart-managed; from values.admin.password)
 {{- else if .Values.admin.existingSecret }}
-  Login: {{ .Values.admin.username }} / (value of {{ .Values.admin.existingSecret }}/{{ .Values.admin.existingSecretKey }})
+  Password: (from {{ .Values.admin.existingSecret }}/{{ .Values.admin.existingSecretKey }})
 {{- else }}
-  WARNING: no admin password set. The manager will seed a default admin
-  but you should rotate via SL_QUACK_ADMIN_PASSWORD or chart values
+  WARNING: no admin password set. Set admin.password or admin.existingSecret
   before exposing the manager.
 {{- end }}
 
