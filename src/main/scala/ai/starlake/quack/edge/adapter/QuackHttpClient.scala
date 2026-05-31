@@ -26,6 +26,16 @@ import java.sql.{DriverManager, PreparedStatement, SQLException}
   * surrounding code; the wire is no longer HTTP. */
 open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
 
+  // Per-endpoint DuckDB instance. The `quack` extension caches a single
+  // upstream connection per database, so reusing one DuckDB across multiple
+  // (host:port, token) targets produces "Authentication failed" / "Invalid
+  // connection id" errors when the cached entry doesn't match the call.
+  // We keep one DuckDB per `endpoint` (which already encodes host:port);
+  // the rootConn below is used only for the first INSTALL / proxy SET and
+  // becomes the seed for the per-endpoint pool.
+  private val perEndpoint =
+    new java.util.concurrent.ConcurrentHashMap[String, DuckDBConnection]()
+
   // One shared in-process DuckDB. We hand out per-call connections via
   // `duplicate()` so multiple Flight requests don't serialise.
   private val rootConn: DuckDBConnection = {
@@ -57,7 +67,41 @@ open class QuackHttpClient(allocator: BufferAllocator) extends LazyLogging:
       session: Option[String]
   ): IO[QuackResponse] = IO.blocking {
     val started = System.nanoTime()
-    val conn = rootConn.duplicate()
+    // Pin to one DuckDB per endpoint so the quack extension's internal
+    // upstream-connection cache stays consistent for that target. Within
+    // a single endpoint, we synchronize so concurrent statements against
+    // the same node serialize at the JDBC layer (the cached upstream
+    // would race otherwise). Different endpoints get different DuckDBs
+    // and run independently.
+    val endpointConn = perEndpoint.computeIfAbsent(endpoint, _ => freshDuckDB())
+    endpointConn.synchronized {
+      val conn = endpointConn.duplicate()
+      queryWith(conn, endpoint, token, sql, session, started)
+    }
+  }
+
+  /** Build a fresh DuckDB instance with the quack extension loaded. Each
+    * gets its own clean upstream-connection cache. */
+  private def freshDuckDB(): DuckDBConnection = {
+    Class.forName("org.duckdb.DuckDBDriver")
+    val c = DriverManager.getConnection("jdbc:duckdb:").asInstanceOf[DuckDBConnection]
+    val stmt = c.createStatement()
+    try
+      QuackHttpClient.proxyHostPort.foreach(hp => stmt.execute(s"SET http_proxy = '$hp'"))
+      stmt.execute("INSTALL quack")
+      stmt.execute("LOAD quack")
+    finally stmt.close()
+    c
+  }
+
+  private def queryWith(
+      conn: DuckDBConnection,
+      endpoint: String,
+      token: String,
+      sql: String,
+      session: Option[String],
+      started: Long
+  ): QuackResponse = {
     var ps: PreparedStatement = null
     var rs: DuckDBResultSet    = null
     try
