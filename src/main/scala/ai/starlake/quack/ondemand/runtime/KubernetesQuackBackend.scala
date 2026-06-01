@@ -78,11 +78,11 @@ final class KubernetesQuackBackend(
         }
     }
     val tokenEnv = new EnvVar()
-    tokenEnv.setName("QUACK_TOKEN")
+    tokenEnv.setName("QOD_NODE_TOKEN")
     tokenEnv.setValue(token)
     envs.add(tokenEnv)
     val portEnv = new EnvVar()
-    portEnv.setName("QUACK_PORT")
+    portEnv.setName("QOD_NODE_PORT")
     portEnv.setValue(quackPort.toString)
     envs.add(portEnv)
 
