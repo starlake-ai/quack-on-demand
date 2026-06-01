@@ -34,7 +34,7 @@ This:
 | `IMAGE` | `quack-on-demand:local` | manager image ref |
 | `NAMESPACE` | `qod` | install namespace |
 | `RELEASE` | `qod` | helm release name |
-| `BUILD` | `1` | `1` runs `docker build`; `0` reuses an already-loaded image. Same convention as `scripts/run-jar.sh`. |
+| `BUILD` | `0` | `0` reuses local `:local`-tagged images (falling back to `:latest-snapshot` from Docker Hub if absent); `1` runs `docker build` first. Same convention as `scripts/run-jar.sh`. |
 | `NUKE` | `0` | `1` deletes the namespace before reinstalling — wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
 | `LOAD_TPCH` | unset | TPC-H seed. Unset = skip; positive integer = scale factor (`LOAD_TPCH=1` ≈ 6M lineitem rows, `LOAD_TPCH=10` ≈ 60M). Seeds TPC-H into the in-cluster Postgres + SeaweedFS before the manager boots — same `scripts/load-tpch-dbgen.sh` flow `run-jar.sh` uses. Requires `duckdb` on the host. |
 
@@ -45,8 +45,8 @@ NUKE=1 LOAD_TPCH=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.
 # Just nuke and reinstall without seeding:
 NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
-# Iterate on the chart without rebuilding the image:
-BUILD=0 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+# Force a fresh docker build (default is BUILD=0 = reuse local / pull from Hub):
+BUILD=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
 The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing — so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
@@ -79,5 +79,5 @@ Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod
 ## Known limitations
 
 - Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state — that's a feature for a smoke rig.
-- The manager image is built on every run unless `BUILD=0`. The Dockerfile uses cached layers, so reruns are fast once the JDK + sbt deps are cached.
+- By default (`BUILD=0`) the script reuses the local `:local`-tagged images, pulling `:latest-snapshot` from Docker Hub if they're absent. Set `BUILD=1` to rebuild from the local Dockerfile (cached layers make reruns fast once JDK + sbt deps are cached).
 - FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `--insecure` for `loadtest.py`). Production deploys should mount a CA-signed cert via `flightsql.tls.existingSecret`.
