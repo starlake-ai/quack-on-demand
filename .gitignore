@@ -100,3 +100,9 @@ native/quackwire/build*/
 # Each per-platform classifier jar is built by zipping
 # libquackwire/binaries/<platform>/libquackwire.<so|dylib>.
 libquackwire/binaries/
+
+# Defense in depth: src/main/resources/native/ is no longer how
+# libquackwire reaches the assembly (the classifier deps in
+# libraryDependencies handle that). Any binaries that land here would
+# be stale relative to the published Maven coord; ignore them.
+src/main/resources/native/
