@@ -143,13 +143,21 @@ echo "scale:       SF=$SF (approx $((SF * 6))M lineitem rows)"
 echo ""
 
 # ---- Idempotency probe ----
-# Check whether $DB_NAME.$SCHEMA_NAME.lineitem already exists with rows. Use
-# DuckDB itself (not psql against information_schema) because DuckLake tables
-# are not visible to Postgres's catalog - their metadata lives in
-# `__ducklake_*` tables and their data in parquet on disk. Running the probe
-# through DuckDB matches what any client will actually see. stderr is
-# silenced so the expected "table does not exist" path is quiet on first
-# boot.
+# Two-step check:
+#   1. SELECT count(*) - hits DuckLake's metadata, decides if the schema
+#      claims any rows. Cheap; uses the `__ducklake_*` tables in Postgres
+#      and never touches parquet.
+#   2. SELECT LIMIT 1 - if step 1 says "yes, rows exist", this verifies
+#      the parquet files those rows reference are actually on disk.
+#      DuckLake stores absolute paths in its catalog; if `./ducklake/`
+#      (or the S3 prefix) was wiped while pgdata was kept, count(*) lies
+#      and every client query fails with "Cannot open file ...". Catching
+#      that here turns a silent post-boot failure into an actionable
+#      pre-boot one.
+#
+# stderr is silenced for the count (expected "table does not exist" path
+# on first boot is quiet) and surfaced for the file-probe (we want the
+# Cannot-open-file diagnostic visible).
 PROBE_SQL="$(mktemp -t load-tpch-probe.XXXXXX.sql)"
 cat > "$PROBE_SQL" <<SQL
 INSTALL ducklake; LOAD ducklake;
@@ -164,6 +172,35 @@ SQL
 existing_rows="$(duckdb < "$PROBE_SQL" 2>/dev/null | tr -d '\r\n ' || true)"
 rm -f "$PROBE_SQL"
 if [[ "$existing_rows" =~ ^[0-9]+$ ]] && (( existing_rows > 0 )); then
+  # Catalog says there's data. Verify the parquet files are reachable -
+  # LIMIT 1 forces an actual file open, which the metadata short-circuit
+  # in count(*) bypasses.
+  FILE_PROBE_SQL="$(mktemp -t load-tpch-file-probe.XXXXXX.sql)"
+  cat > "$FILE_PROBE_SQL" <<SQL
+INSTALL ducklake; LOAD ducklake;
+INSTALL postgres; LOAD postgres;
+$STORAGE_SQL
+ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
+  (DATA_PATH '$DATA_PATH');
+.mode csv
+.headers off
+SELECT l_orderkey FROM $DB_NAME.$SCHEMA_NAME.lineitem LIMIT 1;
+SQL
+  file_probe_err="$(duckdb < "$FILE_PROBE_SQL" 2>&1 1>/dev/null || true)"
+  rm -f "$FILE_PROBE_SQL"
+  if [[ -n "$file_probe_err" && "$file_probe_err" == *"Cannot open file"* ]]; then
+    echo "ERROR: catalog claims $existing_rows rows in $DB_NAME.$SCHEMA_NAME.lineitem" >&2
+    echo "       but the parquet files it references are missing on disk:" >&2
+    echo "$file_probe_err" | sed -n 's/.*Cannot open file "\([^"]*\)".*/         \1/p' \
+      | head -1 >&2
+    echo "" >&2
+    echo "Catalog metadata in Postgres got out of sync with the data files. Most" >&2
+    echo "likely cause: ./ducklake/ (or the S3 prefix) was wiped while ./pgdata/" >&2
+    echo "was kept. Either re-create both from scratch (NUKE=1) or manually" >&2
+    echo "drop the stale schema:" >&2
+    echo "  DROP SCHEMA $DB_NAME.$SCHEMA_NAME CASCADE;" >&2
+    exit 1
+  fi
   echo "already loaded: $DB_NAME.$SCHEMA_NAME.lineitem has $existing_rows rows; skipping."
   echo "(delete the schema or override SCHEMA_NAME to force a reload)"
   exit 0
