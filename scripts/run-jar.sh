@@ -6,8 +6,11 @@
 #   BUILD=0 (default) - download the jar from Maven Central
 #                       (ai.starlake:quack-on-demand_3:<QUACK_VERSION>),
 #                       cache it under $JAR_CACHE_DIR, run `java -jar`.
-#   BUILD=1           - run `sbt assembly` from this checkout and use the
-#                       freshly-built jar in distrib/.
+#   BUILD=1           - rebuild libquackwire for the host platform (cmake +
+#                       sbt libquackwire/publishLocal), then run `sbt assembly`
+#                       from this checkout. Non-host platforms come from
+#                       Central snapshots so the assembly carries all four
+#                       libs. Uses the freshly-built jar in distrib/.
 #
 # Boot extras: Postgres reachability probe, idempotent CREATE DATABASE
 # of the catalog DB, optional TPC-H seed via load-tpch-dbgen.sh before
@@ -125,8 +128,94 @@ ensure_sbt() {
   echo "bootstrapped sbt -> $SBT_CMD"
 }
 
+# Re-build libquackwire for the host platform via CMake, then ensure all four
+# platforms' binaries are staged under libquackwire/binaries/ so
+# `sbt libquackwire/publishLocal` can produce a complete set of classifier
+# jars. Non-host platforms are pulled from Sonatype Central snapshots (the
+# same libquackwire-SNAPSHOT the manager's libraryDependencies points at)
+# and unpacked into the staging tree. After publishLocal lands the set in
+# ~/.ivy2/local/, the assembly task resolves all four classifier coords
+# from the local cache - the host one carries the freshly-built bits.
+rebuild_libquackwire_locally() {
+  # Skip if the C++ source tree is absent (e.g. distribution-style
+  # checkout without native/quackwire/).
+  if [[ ! -f "$REPO_DIR/native/quackwire/CMakeLists.txt" ]]; then
+    echo "no native/quackwire/CMakeLists.txt found; skipping libquackwire rebuild" >&2
+    return 0
+  fi
+  command -v cmake >/dev/null 2>&1 || {
+    echo "WARN: cmake not on PATH; skipping libquackwire rebuild (assembly will resolve from Central snapshots)." >&2
+    return 0
+  }
+  # 1. Detect host platform - mirrors QuackNativeBridge.NativeLoader.platformDir().
+  local host_os host_arch host_platform host_ext
+  case "$(uname -s)" in
+    Darwin) host_os=osx;     host_ext=dylib ;;
+    Linux)  host_os=linux;   host_ext=so    ;;
+    *) echo "ERROR: unsupported OS for libquackwire: $(uname -s)" >&2; exit 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  host_arch=x86_64  ;;
+    aarch64|arm64) host_arch=aarch64 ;;
+    *) echo "ERROR: unsupported arch for libquackwire: $(uname -m)" >&2; exit 1 ;;
+  esac
+  host_platform="$host_os-$host_arch"
+
+  # 2. Read the libquackwire coord pinned in build.sbt - keeps the script and
+  # the assembly agreeing on which version to publish/resolve.
+  local libq_version
+  libq_version="$(grep -E '^val libquackwireVersion' "$REPO_DIR/build.sbt" \
+                  | sed -E 's/.*"([^"]+)".*/\1/' | head -n1)"
+  [[ -n "$libq_version" ]] || {
+    echo "ERROR: could not parse libquackwireVersion from build.sbt" >&2; exit 1; }
+
+  # 3. CMake build for the host platform.
+  echo "rebuilding libquackwire for $host_platform via cmake..."
+  ( cd "$REPO_DIR/native/quackwire" \
+    && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release )
+  local host_built="$REPO_DIR/native/quackwire/build/libquackwire.$host_ext"
+  [[ -f "$host_built" ]] || {
+    echo "ERROR: cmake did not produce $host_built" >&2; exit 1; }
+  mkdir -p "$REPO_DIR/libquackwire/binaries/$host_platform"
+  cp "$host_built" "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext"
+
+  # 4. For the other 3 platforms, pull the matching classifier jar from
+  # Central snapshots (or use whatever is already staged from a prior run).
+  local snap_url="https://central.sonatype.com/repository/maven-snapshots/ai/starlake/libquackwire/${libq_version}"
+  local platforms=(linux-x86_64 linux-aarch64 osx-x86_64 osx-aarch64)
+  for plat in "${platforms[@]}"; do
+    [[ "$plat" == "$host_platform" ]] && continue
+    local ext
+    case "$plat" in *linux*) ext=so ;; *) ext=dylib ;; esac
+    local out_dir="$REPO_DIR/libquackwire/binaries/$plat"
+    local out_lib="$out_dir/libquackwire.$ext"
+    if [[ -f "$out_lib" ]]; then
+      continue
+    fi
+    mkdir -p "$out_dir"
+    local cls_url="${snap_url}/libquackwire-${libq_version}-${plat}.jar"
+    local tmp
+    tmp="$(mktemp -d)"
+    if curl -fsSL "$cls_url" -o "$tmp/cls.jar" 2>/dev/null; then
+      ( cd "$tmp" && unzip -q cls.jar "native/$plat/libquackwire.$ext" \
+        && mv "native/$plat/libquackwire.$ext" "$out_lib" )
+      echo "fetched libquackwire[$plat] from Central snapshots"
+    else
+      echo "WARN: could not fetch $cls_url; libquackwire[$plat] will be skipped (assembly may fail at sbt-assembly time)." >&2
+    fi
+    rm -rf "$tmp"
+  done
+
+  # 5. Publish all available classifiers into the local ivy cache so the
+  # assembly task resolves them without round-tripping Central for the host.
+  echo "sbt libquackwire/publishLocal..."
+  "$SBT_CMD" libquackwire/publishLocal
+}
+
 build_locally() {
   ensure_sbt
+  rebuild_libquackwire_locally
   echo "running '$SBT_CMD assembly' (local build)..."
   "$SBT_CMD" assembly
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
