@@ -100,3 +100,39 @@ secret name+key the user provided, or the chart-managed one.
 {{- include "qod.fullname" . }}-apikey
 {{- end -}}
 {{- end -}}
+
+{{- define "qod.s3SecretName" -}}
+{{- if .Values.s3.existingSecret -}}
+{{- .Values.s3.existingSecret -}}
+{{- else -}}
+{{- include "qod.fullname" . }}-s3
+{{- end -}}
+{{- end -}}
+
+{{- define "qod.s3AccessKeyKey" -}}
+{{- if .Values.s3.existingSecret -}}
+{{- .Values.s3.existingSecretAccessKeyKey -}}
+{{- else -}}
+{{- "s3AccessKey" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "qod.s3SecretKeyKey" -}}
+{{- if .Values.s3.existingSecret -}}
+{{- .Values.s3.existingSecretSecretKeyKey -}}
+{{- else -}}
+{{- "s3SecretKey" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+True when the chart should wire S3 env vars — i.e. the data path is
+remote-scheme (s3://, s3a://, r2://) AND credentials are available
+(either inline or via existingSecret).
+*/}}
+{{- define "qod.s3Enabled" -}}
+{{- $p := .Values.storage.dataPath -}}
+{{- $remote := or (hasPrefix "s3://" $p) (or (hasPrefix "s3a://" $p) (hasPrefix "r2://" $p)) -}}
+{{- $hasCreds := or .Values.s3.existingSecret (and .Values.s3.accessKey .Values.s3.secretKey) -}}
+{{- if and $remote $hasCreds -}}true{{- end -}}
+{{- end -}}

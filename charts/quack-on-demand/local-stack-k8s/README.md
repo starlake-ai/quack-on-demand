@@ -13,7 +13,7 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 ## One command
 
 ```bash
-./charts/quack-on-demand/test/install-local.sh
+./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
 This:
@@ -22,7 +22,7 @@ This:
 2. Builds the manager image (`quack-on-demand:local`) from the current source tree.
 3. Loads the image into the kind cluster.
 4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)): single Pod + Service, ephemeral `emptyDir`. **Not production-grade** — that's the point. The chart itself expects an external Postgres; this manifest exists only to satisfy the smoke.
-5. `helm install`s the chart pointing at that Postgres + the local image, with TLS off and an inline admin password.
+5. `helm install`s the chart pointing at that Postgres + the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
 6. Waits for the manager pod to be `Ready` and `/health` to return OK.
 7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
 
@@ -40,13 +40,13 @@ This:
 
 ```bash
 # Fresh boot from a clean Postgres + TPC-H SF=1 seeded:
-NUKE=1 SF=1 ./charts/quack-on-demand/test/install-local.sh
+NUKE=1 SF=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Just nuke and reinstall without seeding:
-NUKE=1 ./charts/quack-on-demand/test/install-local.sh
+NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Iterate on the chart without rebuilding the image:
-BUILD=0 ./charts/quack-on-demand/test/install-local.sh
+BUILD=0 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
 The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing — so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
@@ -60,9 +60,9 @@ After the script reports `smoke OK` (the script prints the exact port-forward co
 kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
 # Open http://localhost:20900/ui/  (login admin / admin)
 
-# Port-forward FlightSQL (gRPC on :31338)
+# Port-forward FlightSQL (gRPC+TLS on :31338, manager-issued self-signed cert)
 kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
-# JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=false&user=acme/sales/<user>&password=<password>
+# JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=acme/sales/<user>&password=<password>
 
 # Watch the quack node pods the manager spawns
 kubectl -n qod get pods -l managed-by=quack-on-demand -w
@@ -73,11 +73,11 @@ Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod
 ## Tear down
 
 ```bash
-kind delete cluster --name qod-test
+./charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh
 ```
 
 ## Known limitations
 
 - Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state — that's a feature for a smoke rig.
-- The manager image is built on every run unless `SKIP_BUILD=1`. The Dockerfile uses cached layers, so reruns are fast once the JDK + sbt deps are cached.
-- TLS is disabled for the smoke; production deploys should keep `flightsql.tls.enabled=true` and either let the manager auto-generate or mount a CA-signed cert.
+- The manager image is built on every run unless `BUILD=0`. The Dockerfile uses cached layers, so reruns are fast once the JDK + sbt deps are cached.
+- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `--insecure` for `loadtest.py`). Production deploys should mount a CA-signed cert via `flightsql.tls.existingSecret`.
