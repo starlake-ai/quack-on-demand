@@ -22,11 +22,12 @@
 #   NAMESPACE      install namespace              (default qod)
 #   RELEASE        helm release name              (default qod)
 #   BUILD          "1" to docker build the manager + node images from this
-#                  tree. "0" to reuse the local `:local`-tagged images; if
-#                  they're missing, the script pulls `:latest-snapshot` from
-#                  Docker Hub (starlakeai/quack-on-demand{,-node}) and retags
-#                  them locally so the rest of the flow is unchanged.
-#                  Same convention as scripts/run-jar.sh.          (default 1)
+#                  tree. "0" (default) to reuse the local `:local`-tagged
+#                  images; if they're missing, the script pulls
+#                  `:latest-snapshot` from Docker Hub
+#                  (starlakeai/quack-on-demand{,-node}) and retags them
+#                  locally so the rest of the flow is unchanged.
+#                  Same convention as scripts/run-jar.sh.          (default 0)
 #   NUKE           "1" to delete the namespace before reinstalling (wipes
 #                  Postgres ephemeral data, the helm release, and any
 #                  orphan quack node pods).                       (default 0)
@@ -45,7 +46,7 @@ KIND_CLUSTER="${KIND_CLUSTER:-qod-test}"
 IMAGE="${IMAGE:-quack-on-demand:local}"
 NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
-BUILD="${BUILD:-1}"
+BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
 LOAD_TPCH="${LOAD_TPCH:-}"
 if [[ -n "$LOAD_TPCH" ]]; then
