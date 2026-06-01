@@ -212,11 +212,17 @@ if [[ "$libq_already_released" == "0" ]]; then
   echo "staged 4 platforms:"; ls libquackwire/binaries/*/
 
   # 5. publishSigned + sonatypeBundleRelease.
+  # `project libquackwire` switches the active project before
+  # sonatypeBundleRelease runs - the bundle-release flow checks
+  # `version.value` (active project's version), and we need libquackwire's
+  # non-SNAPSHOT version, not the root's 0.1.0-SNAPSHOT, otherwise sbt-
+  # sonatype refuses with "Version cannot be a snapshot version".
   echo "sbt libquackwire/publishSigned + sonatypeBundleRelease..."
   SBT_OPTS="${SBT_OPTS:--Xss8M -Xmx5g -XX:+UseG1GC}" \
   sbt -no-colors \
     "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
-    "libquackwire/publishSigned" \
+    "project libquackwire" \
+    "publishSigned" \
     "sonatypeBundleRelease"
 fi
 

@@ -98,6 +98,15 @@ lazy val libquackwire = (project in file("libquackwire"))
       else
         sonatypePublishToBundle.value
     },
+    // sbt-sonatype's default `sonatypeBundleDirectory` is
+    // `target / "sonatype-staging" / version.value` at ThisBuild scope,
+    // so libquackwire's signed artifacts land under the root project's
+    // `0.1.0-SNAPSHOT` directory. Override to libquackwire's own version
+    // so `sonatypeBundleRelease` (invoked in the libquackwire project
+    // scope by `scripts/release.sh`) finds its own bundle and the
+    // SNAPSHOT check doesn't fire against the root version.
+    sonatypeBundleDirectory :=
+      (LocalRootProject / target).value / "sonatype-staging" / version.value,
     // Stub main jar (Central requires one). Contains just the README.
     Compile / packageBin / mappings := Seq(
       (baseDirectory.value / "README.md") -> "META-INF/libquackwire/README.md"
