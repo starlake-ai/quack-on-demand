@@ -300,29 +300,51 @@ else
       ;;
   esac
 
+  # Decide whether the cached jar at $JAR is already current. Maven
+  # publishes a `.sha1` sidecar next to every jar; compare it against
+  # `shasum -a 1` of the local file. Snapshots use this every time
+  # (same coord can re-publish). Releases use it as belt-and-suspenders
+  # (Central is immutable, so a filename match is usually enough - but
+  # a partial download from a prior interrupted run would slip past
+  # `[[ -f "$JAR" ]]`).
+  jar_is_current() {
+    local jar="$1" sha_url="$2"
+    [[ -f "$jar" ]] || return 1
+    local remote_sha1 local_sha1
+    remote_sha1=$(curl -fsSL --max-time 10 "$sha_url" 2>/dev/null | tr -d '[:space:]' | head -c40)
+    [[ -n "$remote_sha1" ]] || return 1
+    local_sha1=$(shasum -a 1 "$jar" 2>/dev/null | awk '{print $1}')
+    [[ "$local_sha1" == "$remote_sha1" ]]
+  }
+
   if [[ -z "$version" ]]; then
     # Resolution failed -> reuse local jar if present, else build.
     use_local_jar_or_build
   elif [[ "$version" == *-SNAPSHOT ]]; then
     base_url="https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/${version}"
     JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
-    # Snapshots: always re-download (same version label can ship new bits).
-    echo "downloading snapshot $version (always refreshed)..."
-    if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
-      echo "WARN: snapshot download failed; falling back to local jar / build." >&2
-      use_local_jar_or_build
+    jar_url="$base_url/${ARTIFACT}-${version}.jar"
+    if jar_is_current "$JAR" "${jar_url}.sha1"; then
+      echo "snapshot $version cached (sha1 matches Central); skipping download."
+    else
+      echo "downloading snapshot $version..."
+      if ! curl -fsSL "$jar_url" -o "$JAR" 2>/dev/null; then
+        echo "WARN: snapshot download failed; falling back to local jar / build." >&2
+        use_local_jar_or_build
+      fi
     fi
   else
     base_url="https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${version}"
     JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
-    if [[ ! -f "$JAR" ]]; then
+    jar_url="$base_url/${ARTIFACT}-${version}.jar"
+    if jar_is_current "$JAR" "${jar_url}.sha1"; then
+      echo "release $version cached (sha1 matches Central); skipping download."
+    else
       echo "downloading $version from Maven Central..."
-      if ! curl -fsSL "$base_url/${ARTIFACT}-${version}.jar" -o "$JAR" 2>/dev/null; then
+      if ! curl -fsSL "$jar_url" -o "$JAR" 2>/dev/null; then
         echo "WARN: release download failed; falling back to local jar / build." >&2
         use_local_jar_or_build
       fi
-    else
-      echo "using cached jar: $JAR"
     fi
   fi
 fi
