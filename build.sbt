@@ -84,6 +84,20 @@ lazy val libquackwire = (project in file("libquackwire"))
       "directly from a JVM. Native binaries published as classifier jars per platform.",
     crossPaths := false,         // not a Scala-versioned artifact
     autoScalaLibrary := false,   // no scala-library dependency
+    // The `ThisBuild / publishTo` above keys off the root project's
+    // `isSnapshot.value` (read from `version.sbt`), so a non-SNAPSHOT
+    // libquackwire release would still get routed to Central snapshots
+    // and rejected with HTTP 400 because the version doesn't end in
+    // -SNAPSHOT. Override per-project so libquackwire's own version
+    // picks the endpoint: snapshots for *-SNAPSHOT, release-bundle
+    // staging otherwise.
+    publishTo := {
+      val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
+      if (version.value.endsWith("-SNAPSHOT"))
+        Some("central-snapshots" at centralSnapshots)
+      else
+        sonatypePublishToBundle.value
+    },
     // Stub main jar (Central requires one). Contains just the README.
     Compile / packageBin / mappings := Seq(
       (baseDirectory.value / "README.md") -> "META-INF/libquackwire/README.md"
