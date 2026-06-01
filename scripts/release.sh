@@ -226,20 +226,20 @@ if [[ "$libq_already_released" == "0" ]]; then
     "sonatypeBundleRelease"
 fi
 
-# 6. Bump libquackwire to next snapshot, commit.
-echo "bumping libquackwire build.sbt: $libq_release -> $libq_next"
-sed -i.bak -E "s|^val libquackwireVersion = \".*\"$|val libquackwireVersion = \"${libq_next}\"|" build.sbt
-rm build.sbt.bak
-git add build.sbt
-git commit -m "next snapshot: libquackwire ${libq_next}" -q
-
 echo "libquackwire $libq_release published to Maven Central."
 echo
 
 # ---- sbt-release ----
-# `with-defaults` accepts the prompts non-interactively. We still pass the
-# explicit version overrides on the command line so PR-driven releases can
-# pin them via env without touching version.sbt first.
+# IMPORTANT: the manager release runs BEFORE we bump libquackwire to the
+# next snapshot. sbt-release's `checkSnapshotDependencies` step refuses
+# any SNAPSHOT dep; the manager must keep pinning the just-released
+# libquackwire $libq_release (non-SNAPSHOT) for this step to succeed.
+# The libquackwire snapshot bump for the next dev cycle happens AFTER
+# sbt-release completes.
+#
+# `with-defaults` accepts the prompts non-interactively. We still pass
+# the explicit version overrides on the command line so PR-driven
+# releases can pin them via env without touching version.sbt first.
 sbt_args=(release with-defaults)
 [[ -n "${RELEASE_VERSION:-}" ]] && sbt_args+=("release-version" "$RELEASE_VERSION")
 [[ -n "${NEXT_VERSION:-}"    ]] && sbt_args+=("next-version"    "$NEXT_VERSION")
@@ -250,6 +250,14 @@ SBT_OPTS="${SBT_OPTS:--Xss8M -Xmx5g -XX:+UseG1GC}" \
 sbt -no-colors \
   "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
   "${sbt_args[@]}"
+
+# Bump libquackwire to next snapshot AFTER the manager release succeeded.
+echo "bumping libquackwire build.sbt: $libq_release -> $libq_next"
+sed -i.bak -E "s|^val libquackwireVersion = \".*\"$|val libquackwireVersion = \"${libq_next}\"|" build.sbt
+rm build.sbt.bak
+git add build.sbt
+git commit -m "next snapshot: libquackwire ${libq_next}" -q
+git push origin HEAD 2>&1 | tail -2 || true
 
 # ---- Optional: multi-arch Docker push ----
 if [[ "$NO_DOCKER" == "1" ]]; then
