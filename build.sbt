@@ -51,21 +51,21 @@ ThisBuild / developers := List(
   )
 )
 
-// ----- libquackwire (Maven Central publishing) ------------------------------
+// ----- libquackwire (Maven Central snapshots) -------------------------------
 // JNI shim native binaries published as classifier-per-platform jars on
-// Sonatype Central. Version aligns with the DuckDB ABI it links against
-// (1.5.3) suffixed with the duckdb-quack short SHA, so the
-// (libquackwire <-> duckdb-quack) pin is explicit in the coordinate.
-// Bumping either upstream bumps this version.
+// Sonatype Central snapshots. Version aligns with the DuckDB ABI it
+// links against (1.5.3) suffixed with the duckdb-quack short SHA, plus
+// `-SNAPSHOT` to keep us on the snapshot repository (mutable, no GPG
+// signing required - matches the manager's own publishing pattern in
+// `.github/workflows/snapshot.yml`).
 //
 // CI workflow `.github/workflows/quackwire.yml` builds the 4-platform
 // matrix, stages each `libquackwire.{so,dylib}` into
-// `libquackwire/binaries/<platform>/`, then runs
-// `sbt libquackwire/publishSigned sonatypeBundleRelease`.
+// `libquackwire/binaries/<platform>/`, then runs `sbt libquackwire/publish`.
 //
 // Local dev: `sbt libquackwire/publishLocal` after a CMake build (with
 // the binary copied into `libquackwire/binaries/<host-platform>/`).
-val libquackwireVersion = "1.5.3-87cd65b912a8"
+val libquackwireVersion = "1.5.3-87cd65b912a8-SNAPSHOT"
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(
@@ -97,6 +97,10 @@ lazy val root = (project in file("."))
   .settings(UiBuild.settings)
   .settings(
     name := "quack-on-demand",
+    // Resolve `ai.starlake:libquackwire:*-SNAPSHOT` from Sonatype Central
+    // snapshots. Released libquackwire versions (no -SNAPSHOT suffix)
+    // are picked up from Maven Central via the default resolver.
+    resolvers += "central-snapshots" at "https://central.sonatype.com/repository/maven-snapshots/",
     libraryDependencySchemes += "io.circe" %% "circe-yaml-common" % VersionScheme.Always,
     dependencyOverrides ++= Seq(
       "io.netty" % "netty-buffer"                       % Versions.netty,
