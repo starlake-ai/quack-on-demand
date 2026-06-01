@@ -26,14 +26,22 @@
 #   AUTO_BUMP_PG_PORT   "true" auto-bumps to 15432 when host:5432 busy
 #                                                 (default true)
 #   WAIT_TIMEOUT        manager readiness wait    (default 90 s)
+#   PROFILES            comma-separated list of compose profiles to
+#                       activate (e.g. "observability,seaweedfs"). Merges
+#                       with auto-detected profiles - the `seaweedfs`
+#                       profile auto-activates when QOD_S3_ENDPOINT in
+#                       .env points at it, so you only need PROFILES
+#                       for the OTHER opt-in profiles (`observability`).
+#                                                 (default unset)
 #
 # Usage:
 #   ./scripts/run-docker-compose.sh                            # latest
-#   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh        # pinned
+#   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh          # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
 #   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H SF=1
 #   LOAD_TPCH=10 ./scripts/run-docker-compose.sh               # + TPC-H SF=10
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
+#   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
 
 set -euo pipefail
 
@@ -49,7 +57,13 @@ NUKE="${NUKE:-0}"
 # ephemeral root container that has write access to the mount.
 if [[ "$NUKE" == "1" ]]; then
   echo "NUKE=1: tearing down any existing stack..."
-  docker compose -f docker-compose.yml --profile seaweedfs down --remove-orphans 2>/dev/null || true
+  # `down` must enumerate every profile that could have services running;
+  # otherwise containers in skipped profiles linger. Always include the
+  # known opt-in profiles so a teardown is exhaustive regardless of which
+  # combination was used last time.
+  docker compose -f docker-compose.yml \
+    --profile seaweedfs --profile observability \
+    down --remove-orphans 2>/dev/null || true
   if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" \
      || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" ]]; then
     echo "wiping ./pgdata, ./ducklake, ./certs, ./seaweedfs, ./seaweedfs-config via ephemeral container..."
@@ -221,19 +235,36 @@ if [[ "$PG_PORT_EFFECTIVE" == "5432" ]] && lsof -nP -iTCP:5432 -sTCP:LISTEN 2>/d
   fi
 fi
 
-# ---- Auto-activate the seaweedfs profile when .env wires DuckLake at it ----
-# When QOD_S3_ENDPOINT references the in-compose `seaweedfs` service
-# (i.e. the user opted into the bundled S3 backend via .env), bring the
-# profile up alongside the default services. Without this the manager would
-# come up trying to write to s3://… but the seaweedfs container would never
-# start. Detected purely from .env so it's transparent on the filesystem path.
-COMPOSE_PROFILES=()
+# ---- Compose profile resolution -------------------------------------------
+# Two sources:
+#   1. Auto: when .env's QOD_S3_ENDPOINT points at the in-compose seaweedfs
+#      service, activate the `seaweedfs` profile so the manager doesn't come
+#      up writing to s3:// against a never-started SeaweedFS container.
+#   2. Explicit: PROFILES=foo,bar from the caller's env. Merges with the
+#      auto-detected set. De-duplicated. Lets the user add `observability`
+#      etc. without touching .env.
+declare -A _profile_set=()
 s3_endpoint="$(grep -E '^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
   | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
 if [[ "$s3_endpoint" == seaweedfs:* ]]; then
-  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> activating 'seaweedfs' compose profile"
-  COMPOSE_PROFILES=("--profile" "seaweedfs")
+  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'seaweedfs' compose profile"
+  _profile_set[seaweedfs]=1
 fi
+if [[ -n "${PROFILES:-}" ]]; then
+  IFS=',' read -ra _user_profiles <<< "$PROFILES"
+  for p in "${_user_profiles[@]}"; do
+    p="${p//[[:space:]]/}"
+    [[ -n "$p" ]] || continue
+    if [[ -z "${_profile_set[$p]:-}" ]]; then
+      echo "PROFILES: activating '$p' compose profile"
+      _profile_set[$p]=1
+    fi
+  done
+fi
+COMPOSE_PROFILES=()
+for p in "${!_profile_set[@]}"; do
+  COMPOSE_PROFILES+=("--profile" "$p")
+done
 
 # ---- Acquire image + up ----
 if [[ "${BUILD:-0}" == "1" ]]; then
