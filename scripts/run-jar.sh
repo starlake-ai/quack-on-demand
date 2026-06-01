@@ -31,21 +31,21 @@
 #   JAVA_HOME                     uses `java` on PATH if unset
 #   JAVA_OPTS                     extra JVM flags (e.g. -Xmx2g)
 #
-#   QOD_BOOTSTRAP_LOAD_TPCH  "true" to seed TPC-H via load-tpch-dbgen.sh
-#                                 before the JVM starts (requires `duckdb` CLI)
-#   QOD_BOOTSTRAP_TPCH_SF    TPC-H scale factor                       (default 1)
+#   LOAD_TPCH                TPC-H seed scale factor. Unset/empty/0 = skip
+#                                 the seed; positive integer = run
+#                                 load-tpch-dbgen.sh before the JVM boots
+#                                 (requires `duckdb` CLI).              (default unset)
 #   QOD_BOOTSTRAP_TPCH_SCHEMA DuckLake schema for the seed            (default tpch1)
 #
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
-#   LOAD_TPCH=N                   shortcut for the TPC-H seed: implies
-#                                 QOD_BOOTSTRAP_LOAD_TPCH=true and
-#                                 QOD_BOOTSTRAP_TPCH_SF=N. N is the
-#                                 scale factor (LOAD_TPCH=1 ≈ 6M lineitem
-#                                 rows). Works in either BUILD=0 or
-#                                 BUILD=1.                              (default unset)
+#   LOAD_TPCH=N                   TPC-H seed scale factor (positive integer).
+#                                 Runs load-tpch-dbgen.sh before the JVM boots.
+#                                 LOAD_TPCH=1 ≈ 6M lineitem rows; LOAD_TPCH=10
+#                                 ≈ 60M. Works in either BUILD=0 or BUILD=1.
+#                                                                       (default unset)
 #
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
@@ -71,17 +71,12 @@ GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 
-# LOAD_TPCH=N is a shortcut for the TPC-H seed: implies
-# QOD_BOOTSTRAP_LOAD_TPCH=true and QOD_BOOTSTRAP_TPCH_SF=N. N is
-# the scale factor (positive integer). Explicit QOD_BOOTSTRAP_* env
-# vars still win if both are set.
+# LOAD_TPCH=N validates and is consumed directly by the seed step below.
 if [[ -n "${LOAD_TPCH:-}" ]]; then
   if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
     echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
     exit 1
   fi
-  export QOD_BOOTSTRAP_LOAD_TPCH="${QOD_BOOTSTRAP_LOAD_TPCH:-true}"
-  export QOD_BOOTSTRAP_TPCH_SF="${QOD_BOOTSTRAP_TPCH_SF:-$LOAD_TPCH}"
 fi
 
 # ---- Resolve jar ----
@@ -428,17 +423,17 @@ if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$
 fi
 
 # ---- Optional: TPC-H seed (delegates to load-tpch-dbgen.sh) ----
-if [[ "${QOD_BOOTSTRAP_LOAD_TPCH:-false}" == "true" ]]; then
+# Presence of LOAD_TPCH (positive integer) is the sole gate.
+if [[ -n "${LOAD_TPCH:-}" ]]; then
   tpch_schema="${QOD_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
-  tpch_sf="${QOD_BOOTSTRAP_TPCH_SF:-1}"
   if ! command -v duckdb >/dev/null 2>&1; then
-    echo "WARN: QOD_BOOTSTRAP_LOAD_TPCH=true but duckdb CLI not on PATH; skipping TPC-H seed." >&2
+    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but duckdb CLI not on PATH; skipping TPC-H seed." >&2
   elif [[ "$pg_reachable" != "1" ]]; then
-    echo "WARN: QOD_BOOTSTRAP_LOAD_TPCH=true but Postgres unreachable; skipping TPC-H seed." >&2
+    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but Postgres unreachable; skipping TPC-H seed." >&2
   else
     DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$pg_dbname}" \
     PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
-    DB_NAME="$pg_dbname" SCHEMA_NAME="$tpch_schema" SF="$tpch_sf" \
+    DB_NAME="$pg_dbname" SCHEMA_NAME="$tpch_schema" SF="$LOAD_TPCH" \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
   fi
 fi
