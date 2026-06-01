@@ -30,12 +30,14 @@
 #   NUKE           "1" to delete the namespace before reinstalling (wipes
 #                  Postgres ephemeral data, the helm release, and any
 #                  orphan quack node pods).                       (default 0)
-#   SF             TPC-H scale factor to seed into the in-cluster Postgres
-#                  before the manager boots (mirrors SF in run-jar.sh).
-#                  Requires `duckdb` CLI on the host. SF=1 ≈ 6M lineitem
-#                  rows. Unset to skip the seed.                  (default unset)
+#   LOAD_TPCH      TPC-H seed: unset = skip; positive integer = scale
+#                  factor (LOAD_TPCH=1 ≈ 6M lineitem rows, LOAD_TPCH=10
+#                  ≈ 60M). Seeds into the in-cluster Postgres before the
+#                  manager boots; mirrors LOAD_TPCH in run-jar.sh and
+#                  run-docker-compose.sh. Requires `duckdb` CLI on the
+#                  host.                                          (default unset)
 #
-# Requires: kind, kubectl, helm, docker. SF requires duckdb on the host.
+# Requires: kind, kubectl, helm, docker. LOAD_TPCH requires duckdb on the host.
 
 set -euo pipefail
 
@@ -45,7 +47,13 @@ NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
 BUILD="${BUILD:-1}"
 NUKE="${NUKE:-0}"
-SF="${SF:-}"
+LOAD_TPCH="${LOAD_TPCH:-}"
+if [[ -n "$LOAD_TPCH" ]]; then
+  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
+    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
+    exit 1
+  fi
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -126,16 +134,17 @@ S3_ACCESS_KEY="${S3_ACCESS_KEY:-quack}"
 S3_SECRET_KEY="${S3_SECRET_KEY:-quackquack}"
 DATA_PATH_S3="s3://${S3_BUCKET}/${S3_PREFIX}"
 
-# 4b. optional TPC-H seed (mirrors SF in scripts/run-jar.sh). The DuckLake
-# catalog goes into the in-cluster Postgres; parquet files land in
-# SeaweedFS so the Quack node pods can read them at the same s3:// URL
-# the manager records. Both Postgres and SeaweedFS are reached via short-
-# lived port-forwards from the host.
-if [[ -n "$SF" ]]; then
+# 4b. optional TPC-H seed (mirrors LOAD_TPCH in scripts/run-jar.sh and
+# scripts/run-docker-compose.sh). LOAD_TPCH's value is the scale factor.
+# The DuckLake catalog goes into the in-cluster Postgres; parquet files
+# land in SeaweedFS so the Quack node pods can read them at the same s3://
+# URL the manager records. Both Postgres and SeaweedFS are reached via
+# short-lived port-forwards from the host.
+if [[ -n "$LOAD_TPCH" ]]; then
   if ! command -v duckdb >/dev/null 2>&1; then
-    echo "WARN: SF=$SF set but duckdb CLI not on PATH; skipping seed." >&2
+    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but duckdb CLI not on PATH; skipping seed." >&2
   else
-    echo "[4b/7] seeding TPC-H SF=$SF into Postgres catalog + SeaweedFS parquet..."
+    echo "[4b/7] seeding TPC-H SF=$LOAD_TPCH into Postgres catalog + SeaweedFS parquet..."
     SEED_PG_PORT=15432
     SEED_S3_PORT=18333
     pkill -f "port-forward.*postgres.*$SEED_PG_PORT:5432"   2>/dev/null || true
@@ -154,7 +163,7 @@ if [[ -n "$SF" ]]; then
     sleep 3
     DATA_PATH="$DATA_PATH_S3" \
     PG_HOST=localhost PG_PORT="$SEED_PG_PORT" PG_USER=postgres PG_PASS=azizam \
-    DB_NAME=tpch SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$SF" \
+    DB_NAME=tpch SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$LOAD_TPCH" \
     SL_QUACK_S3_ENDPOINT="http://localhost:$SEED_S3_PORT" \
     SL_QUACK_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
     SL_QUACK_S3_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
@@ -164,7 +173,7 @@ if [[ -n "$SF" ]]; then
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
     kill $SEED_PG_PID $SEED_S3_PID 2>/dev/null || true
     trap - EXIT
-    echo "TPC-H SF=$SF seed complete (catalog -> Postgres, parquet -> SeaweedFS)."
+    echo "TPC-H SF=$LOAD_TPCH seed complete (catalog -> Postgres, parquet -> SeaweedFS)."
   fi
 fi
 

@@ -37,18 +37,20 @@
 #                                 state/, certs/) before booting. Irreversible.
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
-#   SF=N                          shortcut for the TPC-H seed: implies
+#   LOAD_TPCH=N                   shortcut for the TPC-H seed: implies
 #                                 SL_QUACK_BOOTSTRAP_LOAD_TPCH=true and
-#                                 SL_QUACK_BOOTSTRAP_TPCH_SF=N. Works in either
-#                                 BUILD=0 or BUILD=1.                   (default unset)
+#                                 SL_QUACK_BOOTSTRAP_TPCH_SF=N. N is the
+#                                 scale factor (LOAD_TPCH=1 ≈ 6M lineitem
+#                                 rows). Works in either BUILD=0 or
+#                                 BUILD=1.                              (default unset)
 #
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
 #   QUACK_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
 #   QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
 #   BUILD=1 ./scripts/run-jar.sh                           # local source build
-#   SL_QUACK_BOOTSTRAP_LOAD_TPCH=true ./scripts/run-jar.sh
-#   NUKE=1 SF=1 ./scripts/run-jar.sh                       # wipe + fresh boot + TPC-H SF=1
+#   LOAD_TPCH=1 ./scripts/run-jar.sh                       # + TPC-H SF=1
+#   NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh                # wipe + fresh boot + TPC-H SF=1
 
 set -euo pipefail
 
@@ -66,11 +68,17 @@ GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 
-# SF=N is a shortcut for the TPC-H seed: implies SL_QUACK_BOOTSTRAP_LOAD_TPCH=true
-# and SL_QUACK_BOOTSTRAP_TPCH_SF=N. Explicit env vars still win if both are set.
-if [[ -n "${SF:-}" ]]; then
+# LOAD_TPCH=N is a shortcut for the TPC-H seed: implies
+# SL_QUACK_BOOTSTRAP_LOAD_TPCH=true and SL_QUACK_BOOTSTRAP_TPCH_SF=N. N is
+# the scale factor (positive integer). Explicit SL_QUACK_BOOTSTRAP_* env
+# vars still win if both are set.
+if [[ -n "${LOAD_TPCH:-}" ]]; then
+  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
+    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
+    exit 1
+  fi
   export SL_QUACK_BOOTSTRAP_LOAD_TPCH="${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-true}"
-  export SL_QUACK_BOOTSTRAP_TPCH_SF="${SL_QUACK_BOOTSTRAP_TPCH_SF:-$SF}"
+  export SL_QUACK_BOOTSTRAP_TPCH_SF="${SL_QUACK_BOOTSTRAP_TPCH_SF:-$LOAD_TPCH}"
 fi
 
 # ---- Resolve jar ----
