@@ -38,10 +38,14 @@ The repo ships a Python load tester that doubles as a one-shot client:
 ```bash
 pip install --user adbc_driver_flightsql adbc_driver_manager
 python3 ./scripts/loadtest/loadtest.py \
-  --url grpc://localhost:31338 \
+  --url grpc+tls://localhost:31338 --insecure \
   --user admin --password admin \
   -w 1 -i 1 --warmup 0
 ```
+
+(`.env`'s `TLS=true` means the gateway expects TLS; `--insecure` skips
+cert verification because the self-signed cert isn't in your trust store.
+Drop both flags once you mount a CA-signed cert and set `TLS=false`.)
 
 Expected:
 
@@ -74,7 +78,8 @@ LT_QUERY="SELECT n_name, count(*) AS suppliers
           FROM tpch1.nation JOIN tpch1.supplier ON n_nationkey = s_nationkey
           GROUP BY n_name ORDER BY suppliers DESC LIMIT 5" \
   python3 ./scripts/loadtest/loadtest.py \
-    --url grpc://localhost:31338 --user admin --password admin \
+    --url grpc+tls://localhost:31338 --insecure \
+    --user admin --password admin \
     -w 1 -i 1 --warmup 0
 ```
 
@@ -141,14 +146,14 @@ from adbc_driver_flightsql import DatabaseOptions
 conn = flight_sql.connect(
     uri="grpc+tls://localhost:31338",
     db_kwargs={
-        DatabaseOptions.USERNAME.value: "admin",
-        DatabaseOptions.PASSWORD.value: "admin",
+        "username": "admin",
+        "password": "admin",
         DatabaseOptions.TLS_SKIP_VERIFY.value: "true",
     },
 )
 cur = conn.cursor()
 cur.execute("SELECT count(*) FROM tpch1.lineitem")
-print(cur.fetchone())
+print(cur.fetchone())   # -> (6001215,)
 ```
 
 ## 5. Stop the stack — 10 seconds
