@@ -1,0 +1,3 @@
+[submodule "native/quackwire/thirdparty/duckdb-quack"]
+	path = native/quackwire/thirdparty/duckdb-quack
+	url = https://github.com/duckdb/duckdb-quack.git

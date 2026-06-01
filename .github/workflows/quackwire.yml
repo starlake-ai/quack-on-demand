@@ -1,0 +1,253 @@
+name: quackwire native build
+
+# Builds the JNI shim `libquackwire.{so,dylib}` for the four platforms the
+# manager runs on, then aggregates them into a draft GitHub Release whose
+# tag encodes the pinned `duckdb-quack` short SHA (per design doc §9.7 /
+# §9.9). The sbt `fetchQuackwire` task in `project/QuackwireArtifact.scala`
+# consumes the release at compile time so a normal `sbt assembly` does not
+# need a local C/C++ toolchain.
+#
+# Co-pinned versions (single source of truth: design doc §9.9):
+#   - duckdb-quack : 87cd65b912a85f38a8522cabcb7514b1854c08bf
+#                    (branch v1.5-variegata, short 87cd65b912a8)
+#   - libduckdb    : v1.5.3 (matches Homebrew stable; matches the
+#                    libduckdb-{linux-amd64,linux-arm64,osx-universal}.zip
+#                    release artifacts)
+#
+# Runner labels (verified 2026-06-01):
+#   - ubuntu-22.04        : standard linux/x86_64, free on public repos
+#   - ubuntu-22.04-arm    : linux/arm64, free on public repos since
+#                           https://github.blog/changelog/2025-01-16-...
+#   - macos-15-intel      : x86_64 macOS; macos-13 is deprecated as of
+#                           the 2026 runner-images cleanup so we use the
+#                           current Intel-on-macOS-15 image instead
+#   - macos-14            : arm64 macOS (Apple Silicon)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'native/quackwire/**'
+      - '.github/workflows/quackwire.yml'
+  pull_request:
+    paths:
+      - 'native/quackwire/**'
+      - '.github/workflows/quackwire.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: quackwire-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # -----------------------------------------------------------------------
+  # 1. Per-platform native build
+  # -----------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            libname: libquackwire.so
+            os: linux
+            duckdb_zip: libduckdb-linux-amd64.zip
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+            libname: libquackwire.so
+            os: linux
+            duckdb_zip: libduckdb-linux-arm64.zip
+          - runner: macos-15-intel
+            platform: osx-x86_64
+            libname: libquackwire.dylib
+            os: macos
+            duckdb_zip: ''
+          - runner: macos-14
+            platform: osx-aarch64
+            libname: libquackwire.dylib
+            os: macos
+            duckdb_zip: ''
+    steps:
+      - name: Checkout (with duckdb-quack submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21 (for jni.h)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # --- libduckdb v1.5.3 install ---------------------------------------
+      # macOS: Homebrew currently ships duckdb 1.5.3 as the stable bottle
+      # (verified 2026-06-01: `brew info --json=v2 duckdb` -> stable 1.5.3
+      # with bottle tags arm64_sequoia / sonoma / arm64_linux / x86_64_linux).
+      # The find_path / find_library in native/quackwire/CMakeLists.txt
+      # already probes /opt/homebrew/{include,lib} (Apple Silicon) and
+      # /usr/local/{include,lib} (Intel) so no extra hint is needed.
+      - name: Install libduckdb v1.5.3 (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          brew update
+          brew install duckdb
+          INSTALLED=$(brew list --versions duckdb | awk '{print $2}')
+          echo "libduckdb installed: $INSTALLED"
+          if [[ "$INSTALLED" != 1.5.3* ]]; then
+            echo "::error::Homebrew duckdb is not 1.5.3 (got: $INSTALLED). The duckdb-quack pin requires the v1.5.3 ABI." >&2
+            exit 1
+          fi
+
+      # Linux: download the official libduckdb release zip and stage into
+      # /usr/local. The CMake `find_path / find_library` hints in
+      # native/quackwire/CMakeLists.txt cover /usr/local/{include,lib}.
+      # Verified asset names on the v1.5.3 release page:
+      #   libduckdb-linux-amd64.zip   (x86_64)
+      #   libduckdb-linux-arm64.zip   (aarch64)
+      # (gh api repos/duckdb/duckdb/releases/tags/v1.5.3 .assets[].name)
+      - name: Install libduckdb v1.5.3 (Linux)
+        if: matrix.os == 'linux'
+        env:
+          DUCKDB_ZIP: ${{ matrix.duckdb_zip }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip ca-certificates curl cmake build-essential
+          tmp=$(mktemp -d)
+          curl -fsSL -o "$tmp/$DUCKDB_ZIP" \
+            "https://github.com/duckdb/duckdb/releases/download/v1.5.3/$DUCKDB_ZIP"
+          unzip -o "$tmp/$DUCKDB_ZIP" -d "$tmp/extracted"
+          sudo install -m 0644 "$tmp/extracted/duckdb.h"   /usr/local/include/duckdb.h
+          sudo install -m 0644 "$tmp/extracted/duckdb.hpp" /usr/local/include/duckdb.hpp
+          sudo install -m 0755 "$tmp/extracted/libduckdb.so" /usr/local/lib/libduckdb.so
+          sudo ldconfig
+          ls -l /usr/local/lib/libduckdb.so /usr/local/include/duckdb.hpp
+
+      - name: CMake configure
+        working-directory: native/quackwire
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: CMake build
+        working-directory: native/quackwire
+        run: cmake --build build --config Release
+
+      - name: Verify artifact
+        working-directory: native/quackwire/build
+        run: |
+          set -euo pipefail
+          ls -la "${{ matrix.libname }}"
+          file "${{ matrix.libname }}" || true
+          # Smoke-check the smokeAnswer symbol made it through the link.
+          if command -v nm >/dev/null 2>&1; then
+            nm -gU "${{ matrix.libname }}" 2>/dev/null | grep -i smokeAnswer || \
+              nm    "${{ matrix.libname }}" 2>/dev/null | grep -i smokeAnswer || \
+              echo "warn: smokeAnswer symbol not found via nm"
+          fi
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quackwire-${{ matrix.platform }}
+          path: native/quackwire/build/${{ matrix.libname }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
+  # 2. Aggregate per-platform artifacts into a draft GitHub Release
+  # -----------------------------------------------------------------------
+  # Only runs on push-to-main. Always creates the release as a DRAFT so a
+  # human reviews and publishes before the sbt `fetchQuackwire` task can
+  # download from it. The tag encodes the duckdb-quack short SHA so the
+  # manager assembly can confirm at a glance which pair (libquackwire <->
+  # duckdb-quack) it bundles, matching the §9.9 single-source-of-truth.
+  release:
+    name: aggregate draft release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (with duckdb-quack submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Read pinned duckdb-quack short SHA
+        id: pin
+        run: |
+          set -euo pipefail
+          if [[ -d native/quackwire/thirdparty/duckdb-quack/.git || \
+                -f native/quackwire/thirdparty/duckdb-quack/.git ]]; then
+            short_sha=$(git -C native/quackwire/thirdparty/duckdb-quack rev-parse --short=12 HEAD)
+          else
+            short_sha="unknown"
+          fi
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "duckdb-quack short SHA: $short_sha"
+
+      - name: Read quack-on-demand version
+        id: ver
+        run: |
+          set -euo pipefail
+          version=$(grep -E '^ThisBuild / version' version.sbt | sed -E 's/.*"([^"]+)".*/\1/')
+          # Strip -SNAPSHOT to keep the release tag short. The snapshot
+          # publishing workflow already owns the -SNAPSHOT naming for Maven.
+          base=${version%-SNAPSHOT}
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "manager base version: $base"
+
+      - name: Download all per-platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: quackwire-*
+          path: artifacts
+
+      - name: Assemble release tree
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for d in artifacts/quackwire-*; do
+            platform=$(basename "$d" | sed 's/^quackwire-//')
+            # Each artifact dir contains exactly one libquackwire.{so,dylib};
+            # rename it to libquackwire-<platform>.<ext> so the sbt task
+            # downloads a deterministically-named asset per platform.
+            for f in "$d"/libquackwire.*; do
+              ext=${f##*.}
+              cp "$f" "release/libquackwire-${platform}.${ext}"
+            done
+          done
+          ls -la release/
+
+      - name: Publish draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Tag scheme per design §9.8: encodes the pinned duckdb-quack
+          # short SHA so deployments can confirm the (quackwire <->
+          # duckdb-quack) pair at a glance.
+          tag_name: quackwire-v${{ steps.ver.outputs.base }}-duckdbquack-${{ steps.pin.outputs.short_sha }}
+          name: quackwire ${{ steps.ver.outputs.base }} (duckdb-quack ${{ steps.pin.outputs.short_sha }})
+          draft: true
+          prerelease: false
+          files: release/*
+          generate_release_notes: false
+          body: |
+            Native JNI shim binaries for the quack-on-demand manager.
+
+            Co-pinned upstream versions (single source of truth: design §9.9):
+            - `duckdb/duckdb-quack` @ `${{ steps.pin.outputs.short_sha }}` (branch `v1.5-variegata`)
+            - `duckdb/duckdb` v1.5.3 (released)
+
+            Assets:
+            - `libquackwire-linux-x86_64.so`
+            - `libquackwire-linux-aarch64.so`
+            - `libquackwire-osx-x86_64.dylib`
+            - `libquackwire-osx-aarch64.dylib`
+
+            Consumed by `project/QuackwireArtifact.scala` at sbt compile time.

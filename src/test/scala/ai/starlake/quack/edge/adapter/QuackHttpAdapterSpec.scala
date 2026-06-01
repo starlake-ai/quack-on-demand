@@ -17,7 +17,11 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
   /** Stub returning canned responses keyed by endpoint URI. Each entry is a
     * thunk because ArrowReader instances are single-use. */
   final class FakeClient(canned: Map[String, () => QuackResponse])
-      extends QuackHttpClient(TestArrow.sharedAllocator):
+      extends QuackHttpClient(
+        TestArrow.sharedAllocator,
+        nativeClient   = true,
+        nodeDisableSsl = true
+      ):
     override def query(endpoint: String, token: String, sql: String, session: Option[String]): IO[QuackResponse] =
       IO.pure(canned.getOrElse(endpoint, () =>
         QuackResponse.Failed(QuackError.Permanent("no stub"))).apply())
