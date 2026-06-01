@@ -88,3 +88,17 @@ project/project/
 pgdata/
 seaweedfs/
 seaweedfs-config/
+
+# Native quackwire JNI shim - local CMake build tree.
+# Per-platform `libquackwire.{so,dylib}` binaries live in a GitHub Release
+# (built by `.github/workflows/quackwire.yml`) and are fetched into
+# `target/.../resource_managed/main/native/<platform>/` by the
+# `QuackwireArtifact.fetchQuackwire` sbt task at compile time, so the
+# source tree never carries them.
+native/quackwire/build*/
+
+# Locally-built libquackwire binaries. The sbt resource generator
+# `QuackwireArtifact.fetchQuackwire` may fall back to them, but they are
+# developer-machine artifacts; CI fetches the official set from the
+# GitHub Release into `target/.../resource_managed/`.
+src/main/resources/native/

@@ -91,10 +91,21 @@ case "${TARGETARCH:-amd64}" in
   *)     echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;;
 esac
 curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-${DUCKDB_ARCH}.zip" \
-  -o /tmp/duckdb.zip
-unzip -d /usr/local/bin /tmp/duckdb.zip
+  -o /tmp/duckdb-cli.zip
+unzip -d /usr/local/bin /tmp/duckdb-cli.zip
 chmod +x /usr/local/bin/duckdb
-rm /tmp/duckdb.zip
+rm /tmp/duckdb-cli.zip
+
+# libduckdb.so is required at runtime by libquackwire (the JNI shim that
+# powers SL_QUACK_NATIVE_CLIENT=true) because the shim links against
+# DuckDB::LibraryVersion / ArrowConverter / etc. The duckdb CLI above is
+# self-contained and does not provide a system-installed libduckdb.so.
+curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${DUCKDB_ARCH}.zip" \
+  -o /tmp/libduckdb.zip
+unzip -d /tmp/libduckdb /tmp/libduckdb.zip
+install -m 0755 /tmp/libduckdb/libduckdb.so /usr/local/lib/libduckdb.so
+ldconfig
+rm -rf /tmp/libduckdb.zip /tmp/libduckdb
 
 apt-get purge -y --auto-remove curl unzip
 rm -rf /var/lib/apt/lists/*

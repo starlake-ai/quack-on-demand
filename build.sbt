@@ -53,7 +53,14 @@ ThisBuild / developers := List(
 
 lazy val root = (project in file("."))
   .settings(UiBuild.settings)
+  .settings(QuackwireArtifact.settings)
   .settings(
+    // libquackwire JNI shim binaries. The generator fetches the matching
+    // per-platform asset from the GitHub Release into
+    // `Compile / resourceManaged / native/<platform>/libquackwire.<ext>`;
+    // `copyResources` then stages it under `classDirectory` for the
+    // assembly. See `project/QuackwireArtifact.scala`.
+    Compile / resourceGenerators += QuackwireArtifact.fetchQuackwire.taskValue,
     name := "quack-on-demand",
     libraryDependencySchemes += "io.circe" %% "circe-yaml-common" % VersionScheme.Always,
     dependencyOverrides ++= Seq(

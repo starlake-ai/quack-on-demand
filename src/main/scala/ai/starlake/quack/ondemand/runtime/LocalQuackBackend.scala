@@ -14,7 +14,7 @@ final class LocalQuackBackend(
     max: Int,
     defaultMetastore: Map[String, String] = Map.empty,
     commandFor: (NodeSpec, Int, String) => List[String] =
-      LocalQuackBackend.defaultCommand
+      LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript)
 ) extends QuackBackend:
 
   private val ports        = new PortAllocator(min, max)
@@ -109,15 +109,17 @@ final class LocalQuackBackend(
 
 object LocalQuackBackend:
 
-  /** Default command. Invokes the bundled spawn script which starts DuckDB,
-    * attaches the DuckLake catalog, and calls `quack_serve(...)`. Override
-    * the script path via `SL_QUACK_SPAWN_SCRIPT` if the binary lives elsewhere. */
-  val defaultCommand: (NodeSpec, Int, String) => List[String] = (_, port, token) =>
-    List(
-      sys.env.getOrElse("SL_QUACK_SPAWN_SCRIPT", "./scripts/spawn-quack-node.sh"),
-      port.toString,
-      token
-    )
+  /** Path to the spawn script the default `commandFor` invokes. Production
+    * code passes `mgrCfg.spawnScript` (HOCON `quack-on-demand.spawnScript`,
+    * env override `SL_QUACK_SPAWN_SCRIPT`); this constant is the in-repo
+    * fallback so the test suite and zero-config dev runs keep working. */
+  val DefaultSpawnScript: String = "./scripts/spawn-quack-node.sh"
+
+  /** Default command. Invokes `script` (the bundled spawn script in
+    * production), which starts DuckDB, attaches the DuckLake catalog,
+    * and calls `quack_serve(...)`. */
+  def defaultCommand(script: String): (NodeSpec, Int, String) => List[String] =
+    (_, port, token) => List(script, port.toString, token)
 
   private val rnd = new SecureRandom()
   def randomToken(): String =

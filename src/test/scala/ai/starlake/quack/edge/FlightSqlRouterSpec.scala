@@ -52,7 +52,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // Use TestArrow.sharedAllocator (which never closes); each call gets a
     // fresh reader from `stub`. The stub function is used (not a single value)
     // because ArrowReader is single-use.
-    val client = new QuackHttpClient(TestArrow.sharedAllocator):
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient   = true,
+      nodeDisableSsl = true
+    ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
         IO.pure(stub())
     val adapter = new QuackHttpAdapter(client, tracker)

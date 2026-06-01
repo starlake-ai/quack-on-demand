@@ -104,7 +104,12 @@ object Main extends IOApp.Simple with LazyLogging:
 
     val backend: QuackBackend = mgrCfg.runtimeType.toLowerCase match
       case "local" =>
-        new LocalQuackBackend(mgrCfg.minPort, mgrCfg.maxPort, mgrCfg.defaultMetastore)
+        new LocalQuackBackend(
+          mgrCfg.minPort,
+          mgrCfg.maxPort,
+          mgrCfg.defaultMetastore,
+          commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript)
+        )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
         new KubernetesQuackBackend(
@@ -162,7 +167,11 @@ object Main extends IOApp.Simple with LazyLogging:
     val historyHandlers   = new StatementHistoryHandlers(stmtHistory)
     val sessions = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
-    val client   = new QuackHttpClient(arrowAllocator)
+    val client   = new QuackHttpClient(
+      arrowAllocator,
+      nativeClient   = mgrCfg.nativeClient,
+      nodeDisableSsl = mgrCfg.nodeDisableSsl
+    )
     val adapter  = new QuackHttpAdapter(client, tracker)
     // SQL ACL validator. Picks between two implementations:
     //   - PostgresAclValidator (preferred when stateStorage=postgres): reads
@@ -281,7 +290,8 @@ object Main extends IOApp.Simple with LazyLogging:
         edgeIO.attempt.flatMap {
           case Right(edge) =>
             logger.info("edge FlightSQL started")
-            healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
+            healthProbe.
+              start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
               IO.never[Unit].guarantee(fiber.cancel *> IO.delay(edge.stop()))
             }
           case Left(t) =>
