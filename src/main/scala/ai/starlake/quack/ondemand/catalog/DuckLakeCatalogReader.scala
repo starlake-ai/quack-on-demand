@@ -40,11 +40,30 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
     // Row counts live in `ducklake_table_stats.record_count` - DuckLake's
     // `ducklake_table` table doesn't carry stats columns. We `LEFT JOIN` it
     // so tables with no committed snapshot yet still appear with rowCount=-1.
+    //
+    // `folder` composition: DuckLake stores per-row `path` + `path_is_relative`
+    // on `ducklake_schema` AND `ducklake_table`. The base is the catalog-wide
+    // `data_path` metadata key (typed at ATTACH time, e.g.
+    // `s3://ducklake/tpch/` or `/app/ducklake/tpch/`). Resolution:
+    //   - if `t.path_is_relative=false` → folder = `t.path` (absolute)
+    //   - else if `s.path_is_relative=false` → folder = `s.path || t.path`
+    //   - else → folder = `<data_path> || s.path || t.path`
+    // NULLIF turns the empty-string fallback into NULL so the UI can show
+    // "(none)" cleanly when DuckLake is missing the data_path metadata.
     val sql =
       """SELECT s.schema_name,
         |       t.table_name,
         |       coalesce(ts.record_count, -1) AS row_count,
-        |       count(d.data_file_id) FILTER (WHERE d.end_snapshot IS NULL) AS data_file_count
+        |       count(d.data_file_id) FILTER (WHERE d.end_snapshot IS NULL) AS data_file_count,
+        |       NULLIF(
+        |         CASE WHEN NOT t.path_is_relative THEN t.path
+        |              WHEN NOT s.path_is_relative THEN s.path || t.path
+        |              ELSE coalesce(
+        |                     (SELECT value FROM ducklake_metadata
+        |                       WHERE key = 'data_path' LIMIT 1), ''
+        |                   ) || s.path || t.path
+        |         END
+        |       , '') AS folder
         |  FROM ducklake_schema s
         |  JOIN ducklake_table   t  ON t.schema_id = s.schema_id
         |  LEFT JOIN ducklake_table_stats ts ON ts.table_id = t.table_id
@@ -52,14 +71,17 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
         | WHERE s.schema_name = ?
         |   AND s.end_snapshot IS NULL
         |   AND t.end_snapshot IS NULL
-        | GROUP BY s.schema_name, t.table_name, ts.record_count
+        | GROUP BY s.schema_name, t.table_name, ts.record_count,
+        |          t.path_is_relative, t.path,
+        |          s.path_is_relative, s.path
         | ORDER BY t.table_name""".stripMargin
     query(sql, schema) { rs =>
       CatalogTableEntry(
         schema = rs.getString("schema_name"),
         name = rs.getString("table_name"),
         rowCount = rs.getLong("row_count"),
-        dataFileCount = rs.getInt("data_file_count")
+        dataFileCount = rs.getInt("data_file_count"),
+        folder = Option(rs.getString("folder"))
       )
     }
 

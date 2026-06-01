@@ -11,7 +11,7 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
   // control per-tenant routing without spinning up Hikari.
   trait Stubs:
     val schemas = List(CatalogSchemaEntry("main", 0), CatalogSchemaEntry("tpch1", 1))
-    val region  = CatalogTableEntry("tpch1", "region", 5L, 1)
+    val region  = CatalogTableEntry("tpch1", "region", 5L, 1, Some("s3://lake/tpch1/region/"))
     val column  = CatalogColumnEntry(0, "r_regionkey", "INTEGER", false, false)
     val file    = CatalogDataFileEntry("s3://lake/tpch1/region.parquet", 2048L, 5L, 1L)
 

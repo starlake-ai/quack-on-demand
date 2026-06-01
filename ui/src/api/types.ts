@@ -157,6 +157,8 @@ export interface CatalogTableEntry {
   name: string;
   rowCount: number;        // -1 when DuckLake stats are unavailable
   dataFileCount: number;
+  folder: string | null;   // table data-folder (parent dir of its parquet files);
+                           // null when the table has no committed data files yet
 }
 
 export interface CatalogColumnEntry {
