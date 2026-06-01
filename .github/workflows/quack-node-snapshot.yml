@@ -1,0 +1,185 @@
+name: quack-node-snapshot
+
+# Build + publish the Quack node image to Docker Hub:
+#   starlakeai/quack-on-demand-node:<version>      from version.sbt
+#   starlakeai/quack-on-demand-node:latest-snapshot
+#
+# The node image is the data-plane pod the manager spawns via
+# KubernetesQuackBackend (a DuckDB CLI + the project's
+# scripts/spawn-quack-node.sh). It's built from
+# docker/quack-node/Dockerfile and versioned in lockstep with the
+# manager image (same version.sbt) so operators get matched tags.
+#
+# Two-platform matrix (linux/amd64 + linux/arm64) on native runners,
+# push-by-digest, merged into a manifest list by the docker-merge job
+# at the end. Same shape as snapshot.yml's docker-build / docker-merge.
+#
+# Required repo secrets:
+#   DOCKERHUB_USERNAME   Docker Hub login
+#   DOCKER_PASSWORD      Docker Hub access token (RW)
+#
+# Triggers:
+#   - push to `main` that touches the node Dockerfile, the spawn script,
+#     or this workflow file itself
+#   - workflow_dispatch (manual button)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/quack-node/**'
+      - 'scripts/spawn-quack-node.sh'
+      - 'version.sbt'
+      - '.github/workflows/quack-node-snapshot.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: quack-node-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY_IMAGE: starlakeai/quack-on-demand-node
+
+jobs:
+
+  # -----------------------------------------------------------------------
+  # 1. Extract version from version.sbt so manager + node tags stay aligned.
+  # -----------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from version.sbt
+        id: extract
+        run: |
+          version=$(grep -E '^ThisBuild / version' version.sbt | sed -E 's/.*"([^"]+)".*/\1/')
+          if [[ -z "$version" ]]; then
+            echo "::error::Failed to extract version from version.sbt" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing version: $version"
+
+  # -----------------------------------------------------------------------
+  # 2. Per-platform build, push by digest. amd64 on ubuntu-latest, arm64
+  #    on ubuntu-24.04-arm (native arm runner — no QEMU emulation).
+  # -----------------------------------------------------------------------
+  docker-build:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set platform pair env
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Docker metadata (labels only — tags applied in merge step)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          labels: |
+            org.opencontainers.image.vendor=starlakeai
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=quack-on-demand-node
+            org.opencontainers.image.description=DuckDB Quack server pod image used by quack-on-demand's KubernetesQuackBackend.
+            org.opencontainers.image.url=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.source=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/quack-node/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }}
+          cache-to:   type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -----------------------------------------------------------------------
+  # 3. Merge per-arch digests into one tagged manifest list.
+  # -----------------------------------------------------------------------
+  docker-merge:
+    needs: [version, docker-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          # Snapshot tagging:
+          #   <version>           e.g. 0.1.0-SNAPSHOT (matches manager image)
+          #   latest-snapshot     moving alias to the most recent snapshot
+          docker buildx imagetools create \
+            -t "${{ env.REGISTRY_IMAGE }}:${version}" \
+            -t "${{ env.REGISTRY_IMAGE }}:latest-snapshot" \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${version}"
