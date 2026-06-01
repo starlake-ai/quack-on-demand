@@ -52,30 +52,30 @@ case "$dataPath" in
   s3://*|s3a://*|gs://*|r2://*)
     IS_REMOTE=1
     STORAGE_SQL="INSTALL httpfs; LOAD httpfs;"
-    if [[ -n "${SL_QUACK_S3_ACCESS_KEY_ID:-}" && -n "${SL_QUACK_S3_SECRET_ACCESS_KEY:-}" ]]; then
+    if [[ -n "${QOD_S3_ACCESS_KEY_ID:-}" && -n "${QOD_S3_SECRET_ACCESS_KEY:-}" ]]; then
       # Strip http(s):// from the endpoint - DuckDB wants "host:port".
-      ep="${SL_QUACK_S3_ENDPOINT:-}"
+      ep="${QOD_S3_ENDPOINT:-}"
       ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
       STORAGE_SQL="$STORAGE_SQL
 CREATE OR REPLACE SECRET quack_s3 (
   TYPE s3,
-  KEY_ID '${SL_QUACK_S3_ACCESS_KEY_ID}',
-  SECRET '${SL_QUACK_S3_SECRET_ACCESS_KEY}',
-  REGION '${SL_QUACK_S3_REGION:-us-east-1}',
+  KEY_ID '${QOD_S3_ACCESS_KEY_ID}',
+  SECRET '${QOD_S3_SECRET_ACCESS_KEY}',
+  REGION '${QOD_S3_REGION:-us-east-1}',
   ENDPOINT '${ep}',
-  URL_STYLE '${SL_QUACK_S3_URL_STYLE:-path}',
-  USE_SSL ${SL_QUACK_S3_USE_SSL:-true}
+  URL_STYLE '${QOD_S3_URL_STYLE:-path}',
+  USE_SSL ${QOD_S3_USE_SSL:-true}
 );"
     fi
     ;;
   az://*|azure://*|abfss://*)
     IS_REMOTE=1
     STORAGE_SQL="INSTALL azure; LOAD azure;"
-    if [[ -n "${SL_QUACK_AZURE_CONNECTION_STRING:-}" ]]; then
+    if [[ -n "${QOD_AZURE_CONNECTION_STRING:-}" ]]; then
       STORAGE_SQL="$STORAGE_SQL
 CREATE OR REPLACE SECRET quack_azure (
   TYPE azure,
-  CONNECTION_STRING '${SL_QUACK_AZURE_CONNECTION_STRING}'
+  CONNECTION_STRING '${QOD_AZURE_CONNECTION_STRING}'
 );"
     fi
     ;;

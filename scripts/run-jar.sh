@@ -4,7 +4,7 @@
 #
 # Two modes, picked via BUILD:
 #   BUILD=0 (default) - download the jar from Maven Central
-#                       (ai.starlake:quack-on-demand_3:<QUACK_VERSION>),
+#                       (ai.starlake:quack-on-demand_3:<QOD_VERSION>),
 #                       cache it under $JAR_CACHE_DIR, run `java -jar`.
 #   BUILD=1           - rebuild libquackwire for the host platform (cmake +
 #                       sbt libquackwire/publishLocal), then run `sbt assembly`
@@ -16,14 +16,14 @@
 # of the catalog DB, optional TPC-H seed via load-tpch-dbgen.sh before
 # the JVM starts.
 #
-# All quack-on-demand settings come from SL_QUACK_* / PROXY_* env vars
+# All quack-on-demand settings come from QOD_* / PROXY_* env vars
 # (see RUNNING.md Path 1 for the full list). Sensible defaults:
 #   - REST + UI on :20900, FlightSQL edge on :31338 (TLS on)
-#   - Postgres expected at $SL_QUACK_PG_HOST:5432 (default localhost)
+#   - Postgres expected at $QOD_PG_HOST:5432 (default localhost)
 #
 # Env vars:
 #   BUILD=1                       run `sbt assembly` first instead of downloading
-#   QUACK_VERSION                 artifact version to download (default = latest
+#   QOD_VERSION                 artifact version to download (default = latest
 #                                 release from Maven Central; `latest-snapshot`
 #                                 fetches from Central snapshots; ignored when
 #                                 BUILD=1)
@@ -31,26 +31,26 @@
 #   JAVA_HOME                     uses `java` on PATH if unset
 #   JAVA_OPTS                     extra JVM flags (e.g. -Xmx2g)
 #
-#   SL_QUACK_BOOTSTRAP_LOAD_TPCH  "true" to seed TPC-H via load-tpch-dbgen.sh
+#   QOD_BOOTSTRAP_LOAD_TPCH  "true" to seed TPC-H via load-tpch-dbgen.sh
 #                                 before the JVM starts (requires `duckdb` CLI)
-#   SL_QUACK_BOOTSTRAP_TPCH_SF    TPC-H scale factor                       (default 1)
-#   SL_QUACK_BOOTSTRAP_TPCH_SCHEMA DuckLake schema for the seed            (default tpch1)
+#   QOD_BOOTSTRAP_TPCH_SF    TPC-H scale factor                       (default 1)
+#   QOD_BOOTSTRAP_TPCH_SCHEMA DuckLake schema for the seed            (default tpch1)
 #
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
 #   LOAD_TPCH=N                   shortcut for the TPC-H seed: implies
-#                                 SL_QUACK_BOOTSTRAP_LOAD_TPCH=true and
-#                                 SL_QUACK_BOOTSTRAP_TPCH_SF=N. N is the
+#                                 QOD_BOOTSTRAP_LOAD_TPCH=true and
+#                                 QOD_BOOTSTRAP_TPCH_SF=N. N is the
 #                                 scale factor (LOAD_TPCH=1 ≈ 6M lineitem
 #                                 rows). Works in either BUILD=0 or
 #                                 BUILD=1.                              (default unset)
 #
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
-#   QUACK_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
-#   QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
+#   QOD_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
+#   QOD_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
 #   BUILD=1 ./scripts/run-jar.sh                           # local source build
 #   LOAD_TPCH=1 ./scripts/run-jar.sh                       # + TPC-H SF=1
 #   NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh                # wipe + fresh boot + TPC-H SF=1
@@ -72,16 +72,16 @@ ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 
 # LOAD_TPCH=N is a shortcut for the TPC-H seed: implies
-# SL_QUACK_BOOTSTRAP_LOAD_TPCH=true and SL_QUACK_BOOTSTRAP_TPCH_SF=N. N is
-# the scale factor (positive integer). Explicit SL_QUACK_BOOTSTRAP_* env
+# QOD_BOOTSTRAP_LOAD_TPCH=true and QOD_BOOTSTRAP_TPCH_SF=N. N is
+# the scale factor (positive integer). Explicit QOD_BOOTSTRAP_* env
 # vars still win if both are set.
 if [[ -n "${LOAD_TPCH:-}" ]]; then
   if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
     echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
     exit 1
   fi
-  export SL_QUACK_BOOTSTRAP_LOAD_TPCH="${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-true}"
-  export SL_QUACK_BOOTSTRAP_TPCH_SF="${SL_QUACK_BOOTSTRAP_TPCH_SF:-$LOAD_TPCH}"
+  export QOD_BOOTSTRAP_LOAD_TPCH="${QOD_BOOTSTRAP_LOAD_TPCH:-true}"
+  export QOD_BOOTSTRAP_TPCH_SF="${QOD_BOOTSTRAP_TPCH_SF:-$LOAD_TPCH}"
 fi
 
 # ---- Resolve jar ----
@@ -269,7 +269,7 @@ else
   # Belt-and-suspenders: also wrap each substitution with `|| true`, so an
   # accidental non-zero from the function never aborts the script under
   # `set -e`. The empty-version fall-back branch below picks up the result.
-  version="${QUACK_VERSION:-latest}"
+  version="${QOD_VERSION:-latest}"
   case "$version" in
     latest)
       version="$(resolve_latest_release || true)"
@@ -338,13 +338,13 @@ command -v "${JAVA_BIN:-java}" >/dev/null 2>&1 || {
 echo "java: $("${JAVA_BIN:-java}" -version 2>&1 | head -1)"
 
 # ---- Sanity: Postgres reachable when stateStorage=postgres (the default) ----
-state_mode="${SL_QUACK_STATE_STORAGE:-postgres}"
-pg_host="${SL_QUACK_PG_HOST:-localhost}"
-pg_port="${SL_QUACK_PG_PORT:-5432}"
-pg_user="${SL_QUACK_PG_USER:-postgres}"
-pg_pass="${SL_QUACK_PG_PASSWORD:-azizam}"
-pg_admin_db="${SL_QUACK_PG_ADMIN_DB:-postgres}"
-pg_dbname="${SL_QUACK_PG_DBNAME:-tpch}"
+state_mode="${QOD_STATE_STORAGE:-postgres}"
+pg_host="${QOD_PG_HOST:-localhost}"
+pg_port="${QOD_PG_PORT:-5432}"
+pg_user="${QOD_PG_USER:-postgres}"
+pg_pass="${QOD_PG_PASSWORD:-azizam}"
+pg_admin_db="${QOD_PG_ADMIN_DB:-postgres}"
+pg_dbname="${QOD_PG_DBNAME:-tpch}"
 
 pg_reachable=0
 if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
@@ -354,7 +354,7 @@ if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
     pg_reachable=1
   else
     echo "WARN: cannot reach Postgres at $pg_user@$pg_host:$pg_port; manager will fail at startup if it cannot persist state." >&2
-    echo "      Either start Postgres, set SL_QUACK_STATE_STORAGE=file, or override SL_QUACK_PG_*." >&2
+    echo "      Either start Postgres, set QOD_STATE_STORAGE=file, or override QOD_PG_*." >&2
   fi
 fi
 
@@ -366,7 +366,7 @@ fi
 if [[ "$NUKE" == "1" ]]; then
   echo "NUKE=1: tearing down state..."
   # Stop any running manager via the project's own stop script.
-  if curl -sS --max-time 2 "http://${SL_QUACK_ON_DEMAND_HOST:-localhost}:${SL_QUACK_ON_DEMAND_PORT:-20900}/health" >/dev/null 2>&1; then
+  if curl -sS --max-time 2 "http://${QOD_ON_DEMAND_HOST:-localhost}:${QOD_ON_DEMAND_PORT:-20900}/health" >/dev/null 2>&1; then
     echo "  stopping running manager"
     "$REPO_DIR/scripts/stop-jar.sh" >/dev/null 2>&1 || true
   fi
@@ -406,15 +406,15 @@ if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$
 fi
 
 # ---- Optional: TPC-H seed (delegates to load-tpch-dbgen.sh) ----
-if [[ "${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-false}" == "true" ]]; then
-  tpch_schema="${SL_QUACK_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
-  tpch_sf="${SL_QUACK_BOOTSTRAP_TPCH_SF:-1}"
+if [[ "${QOD_BOOTSTRAP_LOAD_TPCH:-false}" == "true" ]]; then
+  tpch_schema="${QOD_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
+  tpch_sf="${QOD_BOOTSTRAP_TPCH_SF:-1}"
   if ! command -v duckdb >/dev/null 2>&1; then
-    echo "WARN: SL_QUACK_BOOTSTRAP_LOAD_TPCH=true but duckdb CLI not on PATH; skipping TPC-H seed." >&2
+    echo "WARN: QOD_BOOTSTRAP_LOAD_TPCH=true but duckdb CLI not on PATH; skipping TPC-H seed." >&2
   elif [[ "$pg_reachable" != "1" ]]; then
-    echo "WARN: SL_QUACK_BOOTSTRAP_LOAD_TPCH=true but Postgres unreachable; skipping TPC-H seed." >&2
+    echo "WARN: QOD_BOOTSTRAP_LOAD_TPCH=true but Postgres unreachable; skipping TPC-H seed." >&2
   else
-    DATA_PATH="${SL_QUACK_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$pg_dbname}" \
+    DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$pg_dbname}" \
     PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
     DB_NAME="$pg_dbname" SCHEMA_NAME="$tpch_schema" SF="$tpch_sf" \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
@@ -422,10 +422,10 @@ if [[ "${SL_QUACK_BOOTSTRAP_LOAD_TPCH:-false}" == "true" ]]; then
 fi
 
 # ---- Effective settings ----
-echo "REST + UI:  http://${SL_QUACK_ON_DEMAND_HOST:-0.0.0.0}:${SL_QUACK_ON_DEMAND_PORT:-20900}/ui/"
+echo "REST + UI:  http://${QOD_ON_DEMAND_HOST:-0.0.0.0}:${QOD_ON_DEMAND_PORT:-20900}/ui/"
 echo "FlightSQL:  ${PROXY_HOST:-0.0.0.0}:${PROXY_PORT:-31338}  (TLS=${PROXY_TLS_ENABLED:-true})"
 echo "State:      $state_mode"
-echo "Runtime:    ${SL_QUACK_RUNTIME_TYPE:-local}"
+echo "Runtime:    ${QOD_RUNTIME_TYPE:-local}"
 echo ""
 
 # ---- Run ----

@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Reference for every knob the manager honors. Anything under `env:` is passed
-# through to the manager pod verbatim as SL_QUACK_* / PROXY_* env vars and
+# through to the manager pod verbatim as QOD_* / PROXY_* env vars and
 # overrides the corresponding key in application.conf. See the project's
 # RUNNING.md for the full env-var table.
 
@@ -172,7 +172,7 @@ storage:
 # Used when storage.dataPath starts with `s3://` (or s3a/r2). The chart renders
 # these into the manager's defaultMetastore env vars, which KubernetesQuackBackend
 # then forwards verbatim into every spawned Quack node pod. The node's
-# spawn-quack-node.sh consumes `SL_QUACK_S3_*` to emit the matching DuckDB
+# spawn-quack-node.sh consumes `QOD_S3_*` to emit the matching DuckDB
 # `CREATE SECRET quack_s3 (...)` so httpfs can talk to the endpoint.
 #
 # For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
@@ -244,7 +244,7 @@ bootstrap:
 
 # --- Arbitrary env-var passthrough ------------------------------------------
 # Anything under `env` lands as an env var on the manager pod, taking
-# precedence over the chart's own templating. Use this for SL_QUACK_* knobs
+# precedence over the chart's own templating. Use this for QOD_* knobs
 # the chart doesn't model explicitly yet.
 env: {}
 

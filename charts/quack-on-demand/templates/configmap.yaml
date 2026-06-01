@@ -7,48 +7,48 @@ metadata:
     {{- include "qod.labels" . | nindent 4 }}
 data:
   # ---- Runtime + Postgres ---------------------------------------------------
-  SL_QUACK_RUNTIME_TYPE:        "kubernetes"
-  SL_QUACK_PG_HOST:             {{ .Values.postgres.host | quote }}
-  SL_QUACK_PG_PORT:             {{ .Values.postgres.port | quote }}
-  SL_QUACK_PG_USER:             {{ .Values.postgres.user | quote }}
-  SL_QUACK_PG_DBNAME:           {{ .Values.postgres.dbName | quote }}
-  SL_QUACK_DUCKLAKE_DATA_PATH:  {{ .Values.storage.dataPath | quote }}
+  QOD_RUNTIME_TYPE:        "kubernetes"
+  QOD_PG_HOST:             {{ .Values.postgres.host | quote }}
+  QOD_PG_PORT:             {{ .Values.postgres.port | quote }}
+  QOD_PG_USER:             {{ .Values.postgres.user | quote }}
+  QOD_PG_DBNAME:           {{ .Values.postgres.dbName | quote }}
+  QOD_DUCKLAKE_DATA_PATH:  {{ .Values.storage.dataPath | quote }}
 
   # ---- K8s backend ----------------------------------------------------------
-  # SL_QUACK_K8S_NAMESPACE is injected via fieldRef in the Deployment so it
+  # QOD_K8S_NAMESPACE is injected via fieldRef in the Deployment so it
   # always tracks the manager pod's own namespace.
-  SL_QUACK_K8S_IMAGE:           {{ .Values.quackNode.image | quote }}
+  QOD_K8S_IMAGE:           {{ .Values.quackNode.image | quote }}
   # disable_ssl flag passed to quack_query in QuackHttpClient. Plain HTTP
   # by default; true means TLS NOT used on the manager<->node wire.
-  SL_QUACK_NODE_DISABLE_SSL:    {{ not .Values.quackNode.tls.enabled | quote }}
-  SL_QUACK_K8S_SERVICE_ACCOUNT: {{ include "qod.serviceAccountName" . | quote }}
+  QOD_NODE_DISABLE_SSL:    {{ not .Values.quackNode.tls.enabled | quote }}
+  QOD_K8S_SERVICE_ACCOUNT: {{ include "qod.serviceAccountName" . | quote }}
 
   # ---- Admin bootstrap (idempotent) ----------------------------------------
-  SL_QUACK_ADMIN_USERNAME:      {{ .Values.admin.username | quote }}
+  QOD_ADMIN_USERNAME:      {{ .Values.admin.username | quote }}
 
   # ---- Bootstrap tenant + pool ---------------------------------------------
-  SL_QUACK_BOOTSTRAP_ENABLED:   {{ .Values.bootstrap.enabled | quote }}
-  SL_QUACK_BOOTSTRAP_TENANT:    {{ .Values.bootstrap.tenant | quote }}
-  SL_QUACK_BOOTSTRAP_POOL:      {{ .Values.bootstrap.pool | quote }}
-  SL_QUACK_BOOTSTRAP_WRITEONLY: {{ .Values.bootstrap.roleDistribution.writeonly | quote }}
-  SL_QUACK_BOOTSTRAP_READONLY:  {{ .Values.bootstrap.roleDistribution.readonly  | quote }}
-  SL_QUACK_BOOTSTRAP_DUAL:      {{ .Values.bootstrap.roleDistribution.dual      | quote }}
+  QOD_BOOTSTRAP_ENABLED:   {{ .Values.bootstrap.enabled | quote }}
+  QOD_BOOTSTRAP_TENANT:    {{ .Values.bootstrap.tenant | quote }}
+  QOD_BOOTSTRAP_POOL:      {{ .Values.bootstrap.pool | quote }}
+  QOD_BOOTSTRAP_WRITEONLY: {{ .Values.bootstrap.roleDistribution.writeonly | quote }}
+  QOD_BOOTSTRAP_READONLY:  {{ .Values.bootstrap.roleDistribution.readonly  | quote }}
+  QOD_BOOTSTRAP_DUAL:      {{ .Values.bootstrap.roleDistribution.dual      | quote }}
 
   # ---- FlightSQL edge TLS ---------------------------------------------------
   PROXY_TLS_ENABLED:            {{ .Values.flightsql.tls.enabled | quote }}
 
   # ---- Metrics sink ---------------------------------------------------------
-  SL_QUACK_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
+  QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
 
   {{- if eq (include "qod.s3Enabled" .) "true" }}
   # ---- Object store (S3 / SeaweedFS / MinIO / R2) --------------------------
   # storage.dataPath is an s3:// URL. These vars land on the manager pod's
-  # env; KubernetesQuackBackend forwards the `SL_QUACK_S3_*` prefix verbatim
+  # env; KubernetesQuackBackend forwards the `QOD_S3_*` prefix verbatim
   # into every spawned node pod, where spawn-quack-node.sh consumes them to
   # emit `CREATE SECRET quack_s3 (...)`. Same contract as docker-compose
   # (where ProcessBuilder env inheritance does the forwarding for free).
-  SL_QUACK_S3_ENDPOINT:    {{ .Values.s3.endpoint  | quote }}
-  SL_QUACK_S3_REGION:      {{ .Values.s3.region    | quote }}
-  SL_QUACK_S3_URL_STYLE:   {{ .Values.s3.urlStyle  | quote }}
-  SL_QUACK_S3_USE_SSL:     {{ .Values.s3.useSsl    | quote }}
+  QOD_S3_ENDPOINT:    {{ .Values.s3.endpoint  | quote }}
+  QOD_S3_REGION:      {{ .Values.s3.region    | quote }}
+  QOD_S3_URL_STYLE:   {{ .Values.s3.urlStyle  | quote }}
+  QOD_S3_USE_SSL:     {{ .Values.s3.useSsl    | quote }}
   {{- end }}

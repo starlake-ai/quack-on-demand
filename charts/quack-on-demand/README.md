@@ -39,7 +39,7 @@ helm install qod charts/quack-on-demand \
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** — the manager only ever talks to its own namespace. |
-| `ConfigMap` | `SL_QUACK_*` / `PROXY_*` env-var overrides — everything in `application.conf` that isn't a secret. |
+| `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides — everything in `application.conf` that isn't a secret. |
 | `Secret` | Chart-managed only when `postgres.password` / `admin.password` / `apiKey.value` are inline. Production deploys should use `existingSecret` references instead. |
 | `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here — front it with a Gateway / Envoy / Istio. |
 | `ServiceMonitor` | Optional, for the Prometheus Operator. |
@@ -69,7 +69,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 
 The chart's `quackNode.image` value points at the DuckDB Quack server image — a **different artifact** from the manager image. The manager spawns one pod per Quack node and references this image in the pod spec. The default `starlakeai/quack:latest` is a placeholder; the project does not yet publish a public Quack server image. For now, operators must:
 
-1. Build (or otherwise obtain) a Docker image that runs a DuckDB Quack server listening on port `8080` (or override `SL_QUACK_K8S_QUACK_PORT`).
+1. Build (or otherwise obtain) a Docker image that runs a DuckDB Quack server listening on port `8080` (or override `QOD_K8S_QUACK_PORT`).
 2. Push it to a registry the cluster can pull from.
 3. Override the chart value:
 
@@ -82,7 +82,7 @@ Until then, the manager comes up healthy but the spawned node pods will `ImagePu
 
 ## Manager ↔ Quack node TLS
 
-The chart's default is **plain HTTP** on the manager↔node wire (`quackNode.tls.enabled: false`, which sets `SL_QUACK_NODE_DISABLE_SSL=true`). The auth token Quack ships on every request is still required and enforced; only the transport is unencrypted.
+The chart's default is **plain HTTP** on the manager↔node wire (`quackNode.tls.enabled: false`, which sets `QOD_NODE_DISABLE_SSL=true`). The auth token Quack ships on every request is still required and enforced; only the transport is unencrypted.
 
 Why HTTP by default:
 - Intra-namespace traffic. Anyone with pod-network access to your namespace has bigger problems than sniffing this.
@@ -98,7 +98,7 @@ Without one of those two, leave it off.
 ## Operational notes
 
 - **Replicas** — keep at 1 until `roadmap:v0.4 #11` (Postgres advisory-lock leader election) lands. Two managers against the same Postgres will race on pod create/delete.
-- **K8s API scope** — manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `SL_QUACK_K8S_NAMESPACE` and grant the equivalent `Role` there.
+- **K8s API scope** — manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
 - **TLS** — leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
 - **Probes** — both liveness and readiness target `/health`. Readiness gates traffic until `PoolSupervisor.restore() + reconcile()` finish, so a rolling restart doesn't briefly 503.
 - **terminationGracePeriodSeconds** — default 60 s. Gives in-flight FlightSQL statements a chance to finish before the JVM is killed.
