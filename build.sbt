@@ -51,16 +51,51 @@ ThisBuild / developers := List(
   )
 )
 
+// ----- libquackwire (Maven Central publishing) ------------------------------
+// JNI shim native binaries published as classifier-per-platform jars on
+// Sonatype Central. Version aligns with the DuckDB ABI it links against
+// (1.5.3) suffixed with the duckdb-quack short SHA, so the
+// (libquackwire <-> duckdb-quack) pin is explicit in the coordinate.
+// Bumping either upstream bumps this version.
+//
+// CI workflow `.github/workflows/quackwire.yml` builds the 4-platform
+// matrix, stages each `libquackwire.{so,dylib}` into
+// `libquackwire/binaries/<platform>/`, then runs
+// `sbt libquackwire/publishSigned sonatypeBundleRelease`.
+//
+// Local dev: `sbt libquackwire/publishLocal` after a CMake build (with
+// the binary copied into `libquackwire/binaries/<host-platform>/`).
+val libquackwireVersion = "1.5.3-87cd65b912a8"
+
+lazy val libquackwire = (project in file("libquackwire"))
+  .settings(
+    name := "libquackwire",
+    version := libquackwireVersion,
+    description :=
+      "JNI shim that speaks DuckDB Quack's binary wire (application/vnd.duckdb) " +
+      "directly from a JVM. Native binaries published as classifier jars per platform.",
+    crossPaths := false,         // not a Scala-versioned artifact
+    autoScalaLibrary := false,   // no scala-library dependency
+    // Stub main jar (Central requires one). Contains just the README.
+    Compile / packageBin / mappings := Seq(
+      (baseDirectory.value / "README.md") -> "META-INF/libquackwire/README.md"
+    ),
+    // No sources / docs - the source-of-truth is the parent repo's
+    // `native/quackwire/` directory at the duckdb-quack SHA in the version.
+    Compile / packageSrc / publishArtifact := false,
+    Compile / packageDoc / publishArtifact := false,
+    // Disable the noop compile task by emptying its source sets.
+    Compile / unmanagedSourceDirectories := Seq.empty,
+    // Four classifier artifacts. Each task zips
+    // libquackwire/binaries/<platform>/libquackwire.<ext> into a jar
+    // containing `native/<platform>/libquackwire.<ext>` - matching the
+    // runtime resource path `QuackNativeBridge.loaded` looks up.
+  )
+  .settings(LibquackwireArtifacts.classifierSettings*)
+
 lazy val root = (project in file("."))
   .settings(UiBuild.settings)
-  .settings(QuackwireArtifact.settings)
   .settings(
-    // libquackwire JNI shim binaries. The generator fetches the matching
-    // per-platform asset from the GitHub Release into
-    // `Compile / resourceManaged / native/<platform>/libquackwire.<ext>`;
-    // `copyResources` then stages it under `classDirectory` for the
-    // assembly. See `project/QuackwireArtifact.scala`.
-    Compile / resourceGenerators += QuackwireArtifact.fetchQuackwire.taskValue,
     name := "quack-on-demand",
     libraryDependencySchemes += "io.circe" %% "circe-yaml-common" % VersionScheme.Always,
     dependencyOverrides ++= Seq(
@@ -114,6 +149,16 @@ lazy val root = (project in file("."))
       Dependencies.blobstoreGcs,
       Dependencies.blobstoreAzure,
       Dependencies.duckdbJdbc,
+      // libquackwire JNI shim - one classifier dep per supported platform.
+      // sbt-assembly bundles each classifier jar's payload into the uber-jar,
+      // so the resulting `quack-on-demand-assembly-*.jar` carries
+      // `native/<platform>/libquackwire.<so|dylib>` for all four platforms.
+      // `QuackNativeBridge` resolves the matching one at runtime via
+      // `getResourceAsStream("/native/<host-platform>/libquackwire.<ext>")`.
+      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "linux-x86_64",
+      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "linux-aarch64",
+      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-x86_64",
+      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-aarch64",
       Dependencies.micrometerCore,
       Dependencies.micrometerPrometheus,
       Dependencies.micrometerCloudwatch,

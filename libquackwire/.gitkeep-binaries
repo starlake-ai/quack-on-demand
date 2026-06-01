@@ -1,0 +1,5 @@
+CI populates libquackwire/binaries/<platform>/libquackwire.<so|dylib>
+before running `sbt libquackwire/publishSigned`. The directory is
+gitignored so source-tree builds never carry binaries.
+
+See .github/workflows/quackwire.yml (release job).
