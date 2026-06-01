@@ -64,11 +64,12 @@ paths/credentials by construction. The loader self-skips if `tpch1.lineitem`
 is already there.
 
 ```bash
-# Default SF=1 (~6M lineitem rows, ≈ 10s)
-QOD_BOOTSTRAP_LOAD_TPCH=true \
-  ./scripts/run-jar.sh
+# Shortcut: LOAD_TPCH=N implies QOD_BOOTSTRAP_LOAD_TPCH=true +
+# QOD_BOOTSTRAP_TPCH_SF=N (N is the scale factor, positive integer).
+LOAD_TPCH=1  ./scripts/run-jar.sh   # ~6M lineitem rows, ≈ 10s
+LOAD_TPCH=10 ./scripts/run-jar.sh   # ~60M, a few minutes
 
-# Larger scale
+# Or use the underlying backend env vars directly:
 QOD_BOOTSTRAP_LOAD_TPCH=true \
 QOD_BOOTSTRAP_TPCH_SF=10 \
   ./scripts/run-jar.sh
@@ -161,10 +162,13 @@ The image ships `/app/scripts/load-tpch-dbgen.sh`. `PG_*` and DuckLake env
 vars are already set inside the container, so once the manager is up:
 
 ```bash
-# Default SF=1
+# Default scale factor 1.
 docker exec -it quack-on-demand /app/scripts/load-tpch-dbgen.sh
 
-# Larger scale (override at exec time)
+# Larger scale. The low-level loader takes its scale factor via an
+# internal `SF` env var (matches DuckDB's dbgen(sf=...) API). The
+# user-facing wrappers (run-jar.sh / run-docker-compose.sh) use
+# `LOAD_TPCH=N` instead and forward it to the loader as `SF=N`.
 docker exec -it -e SF=10 quack-on-demand /app/scripts/load-tpch-dbgen.sh
 ```
 
@@ -288,14 +292,14 @@ EOF
 # 2. Bring everything up in one command. The wrapper detects
 #    QOD_S3_ENDPOINT=seaweedfs:* and auto-activates the `seaweedfs`
 #    compose profile; LOAD_TPCH=true seeds TPC-H onto S3 in the same step.
-LOAD_TPCH=true ./scripts/run-docker-compose.sh
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge end-to-end.
 ./scripts/loadtest/loadtest.py -w 2 -i 5
 ```
 
-Verified path on a fresh boot: TPC-H SF=1 -> ~313 MB of parquet under
-`./seaweedfs/`, loadtest 10/10 OK at p50 ~40 ms over TLS.
+Verified path on a fresh boot: TPC-H at scale factor 1 -> ~313 MB of
+parquet under `./seaweedfs/`, loadtest 10/10 OK at p50 ~40 ms over TLS.
 
 Persistence: `./seaweedfs/` on the host (parquet) and
 `./seaweedfs-config/s3.json` (gateway credentials). `NUKE=1
@@ -633,7 +637,7 @@ Once the manager is up:
   LT_USER=admin LT_PASSWORD=change-me \
     ./scripts/loadtest/loadtest.py -w 32 -i 200 --warmup 20
 
-  # Stress: 64 sessions x 500 iterations = 32000 queries against TPC-H SF=10.
+  # Stress: 64 sessions x 500 iterations = 32000 queries against TPC-H at scale factor 10.
   # Expect minutes of runtime; watch the manager UI for pool scaling and
   # per-node QPS while it runs.
   LT_USER=admin LT_PASSWORD=change-me \

@@ -477,9 +477,14 @@ preflight_ports() {
     return 0
   fi
 
+  # `set -euo pipefail` is on. `head -N` closes its pipe early, which
+  # makes `lsof` / `sort` exit SIGPIPE (non-zero), which `pipefail`
+  # propagates as the substitution's exit code, which `set -e` then
+  # treats as a fatal script error. The `|| true` tail neutralises that
+  # without changing what `busy=` ends up with.
   local busy
   for p in "$rest_port" "$flight_port"; do
-    busy=$(lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2 " " $1}' | sort -u | head -3)
+    busy=$(lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2 " " $1}' | sort -u | head -3 || true)
     if [[ -n "$busy" ]]; then
       echo "ERROR: port $p already in use:" >&2
       echo "$busy" | sed 's/^/  /' >&2
@@ -498,7 +503,7 @@ preflight_ports() {
                    port=parts[n];
                    if (port+0>=lo && port+0<=hi) print $2 " " $1 " :" port;
                  }
-               ' | sort -u)
+               ' | sort -u || true)
   if [[ -n "$in_range" ]]; then
     echo "ERROR: orphan listener(s) inside the configured node port range [$min_port, $max_port]:" >&2
     echo "$in_range" | sed 's/^/  /' >&2
