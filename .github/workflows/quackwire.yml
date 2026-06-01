@@ -28,10 +28,16 @@ on:
     branches: [main]
     paths:
       - 'native/quackwire/**'
+      - 'libquackwire/**'
+      - 'project/LibquackwireArtifacts.scala'
+      - 'build.sbt'
       - '.github/workflows/quackwire.yml'
   pull_request:
     paths:
       - 'native/quackwire/**'
+      - 'libquackwire/**'
+      - 'project/LibquackwireArtifacts.scala'
+      - 'build.sbt'
       - '.github/workflows/quackwire.yml'
   workflow_dispatch:
 
