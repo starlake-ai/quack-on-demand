@@ -137,7 +137,13 @@ postgres:
 # Quack server, NOT the manager — they're separate processes. Built from
 # docker/quack-node/Dockerfile in this repo.
 quackNode:
-  image: starlakeai/quack-on-demand-node:latest
+  # Published image on Docker Hub. Until v1.0 cuts a `:latest` tag from a
+  # real release, the default points at `:latest-snapshot` — the moving
+  # alias updated by the `quack-node-snapshot` GitHub Action on every push
+  # to main that touches docker/quack-node/** or scripts/spawn-quack-node.sh.
+  # Override (e.g. with `--set quackNode.image=...:0.1.0-SNAPSHOT`) when
+  # you need a pinned reproducible tag.
+  image: starlakeai/quack-on-demand-node:latest-snapshot
   tls:
     # By default the spawn-quack-node.sh script runs quack_serve without TLS,
     # so the manager's quack_query client must use disable_ssl=true to talk
@@ -152,11 +158,38 @@ quackNode:
     enabled: false
 
 # --- DuckLake storage --------------------------------------------------------
-# Path inside the spawned Quack node pods where parquet files land. For
-# real deployments this is usually an object store URL (s3://, gs://,
-# azure://); for kind tests an emptyDir-backed filesystem path is fine.
+# Path the DuckLake catalog persists for parquet files. The same string is
+# used by the manager-side loader and by every spawned Quack node, so it
+# must be reachable from both. Default is `s3://qod-ducklake/qod-test`
+# against the `s3:` block below — set s3.endpoint to your object store
+# (SeaweedFS in the kind smoke; MinIO, real S3, R2, etc. elsewhere).
+# Override to a filesystem path only when the manager and the node pods
+# share a mount (rare in K8s; common in docker-compose).
 storage:
-  dataPath: /var/quack/ducklake
+  dataPath: s3://qod-ducklake/qod-test
+
+# --- Object-store credentials (S3-compatible) -------------------------------
+# Used when storage.dataPath starts with `s3://` (or s3a/r2). The chart renders
+# these into the manager's defaultMetastore env vars, which KubernetesQuackBackend
+# then forwards verbatim into every spawned Quack node pod. The node's
+# spawn-quack-node.sh consumes `SL_QUACK_S3_*` to emit the matching DuckDB
+# `CREATE SECRET quack_s3 (...)` so httpfs can talk to the endpoint.
+#
+# For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
+# For production: point endpoint at your bucket (https://s3.<region>.amazonaws.com
+# for real AWS S3), set useSsl=true, and use an existingSecret rather than the
+# inline accessKey/secretKey.
+s3:
+  endpoint: "http://seaweedfs:8333"
+  region: us-east-1
+  urlStyle: path     # "path" for SeaweedFS/MinIO/R2; "vhost" for real S3
+  useSsl: false
+  # Inline creds (dev / kind only). Prefer existingSecret in production.
+  accessKey: "quack"
+  secretKey: "quackquack"
+  existingSecret: ""
+  existingSecretAccessKeyKey: s3AccessKey
+  existingSecretSecretKeyKey: s3SecretKey
 
 # --- Admin credentials -------------------------------------------------------
 # Initial admin user(s) seeded into slkstate_user on every boot. Re-applied

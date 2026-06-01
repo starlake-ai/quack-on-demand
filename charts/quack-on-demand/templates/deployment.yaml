@@ -95,6 +95,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if eq (include "qod.s3Enabled" .) "true" }}
+            - name: SL_QUACK_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.s3SecretName"   . | quote }}
+                  key:  {{ include "qod.s3AccessKeyKey" . | quote }}
+            - name: SL_QUACK_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.s3SecretName"   . | quote }}
+                  key:  {{ include "qod.s3SecretKeyKey" . | quote }}
+            {{- end }}
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}

@@ -27,7 +27,8 @@ final class KubernetesQuackBackend(
     startupTimeoutSec: Int,
     defaultMetastore: Map[String, String] = Map.empty,
     readPodReady: Pod => Boolean = pod =>
-      Option(pod.getStatus).map(_.getPhase).contains("Running")
+      Option(pod.getStatus).map(_.getPhase).contains("Running"),
+    readEnv: String => Option[String] = name => Option(System.getenv(name))
 ) extends QuackBackend:
 
   private val (labelKey, labelValue) =
@@ -44,6 +45,12 @@ final class KubernetesQuackBackend(
     m.put("quack-pool", spec.poolKey.pool)
     m.put("quack-role", spec.role.toString)
     m.put("quack-max-concurrent", spec.maxConcurrent.toString)
+    // Per-node identity. Without this, the per-node Service's selector
+    // (managed-by + tenant + pool) matches every pod in the pool, so the
+    // K8s endpoints for `quack-<pool>-1` end up pointing at all N pods.
+    // Manager calls then round-robin across pods with mismatching auth
+    // tokens, producing intermittent "Authentication failed".
+    m.put("quack-node-id", spec.nodeId)
     m
 
   private def buildPod(spec: NodeSpec, token: String): Pod =
@@ -55,6 +62,20 @@ final class KubernetesQuackBackend(
       e.setName(k)
       e.setValue(v)
       envs.add(e)
+    }
+    // Mirror the env-inheritance LocalQuackBackend gets for free (via
+    // ProcessBuilder): forward object-store credentials present on the
+    // manager process so spawn-quack-node.sh can build CREATE SECRET for
+    // s3:// / az:// / gs:// data paths. `defaultMetastore` wins if the
+    // operator has explicitly pinned a value there.
+    KubernetesQuackBackend.cloudCredEnvVars.foreach { name =>
+      if !merged.contains(name) then
+        readEnv(name).foreach { v =>
+          val e = new EnvVar()
+          e.setName(name)
+          e.setValue(v)
+          envs.add(e)
+        }
     }
     val tokenEnv = new EnvVar()
     tokenEnv.setName("QUACK_TOKEN")
@@ -95,6 +116,11 @@ final class KubernetesQuackBackend(
     selector.put(labelKey, labelValue)
     selector.put("quack-tenant", spec.poolKey.tenant)
     selector.put("quack-pool", spec.poolKey.pool)
+    // Pin the Service to exactly one pod by its unique node id. Without
+    // this the selector matches every pod in the pool, producing fan-out
+    // routing across pods and intermittent auth-token mismatches at the
+    // manager call site.
+    selector.put("quack-node-id", spec.nodeId)
 
     val svcSpec = new ServiceSpec()
     svcSpec.setSelector(selector)
@@ -189,3 +215,22 @@ final class KubernetesQuackBackend(
   }
 
   def cleanup(): IO[Unit] = IO.unit
+
+end KubernetesQuackBackend
+
+object KubernetesQuackBackend:
+  /** Object-store credential env vars the manager's pod env is allowed to
+    * forward into spawned node pods. Mirrors what `LocalQuackBackend` gets
+    * for free through `ProcessBuilder` env inheritance. Keep in sync with
+    * the `SL_QUACK_*` keys read by `scripts/spawn-quack-node.sh`. */
+  val cloudCredEnvVars: Seq[String] = Seq(
+    "SL_QUACK_S3_ENDPOINT",
+    "SL_QUACK_S3_ACCESS_KEY_ID",
+    "SL_QUACK_S3_SECRET_ACCESS_KEY",
+    "SL_QUACK_S3_REGION",
+    "SL_QUACK_S3_URL_STYLE",
+    "SL_QUACK_S3_USE_SSL",
+    "SL_QUACK_AZURE_CONNECTION_STRING",
+    "SL_QUACK_GCS_KEY_ID",
+    "SL_QUACK_GCS_SECRET"
+  )

@@ -39,3 +39,16 @@ data:
 
   # ---- Metrics sink ---------------------------------------------------------
   SL_QUACK_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
+
+  {{- if eq (include "qod.s3Enabled" .) "true" }}
+  # ---- Object store (S3 / SeaweedFS / MinIO / R2) --------------------------
+  # storage.dataPath is an s3:// URL. These vars land on the manager pod's
+  # env; KubernetesQuackBackend forwards the `SL_QUACK_S3_*` prefix verbatim
+  # into every spawned node pod, where spawn-quack-node.sh consumes them to
+  # emit `CREATE SECRET quack_s3 (...)`. Same contract as docker-compose
+  # (where ProcessBuilder env inheritance does the forwarding for free).
+  SL_QUACK_S3_ENDPOINT:    {{ .Values.s3.endpoint  | quote }}
+  SL_QUACK_S3_REGION:      {{ .Values.s3.region    | quote }}
+  SL_QUACK_S3_URL_STYLE:   {{ .Values.s3.urlStyle  | quote }}
+  SL_QUACK_S3_USE_SSL:     {{ .Values.s3.useSsl    | quote }}
+  {{- end }}
