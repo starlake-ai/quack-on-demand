@@ -10,7 +10,7 @@ that matches what you already have on hand.
 | **[Path 3 - Docker compose](#path-3--docker-compose-bundled-postgres--host-volumes)** | container | container | you want one command to bring up the whole stack; Postgres + DuckLake files persist on the host |
 
 All three paths use **the same `application.conf`** at runtime - knobs are
-flipped via `SL_QUACK_*` env vars. None require the loading of any dataset.
+flipped via `QOD_*` env vars. None require the loading of any dataset.
 Each path below has a **Seed with TPC-H and Run** subsection if you want benchmark
 data - the loader probes DuckLake first and self-skips when `tpch1.lineitem`
 is already populated, so it's safe to leave the seeding flag on across reboots.
@@ -25,7 +25,7 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)
 - A reachable Postgres - the catalog DB and the slkstate_* control-plane tables both live there
-  (the catalog DB itself is auto-created on first boot if your `$SL_QUACK_PG_USER` has `CREATEDB`)
+  (the catalog DB itself is auto-created on first boot if your `$QOD_PG_USER` has `CREATEDB`)
 - **`sbt` 1.x and `npm` 18+** - only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
 
 ### Run
@@ -37,40 +37,40 @@ Arrow's allocator pinned:
 ```bash
 # Default: download latest release from Maven Central, cache under
 # ~/.cache/quack-on-demand/, run it.
-SL_QUACK_PG_HOST=db.internal      \
-SL_QUACK_PG_PASSWORD=hunter2      \
-SL_QUACK_ADMIN_PASSWORD=change-me \
+QOD_PG_HOST=db.internal      \
+QOD_PG_PASSWORD=hunter2      \
+QOD_ADMIN_PASSWORD=change-me \
 ./scripts/run-jar.sh
 
 # Pin a specific version (release or -SNAPSHOT)
-QUACK_VERSION=0.1.0           ./scripts/run-jar.sh
-QUACK_VERSION=latest-snapshot ./scripts/run-jar.sh
+QOD_VERSION=0.1.0           ./scripts/run-jar.sh
+QOD_VERSION=latest-snapshot ./scripts/run-jar.sh
 
 # Local source build (requires sbt + npm); writes distrib/<...>.jar
 BUILD=1 ./scripts/run-jar.sh
 ```
 
 Default ports: `:20900` (REST + admin UI) and `:31338` (FlightSQL edge,
-TLS on). Override with `SL_QUACK_ON_DEMAND_PORT` / `PROXY_PORT`.
+TLS on). Override with `QOD_ON_DEMAND_PORT` / `PROXY_PORT`.
 
 To stop: `./scripts/stop-jar.sh`.
 
 ### Seed with TPC-H and Run
 
 The start script will seed the catalog before the JVM boots when
-`SL_QUACK_BOOTSTRAP_LOAD_TPCH=true`. It re-uses your `$SL_QUACK_PG_*` and
-`$SL_QUACK_DUCKLAKE_DATA_PATH` so the loader and the manager agree on
+`QOD_BOOTSTRAP_LOAD_TPCH=true`. It re-uses your `$QOD_PG_*` and
+`$QOD_DUCKLAKE_DATA_PATH` so the loader and the manager agree on
 paths/credentials by construction. The loader self-skips if `tpch1.lineitem`
 is already there.
 
 ```bash
 # Default SF=1 (~6M lineitem rows, ≈ 10s)
-SL_QUACK_BOOTSTRAP_LOAD_TPCH=true \
+QOD_BOOTSTRAP_LOAD_TPCH=true \
   ./scripts/run-jar.sh
 
 # Larger scale
-SL_QUACK_BOOTSTRAP_LOAD_TPCH=true \
-SL_QUACK_BOOTSTRAP_TPCH_SF=10 \
+QOD_BOOTSTRAP_LOAD_TPCH=true \
+QOD_BOOTSTRAP_TPCH_SF=10 \
   ./scripts/run-jar.sh
 ```
 
@@ -85,24 +85,24 @@ orders, lineitem`) in `tpch.tpch1`.
 
 ### Override knobs
 
-Every scalar in `application.conf` has a matching `SL_QUACK_*` /
+Every scalar in `application.conf` has a matching `QOD_*` /
 `PROXY_*` env var. The most-used:
 
 | Setting | Env var | Default |
 |---|---|---|
-| Postgres host  | `SL_QUACK_PG_HOST`      | `localhost` |
-| Postgres user  | `SL_QUACK_PG_USER`      | `postgres` |
-| Postgres password | `SL_QUACK_PG_PASSWORD` | `azizam` |
-| Catalog DB name | `SL_QUACK_PG_DBNAME`   | `tpch` |
-| DuckLake data dir | `SL_QUACK_DUCKLAKE_DATA_PATH` | `<repo>/ducklake/<db>` |
+| Postgres host  | `QOD_PG_HOST`      | `localhost` |
+| Postgres user  | `QOD_PG_USER`      | `postgres` |
+| Postgres password | `QOD_PG_PASSWORD` | `azizam` |
+| Catalog DB name | `QOD_PG_DBNAME`   | `tpch` |
+| DuckLake data dir | `QOD_DUCKLAKE_DATA_PATH` | `<repo>/ducklake/<db>` |
 | Edge TLS on/off | `PROXY_TLS_ENABLED`    | `true` |
-| FlightSQL edge auth | `SL_QUACK_AUTH_DB_ENABLED` | `true` |
-| Admin username | `SL_QUACK_ADMIN_USERNAME` | `admin@localhost.local,admin` |
-| Admin password | `SL_QUACK_ADMIN_PASSWORD` | `admin` (rotate!) |
-| Static REST key | `SL_QUACK_API_KEY`     | unset (open `/api/*` with startup warning) |
-| Seed TPC-H at boot | `SL_QUACK_BOOTSTRAP_LOAD_TPCH` | unset (`true` to seed) |
-| TPC-H scale factor | `SL_QUACK_BOOTSTRAP_TPCH_SF` | `1` |
-| TPC-H schema name | `SL_QUACK_BOOTSTRAP_TPCH_SCHEMA` | `tpch1` |
+| FlightSQL edge auth | `QOD_AUTH_DB_ENABLED` | `true` |
+| Admin username | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` |
+| Admin password | `QOD_ADMIN_PASSWORD` | `admin` (rotate!) |
+| Static REST key | `QOD_API_KEY`     | unset (open `/api/*` with startup warning) |
+| Seed TPC-H at boot | `QOD_BOOTSTRAP_LOAD_TPCH` | unset (`true` to seed) |
+| TPC-H scale factor | `QOD_BOOTSTRAP_TPCH_SF` | `1` |
+| TPC-H schema name | `QOD_BOOTSTRAP_TPCH_SCHEMA` | `tpch1` |
 
 ---
 
@@ -138,10 +138,10 @@ TLS=true                          \
 ./scripts/run-docker.sh
 
 # Pin a specific tag (release or snapshot)
-QUACK_VERSION=0.1.0           PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
-QUACK_VERSION=latest-snapshot PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
+QOD_VERSION=0.1.0           PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
+QOD_VERSION=latest-snapshot PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
 
-# Local Dockerfile build (writes the same image name, tagged $QUACK_VERSION)
+# Local Dockerfile build (writes the same image name, tagged $QOD_VERSION)
 BUILD=1 PG_HOST=… PG_PASSWORD=… ./scripts/run-docker.sh
 ```
 
@@ -260,8 +260,8 @@ API_KEY=my-rest-key
 By default the `quack` service writes DuckLake parquet to the
 `./ducklake` host bind-mount. To put the data on an S3-compatible bucket
 instead (SeaweedFS, MinIO, AWS S3, R2, GCS via the S3-interop endpoint),
-point `SL_QUACK_DUCKLAKE_DATA_PATH` at an `s3://…` URL and set the
-`SL_QUACK_S3_*` credentials. `spawn-quack-node.sh` and
+point `QOD_DUCKLAKE_DATA_PATH` at an `s3://…` URL and set the
+`QOD_S3_*` credentials. `spawn-quack-node.sh` and
 `load-tpch-dbgen.sh` detect the scheme, `INSTALL httpfs` and
 `CREATE SECRET` so every Quack node reads/writes parquet against the
 bucket - the catalog persists the `s3://` URL, so all nodes resolve the
@@ -276,17 +276,17 @@ one-shot bucket bootstrap.
 ```bash
 # 1. Add the S3 settings to .env (or uncomment the Option A block in .env.example):
 cat >> .env <<'EOF'
-SL_QUACK_DUCKLAKE_DATA_PATH=s3://ducklake/tpch
-SL_QUACK_S3_ENDPOINT=seaweedfs:8333
-SL_QUACK_S3_ACCESS_KEY_ID=quack
-SL_QUACK_S3_SECRET_ACCESS_KEY=quackquack
-SL_QUACK_S3_USE_SSL=false
-SL_QUACK_S3_URL_STYLE=path
+QOD_DUCKLAKE_DATA_PATH=s3://ducklake/tpch
+QOD_S3_ENDPOINT=seaweedfs:8333
+QOD_S3_ACCESS_KEY_ID=quack
+QOD_S3_SECRET_ACCESS_KEY=quackquack
+QOD_S3_USE_SSL=false
+QOD_S3_URL_STYLE=path
 S3_BUCKET=ducklake
 EOF
 
 # 2. Bring everything up in one command. The wrapper detects
-#    SL_QUACK_S3_ENDPOINT=seaweedfs:* and auto-activates the `seaweedfs`
+#    QOD_S3_ENDPOINT=seaweedfs:* and auto-activates the `seaweedfs`
 #    compose profile; LOAD_TPCH=true seeds TPC-H onto S3 in the same step.
 LOAD_TPCH=true ./scripts/run-docker-compose.sh
 
@@ -315,10 +315,10 @@ aws --endpoint-url http://localhost:8333 \
 
 #### Option B - external S3 (AWS, MinIO, R2, GCS HMAC)
 
-Leave the `seaweedfs` profile off and point the same `SL_QUACK_S3_*`
+Leave the `seaweedfs` profile off and point the same `QOD_S3_*`
 env vars at your external endpoint. Same wrapper, same flow as Option A
 - it just doesn't bring up the in-compose SeaweedFS service because
-`SL_QUACK_S3_ENDPOINT` no longer starts with `seaweedfs:`.
+`QOD_S3_ENDPOINT` no longer starts with `seaweedfs:`.
 
 **Pre-flight (manual, one-time):** the bucket must exist before the
 first boot. DuckLake's `CREATE TABLE` issues a `HeadBucket` before any
@@ -329,16 +329,16 @@ auto-creating. Create it with your provider's console / CLI (e.g.
 ```bash
 # 1. Add the S3 settings to .env. Per-vendor knobs in the comments.
 cat >> .env <<'EOF'
-SL_QUACK_DUCKLAKE_DATA_PATH=s3://my-bucket/quack/tpch
-SL_QUACK_S3_ACCESS_KEY_ID=AKIA...
-SL_QUACK_S3_SECRET_ACCESS_KEY=...
-SL_QUACK_S3_REGION=us-east-1
-SL_QUACK_S3_USE_SSL=true
-SL_QUACK_S3_URL_STYLE=vhost
-# Omit SL_QUACK_S3_ENDPOINT for AWS (defaults to s3.amazonaws.com).
-# MinIO:    SL_QUACK_S3_ENDPOINT=minio.local:9000   SL_QUACK_S3_URL_STYLE=path
-# R2:       SL_QUACK_S3_ENDPOINT=<account>.r2.cloudflarestorage.com
-# GCS HMAC: SL_QUACK_S3_ENDPOINT=storage.googleapis.com
+QOD_DUCKLAKE_DATA_PATH=s3://my-bucket/quack/tpch
+QOD_S3_ACCESS_KEY_ID=AKIA...
+QOD_S3_SECRET_ACCESS_KEY=...
+QOD_S3_REGION=us-east-1
+QOD_S3_USE_SSL=true
+QOD_S3_URL_STYLE=vhost
+# Omit QOD_S3_ENDPOINT for AWS (defaults to s3.amazonaws.com).
+# MinIO:    QOD_S3_ENDPOINT=minio.local:9000   QOD_S3_URL_STYLE=path
+# R2:       QOD_S3_ENDPOINT=<account>.r2.cloudflarestorage.com
+# GCS HMAC: QOD_S3_ENDPOINT=storage.googleapis.com
 EOF
 
 # 2. Boot the stack + seed in one step (no seaweedfs profile needed).
@@ -353,7 +353,7 @@ codepath as Option A - the only difference between the two recipes is
 the endpoint and whether the seaweedfs profile is activated.
 
 > **Path-matching still applies.** The catalog persists whichever
-> `SL_QUACK_DUCKLAKE_DATA_PATH` string was active on the first write. If
+> `QOD_DUCKLAKE_DATA_PATH` string was active on the first write. If
 > you toggle between `./ducklake`, `s3://seaweedfs/...`, and
 > `s3://external/...` against the **same** `PG_DBNAME`, the second boot
 > fails to open the previously-written parquet. Use a separate
@@ -517,7 +517,7 @@ strictly in the DuckLake `__ducklake_*` metadata.
 
 Pick one of:
 
-1. **Isolate by `PG_DBNAME`.** Native uses `SL_QUACK_PG_DBNAME=tpch`,
+1. **Isolate by `PG_DBNAME`.** Native uses `QOD_PG_DBNAME=tpch`,
    Docker uses `PG_DBNAME=tpch_docker`. Two catalogs, no overlap, both
    can run any time. Recommended for dev machines that toggle between
    modes.
@@ -537,11 +537,11 @@ that the current manager can't see. Two options:
 # Option A - start fresh: drop the catalog DB + the data dir.
 psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
 rm -rf ducklake/tpch                    # the on-disk parquet files
-# Re-boot with SL_QUACK_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
+# Re-boot with QOD_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
 # LOAD_TPCH=true ./scripts/run-docker-compose.sh (Path 3).
 
 # Option B - keep the data, use a fresh catalog DB.
-SL_QUACK_PG_DBNAME=tpch_native ./scripts/run-jar.sh
+QOD_PG_DBNAME=tpch_native ./scripts/run-jar.sh
 ```
 
 ---

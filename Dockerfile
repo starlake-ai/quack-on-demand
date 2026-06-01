@@ -97,7 +97,7 @@ chmod +x /usr/local/bin/duckdb
 rm /tmp/duckdb-cli.zip
 
 # libduckdb.so is required at runtime by libquackwire (the JNI shim that
-# powers SL_QUACK_NATIVE_CLIENT=true) because the shim links against
+# powers QOD_NATIVE_CLIENT=true) because the shim links against
 # DuckDB::LibraryVersion / ArrowConverter / etc. The duckdb CLI above is
 # self-contained and does not provide a system-installed libduckdb.so.
 curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${DUCKDB_ARCH}.zip" \
@@ -130,15 +130,15 @@ RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 USER quack
 
 # Manager REST + UI (20900) and FlightSQL edge (31338).
-# Local-mode Quack nodes lease ports from SL_QUACK_MIN_PORT..SL_QUACK_MAX_PORT;
+# Local-mode Quack nodes lease ports from QOD_MIN_PORT..QOD_MAX_PORT;
 # expose the default range so a host port-forward can reach them too.
 EXPOSE 20900 31338 21900-22500
 
 # Sensible container defaults. Override at run time via -e.
-ENV SL_QUACK_ON_DEMAND_HOST=0.0.0.0 \
+ENV QOD_ON_DEMAND_HOST=0.0.0.0 \
     PROXY_HOST=0.0.0.0 \
-    SL_QUACK_DUCKLAKE_DATA_PATH=/app/ducklake/tpch \
-    SL_QUACK_STATE_PATH=/app/state/quack-on-demand-state.json \
+    QOD_DUCKLAKE_DATA_PATH=/app/ducklake/tpch \
+    QOD_STATE_PATH=/app/state/quack-on-demand-state.json \
     PROXY_TLS_CERT_CHAIN=/app/certs/server-cert.pem \
     PROXY_TLS_PRIVATE_KEY=/app/certs/server-key.pem \
     JAVA_OPTS=""

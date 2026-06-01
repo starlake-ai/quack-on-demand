@@ -67,7 +67,7 @@ The auth/ACL/session config types and the DuckLake catalog resolver live under [
 
 ## Configuration
 
-Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `SL_QUACK_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin `admin@localhost.local` / `admin`. `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
+Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `QOD_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin `admin@localhost.local` / `admin`. `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
 
 ## Operator runbook
 
@@ -77,4 +77,4 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
 
 - **Don't disable JVM forking** in build.sbt - see "JVM forking" above.
 - **Don't invoke `scripts/spawn-quack-node.sh` directly** - it's spawned by `LocalQuackBackend` with the right port + token + env contract. Manual invocation will leak ports and confuse the supervisor.
-- **Don't edit the bundled `application.conf` for local tweaks** - set the `SL_QUACK_*` env var instead, or the change vanishes on the next `sbt assembly`.
+- **Don't edit the bundled `application.conf` for local tweaks** - set the `QOD_*` env var instead, or the change vanishes on the next `sbt assembly`.

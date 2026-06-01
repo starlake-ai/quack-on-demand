@@ -58,9 +58,9 @@ services:
         - "host.docker.internal:host-gateway"
     # Single image name for both flows: `docker compose up --build` writes
     # this tag locally; `docker compose pull` fetches it from Docker Hub.
-    # Pin to a specific snapshot/release via QUACK_VERSION (e.g.
-    # QUACK_VERSION=0.1.0 docker compose pull).
-    image: starlakeai/quack-on-demand:${QUACK_VERSION:-latest}
+    # Pin to a specific snapshot/release via QOD_VERSION (e.g.
+    # QOD_VERSION=0.1.0 docker compose pull).
+    image: starlakeai/quack-on-demand:${QOD_VERSION:-latest}
     container_name: quack-on-demand
     restart: unless-stopped
     depends_on:
@@ -68,12 +68,12 @@ services:
         condition: service_healthy
     environment:
       # ----- Postgres connection (the service name is the hostname) -----
-      SL_QUACK_PG_HOST:     postgres
-      SL_QUACK_PG_PORT:     "5432"
-      SL_QUACK_PG_USER:     ${PG_USER:-postgres}
-      SL_QUACK_PG_PASSWORD: ${PG_PASSWORD:-azizam}
-      SL_QUACK_PG_DBNAME:   ${PG_DBNAME:-tpch}
-      SL_QUACK_PG_SCHEMA:   ${PG_SCHEMA:-main}
+      QOD_PG_HOST:     postgres
+      QOD_PG_PORT:     "5432"
+      QOD_PG_USER:     ${PG_USER:-postgres}
+      QOD_PG_PASSWORD: ${PG_PASSWORD:-azizam}
+      QOD_PG_DBNAME:   ${PG_DBNAME:-tpch}
+      QOD_PG_SCHEMA:   ${PG_SCHEMA:-main}
 
       # DuckLake data path the manager bakes into the catalog. Must match
       # what `scripts/load-tpch-dbgen.sh` (and the native default) use:
@@ -83,42 +83,42 @@ services:
       #
       # Honor a user-supplied override (.env / shell) so switching to s3://
       # storage works without editing this file. Falls back to the
-      # filesystem default when SL_QUACK_DUCKLAKE_DATA_PATH is unset.
-      SL_QUACK_DUCKLAKE_DATA_PATH: ${SL_QUACK_DUCKLAKE_DATA_PATH:-/app/ducklake/${PG_DBNAME:-tpch}}
+      # filesystem default when QOD_DUCKLAKE_DATA_PATH is unset.
+      QOD_DUCKLAKE_DATA_PATH: ${QOD_DUCKLAKE_DATA_PATH:-/app/ducklake/${PG_DBNAME:-tpch}}
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
-      SL_QUACK_AUTH_DB_ENABLED: ${AUTH:-true}
-      SL_QUACK_ADMIN_USERNAME:  ${ADMIN_USERNAME:-admin}
-      SL_QUACK_ADMIN_PASSWORD:  ${ADMIN_PASSWORD:-admin}
-      SL_QUACK_API_KEY:         ${API_KEY:-}
+      QOD_AUTH_DB_ENABLED: ${AUTH:-true}
+      QOD_ADMIN_USERNAME:  ${ADMIN_USERNAME:-admin}
+      QOD_ADMIN_PASSWORD:  ${ADMIN_PASSWORD:-admin}
+      QOD_API_KEY:         ${API_KEY:-}
       PROXY_TLS_ENABLED:        ${TLS:-false}
 
       # ----- Local-mode Quack node port range -----
-      SL_QUACK_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
-      SL_QUACK_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
+      QOD_MIN_PORT: "${QUACK_MIN_PORT:-21900}"
+      QOD_MAX_PORT: "${QUACK_MAX_PORT:-22500}"
 
       # ----- DuckLake on S3-compatible object storage (optional) -----
-      # When SL_QUACK_DUCKLAKE_DATA_PATH starts with s3:// (or gs://, az://,
+      # When QOD_DUCKLAKE_DATA_PATH starts with s3:// (or gs://, az://,
       # azure://, abfss://), spawn-quack-node.sh + load-tpch-dbgen.sh skip
       # the local mkdir and configure DuckDB's httpfs/azure extensions via
       # CREATE SECRET so DuckLake reads/writes parquet directly against the
-      # bucket. Leave SL_QUACK_DUCKLAKE_DATA_PATH at its filesystem default
+      # bucket. Leave QOD_DUCKLAKE_DATA_PATH at its filesystem default
       # to keep using the ./ducklake bind-mount; set it to s3://bucket/path
       # (or s3a://, etc.) to switch to object storage.
       #
       # The bundled `seaweedfs` profile (docker compose --profile seaweedfs
       # up -d) brings up a single-node SeaweedFS exposing an S3 API at
       # seaweedfs:8333 and creates the bucket named by S3_BUCKET. Pair it
-      # with SL_QUACK_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>, point
-      # SL_QUACK_S3_ENDPOINT at seaweedfs:8333, and the stack runs end-to-end
+      # with QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>, point
+      # QOD_S3_ENDPOINT at seaweedfs:8333, and the stack runs end-to-end
       # without touching ./ducklake. For external S3 (AWS, R2, MinIO, GCS
       # HMAC) leave the profile off and fill in the endpoint + credentials.
-      SL_QUACK_S3_ENDPOINT:          ${SL_QUACK_S3_ENDPOINT:-}
-      SL_QUACK_S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-}
-      SL_QUACK_S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-}
-      SL_QUACK_S3_REGION:            ${SL_QUACK_S3_REGION:-us-east-1}
-      SL_QUACK_S3_URL_STYLE:         ${SL_QUACK_S3_URL_STYLE:-path}
-      SL_QUACK_S3_USE_SSL:           ${SL_QUACK_S3_USE_SSL:-false}
+      QOD_S3_ENDPOINT:          ${QOD_S3_ENDPOINT:-}
+      QOD_S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-}
+      QOD_S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-}
+      QOD_S3_REGION:            ${QOD_S3_REGION:-us-east-1}
+      QOD_S3_URL_STYLE:         ${QOD_S3_URL_STYLE:-path}
+      QOD_S3_USE_SSL:           ${QOD_S3_USE_SSL:-false}
 
       # ----- Corporate proxy passthrough (optional) -----
       # Forward host proxy env vars into the container so DuckDB extension
@@ -178,7 +178,7 @@ services:
   # postgres/ducklake/certs volumes.
   #
   # Credentials are baked in via /etc/seaweedfs/s3.json. Defaults match the
-  # SL_QUACK_S3_* env vars on the quack service. Override S3_ACCESS_KEY_ID /
+  # QOD_S3_* env vars on the quack service. Override S3_ACCESS_KEY_ID /
   # S3_SECRET_ACCESS_KEY / S3_BUCKET in .env if you change them.
   # Pre-init: write /etc/seaweedfs/s3.json BEFORE seaweedfs starts so the S3
   # gateway loads our credentials on first boot. Without this, seaweedfs boots
@@ -189,8 +189,8 @@ services:
     container_name: quack-on-demand-seaweedfs-config
     profiles: ["seaweedfs"]
     environment:
-      S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-quack}
-      S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-quackquack}
+      S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
+      S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
     volumes:
       - ./seaweedfs-config:/etc/seaweedfs
     # $$VAR escapes compose's variable substitution so the in-container shell
@@ -261,8 +261,8 @@ services:
         condition: service_healthy
     environment:
       S3_BUCKET:            ${S3_BUCKET:-ducklake}
-      S3_ACCESS_KEY_ID:     ${SL_QUACK_S3_ACCESS_KEY_ID:-quack}
-      S3_SECRET_ACCESS_KEY: ${SL_QUACK_S3_SECRET_ACCESS_KEY:-quackquack}
+      S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
+      S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
     volumes:
       - ./seaweedfs-config:/etc/seaweedfs
     entrypoint: ["/bin/sh", "-c"]
@@ -303,7 +303,7 @@ services:
 # the manager spawns nodes against, so the absolute DATA_PATH the catalog persists
 # matches what nodes later resolve. No separate compose service required.
 #
-# When using the seaweedfs profile, set SL_QUACK_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>
-# (and SL_QUACK_S3_ENDPOINT=seaweedfs:8333) so the same loader writes parquet
+# When using the seaweedfs profile, set QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>
+# (and QOD_S3_ENDPOINT=seaweedfs:8333) so the same loader writes parquet
 # to the bucket instead of /app/ducklake. The path the catalog persists is the
 # s3:// URL, which every Quack node resolves identically regardless of host.

@@ -25,7 +25,7 @@ Quack on Demand is that infrastructure: an **Arrow Flight SQL** edge (any JDBC/O
 - **React admin console** at `/ui/` - tenant CRUD, pool CRUD, per-tenant ACL editor, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
 - **Single uber-jar** deployment; control-plane state lives next to DuckLake's metadata in the same Postgres database
 - **Self-healing on restart** - dead Quack child processes are detected (PID + port probe) and respawned automatically before the edge accepts traffic
-- **Every config key is overridable** via a `SL_QUACK_*` env var
+- **Every config key is overridable** via a `QOD_*` env var
 
 ---
 
@@ -108,21 +108,21 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 ## Configuration
 
-Every scalar in `src/main/resources/application.conf` accepts a matching `SL_QUACK_*` env-var override. The most-used:
+Every scalar in `src/main/resources/application.conf` accepts a matching `QOD_*` env-var override. The most-used:
 
 | Setting | Env var | Default |
 |---|---|---|
-| Manager REST port | `SL_QUACK_ON_DEMAND_PORT` | `20900` |
+| Manager REST port | `QOD_ON_DEMAND_PORT` | `20900` |
 | FlightSQL edge port | `PROXY_PORT` | `31338` |
 | FlightSQL TLS on/off | `PROXY_TLS_ENABLED` | `true` |
-| State backend | `SL_QUACK_STATE_STORAGE` | `postgres` |
-| Metastore host | `SL_QUACK_PG_HOST` | `localhost` |
-| Metastore database | `SL_QUACK_PG_DBNAME` | `tpch` |
-| Static admin key | `SL_QUACK_API_KEY` | unset |
-| Admin usernames | `SL_QUACK_ADMIN_USERNAME` | `admin@localhost.local,admin` |
-| Admin password | `SL_QUACK_ADMIN_PASSWORD` | `admin` |
-| Enable DB auth | `SL_QUACK_AUTH_DB_ENABLED` | `false` |
-| Enable ACL | `SL_QUACK_ACL_ENABLED` | `false` |
+| State backend | `QOD_STATE_STORAGE` | `postgres` |
+| Metastore host | `QOD_PG_HOST` | `localhost` |
+| Metastore database | `QOD_PG_DBNAME` | `tpch` |
+| Static admin key | `QOD_API_KEY` | unset |
+| Admin usernames | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` |
+| Admin password | `QOD_ADMIN_PASSWORD` | `admin` |
+| Enable DB auth | `QOD_AUTH_DB_ENABLED` | `false` |
+| Enable ACL | `QOD_ACL_ENABLED` | `false` |
 
 Pluggable auth backends, ACL store paths, K8s runtime, JWT keys - see `application.conf` for the full surface.
 
@@ -130,7 +130,7 @@ Pluggable auth backends, ACL store paths, K8s runtime, JWT keys - see `applicati
 
 ## REST API
 
-All endpoints under `/api/*` require a valid `X-API-Key` (either the static `SL_QUACK_API_KEY` or a UI session token from `/api/auth/login`). `/health` and `/api/config/client` are open; `/ui/*` is open (the React app gates itself).
+All endpoints under `/api/*` require a valid `X-API-Key` (either the static `QOD_API_KEY` or a UI session token from `/api/auth/login`). `/health` and `/api/config/client` are open; `/ui/*` is open (the React app gates itself).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -260,8 +260,8 @@ ui/
 
 Defaults and design choices an operator should be aware of before going to production:
 
-- **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `slkstate_user` with the configured admin at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `SL_QUACK_ADMIN_PASSWORD` before exposing the edge.**
-- **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `SL_QUACK_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
+- **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `slkstate_user` with the configured admin at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.**
+- **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `QOD_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
 - **DML grants in ACL mode are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant. Per-table DML grants need the ACL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
 - **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
 - **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.

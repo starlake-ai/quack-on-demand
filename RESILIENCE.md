@@ -96,7 +96,7 @@ transaction. Operators relying on this should design their workload to handle
 | **Statement history** | [`StatementHistoryStore`](src/main/scala/ai/starlake/quack/edge/StatementHistoryStore.scala#L23) — 256-entry ring buffer | The Admin UI's "Recent statements" panel resets. No post-mortem trail of what ran before the crash. |
 | **Per-node EWMA latency / total served** | [`NodeLoadTracker`](src/main/scala/ai/starlake/quack/edge/adapter/NodeLoadTracker.scala) | The routing algorithm recomputes load from zero. New traffic distributes evenly until the EWMA converges (a few seconds at any real QPS). |
 | **FlightSQL sessions + session pins** | [`SessionRegistry`](src/main/scala/ai/starlake/quack/edge/SessionRegistry.scala) | Every client must reconnect. Any open transaction is implicitly rolled back at the Quack node level. |
-| **Admin session tokens** | [`SessionTokenStore`](src/main/scala/ai/starlake/quack/ondemand/api/SessionTokenStore.scala) | Admin UI users must log in again. The static `SL_QUACK_API_KEY` continues to work. |
+| **Admin session tokens** | [`SessionTokenStore`](src/main/scala/ai/starlake/quack/ondemand/api/SessionTokenStore.scala) | Admin UI users must log in again. The static `QOD_API_KEY` continues to work. |
 | **Rolling per-node histogram (p50/p95/p99)** | Part of the load tracker | UI latency widgets reset to zero. |
 
 All of these recover by re-population from live traffic; none cause incorrect behavior, only

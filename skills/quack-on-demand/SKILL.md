@@ -23,7 +23,7 @@ Use this skill when the user wants to:
 - `scripts/loadtest/loadtest.py` - Python FlightSQL load tester (ADBC driver)
 - `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
 - `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
-- `src/main/resources/application.conf` - config (every key has a `SL_QUACK_*` env-var override)
+- `src/main/resources/application.conf` - config (every key has a `QOD_*` env-var override)
 - `docs/superpowers/FOLLOWUPS.md` - triaged backlog
 - `README.md` - full feature list + operational notes
 
@@ -37,7 +37,7 @@ Use this skill when the user wants to:
 BUILD=1 ./scripts/run-jar.sh
 
 # Disable DB auth (UI then skips the login screen)
-SL_QUACK_AUTH_DB_ENABLED=false ./scripts/run-jar.sh
+QOD_AUTH_DB_ENABLED=false ./scripts/run-jar.sh
 
 # Disable TLS on the FlightSQL edge
 PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
@@ -46,14 +46,14 @@ PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 ./scripts/stop-jar.sh
 ```
 
-The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `SL_QUACK_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
+The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `QOD_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
 
-On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent - already-existing tenant/pool are left alone. Override with `SL_QUACK_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `SL_QUACK_BOOTSTRAP_ENABLED=false`.
+On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent - already-existing tenant/pool are left alone. Override with `QOD_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `QOD_BOOTSTRAP_ENABLED=false`.
 
 ## Auth flow (REST + UI)
 
 The REST API has two acceptable credentials:
-1. **Static** `X-API-Key` header matching `SL_QUACK_API_KEY` (if set; not set by default)
+1. **Static** `X-API-Key` header matching `QOD_API_KEY` (if set; not set by default)
 2. **UI session token** minted via `POST /api/auth/login`
 
 ```bash
@@ -67,7 +67,7 @@ TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
 curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
 ```
 
-If `SL_QUACK_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic - fine for local dev, never for prod.
+If `QOD_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic - fine for local dev, never for prod.
 
 ## Tenant + pool management
 
@@ -127,7 +127,7 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/del
 
 Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`. At validation time the authenticated session expands into `user:<username>` + `group:<g>` per group + `role:<r>`; a grant matches any of them.
 
-ACL is *off* by default (`acl.enabled=false`). Flip with `SL_QUACK_ACL_ENABLED=true` to actually enforce.
+ACL is *off* by default (`acl.enabled=false`). Flip with `QOD_ACL_ENABLED=true` to actually enforce.
 
 ## Node status + metrics
 
@@ -175,9 +175,9 @@ The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager p
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/api/*` returns 401 | `SL_QUACK_API_KEY` is set but the header is missing/wrong | Pass `X-API-Key: <key>` or log in via `/api/auth/login` |
+| `/api/*` returns 401 | `QOD_API_KEY` is set but the header is missing/wrong | Pass `X-API-Key: <key>` or log in via `/api/auth/login` |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `stop` + `start` (reconcile respawns) |
-| `access denied: missing SELECT grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `/api/acl/grant/create` or set `SL_QUACK_ACL_ENABLED=false` |
+| `access denied: missing SELECT grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `/api/acl/grant/create` or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/stop` + `pool/create` |
 | Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |
@@ -195,9 +195,9 @@ The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager p
 
 ## When operating
 
-- The default admin password is `admin`. Rotate via `SL_QUACK_ADMIN_PASSWORD` before exposing the edge.
-- The REST API is OPEN by default (no `SL_QUACK_API_KEY` set). Set the env var or restrict the listening interface before going beyond localhost.
-- All scalars in `application.conf` have matching `SL_QUACK_*` env-var overrides. Prefer env vars over editing the file (the conf is bundled into the jar at build time).
+- The default admin password is `admin`. Rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.
+- The REST API is OPEN by default (no `QOD_API_KEY` set). Set the env var or restrict the listening interface before going beyond localhost.
+- All scalars in `application.conf` have matching `QOD_*` env-var overrides. Prefer env vars over editing the file (the conf is bundled into the jar at build time).
 - When in doubt about state, check `docs/superpowers/FOLLOWUPS.md` - it's the authoritative list of known issues and recently-closed work, headed by a `HEAD <sha>` line so you can see the baseline.
 
 ## Common UI URLs

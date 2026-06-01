@@ -4,16 +4,16 @@
 #
 # Two modes, picked via BUILD:
 #   BUILD=0 (default) - `docker pull` the published image
-#                       starlakeai/quack-on-demand:$QUACK_VERSION
+#                       starlakeai/quack-on-demand:$QOD_VERSION
 #   BUILD=1           - `docker build` this repo's Dockerfile and tag the
-#                       result as starlakeai/quack-on-demand:$QUACK_VERSION
+#                       result as starlakeai/quack-on-demand:$QOD_VERSION
 #                       (same name as the published image so the rest of
 #                       this script is identical for both flows)
 #
 # Env vars (with defaults):
 #
 #   BUILD=1          build the image from local Dockerfile instead of pulling
-#   QUACK_VERSION    image tag                              (default latest)
+#   QOD_VERSION    image tag                              (default latest)
 #   IMAGE            full image                             (default starlakeai/quack-on-demand)
 #
 #   PG_HOST          remote Postgres host                   (required)
@@ -34,8 +34,8 @@
 #
 #   MANAGER_PORT     host port -> manager REST + UI         (default 20900)
 #   EDGE_PORT        host port -> FlightSQL edge            (default 31338)
-#   QUACK_MIN_PORT   first local node port                  (default 21900)
-#   QUACK_MAX_PORT   last  local node port                  (default 22500)
+#   QOD_NODE_MIN_PORT   first local node port                  (default 21900)
+#   QOD_NODE_MAX_PORT   last  local node port                  (default 22500)
 #   DATA_PATH        host dir bind-mounted as /app/ducklake (default <CWD>/ducklake)
 #   CERTS_DIR        host dir for auto-generated TLS cert   (default <CWD>/certs)
 #   CONTAINER_NAME   docker --name                          (default quack-on-demand)
@@ -62,8 +62,8 @@
 #
 # Usage:
 #   PG_HOST=db.internal PG_PASSWORD=*** ./scripts/run-docker.sh
-#   QUACK_VERSION=0.1.0 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
-#   QUACK_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
+#   QOD_VERSION=0.1.0 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
+#   QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
 #   NUKE=1 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh   # wipe local mounts first
 
 set -euo pipefail
@@ -74,16 +74,16 @@ set -euo pipefail
 
 # ---- Defaults ----
 IMAGE="${IMAGE:-starlakeai/quack-on-demand}"
-QUACK_VERSION="${QUACK_VERSION:-latest}"
+QOD_VERSION="${QOD_VERSION:-latest}"
 
 # If the user didn't pin a version and is on the pull path (not BUILD=1),
 # probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
 # fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
 # smooth before 0.1.0 ships.
-if [[ "${BUILD:-0}" != "1" ]] && [[ "$QUACK_VERSION" == "latest" ]]; then
+if [[ "${BUILD:-0}" != "1" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
   if ! docker manifest inspect "$IMAGE:latest" >/dev/null 2>&1; then
     echo "$IMAGE:latest not on Docker Hub yet; falling back to :latest-snapshot"
-    QUACK_VERSION="latest-snapshot"
+    QOD_VERSION="latest-snapshot"
   fi
 fi
 
@@ -100,8 +100,8 @@ TLS="${TLS:-false}"
 
 MANAGER_PORT="${MANAGER_PORT:-20900}"
 EDGE_PORT="${EDGE_PORT:-31338}"
-QUACK_MIN_PORT="${QUACK_MIN_PORT:-21900}"
-QUACK_MAX_PORT="${QUACK_MAX_PORT:-22500}"
+QOD_NODE_MIN_PORT="${QOD_NODE_MIN_PORT:-21900}"
+QOD_NODE_MAX_PORT="${QOD_NODE_MAX_PORT:-22500}"
 CONTAINER_NAME="${CONTAINER_NAME:-quack-on-demand}"
 NUKE="${NUKE:-0}"
 
@@ -122,11 +122,11 @@ CERTS_DIR="$(cd "$CERTS_DIR" && pwd)"
 
 # ---- Acquire image ----
 if [[ "${BUILD:-0}" == "1" ]]; then
-  echo "BUILD=1: building $IMAGE:$QUACK_VERSION from $REPO_DIR/Dockerfile ..."
-  docker build -t "$IMAGE:$QUACK_VERSION" "$REPO_DIR"
+  echo "BUILD=1: building $IMAGE:$QOD_VERSION from $REPO_DIR/Dockerfile ..."
+  docker build -t "$IMAGE:$QOD_VERSION" "$REPO_DIR"
 else
-  echo "pulling $IMAGE:$QUACK_VERSION ..."
-  docker pull "$IMAGE:$QUACK_VERSION"
+  echo "pulling $IMAGE:$QOD_VERSION ..."
+  docker pull "$IMAGE:$QOD_VERSION"
 fi
 
 # ---- Stop any prior instance with the same name ----
@@ -247,21 +247,21 @@ exec docker run --rm \
   "${HOST_GATEWAY_ARG[@]}" \
   -p "$MANAGER_PORT:20900" \
   -p "$EDGE_PORT:31338" \
-  -p "$QUACK_MIN_PORT-$QUACK_MAX_PORT:$QUACK_MIN_PORT-$QUACK_MAX_PORT" \
-  -e SL_QUACK_PG_HOST="$PG_HOST" \
-  -e SL_QUACK_PG_PORT="$PG_PORT" \
-  -e SL_QUACK_PG_USER="$PG_USER" \
-  -e SL_QUACK_PG_PASSWORD="$PG_PASSWORD" \
-  -e SL_QUACK_PG_DBNAME="$PG_DBNAME" \
-  -e SL_QUACK_PG_SCHEMA="$PG_SCHEMA" \
-  -e SL_QUACK_DUCKLAKE_DATA_PATH="/app/ducklake/$PG_DBNAME" \
-  -e SL_QUACK_AUTH_DB_ENABLED="$AUTH" \
-  -e SL_QUACK_ADMIN_USERNAME="$ADMIN_USERNAME" \
-  -e SL_QUACK_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-  ${API_KEY:+-e SL_QUACK_API_KEY="$API_KEY"} \
+  -p "$QOD_NODE_MIN_PORT-$QOD_NODE_MAX_PORT:$QOD_NODE_MIN_PORT-$QOD_NODE_MAX_PORT" \
+  -e QOD_PG_HOST="$PG_HOST" \
+  -e QOD_PG_PORT="$PG_PORT" \
+  -e QOD_PG_USER="$PG_USER" \
+  -e QOD_PG_PASSWORD="$PG_PASSWORD" \
+  -e QOD_PG_DBNAME="$PG_DBNAME" \
+  -e QOD_PG_SCHEMA="$PG_SCHEMA" \
+  -e QOD_DUCKLAKE_DATA_PATH="/app/ducklake/$PG_DBNAME" \
+  -e QOD_AUTH_DB_ENABLED="$AUTH" \
+  -e QOD_ADMIN_USERNAME="$ADMIN_USERNAME" \
+  -e QOD_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+  ${API_KEY:+-e QOD_API_KEY="$API_KEY"} \
   -e PROXY_TLS_ENABLED="$TLS" \
-  -e SL_QUACK_MIN_PORT="$QUACK_MIN_PORT" \
-  -e SL_QUACK_MAX_PORT="$QUACK_MAX_PORT" \
+  -e QOD_MIN_PORT="$QOD_NODE_MIN_PORT" \
+  -e QOD_MAX_PORT="$QOD_NODE_MAX_PORT" \
   ${HTTP_PROXY:+-e HTTP_PROXY="$HTTP_PROXY"} \
   ${HTTPS_PROXY:+-e HTTPS_PROXY="$HTTPS_PROXY"} \
   ${NO_PROXY:+-e NO_PROXY="$NO_PROXY"} \
@@ -270,4 +270,4 @@ exec docker run --rm \
   ${no_proxy:+-e no_proxy="$no_proxy"} \
   -v "$DATA_PATH:/app/ducklake" \
   -v "$CERTS_DIR:/app/certs" \
-  "$IMAGE:$QUACK_VERSION"
+  "$IMAGE:$QOD_VERSION"

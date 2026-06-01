@@ -70,20 +70,20 @@ spec:
             - configMapRef:
                 name: {{ include "qod.fullname" . }}
           env:
-            - name: SL_QUACK_PG_PASSWORD
+            - name: QOD_PG_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.postgresPasswordSecretName" . | quote }}
                   key:  {{ include "qod.postgresPasswordSecretKey" . | quote }}
             {{- if or .Values.admin.existingSecret .Values.admin.password }}
-            - name: SL_QUACK_ADMIN_PASSWORD
+            - name: QOD_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.adminPasswordSecretName" . | quote }}
                   key:  {{ include "qod.adminPasswordSecretKey" . | quote }}
             {{- end }}
             {{- if or .Values.apiKey.existingSecret .Values.apiKey.value }}
-            - name: SL_QUACK_API_KEY
+            - name: QOD_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.apiKeySecretName" . | quote }}
@@ -91,17 +91,17 @@ spec:
             {{- end }}
             # Pod injects its own namespace + name so the K8s backend can scope
             # pod create/list calls correctly even when default-ns differs.
-            - name: SL_QUACK_K8S_NAMESPACE
+            - name: QOD_K8S_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- if eq (include "qod.s3Enabled" .) "true" }}
-            - name: SL_QUACK_S3_ACCESS_KEY_ID
+            - name: QOD_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.s3SecretName"   . | quote }}
                   key:  {{ include "qod.s3AccessKeyKey" . | quote }}
-            - name: SL_QUACK_S3_SECRET_ACCESS_KEY
+            - name: QOD_S3_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.s3SecretName"   . | quote }}

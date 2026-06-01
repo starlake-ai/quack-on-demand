@@ -45,11 +45,11 @@ import java.sql.{DriverManager, PreparedStatement, SQLException}
   *                        native path; when `false`, through the historical
   *                        embedded-DuckDB path. Sourced from the HOCON key
   *                        `quack-on-demand.nativeClient` (env override
-  *                        `SL_QUACK_NATIVE_CLIENT`) by `Main.scala`.
+  *                        `QOD_NATIVE_CLIENT`) by `Main.scala`.
   * @param nodeDisableSsl  Embedded path only: value passed to `quack_query`'s
   *                        `disable_ssl :=` argument. Sourced from the HOCON
   *                        key `quack-on-demand.nodeDisableSsl` (env override
-  *                        `SL_QUACK_NODE_DISABLE_SSL`).
+  *                        `QOD_NODE_DISABLE_SSL`).
   * @param protocolFactory Optional test-injection seam: when supplied, the
   *                        native path constructs its [[QuackProtocol]] via
   *                        this factory instead of the production

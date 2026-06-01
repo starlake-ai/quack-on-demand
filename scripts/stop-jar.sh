@@ -8,7 +8,7 @@
 # seconds if anything is still listening.
 #
 # Overrides via env vars:
-#   SL_QUACK_ON_DEMAND_PORT    (default 20900 - manager REST + UI)
+#   QOD_ON_DEMAND_PORT    (default 20900 - manager REST + UI)
 #   PROXY_PORT                 (default 31338 - FlightSQL edge)
 #   FORCE_AFTER                (default 10 - seconds before SIGKILL)
 #
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-MGR_PORT="${SL_QUACK_ON_DEMAND_PORT:-20900}"
+MGR_PORT="${QOD_ON_DEMAND_PORT:-20900}"
 EDGE_PORT="${PROXY_PORT:-31338}"
 FORCE_AFTER="${FORCE_AFTER:-10}"
 

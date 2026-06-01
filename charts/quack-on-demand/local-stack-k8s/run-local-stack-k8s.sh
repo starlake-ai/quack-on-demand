@@ -14,7 +14,7 @@
 # DuckLake DATA_PATH is an `s3://` URL backed by SeaweedFS. The manager-side
 # TPC-H loader (SF=N) writes parquet there via a port-forward; the Quack
 # node pods read at the same s3:// URL through the in-cluster Service. Same
-# SL_QUACK_S3_* env contract as docker-compose.
+# QOD_S3_* env contract as docker-compose.
 #
 # Env:
 #   KIND_CLUSTER   kind cluster name              (default qod-test)
@@ -164,12 +164,12 @@ if [[ -n "$LOAD_TPCH" ]]; then
     DATA_PATH="$DATA_PATH_S3" \
     PG_HOST=localhost PG_PORT="$SEED_PG_PORT" PG_USER=postgres PG_PASS=azizam \
     DB_NAME=tpch SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$LOAD_TPCH" \
-    SL_QUACK_S3_ENDPOINT="http://localhost:$SEED_S3_PORT" \
-    SL_QUACK_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
-    SL_QUACK_S3_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
-    SL_QUACK_S3_REGION=us-east-1 \
-    SL_QUACK_S3_URL_STYLE=path \
-    SL_QUACK_S3_USE_SSL=false \
+    QOD_S3_ENDPOINT="http://localhost:$SEED_S3_PORT" \
+    QOD_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
+    QOD_S3_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
+    QOD_S3_REGION=us-east-1 \
+    QOD_S3_URL_STYLE=path \
+    QOD_S3_USE_SSL=false \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
     kill $SEED_PG_PID $SEED_S3_PID 2>/dev/null || true
     trap - EXIT

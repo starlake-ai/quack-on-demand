@@ -4,17 +4,17 @@
 #
 # Two modes, picked via BUILD:
 #   BUILD=0 (default) - `docker compose pull` the published image
-#                       starlakeai/quack-on-demand:$QUACK_VERSION, then up.
+#                       starlakeai/quack-on-demand:$QOD_VERSION, then up.
 #                       No git checkout, sbt, or node toolchain required.
 #   BUILD=1           - `docker compose up -d --build` against this repo's
 #                       Dockerfile. The build tags the image as
-#                       starlakeai/quack-on-demand:$QUACK_VERSION (same name
+#                       starlakeai/quack-on-demand:$QOD_VERSION (same name
 #                       as the published one), so this script's wait/seed/
 #                       teardown paths are identical for both flows.
 #
 # Env vars:
 #   BUILD=1             build from local Dockerfile (default 0 = pull from Hub)
-#   QUACK_VERSION       image tag                 (default latest)
+#   QOD_VERSION       image tag                 (default latest)
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
 #   LOAD_TPCH           TPC-H seed: unset = skip; numeric value = scale
@@ -29,7 +29,7 @@
 #
 # Usage:
 #   ./scripts/run-docker-compose.sh                            # latest
-#   QUACK_VERSION=0.1.0 ./scripts/run-docker-compose.sh        # pinned
+#   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh        # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
 #   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H SF=1
 #   LOAD_TPCH=10 ./scripts/run-docker-compose.sh               # + TPC-H SF=10
@@ -40,7 +40,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-QUACK_VERSION="${QUACK_VERSION:-latest}"
+QOD_VERSION="${QOD_VERSION:-latest}"
 NUKE="${NUKE:-0}"
 
 # ---- Optional nuke: tear down + wipe before starting ----
@@ -76,11 +76,11 @@ fi
 # probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
 # fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
 # smooth before 0.1.0 ships.
-if [[ "${BUILD:-0}" != "1" ]] && [[ "$QUACK_VERSION" == "latest" ]]; then
+if [[ "${BUILD:-0}" != "1" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
   registry_image="starlakeai/quack-on-demand"
   if ! docker manifest inspect "$registry_image:latest" >/dev/null 2>&1; then
     echo "starlakeai/quack-on-demand:latest not on Docker Hub yet; falling back to :latest-snapshot"
-    QUACK_VERSION="latest-snapshot"
+    QOD_VERSION="latest-snapshot"
   fi
 fi
 ENV_FILE="${ENV_FILE:-.env}"
@@ -114,9 +114,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
 fi
 
-# Ensure QUACK_VERSION is in the env compose will read. We set it as a
+# Ensure QOD_VERSION is in the env compose will read. We set it as a
 # process env var, which compose picks up before reading the .env file.
-export QUACK_VERSION
+export QOD_VERSION
 
 # ---- Rewrite host-loopback proxy URLs for container reachability ----
 # A common corporate setup runs cntlm/squid on the host's loopback (e.g.
@@ -222,16 +222,16 @@ if [[ "$PG_PORT_EFFECTIVE" == "5432" ]] && lsof -nP -iTCP:5432 -sTCP:LISTEN 2>/d
 fi
 
 # ---- Auto-activate the seaweedfs profile when .env wires DuckLake at it ----
-# When SL_QUACK_S3_ENDPOINT references the in-compose `seaweedfs` service
+# When QOD_S3_ENDPOINT references the in-compose `seaweedfs` service
 # (i.e. the user opted into the bundled S3 backend via .env), bring the
 # profile up alongside the default services. Without this the manager would
 # come up trying to write to s3://… but the seaweedfs container would never
 # start. Detected purely from .env so it's transparent on the filesystem path.
 COMPOSE_PROFILES=()
-s3_endpoint="$(grep -E '^[[:space:]]*SL_QUACK_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
-  | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*SL_QUACK_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
+s3_endpoint="$(grep -E '^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+  | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
 if [[ "$s3_endpoint" == seaweedfs:* ]]; then
-  echo "detected SL_QUACK_S3_ENDPOINT=$s3_endpoint -> activating 'seaweedfs' compose profile"
+  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> activating 'seaweedfs' compose profile"
   COMPOSE_PROFILES=("--profile" "seaweedfs")
 fi
 
@@ -240,7 +240,7 @@ if [[ "${BUILD:-0}" == "1" ]]; then
   echo "BUILD=1: starting stack with 'docker compose up -d --build'..."
   docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d --build
 else
-  echo "pulling starlakeai/quack-on-demand:$QUACK_VERSION + postgres:16-alpine..."
+  echo "pulling starlakeai/quack-on-demand:$QOD_VERSION + postgres:16-alpine..."
   docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" pull
   echo "starting stack..."
   docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d
@@ -287,12 +287,12 @@ if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
   pg_dbname="$(read_env PG_DBNAME tpch)"
   tpch_schema="$(read_env TPCH_SCHEMA tpch1)"
 
-  # Honor SL_QUACK_DUCKLAKE_DATA_PATH when the user has switched to S3
+  # Honor QOD_DUCKLAKE_DATA_PATH when the user has switched to S3
   # storage. Compose passes that var into the quack service unchanged, so
   # the seeder writes parquet to the exact same prefix the manager will
   # later read from. Falls back to the bind-mount path /app/ducklake/<db>
   # for the default filesystem deployment.
-  data_path="$(read_env SL_QUACK_DUCKLAKE_DATA_PATH "/app/ducklake/$pg_dbname")"
+  data_path="$(read_env QOD_DUCKLAKE_DATA_PATH "/app/ducklake/$pg_dbname")"
 
   echo "seeding TPC-H (schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
   docker compose -f "$COMPOSE_FILE" exec \
@@ -315,7 +315,7 @@ scheme=$([[ "$tls" == "true" ]] && echo "grpc+tls" || echo "grpc")
 cat <<EOM
 
 stack is up:
-  image:      starlakeai/quack-on-demand:$QUACK_VERSION
+  image:      starlakeai/quack-on-demand:$QOD_VERSION
   REST + UI:  http://localhost:20900/ui/
   FlightSQL:  ${scheme}://localhost:31338  (TLS=$tls)
   Postgres:   localhost:${PG_PORT_EFFECTIVE} (external)  /  postgres:5432 (internal)

@@ -111,7 +111,7 @@ object LocalQuackBackend:
 
   /** Path to the spawn script the default `commandFor` invokes. Production
     * code passes `mgrCfg.spawnScript` (HOCON `quack-on-demand.spawnScript`,
-    * env override `SL_QUACK_SPAWN_SCRIPT`); this constant is the in-repo
+    * env override `QOD_SPAWN_SCRIPT`); this constant is the in-repo
     * fallback so the test suite and zero-config dev runs keep working. */
   val DefaultSpawnScript: String = "./scripts/spawn-quack-node.sh"
 

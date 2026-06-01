@@ -4,12 +4,12 @@
 #
 #   - Metadata: PostgreSQL (defaults to postgres@localhost:5432, db `postgres`)
 #   - Data:     local files under DATA_PATH
-#   - Wire:     Quack HTTP listener on QUACK_URI
+#   - Wire:     Quack HTTP listener on QOD_NODE_URI
 #
 # Overrides via env vars:
 #   PG_HOST   PG_PORT   PG_USER   PG_PASS
 #   DATA_PATH
-#   QUACK_URI         (e.g. quack:0.0.0.0:9494)
+#   QOD_NODE_URI         (e.g. quack:0.0.0.0:9494)
 #   DB_NAME           (Postgres database AND DuckDB catalog name -
 #                      the script creates the Postgres DB if it doesn't exist)
 #   SCHEMA_NAME       (DuckLake schema under $DB_NAME; defaults to `main`.
@@ -42,7 +42,7 @@ SCHEMA_NAME="${SCHEMA_NAME:-tpch1}"
 PG_ADMIN_DB="${PG_ADMIN_DB:-postgres}"
 
 DATA_PATH="${DATA_PATH:-/Users/hayssams/git/public/quack-on-demand/ducklake/$DB_NAME}"
-QUACK_URI="${QUACK_URI:-quack:0.0.0.0:9494}"
+QOD_NODE_URI="${QOD_NODE_URI:-quack:0.0.0.0:9494}"
 
 # ---- Sanity ----
 command -v duckdb >/dev/null 2>&1 || {
@@ -126,14 +126,14 @@ USE $DB_NAME.$SCHEMA_NAME;
 SHOW TABLES;
 
 .print ''
-.print '== Starting Quack server on $QUACK_URI =='
+.print '== Starting Quack server on $QOD_NODE_URI =='
 .print 'The row below carries the auth token. Save it for client ATTACH.'
 .print ''
-CALL quack_serve('$QUACK_URI', allow_other_hostname => true);
+CALL quack_serve('$QOD_NODE_URI', allow_other_hostname => true);
 
 .print ''
 .print 'Quack is running. Clients connect with:'
-.print '    ATTACH ''$QUACK_URI'' AS remote (TYPE quack, TOKEN ''<token-above>'');'
+.print '    ATTACH ''$QOD_NODE_URI'' AS remote (TYPE quack, TOKEN ''<token-above>'');'
 .print ''
 .print 'Ctrl-D or .exit to shut down.'
 SQL

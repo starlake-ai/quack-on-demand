@@ -222,15 +222,15 @@ object KubernetesQuackBackend:
   /** Object-store credential env vars the manager's pod env is allowed to
     * forward into spawned node pods. Mirrors what `LocalQuackBackend` gets
     * for free through `ProcessBuilder` env inheritance. Keep in sync with
-    * the `SL_QUACK_*` keys read by `scripts/spawn-quack-node.sh`. */
+    * the `QOD_*` keys read by `scripts/spawn-quack-node.sh`. */
   val cloudCredEnvVars: Seq[String] = Seq(
-    "SL_QUACK_S3_ENDPOINT",
-    "SL_QUACK_S3_ACCESS_KEY_ID",
-    "SL_QUACK_S3_SECRET_ACCESS_KEY",
-    "SL_QUACK_S3_REGION",
-    "SL_QUACK_S3_URL_STYLE",
-    "SL_QUACK_S3_USE_SSL",
-    "SL_QUACK_AZURE_CONNECTION_STRING",
-    "SL_QUACK_GCS_KEY_ID",
-    "SL_QUACK_GCS_SECRET"
+    "QOD_S3_ENDPOINT",
+    "QOD_S3_ACCESS_KEY_ID",
+    "QOD_S3_SECRET_ACCESS_KEY",
+    "QOD_S3_REGION",
+    "QOD_S3_URL_STYLE",
+    "QOD_S3_USE_SSL",
+    "QOD_AZURE_CONNECTION_STRING",
+    "QOD_GCS_KEY_ID",
+    "QOD_GCS_SECRET"
   )

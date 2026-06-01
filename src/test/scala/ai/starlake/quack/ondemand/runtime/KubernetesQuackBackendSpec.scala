@@ -33,14 +33,14 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
     server.getClient.pods.inNamespace("default")
       .withName(node.podName.get).get() should not be null
 
-  it should "forward SL_QUACK_S3_* env vars from the manager process to the spawned pod" in:
+  it should "forward QOD_S3_* env vars from the manager process to the spawned pod" in:
     val fakeEnv = Map(
-      "SL_QUACK_S3_ENDPOINT"          -> "http://seaweedfs:8333",
-      "SL_QUACK_S3_ACCESS_KEY_ID"     -> "quack",
-      "SL_QUACK_S3_SECRET_ACCESS_KEY" -> "quackquack",
-      "SL_QUACK_S3_REGION"            -> "us-east-1",
-      "SL_QUACK_S3_URL_STYLE"         -> "path",
-      "SL_QUACK_S3_USE_SSL"           -> "false",
+      "QOD_S3_ENDPOINT"          -> "http://seaweedfs:8333",
+      "QOD_S3_ACCESS_KEY_ID"     -> "quack",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "quackquack",
+      "QOD_S3_REGION"            -> "us-east-1",
+      "QOD_S3_URL_STYLE"         -> "path",
+      "QOD_S3_USE_SSL"           -> "false",
       // Unrelated env var that must NOT be copied through.
       "PATH" -> "/usr/bin"
     )
@@ -64,16 +64,16 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
       .getSpec.getContainers.get(0)
     val env = container.getEnv.asScala.map(e => e.getName -> e.getValue).toMap
 
-    env.get("SL_QUACK_S3_ENDPOINT")          shouldBe Some("http://seaweedfs:8333")
-    env.get("SL_QUACK_S3_ACCESS_KEY_ID")     shouldBe Some("quack")
-    env.get("SL_QUACK_S3_SECRET_ACCESS_KEY") shouldBe Some("quackquack")
-    env.get("SL_QUACK_S3_REGION")            shouldBe Some("us-east-1")
-    env.get("SL_QUACK_S3_URL_STYLE")         shouldBe Some("path")
-    env.get("SL_QUACK_S3_USE_SSL")           shouldBe Some("false")
+    env.get("QOD_S3_ENDPOINT")          shouldBe Some("http://seaweedfs:8333")
+    env.get("QOD_S3_ACCESS_KEY_ID")     shouldBe Some("quack")
+    env.get("QOD_S3_SECRET_ACCESS_KEY") shouldBe Some("quackquack")
+    env.get("QOD_S3_REGION")            shouldBe Some("us-east-1")
+    env.get("QOD_S3_URL_STYLE")         shouldBe Some("path")
+    env.get("QOD_S3_USE_SSL")           shouldBe Some("false")
     env.contains("PATH") shouldBe false
 
   it should "let per-node metastore override the forwarded env var" in:
-    val fakeEnv = Map("SL_QUACK_S3_ENDPOINT" -> "http://from-manager:8333")
+    val fakeEnv = Map("QOD_S3_ENDPOINT" -> "http://from-manager:8333")
     val backend = new KubernetesQuackBackend(
       client    = server.getClient,
       namespace = "default",
@@ -86,7 +86,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
     )
     val node = backend.start(
       NodeSpec(PoolKey("acme", "sales"), "quack-cred-override", Role.Dual,
-               metastore = Map("SL_QUACK_S3_ENDPOINT" -> "http://per-pool:8333"),
+               metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
                s3        = Map.empty)
     ).unsafeRunSync()
 
@@ -95,7 +95,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
       .getSpec.getContainers.get(0)
     val env = container.getEnv.asScala.map(e => e.getName -> e.getValue).toMap
 
-    env("SL_QUACK_S3_ENDPOINT") shouldBe "http://per-pool:8333"
+    env("QOD_S3_ENDPOINT") shouldBe "http://per-pool:8333"
 
   it should "discover existing pods by label on restart" in:
     val client = server.getClient

@@ -38,7 +38,7 @@ final class ManagerServer(
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is
     *     open. A startup warning fires so operators know the manager is
     *     exposed; this is the documented dev default. To lock it down,
-    *     set `SL_QUACK_API_KEY` (or use the UI which mints session
+    *     set `QOD_API_KEY` (or use the UI which mints session
     *     tokens via /api/auth/login).
     *   - **`cfg.apiKey` set**: every `/api/...` request must carry an
     *     `X-API-Key` header matching either the static key OR a known
@@ -50,7 +50,7 @@ final class ManagerServer(
     cfg.apiKey match
       case None =>
         logger.warn(
-          "REST API is OPEN: SL_QUACK_API_KEY is not set. Set it (or rely on the " +
+          "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
           "UI login flow) before exposing the manager beyond localhost.")
         routes
       case Some(expected) =>

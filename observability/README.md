@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This directory documents the observability surface of the Quack-on-Demand manager process. Metrics are collected via Micrometer and routed to exactly one sink per process. The active sink is selected by the `quack-on-demand.metrics.sink` key in `application.conf`, overridable at runtime with `SL_QUACK_METRICS_SINK`. Supported values are `prometheus`, `aws`, `azure`, `gcp`, and `none`.
+This directory documents the observability surface of the Quack-on-Demand manager process. Metrics are collected via Micrometer and routed to exactly one sink per process. The active sink is selected by the `quack-on-demand.metrics.sink` key in `application.conf`, overridable at runtime with `QOD_METRICS_SINK`. Supported values are `prometheus`, `aws`, `azure`, `gcp`, and `none`.
 
 ## 2. Prometheus pull (`sink = "prometheus"`)
 
@@ -61,21 +61,21 @@ When a cloud sink is selected the manager pushes metrics on a fixed cadence (def
 
 | Sink | Set | Required config | Credential source |
 |---|---|---|---|
-| `aws` | `SL_QUACK_METRICS_SINK=aws` | `SL_QUACK_METRICS_AWS_NAMESPACE` (default `quack-on-demand`) | `DefaultCredentialsProvider` chain — IAM role, env, profile |
-| `azure` | `SL_QUACK_METRICS_SINK=azure` | `SL_QUACK_METRICS_AZURE_KEY` (Application Insights instrumentation key — **REQUIRED**) | `DefaultAzureCredential` — managed identity, env, CLI |
-| `gcp` | `SL_QUACK_METRICS_SINK=gcp` | `SL_QUACK_METRICS_GCP_PROJECT_ID` (**REQUIRED**) | ADC — `GOOGLE_APPLICATION_CREDENTIALS`, GCE metadata, gcloud |
+| `aws` | `QOD_METRICS_SINK=aws` | `QOD_METRICS_AWS_NAMESPACE` (default `quack-on-demand`) | `DefaultCredentialsProvider` chain — IAM role, env, profile |
+| `azure` | `QOD_METRICS_SINK=azure` | `QOD_METRICS_AZURE_KEY` (Application Insights instrumentation key — **REQUIRED**) | `DefaultAzureCredential` — managed identity, env, CLI |
+| `gcp` | `QOD_METRICS_SINK=gcp` | `QOD_METRICS_GCP_PROJECT_ID` (**REQUIRED**) | ADC — `GOOGLE_APPLICATION_CREDENTIALS`, GCE metadata, gcloud |
 
 Push cadence defaults to 60 s per backend. Override with:
 
-- `SL_QUACK_METRICS_AWS_STEP_SEC`
-- `SL_QUACK_METRICS_AZURE_STEP_SEC`
-- `SL_QUACK_METRICS_GCP_STEP_SEC`
+- `QOD_METRICS_AWS_STEP_SEC`
+- `QOD_METRICS_AZURE_STEP_SEC`
+- `QOD_METRICS_GCP_STEP_SEC`
 
 **Only ONE sink runs per process.** If `metrics.sink = "aws"`, the `/metrics` Prometheus endpoint is **not** exposed and no other cloud sink is active. There are no per-backend `enabled` flags; the single `sink` field is the sole selector.
 
 ## 4. Disabling metrics
 
-Set `metrics.sink = "none"` (or `SL_QUACK_METRICS_SINK=none`). No `/metrics` endpoint is mounted; no cloud push occurs; all counters, timers, and gauges registered against the manager become no-ops.
+Set `metrics.sink = "none"` (or `QOD_METRICS_SINK=none`). No `/metrics` endpoint is mounted; no cloud push occurs; all counters, timers, and gauges registered against the manager become no-ops.
 
 ## 5. CloudWatch cost note
 
@@ -91,14 +91,14 @@ Set the following environment variables to attach static labels to every emitted
 
 | Variable | HOCON key | Purpose |
 |---|---|---|
-| `SL_QUACK_METRICS_DEPLOYMENT` | `metrics.commonTags.deployment` | Deployment name, e.g. `prod-eu` |
-| `SL_QUACK_METRICS_REGION` | `metrics.commonTags.region` | Cloud region, e.g. `eu-west-1` |
+| `QOD_METRICS_DEPLOYMENT` | `metrics.commonTags.deployment` | Deployment name, e.g. `prod-eu` |
+| `QOD_METRICS_REGION` | `metrics.commonTags.region` | Cloud region, e.g. `eu-west-1` |
 
 Example:
 
 ```bash
-export SL_QUACK_METRICS_DEPLOYMENT=prod-eu
-export SL_QUACK_METRICS_REGION=eu-west-1
+export QOD_METRICS_DEPLOYMENT=prod-eu
+export QOD_METRICS_REGION=eu-west-1
 ```
 
 ## 7. Grafana dashboard

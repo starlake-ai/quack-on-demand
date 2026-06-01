@@ -85,8 +85,8 @@ object Main extends IOApp.Simple with LazyLogging:
 
     // Bootstrap admin users. Always runs at startup when stateStorage=postgres
     // so the DB auth backend has at least one credential. Re-hashed on every
-    // boot: changing SL_QUACK_ADMIN_PASSWORD + restart rotates. All names in
-    // SL_QUACK_ADMIN_USERNAME (comma-separated) get the same password + role.
+    // boot: changing QOD_ADMIN_PASSWORD + restart rotates. All names in
+    // QOD_ADMIN_USERNAME (comma-separated) get the same password + role.
     // Skipped for stateStorage=file (no Postgres connection assumed).
     if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
       val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
