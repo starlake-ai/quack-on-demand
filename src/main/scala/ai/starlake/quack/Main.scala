@@ -308,6 +308,10 @@ object Main extends IOApp.Simple with LazyLogging:
         aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint
       )
+      // Pre-init the DuckLake catalog before any Quack node spawn races
+      // to create the same `__ducklake_*` tables in Postgres. See the
+      // DuckLakeInitializer scaladoc for the failure mode this avoids.
+      DuckLakeInitializer.init(mgrCfg.defaultMetastore) *>
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
       bootstrapIO *>
