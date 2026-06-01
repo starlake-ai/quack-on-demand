@@ -36,11 +36,11 @@ This:
 | `RELEASE` | `qod` | helm release name |
 | `BUILD` | `1` | `1` runs `docker build`; `0` reuses an already-loaded image. Same convention as `scripts/run-jar.sh`. |
 | `NUKE` | `0` | `1` deletes the namespace before reinstalling — wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
-| `SF` | unset | TPC-H scale factor. When set, seeds TPC-H into the in-cluster Postgres before the manager boots — same `scripts/load-tpch-dbgen.sh` flow `run-jar.sh` uses. Requires `duckdb` on the host. `SF=1` ≈ 6M lineitem rows. |
+| `LOAD_TPCH` | unset | TPC-H seed. Unset = skip; positive integer = scale factor (`LOAD_TPCH=1` ≈ 6M lineitem rows, `LOAD_TPCH=10` ≈ 60M). Seeds TPC-H into the in-cluster Postgres + SeaweedFS before the manager boots — same `scripts/load-tpch-dbgen.sh` flow `run-jar.sh` uses. Requires `duckdb` on the host. |
 
 ```bash
 # Fresh boot from a clean Postgres + TPC-H SF=1 seeded:
-NUKE=1 SF=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+NUKE=1 LOAD_TPCH=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Just nuke and reinstall without seeding:
 NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh

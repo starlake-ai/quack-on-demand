@@ -30,7 +30,7 @@ dashboard auto-loaded.
 
 ```bash
 # 1. Start the manager on the host (Prometheus sink is the default).
-./scripts/run-jar.sh                       # or NUKE=1 SF=1 ./scripts/run-jar.sh
+./scripts/run-jar.sh                       # or NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
 
 # 2. Bring up Prometheus + Grafana.
 docker compose -f observability/docker-compose.yml up -d

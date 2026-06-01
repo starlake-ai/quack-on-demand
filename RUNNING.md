@@ -363,11 +363,12 @@ the endpoint and whether the seaweedfs profile is activated.
 ### Seed with TPC-H and Run
 
 `scripts/run-docker-compose.sh` will boot the stack and run the seed
-in one step when `LOAD_TPCH=true`:
+in one step when `LOAD_TPCH` is set. The value doubles as the scale
+factor (positive integer):
 
 ```bash
-LOAD_TPCH=true ./scripts/run-docker-compose.sh                # SF=1
-LOAD_TPCH=true TPCH_SF=10 ./scripts/run-docker-compose.sh     # SF=10
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh    # SF=1, ~6M lineitem rows
+LOAD_TPCH=10 ./scripts/run-docker-compose.sh   # SF=10, ~60M
 ```
 
 Under the hood it does `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`

@@ -17,7 +17,9 @@
 #   QUACK_VERSION       image tag                 (default latest)
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
-#   LOAD_TPCH           "true" to seed TPC-H      (default false)
+#   LOAD_TPCH           TPC-H seed: unset = skip; numeric value = scale
+#                       factor (e.g. LOAD_TPCH=1, LOAD_TPCH=10). Replaces
+#                       the old LOAD_TPCH=true + TPCH_SF=N split.
 #   NUKE                "1" tears down any existing stack and wipes
 #                       ./pgdata, ./ducklake, ./certs before starting.
 #                       Irreversible.            (default 0)
@@ -29,7 +31,8 @@
 #   ./scripts/run-docker-compose.sh                            # latest
 #   QUACK_VERSION=0.1.0 ./scripts/run-docker-compose.sh        # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
-#   LOAD_TPCH=true ./scripts/run-docker-compose.sh             # + TPC-H
+#   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H SF=1
+#   LOAD_TPCH=10 ./scripts/run-docker-compose.sh               # + TPC-H SF=10
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
 
 set -euo pipefail
@@ -82,7 +85,7 @@ if [[ "${BUILD:-0}" != "1" ]] && [[ "$QUACK_VERSION" == "latest" ]]; then
 fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
-LOAD_TPCH="${LOAD_TPCH:-false}"
+LOAD_TPCH="${LOAD_TPCH:-}"
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -260,7 +263,15 @@ done
 echo " ok (HTTP $code)"
 
 # ---- Optional TPC-H seed (docker compose exec quack /app/scripts/load-tpch-dbgen.sh) ----
-if [[ "$LOAD_TPCH" == "true" ]]; then
+# LOAD_TPCH is presence-triggered with the value doubling as the scale factor.
+# Accepts positive integers (LOAD_TPCH=1, LOAD_TPCH=10, ...). Unset / empty /
+# 0 / false skips the seed.
+if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
+  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
+    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
+    exit 1
+  fi
+  tpch_sf="$LOAD_TPCH"
   read_env() {
     local key="$1" default="$2"
     if [[ -f "$ENV_FILE" ]]; then
@@ -275,7 +286,6 @@ if [[ "$LOAD_TPCH" == "true" ]]; then
   pg_pass="$(read_env PG_PASSWORD azizam)"
   pg_dbname="$(read_env PG_DBNAME tpch)"
   tpch_schema="$(read_env TPCH_SCHEMA tpch1)"
-  tpch_sf="$(read_env TPCH_SF 1)"
 
   # Honor SL_QUACK_DUCKLAKE_DATA_PATH when the user has switched to S3
   # storage. Compose passes that var into the quack service unchanged, so
