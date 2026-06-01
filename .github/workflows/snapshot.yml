@@ -25,6 +25,16 @@ name: snapshot
 on:
   push:
     branches: [main]
+  # Auto-rebuild after every successful `quackwire native build`. libquackwire's
+  # 4 classifier jars are bundled into the manager assembly at build time, so
+  # a republished -SNAPSHOT (same coord, new content) only reaches users once
+  # we rebuild the assembly + docker image. workflow_run handles content-only
+  # republishes; an actual libquackwire version bump touches build.sbt and
+  # would re-trigger via the push event anyway.
+  workflow_run:
+    workflows: ["quackwire native build"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 # Cancel any in-flight snapshot for the same ref so a fresh push doesn't
@@ -42,6 +52,10 @@ jobs:
   # 1. Sonatype OSSRH snapshot publish
   # -----------------------------------------------------------------------
   publish-jar:
+    # Skip if a workflow_run trigger fired from a FAILED quackwire run.
+    # push / workflow_dispatch leave `github.event.workflow_run` unset, so
+    # the check defaults to "not failure" and runs normally.
+    if: ${{ github.event.workflow_run.conclusion != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
