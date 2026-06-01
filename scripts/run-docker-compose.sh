@@ -351,7 +351,39 @@ stack is up:
   FlightSQL:  ${scheme}://localhost:31338  (TLS=$tls)
   Postgres:   localhost:${PG_PORT_EFFECTIVE} (external)  /  postgres:5432 (internal)
   Data:       ./pgdata + ./ducklake + ./certs (host bind mounts)
+EOM
 
-stop with:  docker compose -f $COMPOSE_FILE down
+# Per-profile URL summaries. Indexed off the same _profile_set the
+# resolution step populated above, so what we print matches what was
+# actually activated.
+if [[ -n "${_profile_set[seaweedfs]:-}" ]]; then
+  cat <<EOM
+
+seaweedfs (S3-compatible object store + UIs):
+  Filer UI:   http://localhost:${SEAWEEDFS_FILER_PORT:-8888}/        (file browser)
+  Master UI:  http://localhost:${SEAWEEDFS_MASTER_PORT:-9333}/        (cluster status)
+  Volume UI:  http://localhost:${SEAWEEDFS_VOLUME_PORT:-8080}/ui/
+  S3 API:     http://localhost:${SEAWEEDFS_S3_PORT:-8333}             (\`aws s3 ls\` / s5cmd)
+  credentials: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+EOM
+fi
+
+if [[ -n "${_profile_set[observability]:-}" ]]; then
+  cat <<EOM
+
+observability (Prometheus + Grafana):
+  Grafana:    http://localhost:${GRAFANA_PORT:-3000}/                 (anonymous admin)
+  Prometheus: http://localhost:${PROMETHEUS_PORT:-9090}/
+EOM
+fi
+
+# Tear-down hint. Mention the active profiles so \`docker compose down\`
+# actually removes the corresponding containers.
+profile_flags=""
+for p in "${!_profile_set[@]}"; do profile_flags="$profile_flags --profile $p"; done
+
+cat <<EOM
+
+stop with:  docker compose -f $COMPOSE_FILE${profile_flags} down
 logs with:  docker compose -f $COMPOSE_FILE logs -f quack
 EOM
