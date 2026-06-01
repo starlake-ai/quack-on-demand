@@ -205,9 +205,37 @@ object Main extends IOApp.Simple with LazyLogging:
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
     // updates the tracker.
+    //
+    // Per-node schema init. The first time we probe a node successfully we
+    // also run `CREATE SCHEMA IF NOT EXISTS <db>.<schema>` so the pool's
+    // default schema is guaranteed to exist before
+    // `FlightSqlRouter.wrapWithDefaultSchema` ever prepends `USE <db>.<schema>`
+    // to a client query. After that first success the node-id is recorded in
+    // `schemaInited` and every subsequent probe reverts to plain `SELECT 1`.
+    // Self-healing if the first probe fails - not recorded -> next tick
+    // retries the CREATE. Manager restart resets the map; the next first
+    // probe per node re-runs the (idempotent) CREATE - at most one wasted
+    // round-trip per node per restart.
+    val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
     val healthProbe = new HealthProbe(
       tracker,
-      n => adapter.probe(n),
+      n => {
+        val initSql =
+          if schemaInited.containsKey(n.nodeId) then None
+          else
+            sup.get(n.poolKey).flatMap { st =>
+              st.metastore.get("dbName").filter(_.nonEmpty).map { db =>
+                val schema = st.metastore.get("schemaName")
+                  .filter(_.nonEmpty).getOrElse("main")
+                s"CREATE SCHEMA IF NOT EXISTS $db.$schema"
+              }
+            }
+        val probeSql = initSql.map(s => s"$s; SELECT 1").getOrElse("SELECT 1")
+        adapter.probe(n, probeSql).map { ok =>
+          if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
+          ok
+        }
+      },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds
     )
 

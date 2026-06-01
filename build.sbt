@@ -51,21 +51,29 @@ ThisBuild / developers := List(
   )
 )
 
-// ----- libquackwire (Maven Central snapshots) -------------------------------
-// JNI shim native binaries published as classifier-per-platform jars on
-// Sonatype Central snapshots. Version aligns with the DuckDB ABI it
-// links against (1.5.3) suffixed with the duckdb-quack short SHA, plus
-// `-SNAPSHOT` to keep us on the snapshot repository (mutable, no GPG
-// signing required - matches the manager's own publishing pattern in
-// `.github/workflows/snapshot.yml`).
+// ----- libquackwire (Maven Central) -----------------------------------------
+// JNI shim native binaries published as classifier-per-platform jars.
 //
-// CI workflow `.github/workflows/quackwire.yml` builds the 4-platform
-// matrix, stages each `libquackwire.{so,dylib}` into
-// `libquackwire/binaries/<platform>/`, then runs `sbt libquackwire/publish`.
+// Version format:  <duckdb-abi>-<duckdb-quack-short-sha>-<rev>[-SNAPSHOT]
+// Example:         1.5.3-87cd65b912a8-1-SNAPSHOT
 //
-// Local dev: `sbt libquackwire/publishLocal` after a CMake build (with
-// the binary copied into `libquackwire/binaries/<host-platform>/`).
-val libquackwireVersion = "1.5.3-87cd65b912a8-SNAPSHOT"
+//   duckdb-abi              the DuckDB libduckdb release the C++ shim
+//                           links against (1.5.3)
+//   duckdb-quack-short-sha  the pinned `native/quackwire/thirdparty/
+//                           duckdb-quack` commit
+//   rev                     monotonic patch number; bumps each time we
+//                           release for the same (abi, sha) pair. Lets
+//                           us re-release after a C++ fix without
+//                           bumping the duckdb-quack pin.
+//   -SNAPSHOT (suffix)      present during dev -> publishes to Central
+//                           snapshots (mutable, no GPG); stripped by
+//                           `scripts/release.sh` before publishSigned +
+//                           sonatypeBundleRelease, then bumped to
+//                           rev+1-SNAPSHOT for the next dev cycle.
+//
+// Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
+// segment here, and reset rev to 1.
+val libquackwireVersion = "1.5.3-87cd65b912a8-1-SNAPSHOT"
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(

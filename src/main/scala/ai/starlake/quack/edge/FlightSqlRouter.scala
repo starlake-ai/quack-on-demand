@@ -132,8 +132,16 @@ final class FlightSqlRouter(
     * 2-part `"schema"."table"` paths resolve. `schemaName` comes from the
     * pool's metastore (defaults to `main`). It MUST differ from the catalog
     * name - same-named catalog+schema is an ambiguous reference in DuckDB,
-    * which JDBC clients hit on 2-part identifier resolution. Skipped for
-    * explicit USE / SET / BEGIN / COMMIT / ROLLBACK / ATTACH / DETACH. */
+    * which JDBC clients hit on 2-part identifier resolution.
+    *
+    * Prerequisite: the schema must already exist on the node. That is the
+    * `HealthProbe`'s job - on its first successful probe per node it runs
+    * `CREATE SCHEMA IF NOT EXISTS <db>.<schema>` exactly once, so by the
+    * time client traffic flows this `USE` always resolves. See `Main.scala`
+    * where the probe is constructed.
+    *
+    * Skipped for explicit USE / SET / BEGIN / COMMIT / ROLLBACK /
+    * ATTACH / DETACH so the operator can still escape the default. */
   private def wrapWithDefaultSchema(
       state: Option[ai.starlake.quack.ondemand.PoolState],
       sql: String
