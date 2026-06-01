@@ -114,6 +114,7 @@ export default function Catalog() {
                       <th align="left">Name</th>
                       <th align="right">Rows</th>
                       <th align="right">Data files</th>
+                      <th align="left">Folder</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -128,6 +129,11 @@ export default function Catalog() {
                           {t.rowCount < 0 ? <em style={{ color: '#888' }}>—</em> : t.rowCount.toLocaleString()}
                         </td>
                         <td align="right">{t.dataFileCount}</td>
+                        <td>
+                          {t.folder
+                            ? <code style={{ fontSize: '0.85em', color: '#444' }}>{t.folder}</code>
+                            : <em style={{ color: '#888' }}>—</em>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

@@ -137,7 +137,10 @@ final case class CatalogTableEntry(
     schema: String,
     name: String,
     rowCount: Long,         // best-effort; -1 when DuckLake stats are missing
-    dataFileCount: Int      // count of __ducklake_data_file rows
+    dataFileCount: Int,     // count of __ducklake_data_file rows
+    folder: Option[String]  // parent dir of the table's parquet files, derived
+                            // from a sample ducklake_data_file.path. None when
+                            // no committed data file exists yet.
 )
 
 final case class CatalogColumnEntry(
