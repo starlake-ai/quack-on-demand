@@ -118,16 +118,26 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends unzip ca-certificates curl cmake build-essential
+          sudo apt-get install -y --no-install-recommends unzip ca-certificates curl cmake build-essential git
           tmp=$(mktemp -d)
+          # 1. Binary + amalgamated public headers from the official release.
           curl -fsSL -o "$tmp/$DUCKDB_ZIP" \
             "https://github.com/duckdb/duckdb/releases/download/v1.5.3/$DUCKDB_ZIP"
           unzip -o "$tmp/$DUCKDB_ZIP" -d "$tmp/extracted"
           sudo install -m 0644 "$tmp/extracted/duckdb.h"   /usr/local/include/duckdb.h
           sudo install -m 0644 "$tmp/extracted/duckdb.hpp" /usr/local/include/duckdb.hpp
           sudo install -m 0755 "$tmp/extracted/libduckdb.so" /usr/local/lib/libduckdb.so
+          # 2. Nested INTERNAL headers (duckdb/common/serializer/*.hpp etc.).
+          # The release zip ships only the amalgamated duckdb.{h,hpp}; the
+          # duckdb-quack message layer pulls `duckdb/common/serializer/
+          # binary_serializer.hpp` directly. Homebrew's duckdb formula
+          # installs them under /opt/homebrew/include/duckdb/ on macOS;
+          # on Linux we grab them from a shallow clone at the same tag.
+          git clone --depth 1 --branch v1.5.3 https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          sudo cp -r "$tmp/duckdb-src/src/include/duckdb" /usr/local/include/
           sudo ldconfig
           ls -l /usr/local/lib/libduckdb.so /usr/local/include/duckdb.hpp
+          ls /usr/local/include/duckdb/common/serializer/binary_serializer.hpp
 
       - name: CMake configure
         working-directory: native/quackwire
