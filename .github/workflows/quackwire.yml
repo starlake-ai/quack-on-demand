@@ -169,49 +169,43 @@ jobs:
           retention-days: 30
 
   # -----------------------------------------------------------------------
-  # 2. Aggregate per-platform artifacts into a draft GitHub Release
+  # 2. Publish per-platform classifier jars to Sonatype Central
   # -----------------------------------------------------------------------
-  # Only runs on push-to-main. Always creates the release as a DRAFT so a
-  # human reviews and publishes before the sbt `fetchQuackwire` task can
-  # download from it. The tag encodes the duckdb-quack short SHA so the
-  # manager assembly can confirm at a glance which pair (libquackwire <->
-  # duckdb-quack) it bundles, matching the §9.9 single-source-of-truth.
-  release:
-    name: aggregate draft release
+  # Only runs on push-to-main. Stages each platform binary into
+  # libquackwire/binaries/<platform>/ and runs
+  # `sbt libquackwire/publishSigned sonatypeBundleRelease`. The version
+  # comes from `libquackwireVersion` in build.sbt (DuckDB ABI version +
+  # duckdb-quack short SHA, e.g. `1.5.3-87cd65b912a8`).
+  #
+  # Required repo secrets (already configured for the manager's snapshot
+  # workflow):
+  #   SONATYPE_USERNAME     Central Portal user token (NOT legacy OSSRH)
+  #   SONATYPE_PASSWORD     Central Portal user token secret
+  #   GPG_PRIVATE_KEY       ASCII-armoured PGP private key
+  #   GPG_PASSPHRASE        Passphrase for that key
+  publish-central:
+    name: publish libquackwire to Sonatype Central
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     steps:
-      - name: Checkout (with duckdb-quack submodule)
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (for sbt-sonatype + sbt-pgp)
+        uses: actions/setup-java@v4
         with:
-          submodules: recursive
+          distribution: temurin
+          java-version: '17'
 
-      - name: Read pinned duckdb-quack short SHA
-        id: pin
+      - name: Import GPG key
         run: |
           set -euo pipefail
-          if [[ -d native/quackwire/thirdparty/duckdb-quack/.git || \
-                -f native/quackwire/thirdparty/duckdb-quack/.git ]]; then
-            short_sha=$(git -C native/quackwire/thirdparty/duckdb-quack rev-parse --short=12 HEAD)
-          else
-            short_sha="unknown"
-          fi
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-          echo "duckdb-quack short SHA: $short_sha"
-
-      - name: Read quack-on-demand version
-        id: ver
-        run: |
-          set -euo pipefail
-          version=$(grep -E '^ThisBuild / version' version.sbt | sed -E 's/.*"([^"]+)".*/\1/')
-          # Strip -SNAPSHOT to keep the release tag short. The snapshot
-          # publishing workflow already owns the -SNAPSHOT naming for Maven.
-          base=${version%-SNAPSHOT}
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "manager base version: $base"
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          # sbt-pgp uses gpg2 by default; ensure it's on PATH.
+          gpg --list-secret-keys --keyid-format LONG
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
 
       - name: Download all per-platform artifacts
         uses: actions/download-artifact@v4
@@ -219,45 +213,26 @@ jobs:
           pattern: quackwire-*
           path: artifacts
 
-      - name: Assemble release tree
+      - name: Stage binaries into libquackwire/binaries/
         run: |
           set -euo pipefail
-          mkdir -p release
           for d in artifacts/quackwire-*; do
             platform=$(basename "$d" | sed 's/^quackwire-//')
-            # Each artifact dir contains exactly one libquackwire.{so,dylib};
-            # rename it to libquackwire-<platform>.<ext> so the sbt task
-            # downloads a deterministically-named asset per platform.
-            for f in "$d"/libquackwire.*; do
-              ext=${f##*.}
-              cp "$f" "release/libquackwire-${platform}.${ext}"
-            done
+            mkdir -p "libquackwire/binaries/$platform"
+            # Each artifact dir contains exactly one libquackwire.{so,dylib}.
+            cp "$d"/libquackwire.* "libquackwire/binaries/$platform/"
           done
-          ls -la release/
+          find libquackwire/binaries -type f -ls
 
-      - name: Publish draft GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          # Tag scheme per design §9.8: encodes the pinned duckdb-quack
-          # short SHA so deployments can confirm the (quackwire <->
-          # duckdb-quack) pair at a glance.
-          tag_name: quackwire-v${{ steps.ver.outputs.base }}-duckdbquack-${{ steps.pin.outputs.short_sha }}
-          name: quackwire ${{ steps.ver.outputs.base }} (duckdb-quack ${{ steps.pin.outputs.short_sha }})
-          draft: true
-          prerelease: false
-          files: release/*
-          generate_release_notes: false
-          body: |
-            Native JNI shim binaries for the quack-on-demand manager.
-
-            Co-pinned upstream versions (single source of truth: design §9.9):
-            - `duckdb/duckdb-quack` @ `${{ steps.pin.outputs.short_sha }}` (branch `v1.5-variegata`)
-            - `duckdb/duckdb` v1.5.3 (released)
-
-            Assets:
-            - `libquackwire-linux-x86_64.so`
-            - `libquackwire-linux-aarch64.so`
-            - `libquackwire-osx-x86_64.dylib`
-            - `libquackwire-osx-aarch64.dylib`
-
-            Consumed by `project/QuackwireArtifact.scala` at sbt compile time.
+      - name: Publish to Sonatype Central
+        env:
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          PGP_PASSPHRASE:    ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # `sbt-pgp` reads PGP_PASSPHRASE from the env. Use a release-
+          # bundle workflow: stage signed artifacts, then bundle-release.
+          sbt --no-colors --batch \
+            "libquackwire/publishSigned" \
+            "sonatypeBundleRelease"
