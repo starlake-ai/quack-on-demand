@@ -58,21 +58,14 @@ To stop: `./scripts/stop-jar.sh`.
 ### Seed with TPC-H and Run
 
 The start script will seed the catalog before the JVM boots when
-`QOD_BOOTSTRAP_LOAD_TPCH=true`. It re-uses your `$QOD_PG_*` and
-`$QOD_DUCKLAKE_DATA_PATH` so the loader and the manager agree on
-paths/credentials by construction. The loader self-skips if `tpch1.lineitem`
-is already there.
+`LOAD_TPCH` is set to a positive integer (the scale factor). It re-uses
+your `$QOD_PG_*` and `$QOD_DUCKLAKE_DATA_PATH` so the loader and the
+manager agree on paths/credentials by construction. The loader
+self-skips if `tpch1.lineitem` is already there.
 
 ```bash
-# Shortcut: LOAD_TPCH=N implies QOD_BOOTSTRAP_LOAD_TPCH=true +
-# QOD_BOOTSTRAP_TPCH_SF=N (N is the scale factor, positive integer).
 LOAD_TPCH=1  ./scripts/run-jar.sh   # ~6M lineitem rows, ≈ 10s
 LOAD_TPCH=10 ./scripts/run-jar.sh   # ~60M, a few minutes
-
-# Or use the underlying backend env vars directly:
-QOD_BOOTSTRAP_LOAD_TPCH=true \
-QOD_BOOTSTRAP_TPCH_SF=10 \
-  ./scripts/run-jar.sh
 ```
 
 Standalone (without booting the manager):
@@ -101,8 +94,7 @@ Every scalar in `application.conf` has a matching `QOD_*` /
 | Admin username | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` |
 | Admin password | `QOD_ADMIN_PASSWORD` | `admin` (rotate!) |
 | Static REST key | `QOD_API_KEY`     | unset (open `/api/*` with startup warning) |
-| Seed TPC-H at boot | `QOD_BOOTSTRAP_LOAD_TPCH` | unset (`true` to seed) |
-| TPC-H scale factor | `QOD_BOOTSTRAP_TPCH_SF` | `1` |
+| Seed TPC-H at boot | `LOAD_TPCH` | unset (positive int = scale factor) |
 | TPC-H schema name | `QOD_BOOTSTRAP_TPCH_SCHEMA` | `tpch1` |
 
 ---
@@ -291,7 +283,7 @@ EOF
 
 # 2. Bring everything up in one command. The wrapper detects
 #    QOD_S3_ENDPOINT=seaweedfs:* and auto-activates the `seaweedfs`
-#    compose profile; LOAD_TPCH=true seeds TPC-H onto S3 in the same step.
+#    compose profile; LOAD_TPCH=N seeds TPC-H (SF=N) onto S3 in the same step.
 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge end-to-end.
@@ -346,7 +338,7 @@ QOD_S3_URL_STYLE=vhost
 EOF
 
 # 2. Boot the stack + seed in one step (no seaweedfs profile needed).
-LOAD_TPCH=true ./scripts/run-docker-compose.sh
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge.
 ./scripts/loadtest/loadtest.py -w 2 -i 5
@@ -541,8 +533,8 @@ that the current manager can't see. Two options:
 # Option A - start fresh: drop the catalog DB + the data dir.
 psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
 rm -rf ducklake/tpch                    # the on-disk parquet files
-# Re-boot with QOD_BOOTSTRAP_LOAD_TPCH=true (Path 1) or
-# LOAD_TPCH=true ./scripts/run-docker-compose.sh (Path 3).
+# Re-boot with LOAD_TPCH=1 ./scripts/run-jar.sh (Path 1) or
+# LOAD_TPCH=1 ./scripts/run-docker-compose.sh (Path 3).
 
 # Option B - keep the data, use a fresh catalog DB.
 QOD_PG_DBNAME=tpch_native ./scripts/run-jar.sh

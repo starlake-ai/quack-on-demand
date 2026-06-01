@@ -298,7 +298,7 @@ services:
         echo "seaweedfs bucket ready: $${S3_BUCKET}"
 
 # TPC-H seeding is done by `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
-# (driven by scripts/run-docker-compose.sh when LOAD_TPCH=true). The loader is
+# (driven by scripts/run-docker-compose.sh when LOAD_TPCH is set). The loader is
 # baked into the image (see Dockerfile) and sees the same /app/ducklake bind-mount
 # the manager spawns nodes against, so the absolute DATA_PATH the catalog persists
 # matches what nodes later resolve. No separate compose service required.
