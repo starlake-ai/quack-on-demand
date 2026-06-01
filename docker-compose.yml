@@ -297,6 +297,75 @@ services:
           || echo "bucket create returned non-zero (already exists?); continuing."
         echo "seaweedfs bucket ready: $${S3_BUCKET}"
 
+  # --- Prometheus + Grafana (observability profile) ------------------------
+  # Optional. Bring up with
+  #   docker compose --profile observability up -d
+  # alongside (or without) the seaweedfs profile. Configs come from
+  # `observability/`, mounted read-only. Grafana is anonymous-admin so the
+  # dashboard is reachable without a login - DON'T expose the port to a
+  # public network without flipping that off.
+  #
+  # Standalone variant (against a native-jar manager on the host) lives at
+  # `observability/docker-compose.yml`; this one scrapes the in-network
+  # `quack` service directly.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: quack-on-demand-prometheus
+    profiles: ["observability"]
+    restart: unless-stopped
+    depends_on:
+      quack:
+        condition: service_started
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: quack-on-demand-grafana
+    profiles: ["observability"]
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      # Anonymous admin so the dashboard opens without a login prompt.
+      # Switch off for any deployment that isn't on a private host.
+      GF_AUTH_ANONYMOUS_ENABLED:     "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE:    Admin
+      GF_AUTH_DISABLE_LOGIN_FORM:    "true"
+      GF_USERS_DEFAULT_THEME:        light
+    volumes:
+      - ./observability/grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana-dashboard.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+# --- SeaweedFS file browser ---------------------------------------------------
+# The `seaweedfs` profile's `seaweedfs` service exposes the SeaweedFS Filer
+# UI on http://localhost:${SEAWEEDFS_FILER_PORT:-8888}/ - that page already
+# IS a file browser (directory tree, drilling into buckets/keys, download
+# links). No extra container needed.
+#
+# Other useful UIs from the same SeaweedFS container:
+#   - http://localhost:${SEAWEEDFS_MASTER_PORT:-9333}/     master / cluster status
+#   - http://localhost:${SEAWEEDFS_VOLUME_PORT:-8080}/ui/  volume server UI
+#
+# S3 API for `aws s3 ls` / `s5cmd ls` / `mc ls`:
+#   http://localhost:${SEAWEEDFS_S3_PORT:-8333}    creds: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+
 # TPC-H seeding is done by `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
 # (driven by scripts/run-docker-compose.sh when LOAD_TPCH is set). The loader is
 # baked into the image (see Dockerfile) and sees the same /app/ducklake bind-mount

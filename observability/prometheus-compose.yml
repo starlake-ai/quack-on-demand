@@ -1,0 +1,23 @@
+# Prometheus scrape config used when Prometheus runs INSIDE the root
+# docker-compose.yml's `observability` profile (alongside the `quack`
+# manager service on the same bridge network).
+#
+# `observability/prometheus.yml` is the standalone variant for when you
+# run the observability stack via `observability/docker-compose.yml`
+# against a host-side native-jar manager - that one targets
+# `host.docker.internal:20900` instead.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    deployment: local
+    region: dev
+
+scrape_configs:
+  - job_name: quack-on-demand
+    static_configs:
+      - targets: ['quack:20900']
+        labels:
+          instance: manager
+    metrics_path: /metrics
