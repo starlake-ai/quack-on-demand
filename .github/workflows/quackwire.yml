@@ -169,22 +169,19 @@ jobs:
           retention-days: 30
 
   # -----------------------------------------------------------------------
-  # 2. Publish per-platform classifier jars to Sonatype Central
+  # 2. Publish per-platform classifier jars to Sonatype Central snapshots
   # -----------------------------------------------------------------------
   # Only runs on push-to-main. Stages each platform binary into
-  # libquackwire/binaries/<platform>/ and runs
-  # `sbt libquackwire/publishSigned sonatypeBundleRelease`. The version
-  # comes from `libquackwireVersion` in build.sbt (DuckDB ABI version +
-  # duckdb-quack short SHA, e.g. `1.5.3-87cd65b912a8`).
+  # libquackwire/binaries/<platform>/ and runs `sbt libquackwire/publish`.
+  # Mirrors the manager's `.github/workflows/snapshot.yml` pattern:
+  # plain `publish` (no GPG signing required), targets Central snapshots
+  # because libquackwireVersion in build.sbt ends in -SNAPSHOT.
   #
-  # Required repo secrets (already configured for the manager's snapshot
-  # workflow):
-  #   SONATYPE_USERNAME     Central Portal user token (NOT legacy OSSRH)
-  #   SONATYPE_PASSWORD     Central Portal user token secret
-  #   GPG_PRIVATE_KEY       ASCII-armoured PGP private key
-  #   GPG_PASSPHRASE        Passphrase for that key
+  # Required repo secrets (shared with the manager's snapshot workflow):
+  #   SONATYPE_USERNAME    Central Portal user token (NOT legacy OSSRH)
+  #   SONATYPE_PASSWORD    Central Portal user token secret
   publish-central:
-    name: publish libquackwire to Sonatype Central
+    name: publish libquackwire to Sonatype Central snapshots
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
@@ -192,20 +189,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17 (for sbt-sonatype + sbt-pgp)
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Import GPG key
-        run: |
-          set -euo pipefail
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-          # sbt-pgp uses gpg2 by default; ensure it's on PATH.
-          gpg --list-secret-keys --keyid-format LONG
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
 
       - name: Download all per-platform artifacts
         uses: actions/download-artifact@v4
@@ -224,15 +212,8 @@ jobs:
           done
           find libquackwire/binaries -type f -ls
 
-      - name: Publish to Sonatype Central
+      - name: Publish to Sonatype Central snapshots
         env:
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
-          PGP_PASSPHRASE:    ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          # `sbt-pgp` reads PGP_PASSPHRASE from the env. Use a release-
-          # bundle workflow: stage signed artifacts, then bundle-release.
-          sbt --no-colors --batch \
-            "libquackwire/publishSigned" \
-            "sonatypeBundleRelease"
+        run: sbt --no-colors --batch "libquackwire/publish"
