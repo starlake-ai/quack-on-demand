@@ -83,6 +83,8 @@ Quack on Demand is that infrastructure: an **Arrow Flight SQL** edge (any JDBC/O
 
 ## Quick start
 
+Zero to first query in under 5 minutes — see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
+
 ```bash
 cp .env.example .env                            # tweak ports / auth / admin password
 LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
