@@ -428,6 +428,67 @@ echo "State:      $state_mode"
 echo "Runtime:    ${QOD_RUNTIME_TYPE:-local}"
 echo ""
 
+# ---- Port preflight ----
+# Aborts before the JVM boots if any port the manager will need is held
+# by another process. The truly nasty failure mode is an orphan Quack
+# node from a prior run still listening inside the [minPort, maxPort]
+# range. The supervisor's port allocator does not probe the OS, so it
+# will happily hand that port to a fresh spawn; the JNI client then
+# connects to the orphan, mismatches tokens, and the node returns
+# "Authentication failed" until you kill the orphan by hand. NUKE=1
+# wipes Postgres state but not OS processes - so a "fresh" NUKE boot
+# is exactly when this trap snaps shut.
+#
+# Three port classes are checked:
+#   1. REST/UI port (manager would crash at bind, but we'd rather say so up-front)
+#   2. FlightSQL edge port (same)
+#   3. Node port range [minPort, maxPort] (only WARN; the manager can
+#      route around in-use entries, but orphans there are the silent-
+#      auth-failure source we want to call out)
+preflight_ports() {
+  local rest_port="${QOD_ON_DEMAND_PORT:-20900}"
+  local flight_port="${PROXY_PORT:-31338}"
+  local min_port="${QOD_MIN_PORT:-21900}"
+  local max_port="${QOD_MAX_PORT:-22500}"
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "WARN: lsof not on PATH; skipping port preflight." >&2
+    return 0
+  fi
+
+  local busy
+  for p in "$rest_port" "$flight_port"; do
+    busy=$(lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2 " " $1}' | sort -u | head -3)
+    if [[ -n "$busy" ]]; then
+      echo "ERROR: port $p already in use:" >&2
+      echo "$busy" | sed 's/^/  /' >&2
+      echo "  Stop the holder (./scripts/stop-jar.sh, or kill -TERM <pid>) and retry." >&2
+      exit 1
+    fi
+  done
+
+  # Node range: enumerate listeners, intersect with the configured range.
+  local in_range
+  in_range=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null \
+             | awk -v lo="$min_port" -v hi="$max_port" '
+                 NR>1 {
+                   # column 9 is "addr:port", typically *:21900 or 127.0.0.1:21900
+                   n=split($9, parts, ":");
+                   port=parts[n];
+                   if (port+0>=lo && port+0<=hi) print $2 " " $1 " :" port;
+                 }
+               ' | sort -u)
+  if [[ -n "$in_range" ]]; then
+    echo "ERROR: orphan listener(s) inside the configured node port range [$min_port, $max_port]:" >&2
+    echo "$in_range" | sed 's/^/  /' >&2
+    echo "  These are almost certainly stale Quack node processes from a prior run." >&2
+    echo "  The manager's port allocator does not probe the OS - re-leasing one of" >&2
+    echo "  these ports leads to silent 'Authentication failed' errors at query time." >&2
+    echo "  Kill them and retry:    pkill -f 'quack_serve|spawn-quack-node'" >&2
+    exit 1
+  fi
+}
+preflight_ports
+
 # ---- Run ----
 # The assembly jar carries `Add-Opens` in its manifest (JEP 261) so Arrow's
 # unsafe allocator works on Java 17+ without extra flags. The system
