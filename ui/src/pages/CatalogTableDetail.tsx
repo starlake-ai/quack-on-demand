@@ -69,6 +69,14 @@ export default function CatalogTableDetail() {
               <td style={{ paddingRight: 16, color: '#555' }}>Total parquet size</td>
               <td>{fmtBytes(totalBytes)}</td>
             </tr>
+            <tr>
+              <td style={{ paddingRight: 16, color: '#555' }}>Folder</td>
+              <td>
+                {detail.table.folder
+                  ? <code style={{ fontSize: '0.9em', color: '#444' }}>{detail.table.folder}</code>
+                  : <em style={{ color: '#888' }}>—</em>}
+              </td>
+            </tr>
           </tbody>
         </table>
       </section>

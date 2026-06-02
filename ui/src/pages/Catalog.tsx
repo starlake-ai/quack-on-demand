@@ -14,6 +14,7 @@ export default function Catalog() {
   const [schemas, setSchemas]      = useState<CatalogSchemaEntry[]>([]);
   const [schema, setSchemaState]   = useState<string>('');
   const [tables, setTables]        = useState<CatalogTableEntry[]>([]);
+  const [filter, setFilter]        = useState<string>('');
   const [error, setError]          = useState<string | null>(null);
 
   function pickTenant(t: string) {
@@ -51,10 +52,20 @@ export default function Catalog() {
   useEffect(() => {
     if (!tenant || !schema) { setTables([]); return; }
     setError(null);
+    // Reset the filter when the user picks a different schema - a stale
+    // string typed against tpch1 would silently hide every row in main.
+    setFilter('');
     api.listCatalogTables(tenant, schema)
       .then(setTables)
       .catch(e => setError(String(e)));
   }, [tenant, schema]);
+
+  // Case-insensitive substring match on the table name. Cheap (linear)
+  // and matches DBeaver's behaviour; switch to fuzzy later if 1000+
+  // tables become normal.
+  const filteredTables = filter
+    ? tables.filter(t => t.name.toLowerCase().includes(filter.toLowerCase()))
+    : tables;
 
   return (
     <div>
@@ -101,12 +112,31 @@ export default function Catalog() {
         </aside>
 
         <main>
-          <h3 style={{ marginTop: 0 }}>
-            Tables in {schema ? <code>{schema}</code> : <em style={{ color: '#888' }}>pick a schema</em>}
-          </h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, marginBottom: 8 }}>
+            <h3 style={{ margin: 0 }}>
+              Tables in {schema ? <code>{schema}</code> : <em style={{ color: '#888' }}>pick a schema</em>}
+            </h3>
+            {schema && tables.length > 0 && (
+              <input
+                type="search"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+                placeholder="filter by name…"
+                style={{
+                  padding: '4px 8px',
+                  border: '1px solid #ccc',
+                  borderRadius: 4,
+                  fontSize: '0.9rem',
+                  width: 220,
+                }}
+              />
+            )}
+          </div>
           {schema && (
             tables.length === 0
               ? <em style={{ color: '#888' }}>no tables</em>
+              : filteredTables.length === 0
+              ? <em style={{ color: '#888' }}>no tables matching <code>{filter}</code></em>
               : (
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead>
@@ -118,7 +148,7 @@ export default function Catalog() {
                     </tr>
                   </thead>
                   <tbody>
-                    {tables.map(t => (
+                    {filteredTables.map(t => (
                       <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
                         <td>
                           <Link to={`/catalog/${encodeURIComponent(tenant)}/${encodeURIComponent(schema)}/${encodeURIComponent(t.name)}`}>
