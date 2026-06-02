@@ -164,14 +164,12 @@ print(cur.fetchone())   # -> (6001215,)
 The compose file has two profiles you can toggle independently. Activate them
 via the `PROFILES` env var on `run-docker-compose.sh`:
 
-- **`observability`** — Prometheus + Grafana. Grafana lands on
-  <http://localhost:3000/> (anonymous admin, a `quack-on-demand` dashboard
-  is provisioned); Prometheus on <http://localhost:9090/>.
-- **`seaweedfs`** — in-cluster SeaweedFS S3 store + filer UI. Useful when
-  you want the catalog backed by object storage instead of the host
-  filesystem. Activates automatically when `.env` sets
-  `QOD_S3_ENDPOINT=seaweedfs:8333` (see `.env.example` lines 81-87 for the
-  full block to uncomment). Filer browser at <http://localhost:8888/buckets/>.
+- **`observability`** — Prometheus + Grafana with a provisioned
+  `quack-on-demand` dashboard.
+- **`seaweedfs`** — in-cluster SeaweedFS S3 store + filer UI for an
+  object-storage-backed catalog. Activates automatically when `.env`
+  sets `QOD_S3_ENDPOINT=seaweedfs:8333` (uncomment lines 81-87 of
+  `.env.example` for the full block).
 
 ```bash
 # Everything on (TPC-H seeded + observability + SeaweedFS-backed storage):
@@ -179,8 +177,21 @@ NUKE=1 LOAD_TPCH=1 PROFILES=observability \
   ./scripts/run-docker-compose.sh   # seaweedfs auto-activates if .env wires it
 ```
 
-The post-boot banner prints the per-profile URLs for whichever profiles
-actually ran.
+### URLs exposed by each profile
+
+The post-boot banner prints these too, but for reference:
+
+| Profile | URL | Purpose |
+|---|---|---|
+| (always) | <http://localhost:20900/ui/> | Manager admin UI (login `admin` / `admin`) |
+| (always) | `grpc+tls://localhost:31338` | FlightSQL edge (use `--insecure` to skip cert verify) |
+| (always) | `localhost:15432` | Postgres (host port; container-internal is `postgres:5432`) |
+| `observability` | <http://localhost:3000/> | Grafana — anonymous admin, `quack-on-demand` dashboard pre-loaded |
+| `observability` | <http://localhost:9090/> | Prometheus — query the `quack-on-demand` scrape target |
+| `seaweedfs` | <http://localhost:8888/buckets/> | Filer file browser (drill into `/buckets/ducklake/tpch/tpch1/`) |
+| `seaweedfs` | <http://localhost:9333/> | SeaweedFS master / cluster status |
+| `seaweedfs` | <http://localhost:8080/ui/> | Volume-server UI |
+| `seaweedfs` | `http://localhost:8333/` | S3 API endpoint — works with `aws s3 ls`, `s5cmd`, `mc`. Default creds: `quack` / `quackquack` |
 
 ## 6. Stop the stack — 10 seconds
 
