@@ -66,8 +66,11 @@ exercised in that one round-trip.
 
 Open <http://localhost:20900/ui/> in a browser. Log in as `admin` /
 `admin`. You can see the bootstrap pool (`acme/sales`), its three Quack
-nodes (`WO`, `RO`, `DUAL`), per-node load and latency, and the statement
-history of the query you just ran.
+nodes (`WO`, `RO`, `DUAL`), per-node load and latency, the statement
+history of the query you just ran, and the catalog browser (`Catalog`
+tab) listing each table's row count, parquet file count, and **folder
+on disk** (e.g. `/app/ducklake/tpch/tpch1/lineitem/` or
+`s3://ducklake/tpch/tpch1/lineitem/`).
 
 ## 4. Run a custom SQL — 30 seconds
 
@@ -156,23 +159,52 @@ cur.execute("SELECT count(*) FROM tpch1.lineitem")
 print(cur.fetchone())   # -> (6001215,)
 ```
 
-## 5. Stop the stack — 10 seconds
+## 5. Opt-in profiles (optional)
+
+The compose file has two profiles you can toggle independently. Activate them
+via the `PROFILES` env var on `run-docker-compose.sh`:
+
+- **`observability`** — Prometheus + Grafana. Grafana lands on
+  <http://localhost:3000/> (anonymous admin, a `quack-on-demand` dashboard
+  is provisioned); Prometheus on <http://localhost:9090/>.
+- **`seaweedfs`** — in-cluster SeaweedFS S3 store + filer UI. Useful when
+  you want the catalog backed by object storage instead of the host
+  filesystem. Activates automatically when `.env` sets
+  `QOD_S3_ENDPOINT=seaweedfs:8333` (see `.env.example` lines 81-87 for the
+  full block to uncomment). Filer browser at <http://localhost:8888/buckets/>.
 
 ```bash
-docker compose down
+# Everything on (TPC-H seeded + observability + SeaweedFS-backed storage):
+NUKE=1 LOAD_TPCH=1 PROFILES=observability \
+  ./scripts/run-docker-compose.sh   # seaweedfs auto-activates if .env wires it
 ```
 
-To wipe all state (Postgres data, parquet, certs) for a clean restart next
-time, add the `NUKE=1` flag to a fresh `run-docker-compose.sh` invocation.
+The post-boot banner prints the per-profile URLs for whichever profiles
+actually ran.
+
+## 6. Stop the stack — 10 seconds
+
+```bash
+docker compose --profile seaweedfs --profile observability down
+```
+
+(`--profile` flags are needed only if you opted into those profiles. The
+post-boot banner's `stop with:` line spells out the right command for your
+current set.)
+
+To wipe all state (Postgres data, parquet, certs, SeaweedFS) for a clean
+restart, add `NUKE=1` to a fresh `./scripts/run-docker-compose.sh`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Connection refused` to `:20900` | Manager pod still booting (TPC-H seed takes ~10 s) | Wait and retry |
+| `Connection refused` to `:20900` | Manager still booting (TPC-H seed takes ~10 s) | Wait and retry |
 | `[FlightSQL] no node with role READONLY or DUAL` | Quack nodes still spawning | Wait 5–10 s and retry |
-| `Cannot open file ".../lineitem/ducklake-...parquet"` | Stale catalog (Postgres has metadata, parquet dir was wiped separately) | `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` for a clean slate |
+| `Cannot open file ".../lineitem/ducklake-...parquet"` | Stale catalog (Postgres has metadata, parquet dir was wiped separately) | `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` for a clean slate. The loader self-detects this and aborts loudly. |
 | `Authentication failed` | Wrong `admin` password — `.env` differs from default | Check `ADMIN_PASSWORD` in `.env` |
+| `error reading server preface: EOF` from loadtest | Client URL is `grpc://` but `.env` has `TLS=true` | Use `grpc+tls://localhost:31338 --insecure` |
+| SeaweedFS filer `/buckets/<bucket>/` is empty after seed | `.env` doesn't wire `QOD_S3_ENDPOINT=seaweedfs:8333`, so the manager wrote parquet to the host FS instead | Uncomment the SeaweedFS block in `.env` (lines 81-87 of `.env.example`) and `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` |
 
 ## Next steps
 
