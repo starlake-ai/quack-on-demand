@@ -2,7 +2,6 @@
 
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](RESILIENCE.md)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
-[![Release](https://img.shields.io/github/v/release/starlake-ai/quack-on-demand?display_name=tag&sort=semver)](https://github.com/starlake-ai/quack-on-demand/releases)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
