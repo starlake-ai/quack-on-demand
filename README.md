@@ -8,17 +8,17 @@
 [![Scala](https://img.shields.io/badge/scala-3.7-red.svg)](https://www.scala-lang.org/)
 [![JDK](https://img.shields.io/badge/jdk-17%2B-blue.svg)](https://adoptium.net/)
 
-**Multi-tenant Arrow Flight SQL gateway for DuckDB — shared DuckLake catalog, per-tenant pools, table-level ACLs, pluggable identity. Single uber-jar.**
+**Multi-tenant Arrow Flight SQL gateway for DuckDB, shared DuckLake catalog, per-tenant pools, table-level ACLs, pluggable identity. Single uber-jar.**
 
 Any JDBC / ODBC / ADBC client connects to one Flight SQL edge; the gateway authenticates the user (DB / JWT / OIDC), checks table-level ACLs against the parsed SQL, classifies the statement, and routes it to a compatible node in the tenant's pool. Control-plane state lives next to DuckLake's metadata in the same Postgres database.
 
 ### Why this exists
 
-DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol lets DuckDB instances talk to each other over HTTP/2 — DuckDB is no longer just an embedded library. But Quack is intentionally minimal: a single static token for auth, no multi-tenancy, no authorization model, DuckDB-only on the client side. The docs themselves recommend putting infrastructure in front of it before any serious deployment. Quack on Demand is that infrastructure.
+DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol lets DuckDB instances talk to each other over HTTP/2. DuckDB is no longer just an embedded library. But Quack is intentionally minimal: a single static token for auth, no multi-tenancy, no authorization model, DuckDB-only on the client side. The docs themselves recommend putting infrastructure in front of it before any serious deployment. Quack on Demand is that infrastructure.
 
 ### Project status
 
-**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available — single-instance, no active-active manager yet. [`RESILIENCE.md`](RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
+**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
 
 ![Admin console - live per-node metrics, statement history, ACL editor](assets/metrics.jpg)
 
@@ -48,14 +48,14 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 **Use Quack on Demand if you want to:**
 
-- Expose a DuckLake / DuckDB warehouse to multiple teams or apps over a standard wire protocol (Arrow Flight SQL — works with JDBC, ODBC, ADBC, PyArrow, DBeaver, Spark, and other Flight-aware clients)
+- Expose a DuckLake / DuckDB warehouse to multiple teams or apps over a standard wire protocol (Arrow Flight SQL: works with JDBC, ODBC, ADBC, PyArrow, DBeaver, Spark, and other Flight-aware clients)
 - Authenticate users against your existing identity provider (Keycloak / Azure AD / Google / Cognito / JWT / database) and enforce table-level ACLs at query time
 - Run several tenants on shared infrastructure without giving each one a private DuckDB process to manage
 
 **Look elsewhere if you:**
 
-- Just need a single embedded DuckDB inside one application — use DuckDB directly
-- Need a distributed query engine over data lakes with cross-node shuffles and joins on TB-scale tables — look at Trino / Dremio / StarRocks. Quack on Demand routes each statement to a single Quack node; it doesn't fan out across them
+- Just need a single embedded DuckDB inside one application ? use DuckDB directly
+- Need a distributed query engine over data lakes with cross-node shuffles and joins on TB-scale tables then look at Trino / Dremio / StarRocks. Quack on Demand routes each statement to a single Quack node; it doesn't fan out across them
 
 ---
 
@@ -137,8 +137,8 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 **Two paths into Postgres** (not pictured to keep the diagram readable):
 
-- The **manager** owns the control plane — it writes `slkstate_pool_state` / `slkstate_user` on tenant + pool CRUD, and reads `slkstate_acl_grant` from the ACL validator on every authenticated statement.
-- Each **Quack node** owns the data plane — it reads and writes DuckLake's `ducklake_*` catalog tables directly when resolving and mutating tables.
+- The **manager** owns the control plane: it writes `slkstate_pool_state` / `slkstate_user` on tenant + pool CRUD, and reads `slkstate_acl_grant` from the ACL validator on every authenticated statement.
+- Each **Quack node** owns the data plane: it reads and writes DuckLake's `ducklake_*` catalog tables directly when resolving and mutating tables.
 
 Both sets of tables live in the same database so control-plane and catalog stay transactionally coherent.
 
@@ -148,27 +148,27 @@ Both sets of tables live in the same database so control-plane and catalog stay 
 
 | | Version | Notes |
 |---|---|---|
-| **JDK** | 17+ | Built and shipped on Temurin 17 (Dockerfile). Arrow's `arrow-memory-unsafe` allocator needs `--add-opens=java.base/java.nio` and `java.base/sun.nio.ch` on 17+ — the assembly jar sets these via an `Add-Opens` manifest attribute so `java -jar` just works |
+| **JDK** | 17+ | Built and shipped on Temurin 17 (Dockerfile). Arrow's `arrow-memory-unsafe` allocator needs `--add-opens=java.base/java.nio` and `java.base/sun.nio.ch` on 17+. T he assembly jar sets these via an `Add-Opens` manifest attribute so `java -jar` just works |
 | **Postgres** | 13+ | Tested with the `postgres:16-alpine` image bundled in `docker-compose.yml`. Both DuckLake's `ducklake_*` catalog tables and the `slkstate_*` control-plane tables live in the same database |
 | **DuckDB CLI** | matched to the bundled libduckdb | Each Quack node is a child `duckdb` process. The Docker image ships its own; for **native** runs you need `duckdb` on `$PATH` (see [`RUNNING.md`](RUNNING.md) for the pinned version) |
 | **Docker** | Engine 24+, Compose v2 | Compose path only |
-| **Scala / sbt** | 3.7, sbt 1.x | Source builds only — not needed if you run the published jar or Docker image |
+| **Scala / sbt** | 3.7, sbt 1.x | Source builds only not needed if you run the published jar or Docker image |
 | **OS** | Linux, macOS | Manager and nodes; the assembly jar bundles `libduckdb_java.so` for `linux_amd64`, `linux_arm64`, and `osx_universal` |
 
 ---
 
 ## Quick start
 
-Zero to first query in under 5 minutes — see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
+Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
 
 ```bash
 cp .env.example .env                            # tweak ports / auth / admin password
 LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
 ```
 
-That brings up Postgres + the manager and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/` — log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`.
+That brings up Postgres + the manager and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`.
 
-**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned — `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
+**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
 
 Smoke-test the FlightSQL edge with the Python load tester:
 
@@ -182,7 +182,7 @@ python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
 ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
 ```
 
-Expected tail — a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
+Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
 
 ```
 Queries OK:       10
