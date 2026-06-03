@@ -24,4 +24,5 @@ object Versions {
   val starlakeJdbc   = "0.7"
   val duckdb         = "1.5.3.0"
   val micrometer     = "1.13.6"
+  val liquibase      = "4.29.2"
 }
