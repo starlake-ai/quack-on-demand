@@ -101,6 +101,29 @@ export interface TenantOpRequest {
   name: string;
 }
 
+// ----- Tenant identity allowlist -----
+export interface IdentityRequest {
+  tenantId: string;
+  issuer: string;
+  externalId: string;
+}
+
+export interface IdentityResponse {
+  id: string;
+  tenantId: string;
+  issuer: string;
+  externalId: string;
+  createdAt: string;
+}
+
+export interface IdentityListResponse {
+  identities: IdentityResponse[];
+}
+
+export interface IdentityOpRequest {
+  id: string;
+}
+
 // ----- ACL grants -----
 export interface AclGrant {
   id: number;

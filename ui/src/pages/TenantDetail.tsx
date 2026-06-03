@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { TenantResponse } from '../api/types';
 import AclSection from '../components/AclSection';
+import IdentitySection from '../components/IdentitySection';
 import Breadcrumb from '../components/Breadcrumb';
 
 export default function TenantDetail() {
@@ -116,6 +117,7 @@ export default function TenantDetail() {
         )}
       </div>
 
+      <IdentitySection tenantId={data.name} />
       <AclSection tenant={data.name} />
     </>
   );

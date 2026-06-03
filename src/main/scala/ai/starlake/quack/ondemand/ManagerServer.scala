@@ -20,6 +20,7 @@ final class ManagerServer(
     pools: PoolHandlers,
     nodes: NodeHandlers,
     tenants: TenantHandlers,
+    identities: IdentityHandlers,
     health: HealthHandler,
     acl: Option[AclHandlers],
     auth: AuthHandlers,
@@ -128,6 +129,9 @@ final class ManagerServer(
       Endpoints.listTenants.serverLogic(_ => tenants.listTenants()),
       Endpoints.setTenantMetastore.serverLogic(tenants.setTenantMetastore),
       Endpoints.deleteTenant.serverLogic(tenants.deleteTenant),
+      Endpoints.createIdentity.serverLogic(identities.createIdentity),
+      Endpoints.listIdentities.serverLogic(identities.listIdentities),
+      Endpoints.deleteIdentity.serverLogic(identities.deleteIdentity),
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.clientConfig.serverLogic(_ => IO.pure(Right(
         ClientConfigResponse(
