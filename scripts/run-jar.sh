@@ -361,7 +361,7 @@ pg_port="${QOD_PG_PORT:-5432}"
 pg_user="${QOD_PG_USER:-postgres}"
 pg_pass="${QOD_PG_PASSWORD:-azizam}"
 pg_admin_db="${QOD_PG_ADMIN_DB:-postgres}"
-pg_dbname="${QOD_PG_DBNAME:-tpch}"
+pg_dbname="${QOD_PG_DBNAME:-qod}"
 
 pg_reachable=0
 if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
