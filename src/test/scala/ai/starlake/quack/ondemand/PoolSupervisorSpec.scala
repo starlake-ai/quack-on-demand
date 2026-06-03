@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -181,6 +181,58 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val (sup, _) = freshSupervisorWithBackend()
     val out = sup.createTenantDb("ghost", "prod", Map.empty, "").unsafeRunSync()
     out.isLeft shouldBe true
+
+  // ---------- DbAdmin provisioning ----------
+
+  /** Capturing fixture: every CREATE / DROP DATABASE call lands here so
+    * tests can assert ordering + name composition without a live
+    * Postgres. */
+  private final class RecordingDbAdmin extends DbAdmin:
+    val created = scala.collection.mutable.ListBuffer.empty[String]
+    val dropped = scala.collection.mutable.ListBuffer.empty[String]
+    def createDatabase(name: String): Either[String, Unit] = { created += name; Right(()) }
+    def dropDatabase(name: String):   Either[String, Unit] = { dropped += name; Right(()) }
+
+  private def supWithAdmin(): (PoolSupervisor, RecordingDbAdmin) =
+    val admin = new RecordingDbAdmin
+    val sup   = new PoolSupervisor(
+      fakeBackend(), new NodeLoadTracker, new InMemoryControlPlaneStore(),
+      defaultMetastore = Map.empty, dbAdmin = admin
+    )
+    (sup, admin)
+
+  "PoolSupervisor.createTenantDb" should "invoke DbAdmin.createDatabase with the composed name" in:
+    val (sup, admin) = supWithAdmin()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    val out = sup.createTenantDb("tpch", "tpch1", Map.empty, "/data/tpch_tpch1").unsafeRunSync()
+    out.isRight shouldBe true
+    admin.created.toList shouldBe List("tpch_tpch1")
+    admin.dropped.toList shouldBe Nil
+
+  it should "auto-populate metastore.dbName with the composed name" in:
+    val (sup, _) = supWithAdmin()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    val td = sup.createTenantDb("tpch", "prod", Map("schemaName" -> "main"), "")
+      .unsafeRunSync().toOption.get
+    td.metastore("dbName")     shouldBe "tpch_prod"
+    td.metastore("schemaName") shouldBe "main"
+
+  "PoolSupervisor.deleteTenantDb" should "invoke DbAdmin.dropDatabase after the row is gone" in:
+    val (sup, admin) = supWithAdmin()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
+    sup.deleteTenantDb("tpch", "tpch_tpch1").unsafeRunSync() shouldBe Right(())
+    admin.dropped.toList shouldBe List("tpch_tpch1")
+    sup.listTenantDbsByTenant("tpch") shouldBe empty
+
+  it should "refuse the delete when a pool still points at the tenant-db" in:
+    val (sup, admin) = supWithAdmin()
+    sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1), ms, Map.empty).unsafeRunSync()
+    val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("active pool")
+    admin.dropped.toList shouldBe Nil
 
   "bootstrap chain" should "thread createTenant -> createTenantDb -> createPool" in:
     val (sup, backend) = freshSupervisorWithBackend()

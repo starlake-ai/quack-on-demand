@@ -17,8 +17,8 @@ import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
-  AclGrantStore, ControlPlaneStore, LiquibaseRunner,
-  PostgresControlPlaneStore, PostgresStateStore, StateStore, UserStore
+  AclGrantStore, ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
+  PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
 }
 import cats.effect.{IO, IOApp}
 import com.typesafe.scalalogging.LazyLogging
@@ -128,7 +128,11 @@ object Main extends IOApp.Simple with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore)
+    // Per-tenant-db Postgres provisioning. The admin connection opens
+    // against the `postgres` system DB and issues CREATE/DROP DATABASE
+    // for each `qodstate_tenant_db` row the supervisor manages.
+    val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore)
+    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore, dbAdmin)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
