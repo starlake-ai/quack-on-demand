@@ -11,6 +11,8 @@ import scala.util.Try
 
 class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
 
+  ai.starlake.quack.ondemand.state.testkit.TestPostgres.dropStrayTestDatabases("qodcp")
+
   private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
   private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
@@ -45,7 +47,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     try
       new LiquibaseRunner(dbUrl(dbName), pgUser, pgPass).run()
       test(new PostgresControlPlaneStore(dbUrl(dbName), pgUser, pgPass))
-    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName""""))
+    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
 
   private val tenant = Tenant(
     id          = "tenant-1",

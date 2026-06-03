@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
+import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -13,6 +14,11 @@ import scala.util.Try
   * database, runs the changelog against it, verifies the four control-
   * plane tables exist with the expected columns, then drops the DB. */
 class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
+
+  // One-shot sweep: drops any `qodlb_test_%` database left behind by a
+  // previously-interrupted suite.
+  TestPostgres.dropStrayTestDatabases("qodlb")
+
 
   private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
   private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
@@ -45,7 +51,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
     val dbName = s"qodlb_test_${System.nanoTime()}"
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try test(dbName)
-    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName""""))
+    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
 
   "LiquibaseRunner" should "apply the changelog and create the qodstate_* tables" in withFreshDb { db =>
     new LiquibaseRunner(dbUrl(db), pgUser, pgPass).run()

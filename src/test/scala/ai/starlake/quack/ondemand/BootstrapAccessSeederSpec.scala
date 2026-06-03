@@ -13,6 +13,8 @@ import scala.util.Try
   * the ALL grant on first run, and that a second run is a no-op. */
 class BootstrapAccessSeederSpec extends AnyFlatSpec with Matchers:
 
+  ai.starlake.quack.ondemand.state.testkit.TestPostgres.dropStrayTestDatabases("qodbs")
+
   private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
   private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
@@ -52,7 +54,7 @@ class BootstrapAccessSeederSpec extends AnyFlatSpec with Matchers:
       val grantStore    = new AclGrantStore(dbUrl(dbName), pgUser, pgPass)
       grantStore.ensureTable()
       test(identityStore, grantStore, tid)
-    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName""""))
+    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
 
   "BootstrapAccessSeeder.seed" should
     "insert one identity + one ALL grant per admin on first run" in withStores { (ids, grants, tid) =>

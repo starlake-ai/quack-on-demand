@@ -11,6 +11,9 @@ import scala.util.Try
   * user `postgres`, password `azizam`). */
 class PostgresDbAdminSpec extends AnyFlatSpec with Matchers:
 
+  ai.starlake.quack.ondemand.state.testkit.TestPostgres.dropStrayTestDatabases("qod_adm")
+
+
   private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
   private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432")
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
