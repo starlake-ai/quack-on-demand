@@ -140,15 +140,16 @@ object Main extends IOApp.Simple with LazyLogging:
     val identities = new IdentityHandlers(identityStore, sup)
     val health   = new HealthHandler(sup)
 
-    // ACL handlers are only available with a Postgres state backend - that's
-    // the same connection the relational grant store reuses. File-mode
-    // deploys skip them; the endpoints won't be mounted and return 404.
+    // ACL grant store is always available now that we're Postgres-only.
+    // The relational grant table reuses the control-plane Postgres
+    // database; the AclHandlers REST surface still respects the
+    // stateStorage flag for backwards compat with any operator who
+    // expected file-mode to hide the endpoints.
+    val grantStore = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+    grantStore.ensureTable()
+    logger.info("ACL grant store ready (slkstate_acl_grant)")
     val aclHandlers: Option[AclHandlers] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val grantStore = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-        grantStore.ensureTable()
-        logger.info("ACL grant store ready (slkstate_acl_grant)")
-        Some(new AclHandlers(grantStore))
+      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then Some(new AclHandlers(grantStore))
       else None
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
@@ -322,7 +323,24 @@ object Main extends IOApp.Simple with LazyLogging:
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
             }
 
-        createTenantIO *> createTenantDbIO *> createPoolIO
+        // Idempotent: looks the bootstrap admin(s) up in
+        // qodstate_tenant_identity + slkstate_acl_grant and inserts
+        // only the rows that don't already exist. Lets the admin
+        // connect over FlightSQL and run any SQL right after a clean
+        // boot, with no manual UI clicks.
+        val seedBootstrapAccessIO: IO[Unit] = IO.blocking {
+          sup.getTenant(bs.tenant).foreach { t =>
+            BootstrapAccessSeeder.seed(
+              tenantId      = t.id,
+              tenantLabel   = t.displayName,
+              adminNames    = mgrCfg.admin.usernameList,
+              identityStore = identityStore,
+              grantStore    = grantStore
+            )
+          }
+        }
+
+        createTenantIO *> createTenantDbIO *> createPoolIO *> seedBootstrapAccessIO
     }
 
     def runWithMetrics(
