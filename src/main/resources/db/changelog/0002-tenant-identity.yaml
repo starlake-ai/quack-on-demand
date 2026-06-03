@@ -1,0 +1,30 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0002-qodstate-tenant-identity
+      author: quack-on-demand
+      changes:
+        - createTable:
+            # One row per verified `(issuer, external_id)` pair allowed
+            # to map onto a tenant at FlightSQL connect time. Examples:
+            #   - issuer `"db"` + external_id = the local username from
+            #     `slkstate_user` (one row per allowed DB user).
+            #   - issuer = Keycloak realm URL + external_id = the realm
+            #     name carried in the configured tenant claim.
+            #   - issuer `"accounts.google.com"` + external_id = the
+            #     Google Workspace `hd` claim.
+            tableName: qodstate_tenant_identity
+            columns:
+              - column: { name: id,          type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,   type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_tenant_identity_tenant, references: 'qodstate_tenant(id)', deleteCascade: false } }
+              - column: { name: issuer,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: external_id, type: TEXT, constraints: { nullable: false } }
+              - column: { name: created_at,  type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+        - addUniqueConstraint:
+            tableName:      qodstate_tenant_identity
+            columnNames:    issuer, external_id
+            constraintName: qodstate_tenant_identity_issuer_external_id_unique
+        - createIndex:
+            indexName: qodstate_tenant_identity_tenant
+            tableName: qodstate_tenant_identity
+            columns:
+              - column: { name: tenant_id }

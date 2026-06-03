@@ -61,7 +61,8 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       while rs.next() do tables += rs.getString(1)
       rs.close()
       tables.toList shouldBe List(
-        "qodstate_node", "qodstate_pool", "qodstate_tenant", "qodstate_tenant_db"
+        "qodstate_node", "qodstate_pool", "qodstate_tenant",
+        "qodstate_tenant_db", "qodstate_tenant_identity"
       )
     finally c.close()
   }
@@ -77,6 +78,6 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "WHERE table_schema = 'public' AND table_name LIKE 'qodstate_%'"
       )
       rs.next()
-      rs.getInt(1) shouldBe 4
+      rs.getInt(1) shouldBe 5
     finally c.close()
   }

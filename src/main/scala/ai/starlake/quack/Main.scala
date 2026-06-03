@@ -136,6 +136,8 @@ object Main extends IOApp.Simple with LazyLogging:
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
+    val identityStore = ai.starlake.quack.ondemand.state.TenantIdentityStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+    val identities = new IdentityHandlers(identityStore, sup)
     val health   = new HealthHandler(sup)
 
     // ACL handlers are only available with a Postgres state backend - that's
@@ -349,7 +351,7 @@ object Main extends IOApp.Simple with LazyLogging:
       }
 
       val mgr = new ManagerServer(
-        mgrCfg, edgeCfg, pools, nodes, tenants, health,
+        mgrCfg, edgeCfg, pools, nodes, tenants, identities, health,
         aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint
       )

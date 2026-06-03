@@ -85,6 +85,19 @@ final case class TenantResponse(
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
+// ----- Tenant identity allowlist -----------------------------------------
+// One verified `(issuer, externalId)` pair per row, mapped to a tenant id.
+final case class IdentityRequest(tenantId: String, issuer: String, externalId: String)
+final case class IdentityResponse(
+    id:         String,
+    tenantId:   String,
+    issuer:     String,
+    externalId: String,
+    createdAt:  String
+)
+final case class IdentityListResponse(identities: List[IdentityResponse])
+final case class IdentityOpRequest(id: String)
+
 final case class AclGrantRequest(
     tenantId: String,
     principal: String,                  // "user:alice" | "group:eng" | "role:admin"
@@ -300,6 +313,11 @@ object Dtos:
   given Codec[TenantListResponse] = deriveCodec
   given Codec[TenantOpRequest]    = deriveCodec
   given Codec[ClientConfigResponse] = deriveCodec
+
+  given Codec[IdentityRequest]      = deriveCodec
+  given Codec[IdentityResponse]     = deriveCodec
+  given Codec[IdentityListResponse] = deriveCodec
+  given Codec[IdentityOpRequest]    = deriveCodec
 
   // ACL grants. Hand-rolled AclGrantRequest decoder so Option fields default
   // to None when absent (circe 0.14 deriveCodec wouldn't honor the case-class

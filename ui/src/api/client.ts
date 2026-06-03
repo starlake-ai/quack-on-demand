@@ -9,6 +9,10 @@ import type {
   TenantResponse,
   TenantListResponse,
   TenantOpRequest,
+  IdentityRequest,
+  IdentityResponse,
+  IdentityListResponse,
+  IdentityOpRequest,
   ClientConfigResponse,
   AclGrant,
   AclGrantRequest,
@@ -95,6 +99,14 @@ export const api = {
   createTenant:       (req: TenantRequest)   => post<TenantResponse>('/tenant/create', req),
   setTenantMetastore: (req: TenantRequest)   => post<TenantResponse>('/tenant/setMetastore', req),
   deleteTenant:       (req: TenantOpRequest) => post<void>('/tenant/delete', req),
+
+  // Tenant identities
+  listIdentities: (tenantId?: string) => {
+    const q = tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : '';
+    return get<IdentityListResponse>(`/identity/list${q}`);
+  },
+  createIdentity: (req: IdentityRequest)   => post<IdentityResponse>('/identity/create', req),
+  deleteIdentity: (req: IdentityOpRequest) => post<void>('/identity/delete', req),
 
   // ACL grants
   listAclGrants:   (tenant?: string) => {

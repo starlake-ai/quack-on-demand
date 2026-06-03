@@ -9,3 +9,5 @@
 databaseChangeLog:
   - include:
       file: db/changelog/0001-normalized-schema.yaml
+  - include:
+      file: db/changelog/0002-tenant-identity.yaml
