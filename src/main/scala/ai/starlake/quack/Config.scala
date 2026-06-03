@@ -26,6 +26,10 @@ final case class RoleDistributionConfig(writeonly: Int, readonly: Int, dual: Int
 final case class BootstrapConfig(
     enabled: Boolean,
     tenant: String,
+    // Tenant-db suffix; the actual Postgres database created on boot is
+    // composed by `Names.normalizeTenantDbName(tenant, tenantDb)` --
+    // i.e. `${tenant}_${tenantDb}` after lowercasing.
+    tenantDb: String,
     pool: String,
     roleDistribution: RoleDistributionConfig
 )

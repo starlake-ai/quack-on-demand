@@ -254,21 +254,60 @@ object Main extends IOApp.Simple with LazyLogging:
         logger.info("bootstrap: disabled (quack-on-demand.bootstrap.enabled=false)")
         IO.unit
       else
+        // Compose the tenant-db name up-front so it can serve both the
+        // explicit `createTenantDb` call AND the per-tenant-db dataPath
+        // derivation.
+        val tenantDbName = ai.starlake.quack.model.Names
+          .normalizeTenantDbName(bs.tenant, bs.tenantDb)
+          .fold(err => sys.error(s"bootstrap: invalid tenant/tenantDb: $err"), identity)
+
         val key  = ai.starlake.quack.model.PoolKey(bs.tenant, bs.pool)
         val dist = ai.starlake.quack.model.RoleDistribution(
           bs.roleDistribution.writeonly,
           bs.roleDistribution.readonly,
           bs.roleDistribution.dual
         )
-        val createTenantIO =
+
+        // Each tenant-db owns its own on-disk data path. Derive it by
+        // replacing the last path component of the global default
+        // `dataPath` with the composed tenant-db name -- e.g.
+        // `/Users/.../ducklake/tpch` + `tpch_tpch1` -> `/Users/.../ducklake/tpch_tpch1`.
+        val rootDataPath = mgrCfg.defaultMetastore.getOrElse("dataPath", "")
+        val tenantDbDataPath =
+          if rootDataPath.isEmpty then ""
+          else
+            val p      = java.nio.file.Paths.get(rootDataPath)
+            val parent = p.getParent
+            if parent == null then tenantDbName else parent.resolve(tenantDbName).toString
+        val tenantDbMetastore = mgrCfg.defaultMetastore
+          .updated("dataPath", tenantDbDataPath)
+          .updated("dbName",   tenantDbName)
+
+        val createTenantIO: IO[Unit] =
           if sup.getTenant(bs.tenant).isDefined then
             IO.delay(logger.info(s"bootstrap: tenant '${bs.tenant}' already exists; skipping"))
           else
             sup.createTenant(ai.starlake.quack.model.Tenant(bs.tenant, Map.empty)).flatMap {
-              case Right(_) => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}'"))
+              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}'"))
               case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
             }
-        val createPoolIO =
+
+        val createTenantDbIO: IO[Unit] =
+          if sup.listTenantDbsByTenant(bs.tenant).exists(_.name == tenantDbName) then
+            IO.delay(logger.info(s"bootstrap: tenant-db '${bs.tenant}/$tenantDbName' already exists; skipping"))
+          else
+            sup.createTenantDb(
+              tenantName  = bs.tenant,
+              suffix      = bs.tenantDb,
+              metastore   = tenantDbMetastore,
+              dataPath    = tenantDbDataPath,
+              objectStore = Map.empty
+            ).flatMap {
+              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant-db '${bs.tenant}/$tenantDbName' at $tenantDbDataPath"))
+              case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant-db create failed: $err"))
+            }
+
+        val createPoolIO: IO[Unit] =
           if sup.get(key).isDefined then
             IO.delay(logger.info(s"bootstrap: pool '${bs.tenant}/${bs.pool}' already exists; skipping"))
           else
@@ -280,7 +319,8 @@ object Main extends IOApp.Simple with LazyLogging:
               case Left(t) =>
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
             }
-        createTenantIO *> createPoolIO
+
+        createTenantIO *> createTenantDbIO *> createPoolIO
     }
 
     def runWithMetrics(
