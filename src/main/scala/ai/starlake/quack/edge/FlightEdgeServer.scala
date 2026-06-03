@@ -14,7 +14,8 @@ import java.util.UUID
 final class FlightEdgeServer(
     cfg: EdgeConfig,
     router: FlightSqlRouter,
-    authService: AuthenticationService
+    authService: AuthenticationService,
+    lookupPool: (String, String) => Either[String, String]
 ) extends LazyLogging:
 
   private val allocator = new RootAllocator()
@@ -115,7 +116,15 @@ final class FlightEdgeServer(
             case _           => None
         }
         val basicUsername = basicPair.map(_._1)
-        val poolHdr = Option(headers.get("X-Pool"))
+        // Flight call headers carrying the target tenant + pool. These
+        // names match how Arrow Flight JDBC drivers serialize arbitrary
+        // connection-string parameters into gRPC metadata -- e.g.
+        // `jdbc:arrow-flight-sql://host:port/?tenant=tpch&pool=sales`
+        // arrives here as headers named `tenant`, `pool`. The owning
+        // tenant-db is resolved server-side via `lookupPool`
+        // (pool names are unique per tenant).
+        val poolHdr   = Option(headers.get("pool"))
+        val tenantHdr = Option(headers.get("tenant"))
 
         // Fast path: client is presenting a Bearer that's an already-known
         // session peerId from a prior handshake. Skip TenantSelector and
@@ -124,7 +133,7 @@ final class FlightEdgeServer(
           case Some(knownPeerId) =>
             authResult(knownPeerId)
           case None =>
-            handshake(bearer, basicPair, basicUsername, poolHdr)
+            handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr)
 
       /** Mint a new session peerId. Runs the configured auth chain when one
         * exists; otherwise trusts the client (legacy v1). On success we resolve
@@ -133,20 +142,45 @@ final class FlightEdgeServer(
           bearer: Option[String],
           basicPair: Option[(String, String)],
           basicUsername: Option[String],
-          poolHdr: Option[String]
+          poolHdr: Option[String],
+          tenantHdr: Option[String]
       ): CallHeaderAuthenticator.AuthResult =
+        // Pre-resolve the target (tenant, tenantDb, pool) from the headers
+        // + basic username BEFORE authenticating. The Basic provider chain
+        // needs (tenant, pool) to look up the right qodstate_user row -- a
+        // user with the same name in two different (tenant, pool) scopes is
+        // a different principal. The bearer body is decoded without
+        // signature verification here; cryptographic verification still
+        // happens inside authenticateBearer below.
+        val hdrs = poolHdr.map("pool" -> _).toMap ++
+                   tenantHdr.map("tenant" -> _).toMap
+        val preResolved: Either[String, Resolved] = TenantSelector.resolve(
+          bearer         = bearer,
+          headers        = hdrs,
+          username       = basicUsername,
+          tenantClaim    = cfg.tenantClaim,
+          lookupPool     = lookupPool
+        )
+
         val validation: Either[String, Option[AuthenticatedProfile]] =
           if !authService.hasProviders then
             // No backends configured - keep v1 trust-the-client.
             Right(None)
           else
-            // Real auth chain. Bearer validated through JWT/OIDC providers;
-            // Basic through DB + ROPC providers.
             (bearer, basicPair) match
               case (Some(token), _) =>
+                // Bearer auth verifies the JWT signature; tenant/pool
+                // scoping is enforced later by the (tenant, pool) headers
+                // on top of the verified claims.
                 authService.authenticateBearer(token).map(Some(_))
-              case (None, Some((u, p))) =>
-                authService.authenticateBasic(u, p).map(Some(_))
+              case (None, Some((_, p))) =>
+                preResolved match
+                  case Right(r) =>
+                    authService.authenticateBasic(
+                      Some(r.poolKey.tenant), Some(r.poolKey.pool), r.user, p
+                    ).map(Some(_))
+                  case Left(err) =>
+                    Left(s"missing tenant/pool scope for Basic auth: $err")
               case _ =>
                 Left("no credentials presented")
 
@@ -166,13 +200,16 @@ final class FlightEdgeServer(
                 .withDescription("session expired; please reconnect with username/password")
                 .toRuntimeException()
 
+            // Re-run TenantSelector with the (possibly enriched) username
+            // from the validated profile -- the pre-resolve above used the
+            // raw Basic username; for Bearer auth the JWT's `sub` claim is
+            // only available after authenticateBearer.
             TenantSelector.resolve(
-              bearer        = bearer,
-              headers       = poolHdr.map(p => "X-Pool" -> p).toMap,
-              username      = resolvedUsername,
-              tenantClaim   = cfg.tenantClaim,
-              defaultTenant = cfg.defaultTenant,
-              defaultPool   = cfg.defaultPool
+              bearer         = bearer,
+              headers        = hdrs,
+              username       = resolvedUsername,
+              tenantClaim    = cfg.tenantClaim,
+              lookupPool     = lookupPool
             ) match
               case Right(resolved) =>
                 val peerId = UUID.randomUUID().toString

@@ -62,7 +62,5 @@ final case class FlightConfig(
     tlsCertChain: String,
     tlsPrivateKey: String,
     tenantClaim: String,
-    defaultTenant: String,
-    defaultPool: String,
     sessionTtlSec: Long
 )

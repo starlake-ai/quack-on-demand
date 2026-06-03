@@ -7,7 +7,7 @@ import java.time.Instant
 
 class RouterSpec extends AnyFlatSpec with Matchers:
 
-  private val poolKey = PoolKey("acme", "sales")
+  private val poolKey = PoolKey("acme", "acme_default", "sales")
   private def node(id: String, role: Role): RunningNode =
     RunningNode(id, poolKey, role, "127.0.0.1", 21900, "tok", Some(1L), None, Instant.EPOCH)
 

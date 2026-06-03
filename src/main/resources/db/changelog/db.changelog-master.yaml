@@ -11,3 +11,9 @@ databaseChangeLog:
       file: db/changelog/0001-normalized-schema.yaml
   - include:
       file: db/changelog/0002-tenant-identity.yaml
+  - include:
+      file: db/changelog/0003-user-table.yaml
+  - include:
+      file: db/changelog/0004-pool-tenant-unique.yaml
+  - include:
+      file: db/changelog/0005-pool-disabled.yaml

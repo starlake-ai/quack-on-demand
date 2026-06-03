@@ -12,33 +12,35 @@ function fmtBytes(n: number): string {
 }
 
 export default function CatalogTableDetail() {
-  const { tenant, schema, table } = useParams<{
-    tenant: string; schema: string; table: string;
+  const { tenant, tenantDb, schema, table } = useParams<{
+    tenant: string; tenantDb: string; schema: string; table: string;
   }>();
   const [detail, setDetail] = useState<CatalogTableDetailResponse | null>(null);
   const [error, setError]   = useState<string | null>(null);
 
   useEffect(() => {
-    if (!tenant || !schema || !table) return;
-    api.getCatalogTable(tenant, schema, table)
+    if (!tenant || !tenantDb || !schema || !table) return;
+    api.getCatalogTable(tenant, tenantDb, schema, table)
       .then(setDetail)
       .catch(e => setError(String(e)));
-  }, [tenant, schema, table]);
+  }, [tenant, tenantDb, schema, table]);
 
   if (error)  return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (!detail) return <p>Loading…</p>;
 
   const totalBytes = detail.dataFiles.reduce((s, f) => s + f.sizeBytes, 0);
 
-  const tEnc = encodeURIComponent(tenant!);
-  const sEnc = encodeURIComponent(schema!);
+  const tEnc  = encodeURIComponent(tenant!);
+  const tdEnc = encodeURIComponent(tenantDb!);
+  const sEnc  = encodeURIComponent(schema!);
   return (
     <div>
       <Breadcrumb
         items={[
           { label: 'Catalog', to: '/catalog' },
           { label: tenant!,   to: `/catalog?tenant=${tEnc}` },
-          { label: schema!,   to: `/catalog?tenant=${tEnc}&schema=${sEnc}` },
+          { label: tenantDb!, to: `/catalog?tenant=${tEnc}&tenantDb=${tdEnc}` },
+          { label: schema!,   to: `/catalog?tenant=${tEnc}&tenantDb=${tdEnc}&schema=${sEnc}` },
           { label: table! },
         ]}
       />

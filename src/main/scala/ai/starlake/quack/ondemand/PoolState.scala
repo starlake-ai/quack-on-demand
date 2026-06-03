@@ -9,6 +9,7 @@ final case class PoolState(
     metastore: Map[String, String],
     s3: Map[String, String],
     maxConcurrentPerNode: Int = 0,
-    draining: Set[String] = Set.empty
+    draining: Set[String] = Set.empty,
+    disabled: Boolean = false
 ):
   def size: Int = nodes.size

@@ -2,6 +2,7 @@ package ai.starlake.quack.edge
 
 import ai.starlake.quack.model.PoolKey
 import io.circe.parser._
+
 import java.util.Base64
 
 final case class Resolved(poolKey: PoolKey, user: String)
@@ -24,46 +25,58 @@ object TenantSelector:
     val r = s.length % 4
     if r == 0 then s else s + "=" * (4 - r)
 
-  /** Resolve tenant + pool + user from the incoming credentials.
+  /** Resolve `(tenant, tenantDb, pool, user)` from the incoming
+    * credentials. The edge applies NO defaults: every client must
+    * fully address its target via the `tenant` and `pool` headers
+    * (or, on the JWT path, `tenant` may come from the configured
+    * `tenantClaim` instead). The owning `tenantDb` is resolved
+    * server-side via `lookupPool`, which also enforces the
+    * `tenant.disabled` / `pool.disabled` kill switches: a Left
+    * propagates back as an UNAUTHENTICATED error at the FlightSQL
+    * edge.
     *
-    *  - JWT path: `tenantClaim` -> tenant if present, else `defaultTenant`.
-    *    Pool from `X-Pool` header if present, else `defaultPool`.
-    *  - Username path (fallback when no JWT): split the username on `/`:
-    *      * 3 parts (`tenant/pool/user`) -> explicit tenant + explicit pool (X-Pool ignored)
-    *      * 2 parts (`pool/user`)        -> `defaultTenant` + explicit pool (X-Pool ignored)
-    *      * 1 part  (`user`)             -> `defaultTenant`, `X-Pool` or `defaultPool`
-    *      * any empty segment            -> rejected
-    *  - `X-Pool` only fills the pool when it would otherwise come from `defaultPool`
-    *    (1-part username, or JWT path without pool). It never overrides an explicit pool. */
+    *  - JWT path: `tenant` from a `tenant` header OR the JWT
+    *    `tenantClaim` (header wins); `pool` header required; user
+    *    from the `sub` claim (falls back to the bare Basic username
+    *    if both are present).
+    *  - Basic path: bare username; `tenant` + `pool` headers required.
+    *
+    *  Header names are plain (`tenant`, `pool`) so that Flight JDBC
+    *  URL connection parameters route here naturally
+    *  (`jdbc:arrow-flight-sql://host:port/?tenant=…&pool=…`).
+    *  The `X-*` prefix is reserved for the manager's HTTP API. */
   def resolve(
-      bearer: Option[String],
-      headers: Map[String, String],
-      username: Option[String],
-      tenantClaim: String,
-      defaultTenant: String,
-      defaultPool: String
+      bearer:          Option[String],
+      headers:         Map[String, String],
+      username:        Option[String],
+      tenantClaim:     String,
+      lookupPool:      (String, String) => Either[String, String]
   ): Either[String, Resolved] =
-    val xPool = headers.get("X-Pool").filter(_.nonEmpty)
+    val hPool   = headers.get("pool").filter(_.nonEmpty)
+    val hTenant = headers.get("tenant").filter(_.nonEmpty)
+
+    def resolvePoolKey(tenant: String, pool: String): Either[String, PoolKey] =
+      lookupPool(tenant, pool).map(td => PoolKey(tenant, td, pool))
 
     bearer match
       case Some(token) if token.split('.').length == 3 =>
-        val tenant = claimFromJwt(token, tenantClaim).getOrElse(defaultTenant)
-        val pool   = xPool.getOrElse(defaultPool)
-        val user   = usernameFromJwt(token).orElse(username).getOrElse("unknown")
-        Right(Resolved(PoolKey(tenant, pool), user))
+        for
+          tenant <- hTenant
+                      .orElse(claimFromJwt(token, tenantClaim))
+                      .toRight(s"missing tenant: provide a 'tenant' header or a '$tenantClaim' JWT claim")
+          pool   <- hPool.toRight("'pool' header required")
+          key    <- resolvePoolKey(tenant, pool)
+        yield
+          val user = usernameFromJwt(token).orElse(username).getOrElse("unknown")
+          Resolved(key, user)
 
       case _ =>
-        username match
-          case Some(u) if u.nonEmpty =>
-            val parts = u.split("/", -1).toList
-            parts match
-              case t :: p :: user :: Nil if t.nonEmpty && p.nonEmpty && user.nonEmpty =>
-                Right(Resolved(PoolKey(t, p), user))
-              case p :: user :: Nil if p.nonEmpty && user.nonEmpty =>
-                Right(Resolved(PoolKey(defaultTenant, p), user))
-              case user :: Nil if user.nonEmpty =>
-                Right(Resolved(PoolKey(defaultTenant, xPool.getOrElse(defaultPool)), user))
-              case _ =>
-                Left(s"username '$u' has empty segment(s)")
-          case _ =>
+        username.filter(_.nonEmpty) match
+          case None =>
             Left("no JWT or username provided")
+          case Some(user) =>
+            for
+              tenant <- hTenant.toRight("'tenant' header required")
+              pool   <- hPool.toRight("'pool' header required")
+              key    <- resolvePoolKey(tenant, pool)
+            yield Resolved(key, user)

@@ -26,7 +26,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
       startupTimeoutSec = 5,
       readPodReady = _ => true
     )
-    val spec = NodeSpec(PoolKey("acme", "sales"), "quack-n1", Role.Dual,
+    val spec = NodeSpec(PoolKey("acme", "acme_default", "sales"), "quack-n1", Role.Dual,
                         metastore = Map("pgHost" -> "pg"), s3 = Map.empty)
     val node = backend.start(spec).unsafeRunSync()
     node.podName.isDefined shouldBe true
@@ -55,7 +55,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
       readEnv      = name => fakeEnv.get(name)
     )
     val node = backend.start(
-      NodeSpec(PoolKey("acme", "sales"), "quack-cred-fwd", Role.Dual,
+      NodeSpec(PoolKey("acme", "acme_default", "sales"), "quack-cred-fwd", Role.Dual,
                metastore = Map.empty, s3 = Map.empty)
     ).unsafeRunSync()
 
@@ -85,7 +85,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
       readEnv      = name => fakeEnv.get(name)
     )
     val node = backend.start(
-      NodeSpec(PoolKey("acme", "sales"), "quack-cred-override", Role.Dual,
+      NodeSpec(PoolKey("acme", "acme_default", "sales"), "quack-cred-override", Role.Dual,
                metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
                s3        = Map.empty)
     ).unsafeRunSync()
@@ -109,6 +109,7 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
     val labels = new java.util.HashMap[String, String]()
     labels.put("managed-by", "quack-on-demand")
     labels.put("quack-tenant", "acme")
+    labels.put("quack-tenant-db", "acme_default")
     labels.put("quack-pool", "sales")
     labels.put("quack-role", "Dual")
     labels.put("quack-max-concurrent", "3")

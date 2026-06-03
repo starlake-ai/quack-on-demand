@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { TenantDbResponse } from '../api/types';
+import CatalogBrowser from './CatalogBrowser';
 import DataPathEditor, {
   buildObjectStore, parseExtras as parseStoreExtras,
   type StoreType,
@@ -12,9 +13,13 @@ import DataPathEditor, {
 export default function DatabaseSection({ tenant }: { tenant: string }) {
   const prefix = `${tenant}_`;
 
-  const [dbs, setDbs]     = useState<TenantDbResponse[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  const [dbs, setDbs]         = useState<TenantDbResponse[]>([]);
+  const [error, setError]     = useState<string | null>(null);
+  const [adding, setAdding]   = useState(false);
+  // null = show the list; otherwise the name of the database being
+  // browsed inline via <CatalogBrowser>. Clicking "Back" returns to
+  // the list without leaving the Databases tab.
+  const [browsing, setBrowsing] = useState<string | null>(null);
 
   // Form state. The Name input always starts with the tenant prefix
   // and the locked-prefix logic in `onNameChange` keeps it there.
@@ -111,9 +116,29 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     }
   }
 
+  // Browsing-a-database mode: full-width catalog browser scoped to that DB.
+  if (browsing != null) {
+    return (
+      <div className="card">
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+          <div className="card-title" style={{ margin: 0 }}>
+            Catalog &mdash; <code>{browsing}</code>
+          </div>
+          <button onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
+        </div>
+        <CatalogBrowser tenant={tenant} tenantDb={browsing} />
+      </div>
+    );
+  }
+
   return (
     <div className="card">
-      <div className="card-title">Databases</div>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+        <div className="card-title" style={{ margin: 0 }}>Databases</div>
+        {!adding && (
+          <button onClick={openForm}>+ New database</button>
+        )}
+      </div>
       <p className="subtle">
         Each database is a separate Postgres database (one DuckLake catalog + data path + object-store
         config). The control plane creates it as <code>{`${tenant}_<suffix>`}</code> on the shared
@@ -137,7 +162,13 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             {dbs.map(d => (
               <tr key={d.id}>
                 <td>
-                  <code>{d.name}</code>
+                  <a
+                    href="#"
+                    onClick={ev => { ev.preventDefault(); setBrowsing(d.name); }}
+                    title="Browse this database's catalog"
+                  >
+                    <code>{d.name}</code>
+                  </a>
                   {d.disabled && <span className="subtle"> (disabled)</span>}
                 </td>
                 <td><code>{d.metastore.schemaName || '-'}</code></td>
@@ -151,9 +182,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
         </table>
       )}
 
-      {!adding ? (
-        <button onClick={openForm} style={{ marginTop: '0.5rem' }}>+ New database</button>
-      ) : (
+      {adding && (
         <form onSubmit={handleCreate} style={{ marginTop: '0.75rem' }}>
           <fieldset>
             <legend>Identity</legend>

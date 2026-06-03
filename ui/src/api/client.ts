@@ -3,6 +3,8 @@ import type {
   ScalePoolRequest,
   StopPoolRequest,
   SetMaxConcurrentRequest,
+  SetPoolDisabledRequest,
+  SetTenantDisabledRequest,
   PoolResponse,
   HealthResponse,
   TenantRequest,
@@ -92,17 +94,21 @@ export const api = {
 
   // Pools + nodes
   listPools:   () => get<{ pools: PoolResponse[] }>('/pool/list'),
-  poolStatus:  (t: string, p: string) => get<PoolResponse>(`/pool/${t}/${p}/status`),
+  poolStatus:  (t: string, td: string, p: string) =>
+    get<PoolResponse>(
+      `/pool/${encodeURIComponent(t)}/${encodeURIComponent(td)}/${encodeURIComponent(p)}/status`
+    ),
   createPool:  (req: CreatePoolRequest) => post<PoolResponse>('/pool/create', req),
   scalePool:   (req: ScalePoolRequest) => post<PoolResponse>('/pool/scale', req),
   stopPool:    (req: StopPoolRequest) => post<void>('/pool/stop', req),
   setMaxConcurrent: (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
+  setPoolDisabled:  (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
 
   // Tenants
-  listTenants:        () => get<TenantListResponse>('/tenant/list'),
-  createTenant:       (req: TenantRequest)   => post<TenantResponse>('/tenant/create', req),
-  setTenantMetastore: (req: TenantRequest)   => post<TenantResponse>('/tenant/setMetastore', req),
-  deleteTenant:       (req: TenantOpRequest) => post<void>('/tenant/delete', req),
+  listTenants:      () => get<TenantListResponse>('/tenant/list'),
+  createTenant:     (req: TenantRequest)            => post<TenantResponse>('/tenant/create', req),
+  deleteTenant:     (req: TenantOpRequest)          => post<void>('/tenant/delete', req),
+  setTenantDisabled:(req: SetTenantDisabledRequest) => post<TenantResponse>('/tenant/setDisabled', req),
 
   // Tenant identities
   listIdentities: (tenantId?: string) => {
@@ -132,14 +138,18 @@ export const api = {
     get<StatementHistoryResponse>(`/node/statements?limit=${limit}`),
 
   // Catalog browser
-  listCatalogSchemas: (tenant: string) =>
-    get<CatalogSchemaEntry[]>(`/catalog/tenant/${encodeURIComponent(tenant)}/schemas`),
-  listCatalogTables: (tenant: string, schema: string) =>
-    get<CatalogTableEntry[]>(
-      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables`
+  listCatalogSchemas: (tenant: string, tenantDb: string) =>
+    get<CatalogSchemaEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/schemas`
     ),
-  getCatalogTable: (tenant: string, schema: string, table: string) =>
+  listCatalogTables: (tenant: string, tenantDb: string, schema: string) =>
+    get<CatalogTableEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables`
+    ),
+  getCatalogTable: (tenant: string, tenantDb: string, schema: string, table: string) =>
     get<CatalogTableDetailResponse>(
-      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
     ),
 };

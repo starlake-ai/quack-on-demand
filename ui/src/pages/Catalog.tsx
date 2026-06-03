@@ -1,30 +1,28 @@
 import { useEffect, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type {
   TenantResponse,
-  CatalogSchemaEntry,
-  CatalogTableEntry,
+  TenantDbResponse,
 } from '../api/types';
+import CatalogBrowser from '../components/CatalogBrowser';
 
 export default function Catalog() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [tenants, setTenants] = useState<TenantResponse[]>([]);
-  const [tenant, setTenantState]   = useState<string>('');
-  const [schemas, setSchemas]      = useState<CatalogSchemaEntry[]>([]);
-  const [schema, setSchemaState]   = useState<string>('');
-  const [tables, setTables]        = useState<CatalogTableEntry[]>([]);
-  const [filter, setFilter]        = useState<string>('');
-  const [error, setError]          = useState<string | null>(null);
+  const [tenants, setTenants]       = useState<TenantResponse[]>([]);
+  const [tenant, setTenantState]    = useState<string>('');
+  const [tenantDbs, setTenantDbs]   = useState<TenantDbResponse[]>([]);
+  const [tenantDb, setTenantDbState] = useState<string>('');
+  const [error, setError]           = useState<string | null>(null);
 
   function pickTenant(t: string) {
     setTenantState(t);
-    setSchemaState('');
+    setTenantDbState('');
     setSearchParams({ tenant: t });
   }
-  function pickSchema(s: string) {
-    setSchemaState(s);
-    setSearchParams({ tenant, schema: s });
+  function pickTenantDb(td: string) {
+    setTenantDbState(td);
+    setSearchParams({ tenant, tenantDb: td });
   }
 
   useEffect(() => {
@@ -34,8 +32,8 @@ export default function Catalog() {
         const fromQuery = searchParams.get('tenant');
         const initial = fromQuery ?? r.tenants[0]?.name ?? '';
         if (initial) setTenantState(initial);
-        const querySchema = searchParams.get('schema');
-        if (querySchema) setSchemaState(querySchema);
+        const queryDb     = searchParams.get('tenantDb');
+        if (queryDb) setTenantDbState(queryDb);
       })
       .catch(e => setError(String(e)));
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -44,133 +42,42 @@ export default function Catalog() {
   useEffect(() => {
     if (!tenant) return;
     setError(null);
-    api.listCatalogSchemas(tenant)
-      .then(setSchemas)
+    api.listTenantDbs(tenant)
+      .then(r => {
+        setTenantDbs(r.tenantDbs);
+        if (!tenantDb && r.tenantDbs.length > 0) {
+          setTenantDbState(r.tenantDbs[0].name);
+        }
+      })
       .catch(e => setError(String(e)));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
-
-  useEffect(() => {
-    if (!tenant || !schema) { setTables([]); return; }
-    setError(null);
-    // Reset the filter when the user picks a different schema - a stale
-    // string typed against tpch1 would silently hide every row in main.
-    setFilter('');
-    api.listCatalogTables(tenant, schema)
-      .then(setTables)
-      .catch(e => setError(String(e)));
-  }, [tenant, schema]);
-
-  // Case-insensitive substring match on the table name. Cheap (linear)
-  // and matches DBeaver's behaviour; switch to fuzzy later if 1000+
-  // tables become normal.
-  const filteredTables = filter
-    ? tables.filter(t => t.name.toLowerCase().includes(filter.toLowerCase()))
-    : tables;
 
   return (
     <div>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>Catalog</h2>
-        <label>
-          Tenant&nbsp;
-          <select value={tenant} onChange={e => pickTenant(e.target.value)}>
-            {tenants.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-          </select>
-        </label>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <label>
+            Tenant&nbsp;
+            <select value={tenant} onChange={e => pickTenant(e.target.value)}>
+              {tenants.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+            </select>
+          </label>
+          <label>
+            Database&nbsp;
+            <select value={tenantDb} onChange={e => pickTenantDb(e.target.value)} disabled={tenantDbs.length === 0}>
+              {tenantDbs.length === 0 && <option value="">(no databases)</option>}
+              {tenantDbs.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
+            </select>
+          </label>
+        </div>
       </header>
 
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: '24px', marginTop: '12px' }}>
-        <aside>
-          <h3 style={{ marginTop: 0 }}>Schemas</h3>
-          {schemas.length === 0
-            ? <em style={{ color: '#888' }}>no schemas</em>
-            : (
-              <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                {schemas.map(s => {
-                  const active = s.name === schema;
-                  return (
-                    <li
-                      key={s.name}
-                      onClick={() => pickSchema(s.name)}
-                      style={{
-                        cursor: 'pointer',
-                        padding: '4px 8px',
-                        borderRadius: 4,
-                        background: active ? '#e6f0ff' : 'transparent',
-                        fontWeight: active ? 600 : 400,
-                      }}
-                    >
-                      {s.name}
-                      <span style={{ color: '#888', marginLeft: 6 }}>({s.tableCount})</span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-        </aside>
-
-        <main>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16, marginBottom: 8 }}>
-            <h3 style={{ margin: 0 }}>
-              Tables in {schema ? <code>{schema}</code> : <em style={{ color: '#888' }}>pick a schema</em>}
-            </h3>
-            {schema && tables.length > 0 && (
-              <input
-                type="search"
-                value={filter}
-                onChange={e => setFilter(e.target.value)}
-                placeholder="filter by name…"
-                style={{
-                  padding: '4px 8px',
-                  border: '1px solid #ccc',
-                  borderRadius: 4,
-                  fontSize: '0.9rem',
-                  width: 220,
-                }}
-              />
-            )}
-          </div>
-          {schema && (
-            tables.length === 0
-              ? <em style={{ color: '#888' }}>no tables</em>
-              : filteredTables.length === 0
-              ? <em style={{ color: '#888' }}>no tables matching <code>{filter}</code></em>
-              : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th align="left">Name</th>
-                      <th align="right">Rows</th>
-                      <th align="right">Data files</th>
-                      <th align="left">Folder</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredTables.map(t => (
-                      <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
-                        <td>
-                          <Link to={`/catalog/${encodeURIComponent(tenant)}/${encodeURIComponent(schema)}/${encodeURIComponent(t.name)}`}>
-                            {t.name}
-                          </Link>
-                        </td>
-                        <td align="right">
-                          {t.rowCount < 0 ? <em style={{ color: '#888' }}>--</em> : t.rowCount.toLocaleString()}
-                        </td>
-                        <td align="right">{t.dataFileCount}</td>
-                        <td>
-                          {t.folder
-                            ? <code style={{ fontSize: '0.85em', color: '#444' }}>{t.folder}</code>
-                            : <em style={{ color: '#888' }}>--</em>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )
-          )}
-        </main>
+      <div style={{ marginTop: '12px' }}>
+        {tenant && tenantDb && <CatalogBrowser tenant={tenant} tenantDb={tenantDb} />}
       </div>
     </div>
   );

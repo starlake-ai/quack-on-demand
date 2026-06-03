@@ -27,9 +27,16 @@ class ResourceOwnerPasswordAuthenticator(
     .build()
 
   override def authenticate(
+      tenant:   Option[String],
+      pool:     Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
+    // OIDC ROPC providers don't see (tenant, pool) -- those are
+    // tenant-system-of-record scoping. The OIDC server is authoritative
+    // for the password check; map-to-tenant happens via the JWT claims
+    // on the way back.
+    val _ = (tenant, pool)
     try
       val body = buildFormBody(username, password)
       val request = HttpRequest.newBuilder()

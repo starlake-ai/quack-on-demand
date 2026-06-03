@@ -27,19 +27,19 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
           Some(CatalogTableDetailResponse(region, List(column), List(file)))
         else None
 
-    val handlers = new CatalogHandlers(_ => reader)
+    val handlers = new CatalogHandlers((_, _) => reader)
 
   "listSchemas" should "return what the reader returns" in new Stubs:
-    handlers.listSchemas("acme") shouldBe schemas
+    handlers.listSchemas("acme", "acme_default") shouldBe schemas
 
   "listTables" should "filter by schema" in new Stubs:
-    handlers.listTables("acme", "tpch1") shouldBe List(region)
-    handlers.listTables("acme", "main")  shouldBe Nil
+    handlers.listTables("acme", "acme_default", "tpch1") shouldBe List(region)
+    handlers.listTables("acme", "acme_default", "main")  shouldBe Nil
 
   "getTable" should "return Some when present" in new Stubs:
-    val detail = handlers.getTable("acme", "tpch1", "region").value
+    val detail = handlers.getTable("acme", "acme_default", "tpch1","region").value
     detail.columns shouldBe List(column)
     detail.dataFiles shouldBe List(file)
 
   "getTable" should "return None when missing" in new Stubs:
-    handlers.getTable("acme", "tpch1", "ghost") shouldBe None
+    handlers.getTable("acme", "acme_default", "tpch1","ghost") shouldBe None

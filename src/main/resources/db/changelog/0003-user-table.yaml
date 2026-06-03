@@ -1,0 +1,46 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0003-qodstate-user
+      author: quack-on-demand
+      changes:
+        # The user table used to be `slkstate_user`, created on-the-fly by
+        # UserStore.ensureTable. Drop the legacy table (Liquibase owns the
+        # schema now) and recreate as `qodstate_user` with `tenant` and
+        # `pool` scoping columns -- a user is identified by
+        # (tenant, pool, username), not by username alone, so alice@acme
+        # cannot impersonate alice@corp.
+        #
+        # `tenant` and `pool` are NULL for the system admin (UI/REST
+        # access) and non-NULL for every FlightSQL principal. The two
+        # partial unique indexes below enforce that separation:
+        # admins have unique usernames globally, tenant-scoped users
+        # are unique within their (tenant, pool).
+        - sql:
+            sql: DROP TABLE IF EXISTS slkstate_user
+        - createTable:
+            tableName: qodstate_user
+            columns:
+              - column: { name: tenant,        type: TEXT }
+              - column: { name: pool,          type: TEXT }
+              - column: { name: username,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: password_hash, type: TEXT, constraints: { nullable: false } }
+              - column: { name: role,          type: TEXT, constraints: { nullable: false }, defaultValue: "user" }
+              - column: { name: created_at,    type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+              - column: { name: updated_at,    type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+        - sql:
+            sql: >
+              CREATE UNIQUE INDEX qodstate_user_admin_unique
+              ON qodstate_user (username)
+              WHERE tenant IS NULL AND pool IS NULL
+        - sql:
+            sql: >
+              CREATE UNIQUE INDEX qodstate_user_scoped_unique
+              ON qodstate_user (tenant, pool, username)
+              WHERE tenant IS NOT NULL AND pool IS NOT NULL
+        # Reject half-scoped rows: either both NULL (system admin) or
+        # both non-NULL (tenant-scoped user) -- never one without the other.
+        - sql:
+            sql: >
+              ALTER TABLE qodstate_user
+              ADD CONSTRAINT qodstate_user_scope_consistency
+              CHECK ((tenant IS NULL) = (pool IS NULL))

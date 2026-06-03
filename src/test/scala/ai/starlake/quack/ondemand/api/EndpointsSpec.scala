@@ -12,19 +12,18 @@ class EndpointsSpec extends AnyFlatSpec with Matchers:
 
   "CreatePoolRequest" should "round-trip through JSON" in:
     val req = CreatePoolRequest(
-      tenant = "acme",
-      pool = "sales",
-      size = 3,
-      roleDistribution = RoleDistribution(0, 2, 1),
-      metastore = Map("pgHost" -> "localhost"),
-      s3 = Map.empty,
+      tenant   = "acme",
+      tenantDb = "acme_default",
+      pool     = "sales",
+      size     = 3,
+      roleDistribution     = RoleDistribution(0, 2, 1),
       maxConcurrentPerNode = 4
     )
     val js = req.asJson.noSpaces
     decode[CreatePoolRequest](js) shouldBe Right(req)
 
   "SetMaxConcurrentRequest" should "round-trip through JSON" in:
-    val req = SetMaxConcurrentRequest("acme", "sales", "node-1", 8)
+    val req = SetMaxConcurrentRequest("acme", "acme_default", "sales", "node-1", 8)
     decode[SetMaxConcurrentRequest](req.asJson.noSpaces) shouldBe Right(req)
 
   "NodeInfo" should "default maxConcurrent to 0 when absent from JSON" in:

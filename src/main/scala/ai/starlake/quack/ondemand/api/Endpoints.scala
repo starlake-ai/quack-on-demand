@@ -30,8 +30,10 @@ object Endpoints:
   val listPools: PublicEndpoint[Unit, (sttp.model.StatusCode, ErrorResponse), PoolListResponse, Any] =
     base.get.in("pool" / "list").out(jsonBody[PoolListResponse])
 
-  val poolStatus: PublicEndpoint[(String, String), (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
-    base.get.in("pool" / path[String]("tenant") / path[String]("pool") / "status").out(jsonBody[PoolResponse])
+  val poolStatus: PublicEndpoint[(String, String, String), (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
+    base.get.in(
+      "pool" / path[String]("tenant") / path[String]("tenantDb") / path[String]("pool") / "status"
+    ).out(jsonBody[PoolResponse])
 
   val setRole: PublicEndpoint[SetRoleRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("node" / "setRole").in(jsonBody[SetRoleRequest])
@@ -59,11 +61,14 @@ object Endpoints:
   val listTenants: PublicEndpoint[Unit, (sttp.model.StatusCode, ErrorResponse), TenantListResponse, Any] =
     base.get.in("tenant" / "list").out(jsonBody[TenantListResponse])
 
-  val setTenantMetastore: PublicEndpoint[TenantRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
-    base.post.in("tenant" / "setMetastore").in(jsonBody[TenantRequest]).out(jsonBody[TenantResponse])
-
   val deleteTenant: PublicEndpoint[TenantOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("tenant" / "delete").in(jsonBody[TenantOpRequest])
+
+  val setTenantDisabled: PublicEndpoint[SetTenantDisabledRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
+    base.post.in("tenant" / "setDisabled").in(jsonBody[SetTenantDisabledRequest]).out(jsonBody[TenantResponse])
+
+  val setPoolDisabled: PublicEndpoint[SetPoolDisabledRequest, (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
+    base.post.in("pool" / "setDisabled").in(jsonBody[SetPoolDisabledRequest]).out(jsonBody[PoolResponse])
 
   // ----- Tenant identity allowlist -----
   val createIdentity: PublicEndpoint[IdentityRequest, (sttp.model.StatusCode, ErrorResponse), IdentityResponse, Any] =
@@ -116,27 +121,30 @@ object Endpoints:
 
   // ----- Catalog browser -----
 
-  val listSchemasEndpoint: PublicEndpoint[String, Unit, List[CatalogSchemaEntry], Any] =
+  val listSchemasEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogSchemaEntry], Any] =
     endpoint
       .get
-      .in("api" / "catalog" / "tenant" / path[String]("tenant") / "schemas")
+      .in("api" / "catalog" / "tenant" / path[String]("tenant") /
+          "database" / path[String]("tenantDb") / "schemas")
       .out(jsonBody[List[CatalogSchemaEntry]])
-      .description("List schemas in the DuckLake catalog backing the tenant.")
+      .description("List schemas in the DuckLake catalog of the (tenant, tenantDb).")
 
-  val listTablesEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogTableEntry], Any] =
+  val listTablesEndpoint: PublicEndpoint[(String, String, String), Unit, List[CatalogTableEntry], Any] =
     endpoint
       .get
       .in("api" / "catalog" / "tenant" / path[String]("tenant") /
-          "schemas" / path[String]("schema") / "tables")
+          "database" / path[String]("tenantDb") /
+          "schemas"  / path[String]("schema") / "tables")
       .out(jsonBody[List[CatalogTableEntry]])
-      .description("List tables in a schema of the tenant's catalog.")
+      .description("List tables in a schema of the (tenant, tenantDb)'s catalog.")
 
-  val getTableEndpoint: PublicEndpoint[(String, String, String), String, CatalogTableDetailResponse, Any] =
+  val getTableEndpoint: PublicEndpoint[(String, String, String, String), String, CatalogTableDetailResponse, Any] =
     endpoint
       .get
       .in("api" / "catalog" / "tenant" / path[String]("tenant") /
-          "schemas" / path[String]("schema") /
-          "tables"  / path[String]("table"))
+          "database" / path[String]("tenantDb") /
+          "schemas"  / path[String]("schema") /
+          "tables"   / path[String]("table"))
       .out(jsonBody[CatalogTableDetailResponse])
       .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
       .description("Get one table's columns + parquet data files.")
