@@ -12,6 +12,8 @@ import scala.util.Try
   * localhost:5432, user `postgres`, password `azizam`). */
 class TenantIdentityStoreSpec extends AnyFlatSpec with Matchers:
 
+  ai.starlake.quack.ondemand.state.testkit.TestPostgres.dropStrayTestDatabases("qodti")
+
   private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
   private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
@@ -49,7 +51,7 @@ class TenantIdentityStoreSpec extends AnyFlatSpec with Matchers:
       psql(dbName, "INSERT INTO qodstate_tenant (id, display_name, disabled) VALUES ('t-1', 'acme', false)")
       psql(dbName, "INSERT INTO qodstate_tenant (id, display_name, disabled) VALUES ('t-2', 'beta', false)")
       test(new TenantIdentityStore(dbUrl(dbName), pgUser, pgPass))
-    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName""""))
+    finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
 
   "TenantIdentityStore" should "round-trip a database-user identity" in withStore { store =>
     val created = store.create("t-1", "db", "alice")
