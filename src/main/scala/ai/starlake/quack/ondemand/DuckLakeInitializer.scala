@@ -5,14 +5,15 @@ import com.typesafe.scalalogging.LazyLogging
 
 import java.sql.DriverManager
 
-/** Pre-bootstraps the DuckLake catalog before any Quack node spawns.
+/** Pre-bootstraps a per-tenant-db DuckLake catalog before its first
+  * Quack node spawns.
   *
-  * **Problem.** A cold-boot manager fans out N concurrent
-  * `spawn-quack-node.sh` calls. Each spawned `duckdb` process runs
-  * `ATTACH ducklake:postgres:...`, which DuckLake implements as a batch
-  * of `CREATE TABLE __ducklake_*` against the shared Postgres catalog.
-  * Concurrent `CREATE TABLE` of the same name races on Postgres's
-  * `pg_type_typname_nsp_index` uniqueness:
+  * **Problem.** When a tenant-db's first pool comes up, the supervisor
+  * fans out N concurrent `spawn-quack-node.sh` calls. Each spawned
+  * `duckdb` process runs `ATTACH ducklake:postgres:...`, which DuckLake
+  * implements as a batch of `CREATE TABLE __ducklake_*` against that
+  * tenant-db's Postgres catalog. Concurrent `CREATE TABLE` of the same
+  * name races on Postgres's `pg_type_typname_nsp_index` uniqueness:
   *
   * {{{
   * ERROR: duplicate key value violates unique constraint
@@ -24,15 +25,22 @@ import java.sql.DriverManager
   * that session, and every later `USE` / `SELECT` against it errors with
   * `Catalog "<dbName>" does not exist!`.
   *
-  * **Fix.** Call `DuckLakeInitializer.init(...)` once at manager startup
-  * BEFORE any node spawn. It opens a one-shot embedded DuckDB connection
-  * (via the same `duckdb_jdbc` driver `QuackHttpClient` already uses on
-  * the embedded path), runs `INSTALL/LOAD ducklake; ATTACH ...;` against
-  * the shared Postgres, then closes. After this the `ducklake_*` tables
+  * **Fix.** Call `DuckLakeInitializer.initBlocking(...)` once from
+  * `PoolSupervisor.createTenantDb`, right after the per-tenant-db
+  * Postgres database is provisioned and before any node can spawn against
+  * it. The call opens a one-shot embedded DuckDB connection (via the same
+  * `duckdb_jdbc` driver `QuackHttpClient` already uses on the embedded
+  * path), runs `INSTALL/LOAD ducklake; ATTACH ...;` against that
+  * tenant-db's Postgres, then closes. After this the `ducklake_*` tables
   * exist; every per-node `ATTACH` from `spawn-quack-node.sh` is then
   * read-only on the metadata and the pg_type race cannot fire.
   *
-  * Idempotent: a re-init on an already-initialized catalog is a no-op.
+  * The control-plane database (`qod`) is never touched by this code -
+  * it holds `qodstate_*` / `slkstate_*` only.
+  *
+  * Idempotent on the *same* dataPath: a re-init that matches the
+  * recorded `ducklake_metadata.data_path` is a no-op. Re-init with a
+  * different dataPath is rejected by DuckLake itself.
   *
   * Pure JVM - no `duckdb` CLI on the manager host required (the duckdb
   * JDBC driver ships its own embedded engine), no shell-out, no extra
@@ -40,22 +48,31 @@ import java.sql.DriverManager
   */
 object DuckLakeInitializer extends LazyLogging:
 
-  def init(defaultMetastore: Map[String, String]): IO[Unit] = IO.blocking {
-    val pgHost     = defaultMetastore.getOrElse("pgHost", "localhost")
-    val pgPort     = defaultMetastore.getOrElse("pgPort", "5432")
-    val pgUser     = defaultMetastore.getOrElse("pgUser", "postgres")
-    val pgPassword = defaultMetastore.getOrElse("pgPassword", "")
-    val dbName     = defaultMetastore.getOrElse("dbName", "")
-    val schemaName = defaultMetastore.getOrElse("schemaName", "main")
-    val dataPath   = defaultMetastore.getOrElse("dataPath", "")
-    if dbName.isEmpty || dataPath.isEmpty then
+  /** Blocking entry point - intended to be called from inside
+    * `PoolSupervisor.createTenantDb` (already wrapped in
+    * `IO.blocking { ... }`). Skips with a warning if the metastore lacks
+    * the keys needed to reach the tenant-db Postgres - the per-node
+    * ATTACH later on will surface the same misconfiguration loudly. */
+  def initBlocking(metastore: Map[String, String]): Unit =
+    val dbName     = metastore.getOrElse("dbName", "")
+    val dataPath   = metastore.getOrElse("dataPath", "")
+    if !metastore.contains("pgHost") || dbName.isEmpty || dataPath.isEmpty then
       logger.warn(
-        s"DuckLake pre-init skipped: defaultMetastore missing dbName/dataPath " +
-        s"(dbName='$dbName', dataPath='$dataPath')."
+        s"DuckLake pre-init skipped: metastore missing pgHost/dbName/dataPath " +
+        s"(dbName='$dbName', dataPath='$dataPath', hasPgHost=${metastore.contains("pgHost")})."
       )
     else
+      val pgHost     = metastore("pgHost")
+      val pgPort     = metastore.getOrElse("pgPort", "5432")
+      val pgUser     = metastore.getOrElse("pgUser", "postgres")
+      val pgPassword = metastore.getOrElse("pgPassword", "")
+      val schemaName = metastore.getOrElse("schemaName", "main")
       runInit(pgHost, pgPort, pgUser, pgPassword, dbName, schemaName, dataPath)
-  }
+
+  /** IO wrapper around [[initBlocking]]. Retained for callers that
+    * already compose `IO` (none today inside the codebase - kept for
+    * symmetry with the rest of the bootstrap chain). */
+  def init(metastore: Map[String, String]): IO[Unit] = IO.blocking(initBlocking(metastore))
 
   private def runInit(
       pgHost: String, pgPort: String, pgUser: String, pgPassword: String,

@@ -18,7 +18,7 @@ import scala.collection.concurrent.TrieMap
 
 class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
-  private val poolKey: PoolKey = PoolKey("acme", "sales")
+  private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
 
   private val mmReg = new SimpleMeterRegistry
   private val si    = new StatementInstruments(mmReg)
@@ -45,8 +45,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup = new PoolSupervisor(backend, tracker,
                                  new InMemoryControlPlaneStore())
     // Pre-register the tenant so createPool succeeds under the new contract.
-    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant, Map.empty)).unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1), Map.empty, Map.empty).unsafeRunSync()
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, Map.empty, "").unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
 
     // Use TestArrow.sharedAllocator (which never closes); each call gets a
@@ -101,7 +102,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "return Left when pool does not exist" in:
     val (router, _, _) = setup()
-    val out = router.execute("c-3", "alice", PoolKey("ghost", "missing"), "SELECT 1").unsafeRunSync()
+    val out = router.execute("c-3", "alice", PoolKey("ghost", "ghost_default", "missing"), "SELECT 1").unsafeRunSync()
     out shouldBe a [Left[_, _]]
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:

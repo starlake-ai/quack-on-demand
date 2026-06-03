@@ -12,7 +12,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       min = 23000, max = 23010,
       commandFor = (spec, port, token) => List("sh", "-c", s"sleep 30 # port=$port token=$token")
     )
-    val spec = NodeSpec(PoolKey("t", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
+    val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
     val node = backend.start(spec).unsafeRunSync()
     try
       node.host shouldBe "127.0.0.1"
@@ -24,7 +24,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
   it should "release the port on stop" in:
     val backend = new LocalQuackBackend(23020, 23021,
       commandFor = (_, _, _) => List("sh", "-c", "sleep 30"))
-    val spec = NodeSpec(PoolKey("t", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
+    val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
     backend.start(spec).unsafeRunSync()
     backend.stop("node-2").unsafeRunSync()
     backend.isAlive("node-2") shouldBe false
@@ -32,7 +32,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
   it should "carry NodeSpec.maxConcurrent through to RunningNode" in:
     val backend = new LocalQuackBackend(23030, 23031,
       commandFor = (_, _, _) => List("sh", "-c", "sleep 30"))
-    val spec = NodeSpec(PoolKey("t", "p"), "node-3", Role.Dual, Map.empty, Map.empty, maxConcurrent = 5)
+    val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-3", Role.Dual, Map.empty, Map.empty, maxConcurrent = 5)
     val node = backend.start(spec).unsafeRunSync()
     try node.maxConcurrent shouldBe 5
     finally backend.stop("node-3").unsafeRunSync()
@@ -48,7 +48,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       )
     )
     val spec = NodeSpec(
-      PoolKey("t", "p"), "node-env", Role.Dual,
+      PoolKey("t", "t_default", "p"), "node-env", Role.Dual,
       metastore = Map("pgHost" -> "override-host", "dbName" -> "specdb"),
       s3 = Map.empty
     )

@@ -32,18 +32,31 @@ class AuthenticationService(config: AuthenticationConfig, sessionConfig: Session
 
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
-  def authenticateBasic(username: String, password: String): Either[String, AuthenticatedProfile] =
+  /** Authenticate `(tenant, pool, username, password)` against the basic
+    * chain. `tenant`/`pool` are `None` for the system-admin login path
+    * (manager UI/REST), and both `Some(_)` for a tenant-scoped FlightSQL
+    * principal. The database provider filters its lookup by all three;
+    * OIDC ROPC providers ignore the scope. */
+  def authenticateBasic(
+      tenant:   Option[String],
+      pool:     Option[String],
+      username: String,
+      password: String
+  ): Either[String, AuthenticatedProfile] =
     if basicProviders.isEmpty then Left("No basic auth providers configured")
     else
+      val scope = (tenant, pool) match
+        case (Some(t), Some(p)) => s"$t/$p"
+        case _                  => "system"
       val errors = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
-          provider.authenticate(username, password) match
+          provider.authenticate(tenant, pool, username, password) match
             case right @ Right(_) =>
-              logger.info(s"User '$username' authenticated via ${provider.name}")
+              logger.info(s"User '$username' ($scope) authenticated via ${provider.name}")
               right
             case Left(err) =>
-              logger.debug(s"Provider ${provider.name} rejected '$username': $err")
+              logger.debug(s"Provider ${provider.name} rejected '$username' ($scope): $err")
               errors += s"${provider.name}: $err"
               Left(err)
         }

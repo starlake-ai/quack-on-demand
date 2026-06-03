@@ -14,9 +14,9 @@ final class NodeHandlers(
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  private def withNode[A](tenant: String, pool: String, nodeId: String)
+  private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)
                          (f: => IO[A]): Out[A] =
-    sup.get(PoolKey(tenant, pool)).flatMap(_.nodes.find(_.nodeId == nodeId)) match
+    sup.get(PoolKey(tenant, tenantDb, pool)).flatMap(_.nodes.find(_.nodeId == nodeId)) match
       case None =>
         IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", "no such node"))))
       case Some(_) => f.map(Right(_))
@@ -29,27 +29,27 @@ final class NodeHandlers(
         // Role mutation is metadata-only at runtime (the router reads role from
         // RunningNode). For v1 we don't restart the node - just acknowledge.
         // A future task may add a CRD-style restart that re-syncs the role label.
-        withNode(req.tenant, req.pool, req.nodeId)(IO.unit)
+        withNode(req.tenant, req.tenantDb, req.pool, req.nodeId)(IO.unit)
 
   def setMaxConcurrent(req: SetMaxConcurrentRequest): Out[Unit] =
     if req.max < 0 then
       IO.pure(Left((StatusCode.BadRequest,
         ErrorResponse("invalid_max", "max must be >= 0 (0 = unlimited)"))))
     else
-      sup.setMaxConcurrent(PoolKey(req.tenant, req.pool), req.nodeId, req.max).map {
+      sup.setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max).map {
         case Some(_) => Right(())
         case None    =>
           Left((StatusCode.NotFound,
-                ErrorResponse("not_found", s"node ${req.nodeId} not found in ${req.tenant}/${req.pool}")))
+                ErrorResponse("not_found", s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}")))
       }
 
   def quarantineNode(req: NodeOpRequest): Out[Unit] =
-    withNode(req.tenant, req.pool, req.nodeId) {
+    withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
       IO.delay(tracker.setHealthy(req.nodeId, false))
     }
 
   def restartNode(req: NodeOpRequest): Out[Unit] =
-    withNode(req.tenant, req.pool, req.nodeId) {
+    withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
       IO.delay(tracker.setDraining(req.nodeId, true)) *>
         backend.stop(req.nodeId) *>
         IO.delay(tracker.setDraining(req.nodeId, false))

@@ -92,14 +92,14 @@ final class ManagerServer(
       // Postgres metastore. JDBC calls go on `IO.blocking` since Hikari
       // semantics are synchronous.
       List[ServerEndpoint[Any, IO]](
-        Endpoints.listSchemasEndpoint.serverLogicSuccess { tenant =>
-          IO.blocking(h.listSchemas(tenant))
+        Endpoints.listSchemasEndpoint.serverLogicSuccess { case (tenant, tenantDb) =>
+          IO.blocking(h.listSchemas(tenant, tenantDb))
         },
-        Endpoints.listTablesEndpoint.serverLogicSuccess { case (tenant, schema) =>
-          IO.blocking(h.listTables(tenant, schema))
+        Endpoints.listTablesEndpoint.serverLogicSuccess { case (tenant, tenantDb, schema) =>
+          IO.blocking(h.listTables(tenant, tenantDb, schema))
         },
-        Endpoints.getTableEndpoint.serverLogic { case (tenant, schema, table) =>
-          IO.blocking(h.getTable(tenant, schema, table)).map {
+        Endpoints.getTableEndpoint.serverLogic { case (tenant, tenantDb, schema, table) =>
+          IO.blocking(h.getTable(tenant, tenantDb, schema, table)).map {
             case Some(d) => Right(d)
             case None    => Left(s"table $schema.$table not found")
           }
@@ -121,15 +121,16 @@ final class ManagerServer(
       Endpoints.scalePool.serverLogic(pools.scalePool),
       Endpoints.stopPool.serverLogic(pools.stopPool),
       Endpoints.listPools.serverLogic(_ => pools.listPools()),
-      Endpoints.poolStatus.serverLogic((t, p) => pools.poolStatus(t, p)),
+      Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
+      Endpoints.setPoolDisabled.serverLogic(pools.setPoolDisabled),
       Endpoints.setRole.serverLogic(nodes.setRole),
       Endpoints.setMaxConcurrent.serverLogic(nodes.setMaxConcurrent),
       Endpoints.quarantineNode.serverLogic(nodes.quarantineNode),
       Endpoints.restartNode.serverLogic(nodes.restartNode),
       Endpoints.createTenant.serverLogic(tenants.createTenant),
       Endpoints.listTenants.serverLogic(_ => tenants.listTenants()),
-      Endpoints.setTenantMetastore.serverLogic(tenants.setTenantMetastore),
       Endpoints.deleteTenant.serverLogic(tenants.deleteTenant),
+      Endpoints.setTenantDisabled.serverLogic(tenants.setTenantDisabled),
       Endpoints.createIdentity.serverLogic(identities.createIdentity),
       Endpoints.listIdentities.serverLogic(identities.listIdentities),
       Endpoints.deleteIdentity.serverLogic(identities.deleteIdentity),

@@ -79,6 +79,26 @@ if [[ "$SCHEMA_NAME" == "$DB_NAME" ]]; then
   exit 1
 fi
 
+# Provision the target Postgres database if it doesn't exist. With per-
+# tenant-db storage the loader's target is the bootstrap tenant-db (e.g.
+# `tpch_tpch1`) which the manager only creates at boot inside
+# PoolSupervisor.createTenantDb. Doing it here too lets the loader run
+# BEFORE the manager (the order run-jar.sh uses). Mirrors the same idiom
+# in spawn-quack-node.sh. Skipped silently when psql is absent -- the
+# ATTACH below will then surface the missing-database error itself.
+if command -v psql >/dev/null 2>&1; then
+  PG_ADMIN_DB="${PG_ADMIN_DB:-postgres}"
+  EXISTS=$(PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
+    -d "$PG_ADMIN_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" 2>/dev/null || true)
+  if [[ "$EXISTS" != "1" ]]; then
+    echo "load-tpch: creating Postgres database $DB_NAME"
+    PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
+      -d "$PG_ADMIN_DB" -tAc "CREATE DATABASE \"$DB_NAME\"" >/dev/null || {
+        echo "WARN: CREATE DATABASE $DB_NAME failed; ATTACH below may fail" >&2
+      }
+  fi
+fi
+
 # Detect remote DATA_PATH (s3:// / SeaweedFS / MinIO / R2, gs://, azure://) and
 # emit the matching DuckDB extension + SECRET so the ATTACH below can read/write
 # parquet against the bucket. Skips mkdir + canonicalize for remote schemes.

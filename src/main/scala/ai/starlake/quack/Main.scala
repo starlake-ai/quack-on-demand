@@ -82,7 +82,10 @@ object Main extends IOApp.Simple with LazyLogging:
       pgPort       = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
       pgHost       = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
       jwtSecretKey = authCfg.jwt.secretKey,
-      aclTenant    = edgeCfg.defaultTenant
+      // ACL grants are partitioned by tenant_id in slkstate_acl_grant; use
+      // the bootstrap tenant as the partition key since that's the tenant
+      // that gets seeded with an admin + ALL grant on startup.
+      aclTenant    = mgrCfg.bootstrap.tenant
     )
     val authService = new AuthenticationService(authCfg, sessionCfg)
 
@@ -92,16 +95,28 @@ object Main extends IOApp.Simple with LazyLogging:
     // QOD_ADMIN_USERNAME (comma-separated) get the same password + role.
     // Skipped for stateStorage=file (no Postgres connection assumed).
     if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+      // Apply the Liquibase changelog first: `qodstate_user` (and the rest
+      // of the control plane) must exist before we upsert the admin row.
+      // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+      LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore).run()
       val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
       val admins = mgrCfg.admin.usernameList
       if admins.isEmpty then
         logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
       else
         admins.foreach { name =>
-          val inserted = userStore.upsertUser(name, mgrCfg.admin.password, mgrCfg.admin.role)
+          // System-admin scope: tenant=NULL, pool=NULL. The qodstate_user
+          // CHECK constraint requires both NULL together.
+          val inserted = userStore.upsertUser(
+            tenant    = None,
+            pool      = None,
+            username  = name,
+            plaintext = mgrCfg.admin.password,
+            role      = mgrCfg.admin.role
+          )
           val verb = if inserted then "created" else "updated"
           logger.info(
-            s"admin user $verb: $name (role=${mgrCfg.admin.role}) in slkstate_user"
+            s"admin user $verb: $name (role=${mgrCfg.admin.role}) in qodstate_user"
           )
         }
 
@@ -121,10 +136,6 @@ object Main extends IOApp.Simple with LazyLogging:
       case other => sys.error(s"unknown runtime: $other")
 
     val tracker  = new NodeLoadTracker
-    // Apply the Liquibase changelog before any store touches the DB.
-    // Idempotent: Liquibase's DATABASECHANGELOG records skip already-
-    // applied changesets, so a second boot is a no-op.
-    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore).run()
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
@@ -161,11 +172,11 @@ object Main extends IOApp.Simple with LazyLogging:
     // spawn-node.
     val catalogHandlers: Option[CatalogHandlers] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val cache = new java.util.concurrent.ConcurrentHashMap[String, DuckLakeCatalogReader]()
-        def reader(tenant: String): DuckLakeCatalogReader =
+        val cache = new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
+        def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
           cache.computeIfAbsent(
-            tenant,
-            t => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t))
+            (tenant, tenantDb),
+            { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
           )
         Some(new CatalogHandlers(reader))
       else None
@@ -265,7 +276,7 @@ object Main extends IOApp.Simple with LazyLogging:
           .normalizeTenantDbName(bs.tenant, bs.tenantDb)
           .fold(err => sys.error(s"bootstrap: invalid tenant/tenantDb: $err"), identity)
 
-        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, bs.pool)
+        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, tenantDbName, bs.pool)
         val dist = ai.starlake.quack.model.RoleDistribution(
           bs.roleDistribution.writeonly,
           bs.roleDistribution.readonly,
@@ -313,12 +324,12 @@ object Main extends IOApp.Simple with LazyLogging:
 
         val createPoolIO: IO[Unit] =
           if sup.get(key).isDefined then
-            IO.delay(logger.info(s"bootstrap: pool '${bs.tenant}/${bs.pool}' already exists; skipping"))
+            IO.delay(logger.info(s"bootstrap: pool '$key' already exists; skipping"))
           else
-            sup.createPool(key, dist, Map.empty, Map.empty).attempt.flatMap {
+            sup.createPool(key, dist).attempt.flatMap {
               case Right(nodes) =>
                 IO.delay(logger.info(
-                  s"bootstrap: created pool '${bs.tenant}/${bs.pool}' with ${nodes.size} node(s) " +
+                  s"bootstrap: created pool '$key' with ${nodes.size} node(s) " +
                   s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"))
               case Left(t) =>
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
@@ -360,9 +371,25 @@ object Main extends IOApp.Simple with LazyLogging:
           val srv = new FlightEdgeServer(
             EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
                        edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
-                       edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
+                       edgeCfg.sessionTtlSec),
             fsRouter,
-            authService)
+            authService,
+            (tenant, pool) =>
+              sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
+                case None => Left(s"pool '$pool' not found in tenant '$tenant'")
+                case Some(key) =>
+                  // Tenant kill switch wins over pool kill switch -- a disabled
+                  // tenant should report itself, not its pool, to avoid leaking
+                  // pool existence under a disabled tenant.
+                  sup.getTenant(key.tenant) match
+                    case Some(t) if t.disabled =>
+                      Left(s"tenant '${key.tenant}' is disabled")
+                    case _ =>
+                      sup.get(key) match
+                        case Some(s) if s.disabled =>
+                          Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
+                        case _ =>
+                          Right(key.tenantDb))
           srv.start()
           srv
         catch case t: Throwable =>
@@ -374,10 +401,11 @@ object Main extends IOApp.Simple with LazyLogging:
         aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint
       )
-      // Pre-init the DuckLake catalog before any Quack node spawn races
-      // to create the same `__ducklake_*` tables in Postgres. See the
-      // DuckLakeInitializer scaladoc for the failure mode this avoids.
-      DuckLakeInitializer.init(mgrCfg.defaultMetastore) *>
+      // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
+      // calls DuckLakeInitializer.initBlocking once the tenant-db's own
+      // Postgres database has been provisioned. The control-plane
+      // database holds qodstate_* / slkstate_* only and must never carry
+      // ducklake_* tables.
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
       bootstrapIO *>

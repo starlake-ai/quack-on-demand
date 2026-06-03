@@ -27,24 +27,35 @@ export interface NodeInfo {
 
 export interface PoolResponse {
   tenant: string;
+  tenantDb: string;
   pool: string;
   nodes: NodeInfo[];
   status: string;
-  metastore: Record<string, string>;   // effective merged metastore; pgPassword redacted
+  // Effective metastore for this pool (inherited from the tenant-db).
+  // pgPassword is redacted.
+  metastore: Record<string, string>;
+  disabled: boolean;
+}
+
+export interface SetPoolDisabledRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  disabled: boolean;
 }
 
 export interface CreatePoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   size: number;
   roleDistribution: RoleDistribution;
-  metastore: Record<string, string>;
-  s3?: Record<string, string>;
   maxConcurrentPerNode?: number; // default 0 = unlimited
 }
 
 export interface ScalePoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   targetSize: number;
   roleDistribution: RoleDistribution;
@@ -53,12 +64,14 @@ export interface ScalePoolRequest {
 
 export interface StopPoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   force?: boolean;
 }
 
 export interface SetMaxConcurrentRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   nodeId: string;
   max: number;
@@ -83,14 +96,17 @@ export interface ClientConfigResponse {
 
 export interface TenantRequest {
   name: string;
-  metastore?: Record<string, string>;
 }
 
 export interface TenantResponse {
   name: string;
-  metastore: Record<string, string>;             // tenant's own overrides
   pools: string[];
-  effectiveMetastore: Record<string, string>;    // global defaults merged with overrides; pgPassword redacted
+  disabled: boolean;
+}
+
+export interface SetTenantDisabledRequest {
+  name: string;
+  disabled: boolean;
 }
 
 export interface TenantListResponse {

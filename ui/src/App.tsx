@@ -19,7 +19,6 @@ function Shell() {
         <span className="brand">🦆 Quack on Demand</span>
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
-        <NavLink to="/catalog"     className={({ isActive }) => isActive ? 'active' : ''}>Catalog</NavLink>
         <span className="spacer" />
         {authEnabled ? (
           <>
@@ -40,12 +39,12 @@ function Shell() {
           <Route path="/tenants"                          element={<TenantList />} />
           <Route path="/create-tenant"                    element={<CreateTenant />} />
           <Route path="/tenant/:tenant"                   element={<TenantDetail />} />
-          <Route path="/tenant/:tenant/create-pool"       element={<CreatePool />} />
-          <Route path="/pool/:tenant/:pool"               element={<PoolDetail />} />
-          <Route path="/pool/:tenant/:pool/scale"         element={<ScalePool />} />
-          <Route path="/nodes"                            element={<Nodes />} />
-          <Route path="/catalog"                          element={<Catalog />} />
-          <Route path="/catalog/:tenant/:schema/:table"   element={<CatalogTableDetail />} />
+          <Route path="/tenant/:tenant/create-pool"                element={<CreatePool />} />
+          <Route path="/pool/:tenant/:tenantDb/:pool"              element={<PoolDetail />} />
+          <Route path="/pool/:tenant/:tenantDb/:pool/scale"        element={<ScalePool />} />
+          <Route path="/nodes"                                     element={<Nodes />} />
+          <Route path="/catalog"                                   element={<Catalog />} />
+          <Route path="/catalog/:tenant/:tenantDb/:schema/:table"  element={<CatalogTableDetail />} />
         </Routes>
       </main>
     </>

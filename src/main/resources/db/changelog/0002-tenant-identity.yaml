@@ -7,7 +7,7 @@ databaseChangeLog:
             # One row per verified `(issuer, external_id)` pair allowed
             # to map onto a tenant at FlightSQL connect time. Examples:
             #   - issuer `"db"` + external_id = the local username from
-            #     `slkstate_user` (one row per allowed DB user).
+            #     `qodstate_user` (one row per allowed DB user).
             #   - issuer = Keycloak realm URL + external_id = the realm
             #     name carried in the configured tenant claim.
             #   - issuer `"accounts.google.com"` + external_id = the

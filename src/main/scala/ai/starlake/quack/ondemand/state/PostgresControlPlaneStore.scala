@@ -121,11 +121,12 @@ final class PostgresControlPlaneStore(
   def upsertPool(p: Pool): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_pool
-        |  (id, tenant_db_id, name, size,
+        |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
-        |   max_concurrent_per_node, idle_timeout_sec)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        |   max_concurrent_per_node, idle_timeout_sec, disabled)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
+        |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
         |  name                    = EXCLUDED.name,
         |  size                    = EXCLUDED.size,
@@ -133,29 +134,32 @@ final class PostgresControlPlaneStore(
         |  dist_readonly           = EXCLUDED.dist_readonly,
         |  dist_dual               = EXCLUDED.dist_dual,
         |  max_concurrent_per_node = EXCLUDED.max_concurrent_per_node,
-        |  idle_timeout_sec        = EXCLUDED.idle_timeout_sec""".stripMargin
+        |  idle_timeout_sec        = EXCLUDED.idle_timeout_sec,
+        |  disabled                = EXCLUDED.disabled""".stripMargin
     )
     try
-      ps.setString(1, p.id)
-      ps.setString(2, p.tenantDbId)
-      ps.setString(3, p.name)
-      ps.setInt   (4, p.size)
-      ps.setInt   (5, p.distribution.writeonly)
-      ps.setInt   (6, p.distribution.readonly)
-      ps.setInt   (7, p.distribution.dual)
-      ps.setInt   (8, p.maxConcurrentPerNode)
+      ps.setString(1,  p.id)
+      ps.setString(2,  p.tenantId)
+      ps.setString(3,  p.tenantDbId)
+      ps.setString(4,  p.name)
+      ps.setInt   (5,  p.size)
+      ps.setInt   (6,  p.distribution.writeonly)
+      ps.setInt   (7,  p.distribution.readonly)
+      ps.setInt   (8,  p.distribution.dual)
+      ps.setInt   (9,  p.maxConcurrentPerNode)
       p.idleTimeoutSec match
-        case Some(v) => ps.setInt(9, v)
-        case None    => ps.setNull(9, Types.INTEGER)
+        case Some(v) => ps.setInt(10, v)
+        case None    => ps.setNull(10, Types.INTEGER)
+      ps.setBoolean(11, p.disabled)
       ps.executeUpdate()
     finally ps.close()
   }
 
   def listPools(tenantDbId: String): List[Pool] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_db_id, name, size,
+      """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
-        |       max_concurrent_per_node, idle_timeout_sec
+        |       max_concurrent_per_node, idle_timeout_sec, disabled
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -172,6 +176,7 @@ final class PostgresControlPlaneStore(
     val idle = rs.getObject("idle_timeout_sec")
     Pool(
       id           = rs.getString("id"),
+      tenantId     = rs.getString("tenant_id"),
       tenantDbId   = rs.getString("tenant_db_id"),
       name         = rs.getString("name"),
       size         = rs.getInt("size"),
@@ -181,7 +186,8 @@ final class PostgresControlPlaneStore(
         dual      = rs.getInt("dist_dual")
       ),
       maxConcurrentPerNode = rs.getInt("max_concurrent_per_node"),
-      idleTimeoutSec       = Option(idle).map(_.asInstanceOf[Number].intValue)
+      idleTimeoutSec       = Option(idle).map(_.asInstanceOf[Number].intValue),
+      disabled             = rs.getBoolean("disabled")
     )
 
   // ---------------- Node ----------------
@@ -224,7 +230,7 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """SELECT n.node_id, n.host, n.port, n.token, n.role,
         |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
-        |       t.display_name AS tenant_name, p.name AS pool_name
+        |       t.display_name AS tenant_name, td.name AS tenant_db_name, p.name AS pool_name
         |FROM qodstate_node n
         |JOIN qodstate_pool p       ON p.id  = n.pool_id
         |JOIN qodstate_tenant_db td ON td.id = p.tenant_db_id
@@ -246,7 +252,11 @@ final class PostgresControlPlaneStore(
   private def readNode(rs: ResultSet): RunningNode =
     RunningNode(
       nodeId    = rs.getString("node_id"),
-      poolKey   = PoolKey(rs.getString("tenant_name"), rs.getString("pool_name")),
+      poolKey   = PoolKey(
+        rs.getString("tenant_name"),
+        rs.getString("tenant_db_name"),
+        rs.getString("pool_name")
+      ),
       role      = Role.valueOf(rs.getString("role")),
       host      = rs.getString("host"),
       port      = rs.getInt("port"),
@@ -264,11 +274,13 @@ final class PostgresControlPlaneStore(
     ControlPlaneSnapshot(
       tenants   = selectAll(c, "SELECT id, display_name, disabled FROM qodstate_tenant ORDER BY display_name", readTenant),
       tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled FROM qodstate_tenant_db ORDER BY name", readTenantDb),
-      pools     = selectAll(c, "SELECT id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec FROM qodstate_pool ORDER BY name", readPool),
+      pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled FROM qodstate_pool ORDER BY name", readPool),
       nodes     = selectAll(c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
           |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
-          |       t.display_name AS tenant_name, p.name AS pool_name
+          |       t.display_name AS tenant_name,
+          |       td.name        AS tenant_db_name,
+          |       p.name         AS pool_name
           |FROM qodstate_node n
           |JOIN qodstate_pool p       ON p.id  = n.pool_id
           |JOIN qodstate_tenant_db td ON td.id = p.tenant_db_id

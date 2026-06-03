@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 
 class SessionRegistrySpec extends AnyFlatSpec with Matchers:
 
-  private val key: PoolKey = PoolKey("acme", "sales")
+  private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
 
   "SessionRegistry" should "create sessions with no pin and no transaction" in:
     val reg = new SessionRegistry

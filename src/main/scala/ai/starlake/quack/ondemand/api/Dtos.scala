@@ -7,11 +7,10 @@ import io.circe.syntax._
 
 final case class CreatePoolRequest(
     tenant: String,
+    tenantDb: String,
     pool: String,
     size: Int,
     roleDistribution: RoleDistribution,
-    metastore: Map[String, String],
-    s3: Map[String, String] = Map.empty,
     idleTimeoutSec: Int = -1,
     maxConcurrentPerNode: Int = 0
 )
@@ -39,21 +38,24 @@ final case class NodeInfo(
 
 final case class PoolResponse(
     tenant: String,
+    tenantDb: String,
     pool: String,
     nodes: List[NodeInfo],
     status: String,
-    metastore: Map[String, String] = Map.empty   // effective merged metastore, password redacted
+    metastore: Map[String, String] = Map.empty,  // effective metastore inherited from the tenant-db, password redacted
+    disabled: Boolean = false                    // when true, the edge rejects fresh handshakes targeting this pool
 )
 
 final case class ScalePoolRequest(
     tenant: String,
+    tenantDb: String,
     pool: String,
     targetSize: Int,
     roleDistribution: RoleDistribution,
     force: Boolean = false
 )
 
-final case class StopPoolRequest(tenant: String, pool: String, force: Boolean = false)
+final case class StopPoolRequest(tenant: String, tenantDb: String, pool: String, force: Boolean = false)
 
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
@@ -69,21 +71,26 @@ final case class ClientConfigResponse(
     authEnabled: Boolean = true
 )
 
-final case class SetRoleRequest(tenant: String, pool: String, nodeId: String, role: String)
-final case class SetMaxConcurrentRequest(tenant: String, pool: String, nodeId: String, max: Int)
-final case class NodeOpRequest(tenant: String, pool: String, nodeId: String)
+final case class SetRoleRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, role: String)
+final case class SetMaxConcurrentRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, max: Int)
+final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
 
 final case class ErrorResponse(error: String, message: String)
 
-final case class TenantRequest(name: String, metastore: Map[String, String] = Map.empty)
+final case class TenantRequest(name: String)
 final case class TenantResponse(
     name: String,
-    metastore: Map[String, String],          // tenant's own overrides (write-back surface)
+    // Pool natural keys under this tenant, formatted as `tenantDb/pool`
+    // (the tenant prefix is implicit). Storage configuration lives on
+    // `qodstate_tenant_db` rows, not here.
     pools: List[String],
-    effectiveMetastore: Map[String, String] = Map.empty   // global defaults <- tenant overrides, password-redacted
+    disabled: Boolean = false   // when true, the edge rejects fresh handshakes targeting this tenant
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
+
+final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
+final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: String, disabled: Boolean)
 
 // ----- Tenant identity allowlist -----------------------------------------
 // One verified `(issuer, externalId)` pair per row, mapped to a tenant id.
@@ -211,42 +218,41 @@ object Dtos:
     Decoder.instance { (c: HCursor) =>
       for
         tenant               <- c.get[String]("tenant")
+        tenantDb             <- c.get[String]("tenantDb")
         pool                 <- c.get[String]("pool")
         size                 <- c.get[Int]("size")
         roleDistribution     <- c.get[RoleDistribution]("roleDistribution")
-        metastore            <- c.get[Map[String, String]]("metastore")
-        s3                   <- c.getOrElse[Map[String, String]]("s3")(Map.empty)
         idleTimeoutSec       <- c.getOrElse[Int]("idleTimeoutSec")(-1)
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
-      yield CreatePoolRequest(tenant, pool, size, roleDistribution, metastore, s3, idleTimeoutSec, maxConcurrentPerNode)
+      yield CreatePoolRequest(tenant, tenantDb, pool, size, roleDistribution, idleTimeoutSec, maxConcurrentPerNode)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
         "tenant"               -> r.tenant.asJson,
+        "tenantDb"             -> r.tenantDb.asJson,
         "pool"                 -> r.pool.asJson,
         "size"                 -> r.size.asJson,
         "roleDistribution"     -> r.roleDistribution.asJson,
-        "metastore"            -> r.metastore.asJson,
-        "s3"                   -> r.s3.asJson,
         "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
         "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson
       ))
     }
   )
-  // Same pattern: optional `force` should default to false when absent.
-  given Codec[ScalePoolRequest] = Codec.from(
+  given Codec[ScalePoolRequest]  = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
         tenant           <- c.get[String]("tenant")
+        tenantDb         <- c.get[String]("tenantDb")
         pool             <- c.get[String]("pool")
         targetSize       <- c.get[Int]("targetSize")
         roleDistribution <- c.get[RoleDistribution]("roleDistribution")
         force            <- c.getOrElse[Boolean]("force")(false)
-      yield ScalePoolRequest(tenant, pool, targetSize, roleDistribution, force)
+      yield ScalePoolRequest(tenant, tenantDb, pool, targetSize, roleDistribution, force)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
         "tenant"           -> r.tenant.asJson,
+        "tenantDb"         -> r.tenantDb.asJson,
         "pool"             -> r.pool.asJson,
         "targetSize"       -> r.targetSize.asJson,
         "roleDistribution" -> r.roleDistribution.asJson,
@@ -257,16 +263,18 @@ object Dtos:
   given Codec[StopPoolRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        tenant <- c.get[String]("tenant")
-        pool   <- c.get[String]("pool")
-        force  <- c.getOrElse[Boolean]("force")(false)
-      yield StopPoolRequest(tenant, pool, force)
+        tenant   <- c.get[String]("tenant")
+        tenantDb <- c.get[String]("tenantDb")
+        pool     <- c.get[String]("pool")
+        force    <- c.getOrElse[Boolean]("force")(false)
+      yield StopPoolRequest(tenant, tenantDb, pool, force)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
-        "tenant" -> r.tenant.asJson,
-        "pool"   -> r.pool.asJson,
-        "force"  -> r.force.asJson
+        "tenant"   -> r.tenant.asJson,
+        "tenantDb" -> r.tenantDb.asJson,
+        "pool"     -> r.pool.asJson,
+        "force"    -> r.force.asJson
       ))
     }
   )
@@ -319,25 +327,12 @@ object Dtos:
   given Codec[SetMaxConcurrentRequest] = deriveCodec
   given Codec[NodeOpRequest]           = deriveCodec
   given Codec[ErrorResponse]           = deriveCodec
-  // Hand-rolled so `metastore` defaults to Map.empty when absent - matches the
-  // CreatePoolRequest pattern. Lets a client POST `{"name":"acme"}` alone.
-  given Codec[TenantRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name      <- c.get[String]("name")
-        metastore <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
-      yield TenantRequest(name, metastore)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "name"      -> r.name.asJson,
-        "metastore" -> r.metastore.asJson
-      ))
-    }
-  )
-  given Codec[TenantResponse]     = deriveCodec
-  given Codec[TenantListResponse] = deriveCodec
-  given Codec[TenantOpRequest]    = deriveCodec
+  given Codec[TenantRequest]            = deriveCodec
+  given Codec[TenantResponse]           = deriveCodec
+  given Codec[TenantListResponse]       = deriveCodec
+  given Codec[TenantOpRequest]          = deriveCodec
+  given Codec[SetTenantDisabledRequest] = deriveCodec
+  given Codec[SetPoolDisabledRequest]   = deriveCodec
   given Codec[ClientConfigResponse] = deriveCodec
 
   given Codec[IdentityRequest]      = deriveCodec

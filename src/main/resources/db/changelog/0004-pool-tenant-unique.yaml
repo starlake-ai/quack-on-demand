@@ -1,0 +1,43 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0004-qodstate-pool-tenant-id
+      author: quack-on-demand
+      changes:
+        # Per-tenant pool name uniqueness lets the FlightSQL edge resolve
+        # the owning tenant-db from (tenant, pool) at handshake time, so
+        # clients no longer need a `db` URL param / header. Enforcing
+        # this at the schema level needs the tenant_id denormalized onto
+        # qodstate_pool -- the previous UNIQUE (tenant_db_id, name) only
+        # scoped uniqueness within a single tenant-db.
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column: { name: tenant_id, type: TEXT }
+        - sql:
+            sql: >-
+              UPDATE qodstate_pool p
+                 SET tenant_id = td.tenant_id
+                FROM qodstate_tenant_db td
+               WHERE td.id = p.tenant_db_id
+        - addNotNullConstraint:
+            tableName:  qodstate_pool
+            columnName: tenant_id
+            columnDataType: TEXT
+        - addForeignKeyConstraint:
+            baseTableName:      qodstate_pool
+            baseColumnNames:    tenant_id
+            constraintName:     fk_qodstate_pool_tenant
+            referencedTableName:   qodstate_tenant
+            referencedColumnNames: id
+        - dropUniqueConstraint:
+            tableName:      qodstate_pool
+            constraintName: qodstate_pool_tenant_db_name_unique
+        - addUniqueConstraint:
+            tableName:      qodstate_pool
+            columnNames:    tenant_id, name
+            constraintName: qodstate_pool_tenant_name_unique
+        - createIndex:
+            indexName: qodstate_pool_tenant
+            tableName: qodstate_pool
+            columns:
+              - column: { name: tenant_id }
