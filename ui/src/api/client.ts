@@ -13,6 +13,10 @@ import type {
   IdentityResponse,
   IdentityListResponse,
   IdentityOpRequest,
+  TenantDbRequest,
+  TenantDbResponse,
+  TenantDbListResponse,
+  TenantDbOpRequest,
   ClientConfigResponse,
   AclGrant,
   AclGrantRequest,
@@ -106,6 +110,12 @@ export const api = {
     return get<IdentityListResponse>(`/identity/list${q}`);
   },
   createIdentity: (req: IdentityRequest)   => post<IdentityResponse>('/identity/create', req),
+
+  // Tenant databases
+  listTenantDbs:  (tenant: string)       =>
+    get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
+  createTenantDb: (req: TenantDbRequest) => post<TenantDbResponse>('/database/create', req),
+  deleteTenantDb: (req: TenantDbOpRequest) => post<void>('/database/delete', req),
   deleteIdentity: (req: IdentityOpRequest) => post<void>('/identity/delete', req),
 
   // ACL grants

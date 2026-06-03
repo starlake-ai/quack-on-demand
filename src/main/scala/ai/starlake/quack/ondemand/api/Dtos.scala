@@ -98,6 +98,32 @@ final case class IdentityResponse(
 final case class IdentityListResponse(identities: List[IdentityResponse])
 final case class IdentityOpRequest(id: String)
 
+// ----- Tenant databases (qodstate_tenant_db) -----------------------------
+// One row per `(tenant, name)` -- the name being composed
+// `${tenant}_${suffix}` and used verbatim as the actual Postgres
+// database name on the shared server.
+final case class TenantDbRequest(
+    tenant:      String,
+    // Suffix typed by the user; the supervisor composes the full
+    // database name as `${tenant}_${suffix}` (idempotent if the caller
+    // already passed the full form).
+    name:        String,
+    metastore:   Map[String, String] = Map.empty,
+    dataPath:    String              = "",
+    objectStore: Map[String, String] = Map.empty
+)
+final case class TenantDbResponse(
+    id:          String,
+    tenant:      String,
+    name:        String,
+    metastore:   Map[String, String],
+    dataPath:    String,
+    objectStore: Map[String, String] = Map.empty,
+    disabled:    Boolean             = false
+)
+final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
+final case class TenantDbOpRequest(tenant: String, name: String)
+
 final case class AclGrantRequest(
     tenantId: String,
     principal: String,                  // "user:alice" | "group:eng" | "role:admin"
@@ -318,6 +344,11 @@ object Dtos:
   given Codec[IdentityResponse]     = deriveCodec
   given Codec[IdentityListResponse] = deriveCodec
   given Codec[IdentityOpRequest]    = deriveCodec
+
+  given Codec[TenantDbRequest]      = deriveCodec
+  given Codec[TenantDbResponse]     = deriveCodec
+  given Codec[TenantDbListResponse] = deriveCodec
+  given Codec[TenantDbOpRequest]    = deriveCodec
 
   // ACL grants. Hand-rolled AclGrantRequest decoder so Option fields default
   // to None when absent (circe 0.14 deriveCodec wouldn't honor the case-class

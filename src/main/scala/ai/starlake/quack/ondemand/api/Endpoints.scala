@@ -75,6 +75,16 @@ object Endpoints:
   val deleteIdentity: PublicEndpoint[IdentityOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("identity" / "delete").in(jsonBody[IdentityOpRequest])
 
+  // ----- Tenant databases -----
+  val createTenantDb: PublicEndpoint[TenantDbRequest, (sttp.model.StatusCode, ErrorResponse), TenantDbResponse, Any] =
+    base.post.in("database" / "create").in(jsonBody[TenantDbRequest]).out(jsonBody[TenantDbResponse])
+
+  val listTenantDbs: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), TenantDbListResponse, Any] =
+    base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
+
+  val deleteTenantDb: PublicEndpoint[TenantDbOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
+    base.post.in("database" / "delete").in(jsonBody[TenantDbOpRequest])
+
   // ----- ACL grants (Postgres-relational store, slkstate_acl_grant) -----
   val createAclGrant: PublicEndpoint[AclGrantRequest, (sttp.model.StatusCode, ErrorResponse), AclGrantResponse, Any] =
     base.post.in("acl" / "grant" / "create").in(jsonBody[AclGrantRequest]).out(jsonBody[AclGrantResponse])

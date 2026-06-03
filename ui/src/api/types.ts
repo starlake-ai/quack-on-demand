@@ -124,6 +124,34 @@ export interface IdentityOpRequest {
   id: string;
 }
 
+// ----- Tenant databases -----
+export interface TenantDbRequest {
+  tenant: string;
+  name: string; // suffix; server composes `${tenant}_${name}`
+  metastore?: Record<string, string>;
+  dataPath?: string;
+  objectStore?: Record<string, string>;
+}
+
+export interface TenantDbResponse {
+  id: string;
+  tenant: string;
+  name: string;
+  metastore: Record<string, string>;
+  dataPath: string;
+  objectStore: Record<string, string>;
+  disabled: boolean;
+}
+
+export interface TenantDbListResponse {
+  tenantDbs: TenantDbResponse[];
+}
+
+export interface TenantDbOpRequest {
+  tenant: string;
+  name: string;
+}
+
 // ----- ACL grants -----
 export interface AclGrant {
   id: number;
