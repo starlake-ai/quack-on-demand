@@ -1,0 +1,89 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0001-qodstate-tenant
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_tenant
+            columns:
+              - column: { name: id,           type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: display_name, type: TEXT, constraints: { nullable: false, unique: true, uniqueConstraintName: qodstate_tenant_display_name_unique } }
+              - column: { name: disabled,     type: BOOLEAN, defaultValueBoolean: false, constraints: { nullable: false } }
+
+  - changeSet:
+      id: 0001-qodstate-tenant-db
+      author: quack-on-demand
+      changes:
+        - createTable:
+            # One row per (tenant, database) pair. The Postgres database the
+            # quack nodes actually attach is named after this row's `name`
+            # (composed as `${tenant}_${suffix}` at create time so it's
+            # globally unique on the shared instance).
+            tableName: qodstate_tenant_db
+            columns:
+              - column: { name: id,                   type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,            type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_tenant_db_tenant, references: 'qodstate_tenant(id)', deleteCascade: false } }
+              - column: { name: name,                 type: TEXT, constraints: { nullable: false } }
+              - column: { name: metastore_params,     type: JSONB, defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+              - column: { name: data_path,            type: TEXT, defaultValue: '',                    constraints: { nullable: false } }
+              - column: { name: object_store_params,  type: JSONB, defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+              - column: { name: disabled,             type: BOOLEAN, defaultValueBoolean: false,        constraints: { nullable: false } }
+        - addUniqueConstraint:
+            tableName:      qodstate_tenant_db
+            columnNames:    tenant_id, name
+            constraintName: qodstate_tenant_db_tenant_name_unique
+        - createIndex:
+            indexName: qodstate_tenant_db_tenant
+            tableName: qodstate_tenant_db
+            columns:
+              - column: { name: tenant_id }
+
+  - changeSet:
+      id: 0001-qodstate-pool
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_pool
+            columns:
+              - column: { name: id,                      type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_db_id,            type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_pool_tenant_db, references: 'qodstate_tenant_db(id)', deleteCascade: false } }
+              - column: { name: name,                    type: TEXT, constraints: { nullable: false } }
+              - column: { name: size,                    type: INT,  constraints: { nullable: false } }
+              - column: { name: dist_writeonly,          type: INT,  constraints: { nullable: false } }
+              - column: { name: dist_readonly,           type: INT,  constraints: { nullable: false } }
+              - column: { name: dist_dual,               type: INT,  constraints: { nullable: false } }
+              - column: { name: max_concurrent_per_node, type: INT,  defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: idle_timeout_sec,        type: INT }
+        - addUniqueConstraint:
+            tableName:      qodstate_pool
+            columnNames:    tenant_db_id, name
+            constraintName: qodstate_pool_tenant_db_name_unique
+        - createIndex:
+            indexName: qodstate_pool_tenant_db
+            tableName: qodstate_pool
+            columns:
+              - column: { name: tenant_db_id }
+
+  - changeSet:
+      id: 0001-qodstate-node
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_node
+            columns:
+              - column: { name: node_id,        type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: pool_id,        type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_node_pool, references: 'qodstate_pool(id)', deleteCascade: false } }
+              - column: { name: host,           type: TEXT, constraints: { nullable: false } }
+              - column: { name: port,           type: INT,  constraints: { nullable: false } }
+              - column: { name: token,          type: TEXT, constraints: { nullable: false } }
+              - column: { name: role,           type: TEXT, constraints: { nullable: false } }
+              - column: { name: pid,            type: BIGINT }
+              - column: { name: pod_name,       type: TEXT }
+              - column: { name: started_at,     type: TIMESTAMP WITH TIME ZONE, constraints: { nullable: false } }
+              - column: { name: last_seen,      type: TIMESTAMP WITH TIME ZONE }
+              - column: { name: max_concurrent, type: INT,  defaultValueNumeric: 0, constraints: { nullable: false } }
+        - createIndex:
+            indexName: qodstate_node_pool
+            tableName: qodstate_node
+            columns:
+              - column: { name: pool_id }
