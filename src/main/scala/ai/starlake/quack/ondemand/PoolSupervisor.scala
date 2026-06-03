@@ -5,7 +5,7 @@ import ai.starlake.quack.model.{
   Names, NodeSpec, Pool, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDb
 }
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, NoopDbAdmin}
 import ai.starlake.quack.route.PoolSnapshot
 import cats.effect.IO
 import org.slf4j.LoggerFactory
@@ -33,7 +33,8 @@ final class PoolSupervisor(
     backend:          QuackBackend,
     tracker:          NodeLoadTracker,
     store:            ControlPlaneStore,
-    defaultMetastore: Map[String, String] = Map.empty
+    defaultMetastore: Map[String, String] = Map.empty,
+    dbAdmin:          DbAdmin             = NoopDbAdmin
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -241,18 +242,56 @@ final class PoolSupervisor(
           case Some(t) if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
             Left(s"tenant-db '$full' already exists in tenant '$tn'")
           case Some(t) =>
-            val td = TenantDb(
-              id          = newId("td"),
-              tenantId    = t.id,
-              name        = full,
-              metastore   = metastore,
-              dataPath    = dataPath,
-              objectStore = objectStore
-            )
-            store.upsertTenantDb(td)
-            tenantDbs.put(td.id, td)
-            Right(td)
+            // Provision the Postgres database BEFORE persisting the
+            // control-plane row, so a failed CREATE doesn't leave a row
+            // pointing at a non-existent DB. Auto-set metastore.dbName
+            // so a Quack node spawning under this tenant-db attaches
+            // the catalog at the right name without operator action.
+            val metaWithDb = metastore.updated("dbName", full)
+            dbAdmin.createDatabase(full) match
+              case Left(err) => Left(s"failed to provision Postgres database '$full': $err")
+              case Right(_) =>
+                val td = TenantDb(
+                  id          = newId("td"),
+                  tenantId    = t.id,
+                  name        = full,
+                  metastore   = metaWithDb,
+                  dataPath    = dataPath,
+                  objectStore = objectStore
+                )
+                store.upsertTenantDb(td)
+                tenantDbs.put(td.id, td)
+                Right(td)
   }
+
+  /** Hard-delete a tenant-db row. Rejects when any pool still points at
+    * it (FK RESTRICT). On success, the underlying Postgres database is
+    * also dropped; a failure to drop is logged but does not roll the
+    * control-plane row back. */
+  def deleteTenantDb(tenantName: String, tenantDbName: String): IO[Either[String, Unit]] =
+    IO.blocking {
+      val tn = tenantName.toLowerCase
+      getTenant(tn) match
+        case None => Left(s"tenant not found: $tn")
+        case Some(t) =>
+          tenantDbs.values.find(td => td.tenantId == t.id && td.name == tenantDbName) match
+            case None => Left(s"tenant-db '$tenantDbName' not found in tenant '$tn'")
+            case Some(td) =>
+              val activePools = poolRows.values.filter(_.tenantDbId == td.id).toList
+              if activePools.nonEmpty then
+                Left(s"tenant-db '$tenantDbName' has ${activePools.size} active pool(s); stop them first")
+              else
+                store.deleteTenantDb(td.id)
+                tenantDbs.remove(td.id)
+                dbAdmin.dropDatabase(td.name) match
+                  case Right(_) => ()
+                  case Left(err) =>
+                    logger.warn(
+                      s"deleteTenantDb: control-plane row removed but " +
+                      s"DROP DATABASE \"${td.name}\" failed: $err"
+                    )
+                Right(())
+    }
 
   private def ensureDefaultTenantDb(
       t:           Tenant,
