@@ -18,7 +18,7 @@ object QuackResponseBytes:
   extension (b: QuackResponseBytes) def bytes: Array[Byte] = b
 
 /** Mirror of duckdb-quack's `MessageType` enum (see
-  * `quack_message.hpp:9-21`). Ordinals are NOT sequential — the upstream
+  * `quack_message.hpp:9-21`). Ordinals are NOT sequential -- the upstream
   * pins specific numeric tags for wire compatibility, notably
   * `FETCH_REQUEST=7` (skipping 5 and 6) and `ERROR_RESPONSE=100`. When
   * upstream changes the enum, this file is the source of truth on the

@@ -17,10 +17,10 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
   * `QuackHttpClient.scala` so Task 7's adapter can map between the two
   * with a thin `match` clause.
   *
-  *   - Transient: retryable. HTTP 5xx, connect refused, read timeout —
+  *   - Transient: retryable. HTTP 5xx, connect refused, read timeout --
   *     anything that says "try the same call again later".
   *   - Permanent: not retryable. HTTP 4xx, ERROR_RESPONSE from a sane
-  *     server, unexpected message type — caller should surface the
+  *     server, unexpected message type -- caller should surface the
   *     error to the user.
   */
 sealed trait QuackWireError extends RuntimeException
@@ -67,11 +67,11 @@ trait QuackTransport:
   * }}}
   *
   * The driver never caches `Connection`s across logical queries (per
-  * design §6.4) — connection reuse is what gave the upstream race its
+  * design §6.4) -- connection reuse is what gave the upstream race its
   * legs, and JDK HttpClient already pools the underlying socket.
   *
   * End-of-FETCH-loop detection. The wire does NOT carry a
-  * `needs_more_fetch` flag on `FETCH_RESPONSE` — only on
+  * `needs_more_fetch` flag on `FETCH_RESPONSE` -- only on
   * `PREPARE_RESPONSE`. The upstream `quack_scan.cpp:331` client uses
   * `fetch_response->MutableResults().empty()` as its terminator
   * ("server is done, we are done"). We mirror that via
@@ -161,7 +161,7 @@ object QuackProtocol:
   * SQL statement and returns a streaming [[ArrowReader]]; [[close]]
   * sends `DISCONNECT_MESSAGE` best-effort.
   *
-  * Concurrency note: `Connection` is one-shot — call `execute` once,
+  * Concurrency note: `Connection` is one-shot -- call `execute` once,
   * drain the returned reader to completion (or close it), then `close()`.
   * Reusing a `Connection` across two `execute` calls is not supported
   * because the wire's `result_uuid` is bound to the connection by
@@ -179,14 +179,14 @@ final class Connection private[adapter] (
   /** Posts a PREPARE_REQUEST for `sql` and returns a streaming
     * [[ArrowReader]] that chains the initial PREPARE_RESPONSE batches
     * with subsequent FETCH_RESPONSE batches until the server signals
-    * end-of-stream (empty `results` vector on a FETCH_RESPONSE — see
+    * end-of-stream (empty `results` vector on a FETCH_RESPONSE -- see
     * upstream `quack_scan.cpp:331`).
     *
     * The returned reader's `close()` cascades to [[close]] on this
     * connection, so callers only manage one resource. The reader is
     * synchronous (Arrow Java's contract); the IO it needs to perform
     * FETCH round-trips is materialised via the supplied
-    * [[IORuntime]] — the standard pattern for bridging IO into a
+    * [[IORuntime]] -- the standard pattern for bridging IO into a
     * synchronous caller, mirroring what http4s does for its IO ←→
     * blocking-API edges.
     */
@@ -287,7 +287,7 @@ private[adapter] final class ChainedQuackArrowReader(
   override def loadNextBatch(): Boolean =
     if closed.get() then return false
     // Drain the current child first. If it has more batches, return.
-    // Otherwise loop: close it, fire next FETCH, swap, retry — until
+    // Otherwise loop: close it, fire next FETCH, swap, retry -- until
     // either we land a batch or the FETCH loop terminates.
     if currentRef.get().loadNextBatch() then return true
     while moreFetchPending.get() do
@@ -322,7 +322,7 @@ private[adapter] final class ChainedQuackArrowReader(
             s"unexpected response type after FETCH_REQUEST: $label"
           )
     end while
-    // moreFetchPending dropped to false without producing a batch — done.
+    // moreFetchPending dropped to false without producing a batch -- done.
     false
 
   override def getVectorSchemaRoot(): VectorSchemaRoot =
@@ -332,7 +332,7 @@ private[adapter] final class ChainedQuackArrowReader(
     currentRef.get().getDictionaryVectors
 
   override def bytesRead(): Long =
-    // Best-effort: only the current reader's bytesRead is visible —
+    // Best-effort: only the current reader's bytesRead is visible --
     // exhausted children have been closed. The Arrow C-data reader
     // currently returns 0 here anyway (see
     // `ArrowArrayStreamReader.bytesRead`), so this is correct.

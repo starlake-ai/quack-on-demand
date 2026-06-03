@@ -5,7 +5,7 @@ import ai.starlake.quack.model.{Pool, RunningNode, Tenant, TenantDb}
 /** Per-entity persistence for the normalized control plane
   * (`qodstate_tenant`, `qodstate_tenant_db`, `qodstate_pool`,
   * `qodstate_node`). Implementations are responsible for ordered
-  * teardown — deleting a parent fails when children remain
+  * teardown -- deleting a parent fails when children remain
   * (matches the FK RESTRICT on the Postgres backend). */
 trait ControlPlaneStore:
 

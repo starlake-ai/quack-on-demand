@@ -9,7 +9,7 @@ import java.time.Duration
   * and history queries agree.
   *
   * The timer publishes a percentile histogram with SLO buckets at 1ms, 10ms,
-  * 100ms, 1s, 10s — those become `_bucket` series in Prometheus and roll up
+  * 100ms, 1s, 10s -- those become `_bucket` series in Prometheus and roll up
   * cleanly in CloudWatch / Stackdriver / Azure as count+sum statistics. */
 final class StatementInstruments(registry: MeterRegistry):
 

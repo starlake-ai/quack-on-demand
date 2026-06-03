@@ -11,7 +11,7 @@ import scala.collection.mutable.ListBuffer
 
 /** Postgres-backed [[ControlPlaneStore]] for the normalized schema
   * produced by changelog `0001-normalized-schema.yaml`. Assumes the
-  * schema is already in place — the caller (typically `Main`) runs
+  * schema is already in place -- the caller (typically `Main`) runs
   * [[LiquibaseRunner]] first. */
 final class PostgresControlPlaneStore(
     jdbcUrl:  String,

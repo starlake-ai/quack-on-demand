@@ -38,7 +38,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
 
   /** Records every POST in order, returns canned responses from a queue.
     * Exhausting the queue raises a [[NoSuchElementException]] straight
-    * from the iterator — that signals an over-eager round trip and is the
+    * from the iterator -- that signals an over-eager round trip and is the
     * right place for the test to fail. */
   private final class FakeTransport(responses: Iterator[Array[Byte]]) extends QuackTransport:
     val requests: ArrayBuffer[(URI, Array[Byte])] = ArrayBuffer.empty
@@ -87,7 +87,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
     // We intercept the public `query` to count which branch the router
     // chose. We do NOT call super because the embedded path requires a
     // real Quack node on the wire and the native path requires a real
-    // libquackwire transport — both out of scope for a routing test.
+    // libquackwire transport -- both out of scope for a routing test.
     override def query(
         endpoint: String,
         token: String,
@@ -131,7 +131,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
             withOneRowOneColChunk = true,
             columnName = "answer"
           ),
-          // DISCONNECT ack — the protocol's `close` swallows the body so
+          // DISCONNECT ack -- the protocol's `close` swallows the body so
           // any valid response shape will do.
           QuackTestFixtures.serializeSampleConnectionResponse("disconnect-ack")
         )
@@ -150,7 +150,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
               reader.loadNextBatch() shouldBe false
             finally close()
             // CONNECT + PREPARE + DISCONNECT = 3 posts. The DISCONNECT
-            // fires exactly once — via the reader's `close()` cascade
+            // fires exactly once -- via the reader's `close()` cascade
             // (DISCONNECT-owner rule). No double-fire from `queryNative`.
             transport.postCount.get() shouldBe 3
             val ordinals = transport.requests.map { case (_, body) =>

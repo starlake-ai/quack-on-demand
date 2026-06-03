@@ -21,9 +21,9 @@ import java.time.Instant
   *   )
   * }}}
   *
-  * Phase 1: this store persists grants. The SQL validator does not yet
-  * consult it (still using the file-based AclStore). Phase 2 will plug
-  * it in. */
+  * This store is the persistence layer for grants. The SQL validator
+  * is wired separately and reads through this table at enforcement
+  * time. */
 final class AclGrantStore(jdbcUrl: String, user: String, password: String):
 
   Class.forName("org.postgresql.Driver")
