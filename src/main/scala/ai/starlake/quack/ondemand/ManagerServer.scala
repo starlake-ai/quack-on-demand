@@ -21,6 +21,7 @@ final class ManagerServer(
     nodes: NodeHandlers,
     tenants: TenantHandlers,
     identities: IdentityHandlers,
+    tenantDbs: TenantDbHandlers,
     health: HealthHandler,
     acl: Option[AclHandlers],
     auth: AuthHandlers,
@@ -132,6 +133,9 @@ final class ManagerServer(
       Endpoints.createIdentity.serverLogic(identities.createIdentity),
       Endpoints.listIdentities.serverLogic(identities.listIdentities),
       Endpoints.deleteIdentity.serverLogic(identities.deleteIdentity),
+      Endpoints.createTenantDb.serverLogic(tenantDbs.createTenantDb),
+      Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
+      Endpoints.deleteTenantDb.serverLogic(tenantDbs.deleteTenantDb),
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.clientConfig.serverLogic(_ => IO.pure(Right(
         ClientConfigResponse(
