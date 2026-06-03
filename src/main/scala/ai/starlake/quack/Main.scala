@@ -16,7 +16,10 @@ import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime._
-import ai.starlake.quack.ondemand.state.{AclGrantStore, PostgresStateStore, StateStore, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  AclGrantStore, ControlPlaneStore, LiquibaseRunner,
+  PostgresControlPlaneStore, PostgresStateStore, StateStore, UserStore
+}
 import cats.effect.{IO, IOApp}
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
@@ -118,15 +121,13 @@ object Main extends IOApp.Simple with LazyLogging:
       case other => sys.error(s"unknown runtime: $other")
 
     val tracker  = new NodeLoadTracker
-    val store: StateStore = mgrCfg.stateStorage.toLowerCase match
-      case "postgres" =>
-        logger.info("state storage: postgres (defaultMetastore database)")
-        PostgresStateStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-      case "file" | "" =>
-        logger.info(s"state storage: file (${mgrCfg.statePath})")
-        StateStore(Path.of(mgrCfg.statePath))
-      case other =>
-        sys.error(s"unknown stateStorage: $other (expected 'file' or 'postgres')")
+    // Apply the Liquibase changelog before any store touches the DB.
+    // Idempotent: Liquibase's DATABASECHANGELOG records skip already-
+    // applied changesets, so a second boot is a no-op.
+    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore).run()
+    logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
+    val store: ControlPlaneStore =
+      PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
     val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)

@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.StateStore
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -33,7 +33,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
 
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(backend, tracker,
-                                 StateStore(Files.createTempFile("nh-", ".json")))
+                                 new InMemoryControlPlaneStore())
     // Tenants are first-class - must exist before a pool can be created.
     sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
     sup.createPool(PoolKey("acme", "sales"),

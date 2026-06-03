@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.StateStore
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -39,7 +39,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   private def freshSupervisor() =
     val stateFile = Files.createTempFile("quack-sup-", ".json")
-    val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, StateStore(stateFile))
+    val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, new InMemoryControlPlaneStore())
     // Tests that create a pool need the tenant up-front. Pre-register the
     // default test tenant; tests that exercise tenant CRUD explicitly use
     // a different name.
@@ -49,7 +49,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   private def freshSupervisorWithBackend(): (PoolSupervisor, CapturingBackend) =
     val stateFile = Files.createTempFile("quack-sup-", ".json")
     val b   = new CapturingBackend
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, StateStore(stateFile))
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
     (sup, b)
 
   "PoolSupervisor.createPool" should "start N nodes matching the role distribution" in:
@@ -107,8 +107,13 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   "PoolSupervisor.createTenant" should "register a new tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
     val res = sup.createTenant(Tenant("foo", Map("pgHost" -> "h"))).unsafeRunSync()
-    res shouldBe Right(Tenant("foo", Map("pgHost" -> "h")))
-    sup.getTenant("foo") shouldBe Some(Tenant("foo", Map("pgHost" -> "h")))
+    res.isRight shouldBe true
+    val t = res.toOption.get
+    t.name        shouldBe "foo"
+    t.displayName shouldBe "foo"
+    t.id            should not be empty
+    sup.getTenant("foo").map(_.name)        shouldBe Some("foo")
+    sup.getTenant("foo").map(_.displayName) shouldBe Some("foo")
     sup.listTenants().map(_.name) shouldBe List("foo")
 
   it should "reject a duplicate tenant name" in:
@@ -117,12 +122,14 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val res = sup.createTenant(Tenant("foo", Map("k" -> "v"))).unsafeRunSync()
     res.left.toOption.getOrElse("") should include("already exists")
 
-  "PoolSupervisor.setTenantMetastore" should "overwrite the tenant's metastore" in:
+  "PoolSupervisor.setTenantMetastore" should "overwrite the tenant's default-db metastore" in:
     val (sup, _) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("foo", Map("a" -> "1"))).unsafeRunSync()
-    val updated = sup.setTenantMetastore("foo", Map("b" -> "2")).unsafeRunSync()
-    updated shouldBe Some(Tenant("foo", Map("b" -> "2")))
-    sup.getTenant("foo").map(_.metastore) shouldBe Some(Map("b" -> "2"))
+    sup.setTenantMetastore("foo", Map("b" -> "2")).unsafeRunSync().isDefined shouldBe true
+    // Metastore now lives on the tenant's default TenantDb; the effective
+    // view exposes it overlaid on the global defaults.
+    sup.effectiveMetastoreFor("foo")("b") shouldBe "2"
+    sup.effectiveMetastoreFor("foo").get("a") shouldBe None
 
   it should "return None for an unknown tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -145,6 +152,54 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "return Left for an unknown tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
     sup.deleteTenant("ghost").unsafeRunSync().isLeft shouldBe true
+
+  // ---------- Explicit createTenantDb + bootstrap chain ----------
+
+  "PoolSupervisor.createTenantDb" should
+    "compose `${tenant}_${suffix}` and persist the tenant-db row" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    val out = sup.createTenantDb(
+      tenantName  = "tpch",
+      suffix      = "tpch1",
+      metastore   = Map("pgHost" -> "h"),
+      dataPath    = "/data/tpch_tpch1"
+    ).unsafeRunSync()
+    out.isRight shouldBe true
+    out.toOption.get.name shouldBe "tpch_tpch1"
+    sup.listTenantDbsByTenant("tpch").map(_.name) shouldBe List("tpch_tpch1")
+
+  it should "reject a duplicate tenant-db inside the same tenant" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
+    val again = sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
+    again.isLeft shouldBe true
+    again.swap.toOption.get should include("already exists")
+
+  it should "reject a tenant-db when the tenant doesn't exist" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    val out = sup.createTenantDb("ghost", "prod", Map.empty, "").unsafeRunSync()
+    out.isLeft shouldBe true
+
+  "bootstrap chain" should "thread createTenant -> createTenantDb -> createPool" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("tpch", Map.empty)).unsafeRunSync()
+    // `createPool` auto-resolves the default tenant-db (`${tenant}_default`),
+    // so the bootstrap creates it explicitly with the suffix `"default"`
+    // and threads its metastore + dataPath through.
+    sup.createTenantDb("tpch", "default",
+      metastore = Map("schemaName" -> "main"),
+      dataPath  = "/data/tpch_default"
+    ).unsafeRunSync()
+    sup.createPool(PoolKey("tpch", "sales"),
+      RoleDistribution(0, 1, 1), Map.empty, Map.empty
+    ).unsafeRunSync()
+    backend.specs.size shouldBe 2
+    backend.specs.head.metastore("schemaName") shouldBe "main"
+    // No second TenantDb was synthesized -- the pre-created default one
+    // was reused.
+    sup.listTenantDbsByTenant("tpch").map(_.name) shouldBe List("tpch_default")
 
   // ---------- Metastore merge ----------
 
@@ -187,7 +242,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   private def supWithDefault(default: Map[String, String]): (PoolSupervisor, CapturingBackend) =
     val stateFile = Files.createTempFile("quack-sup-", ".json")
     val b   = new CapturingBackend
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, StateStore(stateFile), default)
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore(), default)
     (sup, b)
 
   "PoolSupervisor.effectiveMetastoreFor" should
