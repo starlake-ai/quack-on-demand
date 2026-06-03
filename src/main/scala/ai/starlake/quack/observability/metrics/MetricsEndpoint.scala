@@ -6,7 +6,7 @@ import sttp.tapir._
 import sttp.tapir.server.ServerEndpoint
 
 /** Bare Tapir endpoint at `/metrics`. Open (no API-key gate, no /api prefix) so scrapers can pull
-  * without auth — same posture as `/health`.
+  * without auth -- same posture as `/health`.
   *
   * The route is only mounted when there is a Prometheus child registry. When
   * `metrics.prometheus.enabled=false`, `serverEndpoints` returns Nil and the route surfaces as 404.

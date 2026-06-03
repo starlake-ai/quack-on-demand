@@ -7,8 +7,8 @@ import sttp.model.StatusCode
 import java.sql.SQLException
 import java.time.format.DateTimeFormatter
 
-/** CRUD over the slkstate_acl_grant table. Phase 1: store + serve grants.
-  * Phase 2 (later) will wire these grants into the SQL validator. */
+/** CRUD over the `slkstate_acl_grant` table. Stores + serves grants;
+  * the SQL validator that consults them is wired separately. */
 final class AclHandlers(store: AclGrantStore):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]

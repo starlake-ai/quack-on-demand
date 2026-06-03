@@ -156,13 +156,13 @@ export default function Catalog() {
                           </Link>
                         </td>
                         <td align="right">
-                          {t.rowCount < 0 ? <em style={{ color: '#888' }}>—</em> : t.rowCount.toLocaleString()}
+                          {t.rowCount < 0 ? <em style={{ color: '#888' }}>--</em> : t.rowCount.toLocaleString()}
                         </td>
                         <td align="right">{t.dataFileCount}</td>
                         <td>
                           {t.folder
                             ? <code style={{ fontSize: '0.85em', color: '#444' }}>{t.folder}</code>
-                            : <em style={{ color: '#888' }}>—</em>}
+                            : <em style={{ color: '#888' }}>--</em>}
                         </td>
                       </tr>
                     ))}

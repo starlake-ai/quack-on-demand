@@ -57,7 +57,7 @@ export default function CatalogTableDetail() {
               <td style={{ paddingRight: 16, color: '#555' }}>Rows</td>
               <td>
                 {detail.table.rowCount < 0
-                  ? <em style={{ color: '#888' }}>—</em>
+                  ? <em style={{ color: '#888' }}>--</em>
                   : detail.table.rowCount.toLocaleString()}
               </td>
             </tr>
@@ -74,7 +74,7 @@ export default function CatalogTableDetail() {
               <td>
                 {detail.table.folder
                   ? <code style={{ fontSize: '0.9em', color: '#444' }}>{detail.table.folder}</code>
-                  : <em style={{ color: '#888' }}>—</em>}
+                  : <em style={{ color: '#888' }}>--</em>}
               </td>
             </tr>
           </tbody>

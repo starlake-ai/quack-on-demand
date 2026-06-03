@@ -108,7 +108,7 @@ export default function PoolDetail() {
             const port = cfg.flightSqlPort;
             const scheme = cfg.flightSqlTls ? 'arrow-flight-sql' : 'arrow-flight-sql';
             // Encode tenant/pool individually so `<user>` (and the `/`
-            // separators) stay literal in the URL — encoding the whole
+            // separators) stay literal in the URL -- encoding the whole
             // string would turn `<user>` into `%3Cuser%3E` and confuse
             // operators copy-pasting the template.
             const userQuery = `${encodeURIComponent(tenant!)}/${encodeURIComponent(pool!)}/<user>`;

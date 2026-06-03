@@ -85,7 +85,7 @@ open class QuackHttpClient(
   // raw correctness pay one-call-at-a-time per manager and recover
   // throughput by scaling managers horizontally. The native path bypasses
   // this entirely (no embedded DuckDB in the request path) and is the
-  // production-grade default — see [[nativeClient]]. */
+  // production-grade default -- see [[nativeClient]]. */
   private val embeddedJvmLock = new Object()
 
   // One shared in-process DuckDB. We hand out per-call connections via
@@ -130,7 +130,7 @@ open class QuackHttpClient(
   /** The historical embedded-DuckDB + `quack` extension path. Reached
     * when [[nativeClient]] is `false`. The body is wrapped in a JVM-wide
     * mutex ([[embeddedJvmLock]]) so all calls across all endpoints
-    * serialise — the Quack extension keeps process-wide state even
+    * serialise -- the Quack extension keeps process-wide state even
     * across per-endpoint DuckDB instances, and that state is the source
     * of the `Authentication failed` / `Invalid connection id` race the
     * JNI native path eliminates by construction. The per-endpoint pool
@@ -166,7 +166,7 @@ open class QuackHttpClient(
     * `Connection.execute` is a [[ChainedQuackArrowReader]] whose `close()`
     * already cascades to `Connection.close()` which fires the
     * `DISCONNECT_MESSAGE`. The `QuackResponse.Ok` close callback therefore
-    * MUST call only `reader.close()` — wrapping a separate `conn.close()`
+    * MUST call only `reader.close()` -- wrapping a separate `conn.close()`
     * here would double-send DISCONNECT. The reader is the sole owner of
     * the teardown chain. */
   private def queryNative(
@@ -211,7 +211,7 @@ open class QuackHttpClient(
     * tests pass a `protocolFactory` override that wires a stub transport
     * with canned response bytes. Lazy because we MUST NOT allocate any of
     * the native-path machinery (HttpClient threads, JNI lib resolution
-    * for transports) when the flag is off — keeps the default path
+    * for transports) when the flag is off -- keeps the default path
     * byte-identical with pre-Task-7 behavior. */
   private lazy val nativeProtocol: QuackProtocol =
     protocolFactory match
