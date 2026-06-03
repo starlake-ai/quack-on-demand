@@ -5,7 +5,7 @@ import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, Runni
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.StateStore
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -43,7 +43,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(backend, tracker,
-                                 StateStore(Files.createTempFile("fsr-", ".json")))
+                                 new InMemoryControlPlaneStore())
     // Pre-register the tenant so createPool succeeds under the new contract.
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant, Map.empty)).unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1), Map.empty, Map.empty).unsafeRunSync()

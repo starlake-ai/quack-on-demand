@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.StateStore
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -33,7 +33,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   private def freshHandlers =
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(stubBackend, tracker,
-                                 StateStore(Files.createTempFile("h-", ".json")))
+                                 new InMemoryControlPlaneStore())
     // Pool creation now requires the tenant to be registered first.
     sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
     new PoolHandlers(sup, tracker)
@@ -42,7 +42,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   private def handlersWithoutTenant =
     val tracker = new NodeLoadTracker
     val sup = new PoolSupervisor(stubBackend, tracker,
-                                 StateStore(Files.createTempFile("h-", ".json")))
+                                 new InMemoryControlPlaneStore())
     new PoolHandlers(sup, tracker)
 
   "createPool" should "create a pool and return node info with maxConcurrent" in:
