@@ -1,25 +1,26 @@
 package ai.starlake.quack.edge.sql
 
-import com.auth0.jwt.interfaces.Claim
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 
 case class ValidationContext(
     username: String,
     database: String,
     statement: String,
     peer: String,
-    claims: Map[String, Claim],
-    // Per-pool defaults for SQL parser qualification - when an unqualified
-    // table is referenced in the statement, the parser fills these in to
-    // produce a fully-qualified TableRef. Falls back to global config when
-    // a validator instance was built with its own defaults.
+    // Per-pool defaults for SQL parser qualification -- when an
+    // unqualified table is referenced in the statement, the parser
+    // fills these in to produce a fully-qualified TableRef. Falls back
+    // to the validator's construction-time defaults when None.
     defaultDatabase: Option[String] = None,
     defaultSchema:   Option[String] = None,
-    // Groups + role propagated from `AuthenticatedProfile` via
-    // ConnectionContext. The ACL validator expands them into
-    // `group:<g>` and `role:<r>` principals so grants targeted at
-    // groups / roles match alongside `user:<username>`.
-    groups: Set[String] = Set.empty,
-    role:   String      = ""
+    // The closure of (roles, groups, permissions, pool grants)
+    // computed once at handshake. PostgresAclValidator reads
+    // `effectiveSet.permissions` instead of querying
+    // qodstate_role_permission per statement. `None` means no
+    // handshake state pinned -- the validator denies any tenant-scoped
+    // statement in that case so a misconfigured wiring can't
+    // accidentally grant unfiltered access.
+    effectiveSet: Option[EffectiveSet] = None
 )
 
 sealed trait ValidationResult
@@ -34,5 +35,5 @@ object AllowAllValidator extends StatementValidator:
   override def validate(context: ValidationContext): ValidationResult = Allowed
 
 object StatementValidator:
-  /** No-op factory - short alias for [[AllowAllValidator]]. */
+  /** No-op factory -- short alias for [[AllowAllValidator]]. */
   def allowAll: StatementValidator = AllowAllValidator

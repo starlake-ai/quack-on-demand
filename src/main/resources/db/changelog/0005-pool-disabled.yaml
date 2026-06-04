@@ -1,0 +1,19 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0005-qodstate-pool-disabled
+      author: quack-on-demand
+      changes:
+        # Per-pool kill switch. When true the FlightSQL edge rejects
+        # fresh handshakes targeting this pool with an UNAUTHENTICATED
+        # error -- existing sessions keep running until they reconnect.
+        # Mirrors the disabled column already on qodstate_tenant and
+        # qodstate_tenant_db. Defaults to false so all existing pools
+        # stay enabled across the migration.
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: disabled
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }

@@ -9,24 +9,29 @@ final class TenantHandlers(sup: PoolSupervisor):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  /** Hide secret-like keys from the API response. Today: just `pgPassword`. */
-  private def redact(m: Map[String, String]): Map[String, String] =
-    m.filterNot(_._1.equalsIgnoreCase("pgPassword"))
-
   private def toResponse(t: Tenant): TenantResponse =
     TenantResponse(
-      name               = t.name,
-      metastore          = t.metastore,
-      pools              = sup.listPoolsOfTenant(t.name),
-      effectiveMetastore = redact(sup.effectiveMetastoreFor(t.name))
+      name         = t.displayName,
+      pools        = sup.listPoolsOfTenant(t.displayName),
+      disabled     = t.disabled,
+      authProvider = t.authProvider,
+      authConfig   = t.authConfig
     )
 
   def createTenant(req: TenantRequest): Out[TenantResponse] =
     if req.name.isEmpty then
       IO.pure(Left((StatusCode.BadRequest,
         ErrorResponse("invalid_name", "tenant name must be non-empty"))))
+    else if !Tenant.ValidAuthProviders.contains(req.authProvider) then
+      IO.pure(Left((StatusCode.BadRequest,
+        ErrorResponse("invalid_auth_provider",
+          s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"))))
     else
-      sup.createTenant(Tenant(req.name, req.metastore)).map {
+      sup.createTenant(Tenant(
+        name         = req.name,
+        authProvider = req.authProvider,
+        authConfig   = req.authConfig
+      )).map {
         case Right(t)  => Right(toResponse(t))
         case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
       }
@@ -35,22 +40,34 @@ final class TenantHandlers(sup: PoolSupervisor):
     Right(TenantListResponse(sup.listTenants().map(toResponse)))
   )
 
-  def setTenantMetastore(req: TenantRequest): Out[TenantResponse] =
-    sup.setTenantMetastore(req.name, req.metastore).map {
-      case Some(t) => Right(toResponse(t))
-      case None    =>
-        Left((StatusCode.NotFound,
-              ErrorResponse("not_found", s"tenant '${req.name}' not found")))
-    }
-
   def deleteTenant(req: TenantOpRequest): Out[Unit] =
     sup.deleteTenant(req.name).map {
       case Right(_)  => Right(())
       case Left(msg) =>
-        // Distinguish "not found" from "still has pools" by message prefix so
-        // the client can choose the right status. Both are 4xx conditions.
         if msg.startsWith("tenant not found") then
           Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         else
           Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
+    }
+
+  def setTenantDisabled(req: SetTenantDisabledRequest): Out[TenantResponse] =
+    sup.setTenantDisabled(req.name, req.disabled).map {
+      case Right(t) => Right(toResponse(t))
+      case Left(msg) =>
+        if msg.startsWith("tenant not found") then
+          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        else
+          Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+    }
+
+  def setTenantAuth(req: SetTenantAuthRequest): Out[TenantResponse] =
+    sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
+      case Right(t) => Right(toResponse(t))
+      case Left(msg) =>
+        if msg.startsWith("tenant not found") then
+          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        else if msg.startsWith("authProvider must be") then
+          Left((StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", msg)))
+        else
+          Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
     }

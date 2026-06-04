@@ -65,6 +65,14 @@ DISTRIB_DIR="$REPO_DIR/distrib"
 # the user called this script from.
 cd "$REPO_DIR"
 
+# Anchor the DuckLake data path to the repo unless the caller already set
+# it. `application.conf` defaults to "./ducklake/tpch" which, combined
+# with the cd above, would also land here -- but exporting an absolute
+# path makes startup logs unambiguous AND survives any later JVM cwd
+# changes (e.g. tests that fork). Override by exporting QOD_DUCKLAKE_DATA_PATH
+# before invoking this script.
+export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/tpch}"
+
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
 GROUP_PATH="ai/starlake"
@@ -361,13 +369,27 @@ pg_port="${QOD_PG_PORT:-5432}"
 pg_user="${QOD_PG_USER:-postgres}"
 pg_pass="${QOD_PG_PASSWORD:-azizam}"
 pg_admin_db="${QOD_PG_ADMIN_DB:-postgres}"
-pg_dbname="${QOD_PG_DBNAME:-tpch}"
+pg_dbname="${QOD_PG_DBNAME:-qod}"
 
 pg_reachable=0
 if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
   if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc 'SELECT 1' >/dev/null 2>&1; then
-    echo "postgres: OK ($pg_user@$pg_host:$pg_port)  [state storage]"
+    # Version gate: the control plane uses `gen_random_uuid()` (PG13+
+    # built-in), `DROP DATABASE ... WITH (FORCE)` (PG13+), and the
+    # 0006-rbac changeset's modern partial-index shape. The project's
+    # documented minimum is Postgres 16 -- refuse to proceed against
+    # an older server so we fail BEFORE the migration / NUKE syntax
+    # error appears in the log and confuses the operator.
+    pg_major="$(PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
+        -tAc 'SHOW server_version_num' 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$pg_major" ]] || [[ "$pg_major" -lt 160000 ]]; then
+      echo "ERROR: Postgres at $pg_user@$pg_host:$pg_port reports server_version_num=$pg_major (need >= 160000 / PG 16)." >&2
+      echo "       This project requires Postgres 16+. Point QOD_PG_HOST / QOD_PG_PORT / QOD_PG_PASSWORD" >&2
+      echo "       at a PG16 server (e.g. the postgres:16-alpine container the docker-compose ships)." >&2
+      exit 1
+    fi
+    echo "postgres: OK ($pg_user@$pg_host:$pg_port, server_version_num=$pg_major)  [state storage]"
     pg_reachable=1
   else
     echo "WARN: cannot reach Postgres at $pg_user@$pg_host:$pg_port; manager will fail at startup if it cannot persist state." >&2
@@ -391,10 +413,26 @@ if [[ "$NUKE" == "1" ]]; then
   # Postgres to be reachable; otherwise warn and continue with the local
   # wipes — they're still useful and the Postgres side is harmless when
   # the DB is later recreated by the bootstrap step.
+  #
+  # Also drop the bootstrap tenant-db Postgres DB (default `tpch_tpch1`)
+  # so the next boot starts with no leftover DuckLake catalog / tables
+  # from a previous run. Runtime-created tenant-dbs (via the REST API,
+  # not the bootstrap config) are NOT covered — drop them manually if
+  # you want them gone.
   if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
-    echo "  dropping Postgres database: $pg_dbname"
+    echo "  dropping Postgres database: $pg_dbname (control plane)"
     PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
-       -tAc "DROP DATABASE IF EXISTS \"$pg_dbname\"" >/dev/null
+       -tAc "DROP DATABASE IF EXISTS \"$pg_dbname\" WITH (FORCE)" >/dev/null
+    bs_tenant="${QOD_BOOTSTRAP_TENANT:-tpch}"
+    bs_tenantdb_suffix="${QOD_BOOTSTRAP_TENANTDB:-tpch1}"
+    if [[ "$bs_tenantdb_suffix" == "${bs_tenant}_"* ]]; then
+      bs_tenantdb_name="$bs_tenantdb_suffix"
+    else
+      bs_tenantdb_name="${bs_tenant}_${bs_tenantdb_suffix}"
+    fi
+    echo "  dropping Postgres database: $bs_tenantdb_name (bootstrap tenant-db)"
+    PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
+       -tAc "DROP DATABASE IF EXISTS \"$bs_tenantdb_name\" WITH (FORCE)" >/dev/null
   elif [[ "$state_mode" == "postgres" ]]; then
     echo "  WARN: Postgres unreachable; skipping DB drop (local wipes still proceed)" >&2
   fi
@@ -424,16 +462,39 @@ fi
 
 # ---- Optional: TPC-H seed (delegates to load-tpch-dbgen.sh) ----
 # Presence of LOAD_TPCH (positive integer) is the sole gate.
+#
+# Targets the bootstrap tenant-db (default `tpch_tpch1`), NOT the
+# control-plane DB (`qod`). With per-tenant-db storage each tenant-db
+# owns its own Postgres catalog + data path; loading TPC-H into the
+# control-plane DB would not surface to FlightSQL clients that route
+# via (tenant, pool) -> tenant-db.
 if [[ -n "${LOAD_TPCH:-}" ]]; then
   tpch_schema="${QOD_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
+  bs_tenant="${QOD_BOOTSTRAP_TENANT:-tpch}"
+  bs_tenantdb_suffix="${QOD_BOOTSTRAP_TENANTDB:-tpch1}"
+  # Mirror Names.normalizeTenantDbName: idempotent if the suffix already
+  # carries the tenant prefix; otherwise prepend "${tenant}_".
+  if [[ "$bs_tenantdb_suffix" == "${bs_tenant}_"* ]]; then
+    bs_tenantdb_name="$bs_tenantdb_suffix"
+  else
+    bs_tenantdb_name="${bs_tenant}_${bs_tenantdb_suffix}"
+  fi
+  # Derive per-tenant-db data path the same way Main.scala's bootstrap
+  # does: parent(rootDataPath) / <tenant-db name>. E.g.
+  # `.../ducklake/tpch` + `tpch_tpch1` -> `.../ducklake/tpch_tpch1`.
+  root_data_path="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$bs_tenant}"
+  tenant_db_data_path="$(dirname "$root_data_path")/$bs_tenantdb_name"
+
   if ! command -v duckdb >/dev/null 2>&1; then
     echo "WARN: LOAD_TPCH=$LOAD_TPCH set but duckdb CLI not on PATH; skipping TPC-H seed." >&2
   elif [[ "$pg_reachable" != "1" ]]; then
     echo "WARN: LOAD_TPCH=$LOAD_TPCH set but Postgres unreachable; skipping TPC-H seed." >&2
   else
-    DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$pg_dbname}" \
+    echo "load-tpch: target tenant-db '$bs_tenantdb_name' at $tenant_db_data_path"
+    DATA_PATH="$tenant_db_data_path" \
     PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
-    DB_NAME="$pg_dbname" SCHEMA_NAME="$tpch_schema" SF="$LOAD_TPCH" \
+    PG_ADMIN_DB="$pg_admin_db" \
+    DB_NAME="$bs_tenantdb_name" SCHEMA_NAME="$tpch_schema" SF="$LOAD_TPCH" \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
   fi
 fi

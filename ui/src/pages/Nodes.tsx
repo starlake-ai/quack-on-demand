@@ -4,9 +4,10 @@ import { api } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry } from '../api/types';
 
 interface Row extends NodeInfo {
-  tenant: string;
-  pool:   string;
-  qps:    number; // computed client-side from totalServed delta
+  tenant:   string;
+  tenantDb: string;
+  pool:     string;
+  qps:      number; // computed client-side from totalServed delta
 }
 
 /** Snapshot kept between polls so we can compute per-node QPS without
@@ -57,7 +58,7 @@ export default function Nodes() {
         const now = Date.now();
         const flat: Row[] = r.pools.flatMap(p =>
           p.nodes.map(n => {
-            const key = `${p.tenant}/${p.pool}/${n.nodeId}`;
+            const key = `${p.tenant}/${p.tenantDb}/${p.pool}/${n.nodeId}`;
             const prior = prev.current[key];
             // First sample: QPS unknown, show 0 (instead of misleading values).
             let qps = 0;
@@ -66,7 +67,7 @@ export default function Nodes() {
               if (dt > 0) qps = Math.max(0, (n.totalServed - prior.totalServed) / dt);
             }
             prev.current[key] = { totalServed: n.totalServed, t: now };
-            return { ...n, tenant: p.tenant, pool: p.pool, qps };
+            return { ...n, tenant: p.tenant, tenantDb: p.tenantDb, pool: p.pool, qps };
           })
         );
         setRows(flat);
@@ -177,7 +178,7 @@ export default function Nodes() {
             {visible.length === 0 ? (
               <tr><td colSpan={13} className="empty">No nodes running.</td></tr>
             ) : visible.map(n => (
-              <tr key={`${n.tenant}/${n.pool}/${n.nodeId}`}>
+              <tr key={`${n.tenant}/${n.tenantDb}/${n.pool}/${n.nodeId}`}>
                 <td>
                   <Link
                     to={`/nodes?${filter ? `tenant=${encodeURIComponent(filter)}&` : ''}node=${encodeURIComponent(n.nodeId)}`}
@@ -189,7 +190,9 @@ export default function Nodes() {
                 <td>
                   <Link to={`/tenant/${n.tenant}`}>{n.tenant}</Link>
                   {' / '}
-                  <Link to={`/pool/${n.tenant}/${n.pool}`}>{n.pool}</Link>
+                  <code style={{ color: '#666' }}>{n.tenantDb}</code>
+                  {' / '}
+                  <Link to={`/pool/${encodeURIComponent(n.tenant)}/${encodeURIComponent(n.tenantDb)}/${encodeURIComponent(n.pool)}`}>{n.pool}</Link>
                 </td>
                 <td><RoleBadge role={n.role} /></td>
                 <td><HealthBadge healthy={n.healthy} draining={n.draining} /></td>
@@ -240,7 +243,7 @@ export default function Nodes() {
                       <td>
                         <Link to={`/tenant/${h.tenant}`}>{h.tenant}</Link>
                         {' / '}
-                        <Link to={`/pool/${h.tenant}/${h.pool}`}>{h.pool}</Link>
+                        <span>{h.pool}</span>
                       </td>
                       <td>
                         <Link

@@ -13,7 +13,7 @@ issue is linked inline.
 
 | Aspect | Status | Notes |
 |---|---|---|
-| Single-manager cold restart | **Yes** | Pool / tenant / ACL state restored from Postgres; nodes reconciled on boot |
+| Single-manager cold restart | **Yes** | Tenant / tenant-db / pool / RBAC state restored from Postgres; nodes reconciled on boot |
 | Quack node crash | **Yes** | Detected by `HealthProbe`; respawned (local) / left to kubelet (K8s) |
 | In-transaction node death | **Yes** | Session pin invalidated; client sees error and retries from BEGIN |
 | Postgres brief outage | **Partial** | No retry wrapper — first transient failure may bubble up to a 500 |
@@ -36,10 +36,14 @@ When the JVM exits and a supervisor restarts it (systemd, Kubernetes, `run-jar.s
 
 1. **State restored from Postgres** —
    [`PoolSupervisor.restore()`](src/main/scala/ai/starlake/quack/ondemand/PoolSupervisor.scala#L25)
-   reads `slkstate_pool_state` JSONB and re-hydrates the tenant + pool registry into
-   in-memory `TrieMap`s. ACL grants come from `slkstate_acl_grant`. Admin users from
-   `slkstate_user`. Equivalent path exists for the file-backed `StateStore` when
-   `stateStorage = file`.
+   reads the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` /
+   `qodstate_node` tables (Liquibase-managed) and re-hydrates the registry into
+   in-memory `TrieMap`s. Users come from `qodstate_user`; the RBAC graph
+   (`qodstate_role`, `qodstate_role_permission`, `qodstate_group`,
+   `qodstate_user_role`, `qodstate_user_group`, `qodstate_group_role`,
+   `qodstate_pool_permission`) is rebuilt into the per-session EffectiveSet
+   on each connection. Equivalent path exists for the file-backed `StateStore`
+   (legacy `slkstate_pool_state` JSONB blob) when `stateStorage = file`.
 2. **Existing K8s pods adopted** —
    [`KubernetesQuackBackend.discoverExisting()`](src/main/scala/ai/starlake/quack/ondemand/runtime/KubernetesQuackBackend.scala#L159)
    selects pods by the manager's label (`managed-by=quack-on-demand`) and re-binds them to
@@ -118,7 +122,7 @@ gaps in the operator-visible signal.
 | Quack node JVM crash | `HealthProbe` → `/ping` 5 s tick + (local only) PID check | Local: respawn via `spawn-quack-node.sh`. K8s: kubelet restart, manager waits for `Ready`. | New traffic routes to other healthy nodes. Sessions pinned to the dead node get invalidated on next statement. | — |
 | Manager JVM crash (OOM, panic) | Process supervisor (systemd / kubelet / `run-jar.sh` rerun) | Cold restart → restore → reconcile. | All FlightSQL sessions drop. ~15 s to fully reconcile. | Graceful shutdown ([#2](https://github.com/starlake-ai/quack-on-demand/issues/2)) |
 | Postgres unreachable (network blip) | Hikari throws on connection acquire | First state-changing request gets a 500. No automatic retry. | Read-only requests served from in-memory state continue to work; writes fail. | Need retry wrapper (no issue yet) |
-| Postgres down for minutes | Same as above | Manager enters a degraded state where reads work but `createPool` / `setRole` / ACL CRUD all fail. | Existing FlightSQL traffic keeps flowing. | Same |
+| Postgres down for minutes | Same as above | Manager enters a degraded state where reads work but `createPool` / `setRole` / RBAC CRUD all fail. | Existing FlightSQL traffic keeps flowing. | Same |
 | Manager host loss (K8s node evict) | kubelet | New pod scheduled; cold restart sequence runs on a different host. | Same as JVM crash. K8s `terminationGracePeriodSeconds` should be set ≥ 30 s. | — |
 | Network partition between manager and a node | `HealthProbe` flips `healthy=false` after one tick | Node marked unhealthy; router excludes it from `pick()`. | Pinned sessions get invalidated on next statement. | — |
 | Network partition between manager and all nodes | All nodes flip unhealthy | Every routing decision returns `Unavailable("no node compatible")`. FlightSQL responses become 500s. | Total query outage until partition heals. The manager itself does not crash. | — |
@@ -142,7 +146,7 @@ gaps in the operator-visible signal.
    `PoolSupervisor.restore()` + `reconcile()` finish, so a restarted manager doesn't
    briefly 503.
 3. **Persist statement history to Postgres** — back the ring buffer with a small
-   `slkstate_stmt_history` table. Operators get a post-mortem trail surviving crashes.
+   `qodstate_stmt_history` table. Operators get a post-mortem trail surviving crashes.
 4. **Hikari transient-retry wrapper** — wrap every state-store write in a
    ≤ 3-attempt retry with backoff, so a 2-second Postgres blip doesn't bubble up as a 500.
    Reconcile is already idempotent so a retried write is safe.
@@ -213,7 +217,7 @@ If you're putting this in production now (single-manager + Postgres):
 ## What to read for design context
 
 - [Architecture summary in CLAUDE.md](CLAUDE.md#architecture---the-bits-that-span-multiple-files) —
-  the three sockets, state storage, ACL validator selection.
+  the three sockets, state storage, RBAC validator selection.
 - [Observability surface](observability/README.md) — Prometheus / Cloud Monitoring sinks
   and the Grafana dashboard you should be watching during failure investigations.
 - [Roadmap](docs/ROADMAP.md) — v0.2 / v0.3 / v0.4 / v1.x items that progressively close the

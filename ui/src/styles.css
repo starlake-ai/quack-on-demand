@@ -122,7 +122,29 @@ input, select {
   border-radius: 6px;
   font: inherit;
   font-family: var(--mono);
+  /* Equalize rendered height across <input> and <select>. Without these
+     three lines Chrome/Safari size <select> taller than <input> because
+     the native dropdown chrome adds vertical padding. box-sizing pins
+     both to the same outer height, line-height pins the inner content,
+     and a fixed height removes residual vendor variance. */
+  box-sizing: border-box;
+  line-height: 1.4;
+  height: 2.4rem;
 }
+/* Strip the native chrome from <select> so its height matches <input>,
+   and reinstate a CSS-drawn caret on the right. */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 1.8rem;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='%239aa0a6' d='M6 8L0 0h12z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right .65rem center;
+  background-size: 10px 7px;
+}
+/* Textareas keep auto height. */
+textarea { height: auto; box-sizing: border-box; }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 button {
   background: var(--accent);
@@ -229,3 +251,26 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
 /* ----- Loading / empty state ----- */
 .loading { padding: 2rem; text-align: center; color: var(--text-mute); }
 .empty   { padding: 1rem; text-align: center; color: var(--text-mute); border: 1px dashed var(--border); border-radius: var(--radius); }
+
+/* ----- Tabs ----- */
+.tabs    { margin-top: .5rem; }
+.tab-bar { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-top-left-radius: var(--radius);
+  border-top-right-radius: var(--radius);
+  color: var(--text-mute);
+  padding: .5rem 1rem;
+  cursor: pointer;
+  font-weight: 500;
+  margin-bottom: -1px;
+}
+.tab:hover  { color: var(--text); }
+.tab.active {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text);
+}
+.tab-body   { /* container hook; cards inside carry their own padding */ }

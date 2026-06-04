@@ -27,7 +27,7 @@ final class MetricsBindings(
   private val nodeEwma     = MultiGauge.builder("node_ewma_latency_seconds").register(registry)
   private val poolNodes    = MultiGauge.builder("pool_nodes").register(registry)
 
-  // Free JVM metrics — operators expect these and Micrometer ships them.
+  // Free JVM metrics -- operators expect these and Micrometer ships them.
   new io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics().bindTo(registry)
   new io.micrometer.core.instrument.binder.jvm.JvmGcMetrics().bindTo(registry)
   new io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics().bindTo(registry)
@@ -92,7 +92,7 @@ final class MetricsBindings(
       }
     }
 
-    // `overwrite=true` replaces the row set wholesale — old nodes vanish.
+    // `overwrite=true` replaces the row set wholesale -- old nodes vanish.
     nodeHealthy.register(healthyRows.asJava, true)
     nodeDraining.register(drainingRows.asJava, true)
     nodeInFlight.register(inFlightRows.asJava, true)

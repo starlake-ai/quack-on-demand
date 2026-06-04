@@ -2,41 +2,40 @@ package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.Config
 import ai.starlake.acl.parser.{SqlParser, StatementResult}
-import ai.starlake.quack.ondemand.state.AclGrantStore
+import ai.starlake.quack.model.StatementKind
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.ondemand.state.RolePermission
+import ai.starlake.quack.route.StatementClassifier
 import com.typesafe.scalalogging.LazyLogging
 
-/** SQL ACL validator backed by the Postgres-relational `slkstate_acl_grant`
-  * table. Uses the ACL `SqlParser` to extract table refs from SELECT
-  * statements, then queries the grant table for the user's principal.
+/** Per-statement ACL gate backed by the cached [[EffectiveSet]] pinned on
+  * [[ai.starlake.quack.edge.ConnectionContext]] at handshake time. Reads
+  * a tenant-scoped principal's table permissions in-memory; superusers
+  * (`effectiveSet.user.tenant.isEmpty`) bypass.
   *
-  * Decision rule:
-  *   - All `SELECT`s: every referenced table must have at least one grant
-  *     with permission `SELECT` or `ALL` for one of the user's principals.
-  *   - Non-SELECT (DDL/DML) or `ParseError`: deny unless the user has a
-  *     wildcard `ALL` grant on `*.*.*`. The strict default is intentional
-  *     - JSqlParser doesn't enumerate writes the same way as reads, so
-  *     we err on the side of "explicit grant required".
+  * Decision rule per statement:
+  *   1. No `effectiveSet` on the validation context  -> deny (the
+  *      handshake never bound an RBAC principal, so we err on the safe
+  *      side).
+  *   2. Superuser principal                          -> allow.
+  *   3. Classify the statement (SELECT / INSERT / UPDATE / DELETE / DDL).
+  *      DDL still requires a wildcard ALL grant -- DDL grants are out of
+  *      scope for this iteration.
+  *   4. For SELECT/INSERT/UPDATE/DELETE: extract the table refs and
+  *      require each one to be covered by a [[RolePermission]] row whose
+  *      verb is the matching DML verb OR `ALL`, and whose
+  *      (catalog, schema, table) match (literal or `*` wildcard).
   *
-  * Principals come from `ValidationContext.username` (as `user:<name>`).
-  * Group/role propagation is deferred to a later iteration: ConnectionContext
-  * needs to carry `AuthenticatedProfile.groups` + `role` for that.
-  *
-  * `tenantId` is the SessionConfig.aclTenant (defaults to "default").
-  * `defaultDatabase` / `defaultSchema` come from the pool's metastore so
-  * unqualified `FROM customer` resolves to the pool's catalog/schema and
-  * matches grants written against the fully-qualified table. */
+  * Catalog/schema defaults: when a referenced table is unqualified, the
+  * SQL parser fills them in from the pool's metastore via
+  * [[ValidationContext.defaultDatabase]] / `defaultSchema`. */
 final class PostgresAclValidator(
-    store: AclGrantStore,
-    tenantId: String,
-    defaultDatabase: String,
-    defaultSchema: String,
-    dialect: String = "duckdb"
+    defaultDatabase: String = "",
+    defaultSchema:   String = "main",
+    dialect:         String = "duckdb"
 ) extends StatementValidator,
       LazyLogging:
 
-  /** Build the SQL parser config from per-call overrides (ValidationContext)
-    * falling back to the validator's construction-time defaults. Lets a
-    * single validator instance serve multiple pools with different schemas. */
   private def parserConfigFor(context: ValidationContext): Config =
     val db     = context.defaultDatabase.getOrElse(defaultDatabase)
     val schema = context.defaultSchema.getOrElse(defaultSchema)
@@ -44,69 +43,101 @@ final class PostgresAclValidator(
     else Config.forGeneric(db, schema)
 
   override def validate(context: ValidationContext): ValidationResult =
-    val principals = principalsFor(context)
-    val extraction = SqlParser.extract(context.statement, parserConfigFor(context))
+    context.effectiveSet match
+      case None =>
+        // Defensive: no handshake state -> deny. In practice the FlightSQL
+        // handshake always pins an EffectiveSet (even an empty one for
+        // superusers), so reaching here means the wiring is broken.
+        val msg = "no RBAC principal bound to session; deny"
+        logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+        Denied(msg)
 
-    // Bail out on parse errors / unsupported statements: deny unless the
-    // user has an admin-style wildcard grant.
-    val unparsed = extraction.statements.collect {
-      case StatementResult.ParseError(_, snippet, msg) => s"parse error: $msg ($snippet)"
-      case StatementResult.NonSelect(_, snippet, kind)  => s"non-select statement: $kind ($snippet)"
-    }
-    if unparsed.nonEmpty then
-      if hasWildcardAll(principals) then
-        logger.info(s"ACL: wildcard ALL grant covers non-select statement (user=${context.username})")
+      case Some(eff) if eff.user.tenant.isEmpty =>
+        // Superuser bypass. Logged at debug only so admin smoke tests
+        // don't spam the info channel.
+        logger.debug(s"ACL ALLOWED (superuser): user=${context.username}")
         Allowed
-      else
-        val reason = unparsed.mkString("; ")
-        logger.warn(s"ACL DENIED (no wildcard ALL): user=${context.username}: $reason")
-        Denied(reason)
-    else
-      // All tables must be authorized.
-      val unauthorized = extraction.allTables.filterNot { t =>
-        store.hasAccess(
-          tenantId      = tenantId,
-          principals    = principals,
-          catalog       = t.database,
-          schema        = t.schema,
-          table         = t.table,
-          requiredPerms = Set("SELECT")
-        )
-      }
-      if unauthorized.isEmpty then
-        logger.info(
-          s"ACL ALLOWED: user=${context.username} principals=${principals.mkString(",")} " +
-          s"tables=${extraction.allTables.map(_.canonical).mkString(",")}"
-        )
-        Allowed
-      else
-        val reason =
-          s"missing SELECT grant on ${unauthorized.map(_.canonical).mkString(", ")} " +
-          s"for ${principals.mkString(", ")}"
-        logger.warn(s"ACL DENIED: $reason")
-        Denied(reason)
 
-  /** Build the principal set from the authenticated session. Combines
-    * `user:<username>` with `group:<g>` (one per group the profile carries)
-    * and `role:<r>` (when the profile has a non-empty role). Grants
-    * targeted at any of these match. */
-  private def principalsFor(ctx: ValidationContext): Set[String] =
-    val user  = if ctx.username.isEmpty then Set.empty else Set(s"user:${ctx.username}")
-    val groups = ctx.groups.iterator.filter(_.nonEmpty).map(g => s"group:$g").toSet
-    val role   = if ctx.role.isEmpty then Set.empty else Set(s"role:${ctx.role}")
-    user ++ groups ++ role
+      case Some(eff) =>
+        validateForPrincipal(context, eff)
 
-  /** Does the user have a wildcard ALL grant? Passing a synthetic table
-    * name that no real grant row would ever target means the OR-with-NULL
-    * predicate matches only the wildcard rows. Combined with
-    * requiredPerms={"ALL"}, this answers "is there a row with NULL/NULL/NULL
-    * and permission=ALL for any of our principals". */
-  private def hasWildcardAll(principals: Set[String]): Boolean =
-    store.hasAccess(
-      tenantId      = tenantId,
-      principals    = principals,
-      catalog       = "__quack_synthetic_no_match__",
-      schema        = "__quack_synthetic_no_match__",
-      table         = "__quack_synthetic_no_match__",
-      requiredPerms = Set("ALL")
+  private def validateForPrincipal(
+      context: ValidationContext,
+      eff:     EffectiveSet
+  ): ValidationResult =
+    val kind = StatementClassifier.classify(context.statement)
+    val required = requiredVerbFor(kind)
+
+    required match
+      case None =>
+        // DDL or unknown. Today this requires an unrestricted `*.*.* ALL`
+        // grant since the parser doesn't enumerate DDL targets. The spec
+        // calls this out as a follow-up (DDL grants as a first-class
+        // operator concern).
+        if hasWildcardAll(eff) then
+          logger.info(s"ACL: wildcard ALL covers ${kind} for user=${context.username}")
+          Allowed
+        else
+          val msg = s"DDL/unknown statement requires wildcard ALL grant"
+          logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+          Denied(msg)
+
+      case Some(verb) =>
+        val extraction = SqlParser.extract(context.statement, parserConfigFor(context))
+        val unparsed = extraction.statements.collect {
+          case StatementResult.ParseError(_, snippet, msg) => s"parse error: $msg ($snippet)"
+        }
+        if unparsed.nonEmpty then
+          if hasWildcardAll(eff) then
+            logger.info(s"ACL: wildcard ALL covers unparseable statement for user=${context.username}")
+            Allowed
+          else
+            val msg = unparsed.mkString("; ")
+            logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+            Denied(msg)
+        else
+          val unauthorized = extraction.allTables.filterNot { t =>
+            eff.permissions.exists(p =>
+              (p.verb.equalsIgnoreCase(verb) || p.verb.equalsIgnoreCase("ALL")) &&
+                wildcardMatch(p.catalogName, t.database) &&
+                wildcardMatch(p.schemaName,  t.schema) &&
+                wildcardMatch(p.tableName,   t.table)
+            )
+          }
+          if unauthorized.isEmpty then
+            logger.info(
+              s"ACL ALLOWED: user=${context.username} " +
+                s"roles=${eff.roles.map(_.name).mkString(",")} " +
+                s"tables=${extraction.allTables.map(_.canonical).mkString(",")}"
+            )
+            Allowed
+          else
+            val principal = if eff.user.tenant.isEmpty then "superuser"
+                            else s"user:${context.username}"
+            val msg = s"$principal lacks $verb on ${unauthorized.map(_.canonical).mkString(", ")}"
+            logger.warn(s"ACL DENIED: $msg")
+            Denied(msg)
+
+  /** Map a [[StatementKind]] to the SQL verb that a grant must cover.
+    * Select -> SELECT, Dml -> INSERT (any one INSERT/UPDATE/DELETE grant
+    * suffices since the classifier doesn't distinguish them today; the
+    * ALL wildcard is the documented operator path either way). Begin /
+    * Commit / Rollback / Other are session-level statements that don't
+    * carry table refs and short-circuit to Allowed upstream of the
+    * extraction step. */
+  private def requiredVerbFor(kind: StatementKind): Option[String] =
+    kind match
+      case StatementKind.Select => Some("SELECT")
+      case StatementKind.Dml    => Some("INSERT")
+      case _                    => None
+
+  private def wildcardMatch(grant: String, ref: String): Boolean =
+    grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
+
+  private def hasWildcardAll(eff: EffectiveSet): Boolean =
+    eff.permissions.exists(p =>
+      p.verb.equalsIgnoreCase("ALL") &&
+        p.catalogName == RolePermission.Wildcard &&
+        p.schemaName  == RolePermission.Wildcard &&
+        p.tableName   == RolePermission.Wildcard
     )

@@ -19,6 +19,7 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
     sup.get(key).map { p =>
       PoolResponse(
         tenant    = key.tenant,
+        tenantDb  = key.tenantDb,
         pool      = key.pool,
         nodes     = p.nodes.map { n =>
                       val load = tracker.snapshot(n.nodeId)
@@ -39,8 +40,9 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
                         draining      = load.draining
                       )
                     },
-        status    = "ready",
-        metastore = redact(p.metastore)
+        status    = if p.disabled then "disabled" else "ready",
+        metastore = redact(p.metastore),
+        disabled  = p.disabled
       )
     }
 
@@ -49,25 +51,28 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
       IO.pure(Left((StatusCode.BadRequest,
         ErrorResponse("invalid_distribution", "role counts do not sum to size"))))
     else
-      val key = PoolKey(req.tenant, req.pool)
+      val key = PoolKey(req.tenant, req.tenantDb, req.pool)
       sup.getTenant(req.tenant) match
         case None =>
           IO.pure(Left((StatusCode.NotFound,
             ErrorResponse("tenant_not_found", s"tenant '${req.tenant}' is not registered"))))
+        case Some(_) if sup.findTenantDb(req.tenant, req.tenantDb).isEmpty =>
+          IO.pure(Left((StatusCode.NotFound,
+            ErrorResponse("tenant_db_not_found", s"tenant-db '${req.tenant}/${req.tenantDb}' is not registered"))))
         case Some(_) =>
           sup.get(key) match
             case Some(_) =>
               IO.pure(Left((StatusCode.Conflict,
                 ErrorResponse("exists", s"pool $key already exists"))))
             case None =>
-              sup.createPool(key, req.roleDistribution, req.metastore, req.s3, req.maxConcurrentPerNode)
+              sup.createPool(key, req.roleDistribution, req.maxConcurrentPerNode)
                 .map(_ => Right(respond(key).getOrElse(
-                  PoolResponse(req.tenant, req.pool, Nil, "ready", Map.empty))))
+                  PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty))))
                 .handleError(t => Left((StatusCode.InternalServerError,
                   ErrorResponse("start_failed", t.getMessage))))
 
   def scalePool(req: ScalePoolRequest): Out[PoolResponse] =
-    val key = PoolKey(req.tenant, req.pool)
+    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
     sup.get(key) match
       case None =>
         IO.pure(Left((StatusCode.NotFound,
@@ -79,10 +84,10 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
         else
           sup.scale(key, req.targetSize, req.roleDistribution, req.force)
             .map(_ => Right(respond(key).getOrElse(
-              PoolResponse(req.tenant, req.pool, Nil, "ready", Map.empty))))
+              PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty))))
 
   def stopPool(req: StopPoolRequest): Out[Unit] =
-    val key = PoolKey(req.tenant, req.pool)
+    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
     sup.get(key) match
       case None =>
         IO.pure(Left((StatusCode.NotFound,
@@ -94,9 +99,23 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
     Right(PoolListResponse(sup.list().flatMap(p => respond(p.key))))
   )
 
-  def poolStatus(tenant: String, pool: String): Out[PoolResponse] =
-    val key = PoolKey(tenant, pool)
+  def poolStatus(tenant: String, tenantDb: String, pool: String): Out[PoolResponse] =
+    val key = PoolKey(tenant, tenantDb, pool)
     respond(key) match
       case Some(r) => IO.pure(Right(r))
       case None    => IO.pure(Left((StatusCode.NotFound,
                                     ErrorResponse("not_found", s"pool $key not found"))))
+
+  def setPoolDisabled(req: SetPoolDisabledRequest): Out[PoolResponse] =
+    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+    sup.setPoolDisabled(key, req.disabled).map {
+      case Right(_) =>
+        respond(key) match
+          case Some(r) => Right(r)
+          case None    => Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key disappeared after update")))
+      case Left(msg) =>
+        if msg.startsWith("pool not found") then
+          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        else
+          Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+    }

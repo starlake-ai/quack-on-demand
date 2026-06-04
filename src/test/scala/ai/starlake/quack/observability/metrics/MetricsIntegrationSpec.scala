@@ -15,7 +15,7 @@ import java.time.Instant
 
 class MetricsIntegrationSpec extends AnyFlatSpec with Matchers:
 
-  private val poolKey = PoolKey("acme", "sales")
+  private val poolKey = PoolKey("acme", "acme_default", "sales")
   private val ro1 = RunningNode("ro1", poolKey, Role.ReadOnly, "127.0.0.1", 21900, "tok",
                                 Some(1L), None, Instant.EPOCH)
   private def pool(nodes: List[RunningNode]): PoolState =

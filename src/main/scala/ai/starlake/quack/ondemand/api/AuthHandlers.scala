@@ -29,7 +29,10 @@ final class AuthHandlers(authService: AuthenticationService, tokens: SessionToke
         ErrorResponse("auth_disabled",
           "no auth backends configured; set auth.database.enabled=true (or another)")))
     else
-      authService.authenticateBasic(req.username, req.password) match
+      // Manager UI / REST login: system-admin scope (tenant=None).
+      // FlightSQL principals authenticate through FlightEdgeServer with
+      // their resolved tenant -- never through this endpoint.
+      authService.authenticateBasic(None, req.username, req.password) match
         case Left(err) =>
           Left((StatusCode.Unauthorized,
             ErrorResponse("invalid_credentials", err)))

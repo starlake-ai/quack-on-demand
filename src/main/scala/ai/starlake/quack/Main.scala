@@ -6,9 +6,9 @@ import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
   AclConfig, AuthenticationConfig, AwsAuthConfig, AzureAuthConfig,
   DatabaseAuthConfig, GoogleAuthConfig, JwtAuthConfig, KeycloakAuthConfig,
-  OAuthConfig, SessionConfig
+  OAuthConfig
 }
-import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.observability.metrics.{
   MetricsBindings, MetricsConfig, MetricsConfigCodec, MetricsEndpoint, MetricsRegistry, StatementInstruments
 }
@@ -16,7 +16,10 @@ import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime._
-import ai.starlake.quack.ondemand.state.{AclGrantStore, PostgresStateStore, StateStore, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
+  PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
+}
 import cats.effect.{IO, IOApp}
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
@@ -71,17 +74,7 @@ object Main extends IOApp.Simple with LazyLogging:
     val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
-    val sessionCfg = SessionConfig(
-      slProjectId  = "",
-      slDataPath   = "",
-      pgUsername   = mgrCfg.defaultMetastore.getOrElse("pgUser", "postgres"),
-      pgPassword   = mgrCfg.defaultMetastore.getOrElse("pgPassword", ""),
-      pgPort       = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
-      pgHost       = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
-      jwtSecretKey = authCfg.jwt.secretKey,
-      aclTenant    = edgeCfg.defaultTenant
-    )
-    val authService = new AuthenticationService(authCfg, sessionCfg)
+    val authService = new AuthenticationService(authCfg, authCfg.jwt.secretKey)
 
     // Bootstrap admin users. Always runs at startup when stateStorage=postgres
     // so the DB auth backend has at least one credential. Re-hashed on every
@@ -89,16 +82,27 @@ object Main extends IOApp.Simple with LazyLogging:
     // QOD_ADMIN_USERNAME (comma-separated) get the same password + role.
     // Skipped for stateStorage=file (no Postgres connection assumed).
     if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+      // Apply the Liquibase changelog first: `qodstate_user` (and the rest
+      // of the control plane) must exist before we upsert the admin row.
+      // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+      LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore).run()
       val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
       val admins = mgrCfg.admin.usernameList
       if admins.isEmpty then
         logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
       else
         admins.foreach { name =>
-          val inserted = userStore.upsertUser(name, mgrCfg.admin.password, mgrCfg.admin.role)
-          val verb = if inserted then "created" else "updated"
+          // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
+          // CHECK only forbids empty-string tenants now; NULL alone is fine.
+          val out = userStore.upsertUser(
+            tenant    = None,
+            username  = name,
+            plaintext = mgrCfg.admin.password,
+            role      = mgrCfg.admin.role
+          )
+          val verb = if out.inserted then "created" else "updated"
           logger.info(
-            s"admin user $verb: $name (role=${mgrCfg.admin.role}) in slkstate_user"
+            s"admin user $verb: $name (id=${out.id}, role=${mgrCfg.admin.role}) in qodstate_user"
           )
         }
 
@@ -118,31 +122,19 @@ object Main extends IOApp.Simple with LazyLogging:
       case other => sys.error(s"unknown runtime: $other")
 
     val tracker  = new NodeLoadTracker
-    val store: StateStore = mgrCfg.stateStorage.toLowerCase match
-      case "postgres" =>
-        logger.info("state storage: postgres (defaultMetastore database)")
-        PostgresStateStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-      case "file" | "" =>
-        logger.info(s"state storage: file (${mgrCfg.statePath})")
-        StateStore(Path.of(mgrCfg.statePath))
-      case other =>
-        sys.error(s"unknown stateStorage: $other (expected 'file' or 'postgres')")
-    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore)
+    logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
+    val store: ControlPlaneStore =
+      PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+    // Per-tenant-db Postgres provisioning. The admin connection opens
+    // against the `postgres` system DB and issues CREATE/DROP DATABASE
+    // for each `qodstate_tenant_db` row the supervisor manages.
+    val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore)
+    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore, dbAdmin)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
+    val tenantDbs = new TenantDbHandlers(sup)
     val health   = new HealthHandler(sup)
-
-    // ACL handlers are only available with a Postgres state backend - that's
-    // the same connection the relational grant store reuses. File-mode
-    // deploys skip them; the endpoints won't be mounted and return 404.
-    val aclHandlers: Option[AclHandlers] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val grantStore = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-        grantStore.ensureTable()
-        logger.info("ACL grant store ready (slkstate_acl_grant)")
-        Some(new AclHandlers(grantStore))
-      else None
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
@@ -152,11 +144,11 @@ object Main extends IOApp.Simple with LazyLogging:
     // spawn-node.
     val catalogHandlers: Option[CatalogHandlers] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val cache = new java.util.concurrent.ConcurrentHashMap[String, DuckLakeCatalogReader]()
-        def reader(tenant: String): DuckLakeCatalogReader =
+        val cache = new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
+        def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
           cache.computeIfAbsent(
-            tenant,
-            t => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t))
+            (tenant, tenantDb),
+            { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
           )
         Some(new CatalogHandlers(reader))
       else None
@@ -173,34 +165,25 @@ object Main extends IOApp.Simple with LazyLogging:
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter  = new QuackHttpAdapter(client, tracker)
-    // SQL ACL validator. Picks between two implementations:
-    //   - PostgresAclValidator (preferred when stateStorage=postgres): reads
-    //     grants from slkstate_acl_grant, enforces them per statement.
-    //   - AclStatementValidator (file-based): reads YAML files under
-    //     acl.base-path. Still useful for read-only ACL configs shipped
-    //     alongside an immutable deploy.
-    // Both honor acl.enabled=false by falling back to allow-all.
+    // SQL ACL validator. Phase C: the only validator is the RBAC-backed
+    // PostgresAclValidator, which reads from the cached EffectiveSet
+    // pinned on ConnectionContext at handshake time. acl.enabled=false
+    // still falls back to allow-all for local-dev workflows.
     val aclValidator: StatementValidator =
       if !aclCfg.enabled then
         logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
         StatementValidator.allowAll
-      else if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+      else
         val defaultDb     = mgrCfg.defaultMetastore.getOrElse("dbName", "")
         val defaultSchema = mgrCfg.defaultMetastore.getOrElse("schemaName", "main")
         logger.info(
-          s"SQL ACL enabled (Postgres slkstate_acl_grant, tenant=${sessionCfg.aclTenant}, " +
-          s"defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
+          s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
         )
         new PostgresAclValidator(
-          store           = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore),
-          tenantId        = sessionCfg.aclTenant,
           defaultDatabase = defaultDb,
           defaultSchema   = defaultSchema,
           dialect         = aclCfg.dialect
         )
-      else
-        logger.info(s"SQL ACL enabled (file-based, base-path=${aclCfg.basePath}, dialect=${aclCfg.dialect})")
-        new AclStatementValidator(aclCfg, sessionCfg)
 
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
@@ -249,33 +232,82 @@ object Main extends IOApp.Simple with LazyLogging:
         logger.info("bootstrap: disabled (quack-on-demand.bootstrap.enabled=false)")
         IO.unit
       else
-        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, bs.pool)
+        // Compose the tenant-db name up-front so it can serve both the
+        // explicit `createTenantDb` call AND the per-tenant-db dataPath
+        // derivation.
+        val tenantDbName = ai.starlake.quack.model.Names
+          .normalizeTenantDbName(bs.tenant, bs.tenantDb)
+          .fold(err => sys.error(s"bootstrap: invalid tenant/tenantDb: $err"), identity)
+
+        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, tenantDbName, bs.pool)
         val dist = ai.starlake.quack.model.RoleDistribution(
           bs.roleDistribution.writeonly,
           bs.roleDistribution.readonly,
           bs.roleDistribution.dual
         )
-        val createTenantIO =
+
+        // Each tenant-db owns its own on-disk data path. Derive it by
+        // replacing the last path component of the global default
+        // `dataPath` with the composed tenant-db name -- e.g.
+        // `/Users/.../ducklake/tpch` + `tpch_tpch1` -> `/Users/.../ducklake/tpch_tpch1`.
+        val rootDataPath = mgrCfg.defaultMetastore.getOrElse("dataPath", "")
+        val tenantDbDataPath =
+          if rootDataPath.isEmpty then ""
+          else
+            val p      = java.nio.file.Paths.get(rootDataPath)
+            val parent = p.getParent
+            if parent == null then tenantDbName else parent.resolve(tenantDbName).toString
+        val tenantDbMetastore = mgrCfg.defaultMetastore
+          .updated("dataPath", tenantDbDataPath)
+          .updated("dbName",   tenantDbName)
+
+        val createTenantIO: IO[Unit] =
           if sup.getTenant(bs.tenant).isDefined then
             IO.delay(logger.info(s"bootstrap: tenant '${bs.tenant}' already exists; skipping"))
           else
-            sup.createTenant(ai.starlake.quack.model.Tenant(bs.tenant, Map.empty)).flatMap {
-              case Right(_) => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}'"))
+            // Bootstrap tenant uses the `db` auth provider -- the only
+            // provider that needs zero out-of-band config to be useful.
+            sup.createTenant(
+              ai.starlake.quack.model.Tenant(name = bs.tenant, authProvider = "db")
+            ).flatMap {
+              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}' (auth=db)"))
               case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
             }
-        val createPoolIO =
-          if sup.get(key).isDefined then
-            IO.delay(logger.info(s"bootstrap: pool '${bs.tenant}/${bs.pool}' already exists; skipping"))
+
+        val createTenantDbIO: IO[Unit] =
+          if sup.listTenantDbsByTenant(bs.tenant).exists(_.name == tenantDbName) then
+            IO.delay(logger.info(s"bootstrap: tenant-db '${bs.tenant}/$tenantDbName' already exists; skipping"))
           else
-            sup.createPool(key, dist, Map.empty, Map.empty).attempt.flatMap {
+            sup.createTenantDb(
+              tenantName  = bs.tenant,
+              suffix      = bs.tenantDb,
+              metastore   = tenantDbMetastore,
+              dataPath    = tenantDbDataPath,
+              objectStore = Map.empty
+            ).flatMap {
+              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant-db '${bs.tenant}/$tenantDbName' at $tenantDbDataPath"))
+              case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant-db create failed: $err"))
+            }
+
+        val createPoolIO: IO[Unit] =
+          if sup.get(key).isDefined then
+            IO.delay(logger.info(s"bootstrap: pool '$key' already exists; skipping"))
+          else
+            sup.createPool(key, dist).attempt.flatMap {
               case Right(nodes) =>
                 IO.delay(logger.info(
-                  s"bootstrap: created pool '${bs.tenant}/${bs.pool}' with ${nodes.size} node(s) " +
+                  s"bootstrap: created pool '$key' with ${nodes.size} node(s) " +
                   s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"))
               case Left(t) =>
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
             }
-        createTenantIO *> createPoolIO
+
+        // Per-tenant auth model: the bootstrap tenant uses provider=db,
+        // identity is implicit in `qodstate_user.username`. No identity
+        // table to seed any more -- superuser admins (tenant=NULL)
+        // bypass the per-statement ACL gate; tenant-scoped admins
+        // authenticate through the qodstate_user partial unique index.
+        createTenantIO *> createTenantDbIO *> createPoolIO
     }
 
     def runWithMetrics(
@@ -294,24 +326,60 @@ object Main extends IOApp.Simple with LazyLogging:
           val srv = new FlightEdgeServer(
             EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
                        edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
-                       edgeCfg.defaultTenant, edgeCfg.defaultPool, edgeCfg.sessionTtlSec),
+                       edgeCfg.sessionTtlSec),
             fsRouter,
-            authService)
+            authService,
+            (tenant, pool) =>
+              sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
+                case None => Left(s"pool '$pool' not found in tenant '$tenant'")
+                case Some(key) =>
+                  // Tenant kill switch wins over pool kill switch -- a disabled
+                  // tenant should report itself, not its pool, to avoid leaking
+                  // pool existence under a disabled tenant.
+                  sup.getTenant(key.tenant) match
+                    case Some(t) if t.disabled =>
+                      Left(s"tenant '${key.tenant}' is disabled")
+                    case _ =>
+                      sup.get(key) match
+                        case Some(s) if s.disabled =>
+                          Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
+                        case _ =>
+                          Right(key.tenantDb),
+            // Phase C handshake authorize: user-scope + pool-access +
+            // EffectiveSet. Failures bubble up as PERMISSION_DENIED on
+            // the FlightSQL handshake. JWT role + groups claims flow in
+            // from FlightEdgeServer.handshake and get union-merged with
+            // the user's local membership edges inside the supervisor.
+            (tenant, pool, username, jwtRoles, jwtGroups) =>
+              sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups))
           srv.start()
           srv
         catch case t: Throwable =>
           throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
 
+      // RBAC handlers wire through the supervisor + user store so persistence
+      // and the in-memory RbacResolver cache stay in lockstep. The user
+      // handler is built first because role / group / pool-permission
+      // handlers share its DTO mappers.
+      val userStoreForRbac = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+      val userHandlers     = new UserHandlers(sup, userStoreForRbac)
+      val roleHandlers     = new RoleHandlers(sup, userHandlers)
+      val groupHandlers    = new GroupHandlers(sup, userHandlers)
+      val membershipHandlers = new MembershipHandlers(sup)
+      val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
+
       val mgr = new ManagerServer(
-        mgrCfg, edgeCfg, pools, nodes, tenants, health,
-        aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
-        historyHandlers, catalogHandlers, metricsEndpoint
+        mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
+        authHandlers, sessionTokens, authService.hasProviders,
+        historyHandlers, catalogHandlers, metricsEndpoint,
+        userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers
       )
-      // Pre-init the DuckLake catalog before any Quack node spawn races
-      // to create the same `__ducklake_*` tables in Postgres. See the
-      // DuckLakeInitializer scaladoc for the failure mode this avoids.
-      DuckLakeInitializer.init(mgrCfg.defaultMetastore) *>
+      // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
+      // calls DuckLakeInitializer.initBlocking once the tenant-db's own
+      // Postgres database has been provisioned. The control-plane
+      // database holds qodstate_* / slkstate_* only and must never carry
+      // ducklake_* tables.
       IO.delay(sup.restore()) *>
       sup.reconcile() *>
       bootstrapIO *>

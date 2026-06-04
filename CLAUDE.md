@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 sbt run                 # run the manager (forks JVM - see "JVM forking" below)
-sbt test                # run the full Scala test suite (~574 tests)
+sbt test                # run the full Scala test suite (~714 tests)
 sbt assembly            # build distrib/quack-on-demand-assembly-*.jar (UI is bundled in)
 sbt "testOnly ai.starlake.quack.route.RouterSpec"        # one test class
 sbt "testOnly *RouterSpec -- -z 'picks the least-loaded'" # one test by name fragment
@@ -45,25 +45,24 @@ A FlightSQL request flows: `client → FlightProducerImpl → AuthenticationServ
 
 ### State storage - file vs. Postgres
 
-[Main.scala](src/main/scala/ai/starlake/quack/Main.scala) picks a `StateStore` from `quack-on-demand.stateStorage` (default `postgres`):
+[Main.scala](src/main/scala/ai/starlake/quack/Main.scala) picks the control-plane store from `quack-on-demand.stateStorage` (default `postgres`):
 
-- `postgres` - tenant/pool definitions in a single JSONB row in `slkstate_pool_state`, admin users in `slkstate_user` (bcrypt), ACL grants in `slkstate_acl_grant`. All in the same Postgres DB DuckLake uses for its `ducklake_*` catalog tables. ACL REST endpoints and admin-user seeding are **only mounted in postgres mode**.
-- `file` - JSON blob at `statePath`. No admin seeding, no ACL endpoints, no Postgres dependency.
+- `postgres` - normalized **`qodstate_*`** tables managed by Liquibase, living in a dedicated control-plane DB (`qod` by default): `qodstate_tenant`, `qodstate_tenant_db`, `qodstate_pool`, `qodstate_node` for the registry; `qodstate_user`, `qodstate_role`, `qodstate_role_permission`, `qodstate_group`, `qodstate_user_role`, `qodstate_user_group`, `qodstate_group_role`, `qodstate_pool_permission` for the RBAC graph. Each managed tenant-db (e.g. `tpch_tpch1`) is a **separate** database next to it, holding the DuckLake `__ducklake_*` catalog. RBAC REST endpoints and admin seeding are **only mounted in postgres mode**.
+- `file` - legacy single-JSON-blob store at `statePath` (backed by the `slkstate_pool_state` schema when stored in Postgres). No admin seeding, no RBAC endpoints, no Liquibase. Useful for immutable deploys.
 
-The `slkstate_*` prefix keeps control-plane tables from colliding with DuckLake's `__ducklake_*` namespace.
+The `qodstate_*` prefix keeps control-plane tables from colliding with DuckLake's `__ducklake_*` namespace inside any shared database.
 
 ### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 
 The auth/ACL/session config types and the DuckLake catalog resolver live under [quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/) and [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/). The pureconfig `ProductHint`s in [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) override the `derives ConfigReader` defaults to use camelCase (matching `application.conf`) instead of pureconfig's kebab-case.
 
-### ACL validator - two implementations
+### RBAC validator
 
-[Main.scala](src/main/scala/ai/starlake/quack/Main.scala) picks the `StatementValidator` based on storage:
-- `PostgresAclValidator` when `stateStorage=postgres` - reads `slkstate_acl_grant`, uses the [ACL SQL parser](src/main/scala/ai/starlake/acl/parser/) to extract table refs, expands the session's `(username, groups, role)` into `user:*`/`group:*`/`role:*` principals at validation time.
-- `AclStatementValidator` (file-based) - reads YAML under `acl.basePath`. Still useful for immutable deploys.
-- `StatementValidator.allowAll` when `acl.enabled=false` (the default).
+[Main.scala](src/main/scala/ai/starlake/quack/Main.scala) wires the `StatementValidator` based on storage:
+- `PostgresAclValidator` when `stateStorage=postgres` - resolves the session's `(tenant, user)` into the cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them), then per statement uses the [ACL SQL parser](src/main/scala/ai/starlake/acl/parser/) to extract table refs and matches them against that set. Superusers (`qodstate_user.tenant IS NULL`) bypass the check.
+- `StatementValidator.allowAll` when `acl.enabled=false`. The file-based `AclStatementValidator` is parser-only after the RBAC cutover - the YAML grant store is unwired.
 
-**DML grants are coarse-grained today**: `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant - the ACL `TableExtractor` only walks SELECT statements.
+**DML / DDL grants are coarse-grained today**: `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission - the SQL `TableExtractor` only walks SELECT statements.
 
 ## Configuration
 

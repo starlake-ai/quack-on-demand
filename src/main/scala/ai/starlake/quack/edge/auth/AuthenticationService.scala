@@ -1,12 +1,12 @@
 package ai.starlake.quack.edge.auth
 
-import ai.starlake.quack.edge.config.{AuthenticationConfig, SessionConfig}
+import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
 
 /** Central authentication orchestrator. Builds chains of authenticators from config
   * and tries them in order for each authentication request.
   */
-class AuthenticationService(config: AuthenticationConfig, sessionConfig: SessionConfig)
+class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
     extends AutoCloseable, LazyLogging:
 
   private val basicProviders: List[BasicAuthProvider] = buildBasicChain()
@@ -22,7 +22,7 @@ class AuthenticationService(config: AuthenticationConfig, sessionConfig: Session
     if config.oauth.enabled &&
       (config.keycloak.enabled || config.google.enabled || config.azure.enabled)
     then
-      val server = new OAuthHttpServer(config.oauth, config, sessionConfig.jwtSecretKey)
+      val server = new OAuthHttpServer(config.oauth, config, jwtSecretKey)
       server.start()
       Some(server)
     else None
@@ -32,18 +32,29 @@ class AuthenticationService(config: AuthenticationConfig, sessionConfig: Session
 
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
-  def authenticateBasic(username: String, password: String): Either[String, AuthenticatedProfile] =
+  /** Authenticate `(tenant, username, password)` against the basic
+    * chain. `tenant` is `None` for the system-admin login path
+    * (manager UI/REST) and `Some(_)` for a tenant-scoped FlightSQL
+    * principal. The database provider filters its lookup by the
+    * `(tenant, username)` partial unique index on `qodstate_user`;
+    * OIDC ROPC providers ignore the scope. */
+  def authenticateBasic(
+      tenant:   Option[String],
+      username: String,
+      password: String
+  ): Either[String, AuthenticatedProfile] =
     if basicProviders.isEmpty then Left("No basic auth providers configured")
     else
+      val scope = tenant.getOrElse("system")
       val errors = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
-          provider.authenticate(username, password) match
+          provider.authenticate(tenant, username, password) match
             case right @ Right(_) =>
-              logger.info(s"User '$username' authenticated via ${provider.name}")
+              logger.info(s"User '$username' ($scope) authenticated via ${provider.name}")
               right
             case Left(err) =>
-              logger.debug(s"Provider ${provider.name} rejected '$username': $err")
+              logger.debug(s"Provider ${provider.name} rejected '$username' ($scope): $err")
               errors += s"${provider.name}: $err"
               Left(err)
         }

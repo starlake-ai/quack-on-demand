@@ -13,7 +13,7 @@ import org.scalatest.matchers.should.Matchers
   * spec covers:
   *   - `parseMessageType` round-trips for each of the four request types
   *   - structural failure modes (garbage bytes; wrong type to a typed
-  *     extractor) — verifying that callers get a clean `RuntimeException`
+  *     extractor) -- verifying that callers get a clean `RuntimeException`
   *     rather than UB
   *
   * Happy-path tests for `extractConnectionId`, `extractErrorMessage`,

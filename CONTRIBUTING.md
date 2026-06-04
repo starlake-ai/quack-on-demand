@@ -29,13 +29,13 @@ You need:
 - JDK 17+
 - `sbt` 1.x and `npm` 18+ (the UI builds as part of `sbt assembly`)
 - The `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
-- A reachable Postgres (default `localhost:5432`, user `postgres`,
-  password `azizam` - all overridable)
+- A reachable **PostgreSQL 16+** (default `localhost:5432`, user `postgres`,
+  password `azizam` - all overridable; `run-jar.sh` gates the server version)
 
 Quick loop:
 
 ```bash
-sbt test                      # unit + integration tests (~574 of them)
+sbt test                      # unit + integration tests (~714 of them)
 sbt assembly                  # build distrib/quack-on-demand-assembly-*.jar
 sbt scalafmtAll               # format (scalafmt 3.10, scala3 dialect, max 100 cols)
 BUILD=1 ./scripts/run-jar.sh  # boot the manager from your local build
@@ -80,7 +80,7 @@ done on the issue itself (close it with `Fixes #N` from your PR).
 
 - Behaviour is covered by tests (we live or die by the test suite).
 - The change is justified in the PR description, not just in the diff.
-- Public surface changes (REST, FlightSQL, `slkstate_*` schema) come
+- Public surface changes (REST, FlightSQL, `qodstate_*` schema) come
   with migration notes; backward-compat is a goal until 1.0.
 - Documentation (README, RUNNING.md, scripts' header comments) is
   updated when behaviour changes.

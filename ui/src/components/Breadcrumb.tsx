@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 export interface Crumb {
   /** Display text. */
   label: string;
-  /** Target path. Omit on the last item (current page) — it renders as bold text. */
+  /** Target path. Omit on the last item (current page) -- it renders as bold text. */
   to?: string;
 }
 

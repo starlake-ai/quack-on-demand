@@ -11,11 +11,11 @@ import java.time.Instant
 
 class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
 
-  private val poolKey = PoolKey("acme", "sales")
+  private val poolKey = PoolKey("acme", "acme_default", "sales")
   private def node(id: String, role: Role): RunningNode =
     RunningNode(id, poolKey, role, "127.0.0.1", 21900, "tok", Some(1L), None, Instant.EPOCH)
 
-  /** Minimal PoolState snapshot factory — the binder only reads the fields it
+  /** Minimal PoolState snapshot factory -- the binder only reads the fields it
     * needs (nodes list). */
   private def fakePool(nodes: List[RunningNode]): PoolState =
     PoolState(poolKey, nodes, RoleDistribution(0, 0, 0), Map.empty, Map.empty)

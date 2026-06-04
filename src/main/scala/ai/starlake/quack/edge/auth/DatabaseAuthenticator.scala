@@ -5,12 +5,32 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
-/** Authenticates username/password against a PostgreSQL database.
-  * Passwords must be stored as BCrypt hashes.
+import java.sql.Types
+
+/** Authenticates `(tenant, username, password)` against the
+  * `qodstate_user` table on the control-plane Postgres. The `pool`
+  * parameter is kept on the [[BasicAuthProvider]] signature for
+  * back-compat with the auth chain but is no longer used here -- pool
+  * access is enforced at the FlightSQL handshake via
+  * [[ai.starlake.quack.ondemand.state.PoolPermission]], not in the
+  * password lookup.
   *
-  * The query must return two columns (password_hash, role) and use `?`
-  * as the placeholder for the username parameter.
-  * Default: `SELECT password, role FROM users WHERE username = ?`
+  * The query MUST return two columns `(password_hash, role)` and accept
+  * two placeholders in order: `tenant`, `username`. `tenant` is bound
+  * as SQL NULL for the manager UI / REST login.
+  *
+  * Default query in `application.conf` treats a row with `tenant IS
+  * NULL` as a wildcard matching any caller, so the bootstrap superuser
+  * works on both the manager UI and any FlightSQL tenant. A
+  * tenant-scoped row `(tenant, username)` wins over the wildcard NULL
+  * row when both exist:
+  * {{{
+  *   SELECT password_hash, role FROM qodstate_user
+  *   WHERE (tenant IS NULL OR tenant = ?)
+  *     AND username = ?
+  *   ORDER BY (tenant IS NOT NULL) DESC
+  *   LIMIT 1
+  * }}}
   */
 class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
     extends BasicAuthProvider,
@@ -31,6 +51,7 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
   private val query: String = config.query
 
   override def authenticate(
+      tenant:   Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
@@ -39,7 +60,10 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
       try
         val ps = conn.prepareStatement(query)
         try
-          ps.setString(1, username)
+          tenant match
+            case Some(t) => ps.setString(1, t)
+            case None    => ps.setNull(1, Types.VARCHAR)
+          ps.setString(2, username)
           val rs = ps.executeQuery()
           if rs.next() then
             val storedHash = rs.getString(1)

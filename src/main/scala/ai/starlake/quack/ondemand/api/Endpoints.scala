@@ -30,8 +30,10 @@ object Endpoints:
   val listPools: PublicEndpoint[Unit, (sttp.model.StatusCode, ErrorResponse), PoolListResponse, Any] =
     base.get.in("pool" / "list").out(jsonBody[PoolListResponse])
 
-  val poolStatus: PublicEndpoint[(String, String), (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
-    base.get.in("pool" / path[String]("tenant") / path[String]("pool") / "status").out(jsonBody[PoolResponse])
+  val poolStatus: PublicEndpoint[(String, String, String), (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
+    base.get.in(
+      "pool" / path[String]("tenant") / path[String]("tenantDb") / path[String]("pool") / "status"
+    ).out(jsonBody[PoolResponse])
 
   val setRole: PublicEndpoint[SetRoleRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("node" / "setRole").in(jsonBody[SetRoleRequest])
@@ -59,24 +61,27 @@ object Endpoints:
   val listTenants: PublicEndpoint[Unit, (sttp.model.StatusCode, ErrorResponse), TenantListResponse, Any] =
     base.get.in("tenant" / "list").out(jsonBody[TenantListResponse])
 
-  val setTenantMetastore: PublicEndpoint[TenantRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
-    base.post.in("tenant" / "setMetastore").in(jsonBody[TenantRequest]).out(jsonBody[TenantResponse])
-
   val deleteTenant: PublicEndpoint[TenantOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("tenant" / "delete").in(jsonBody[TenantOpRequest])
 
-  // ----- ACL grants (Postgres-relational store, slkstate_acl_grant) -----
-  val createAclGrant: PublicEndpoint[AclGrantRequest, (sttp.model.StatusCode, ErrorResponse), AclGrantResponse, Any] =
-    base.post.in("acl" / "grant" / "create").in(jsonBody[AclGrantRequest]).out(jsonBody[AclGrantResponse])
+  val setTenantDisabled: PublicEndpoint[SetTenantDisabledRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
+    base.post.in("tenant" / "setDisabled").in(jsonBody[SetTenantDisabledRequest]).out(jsonBody[TenantResponse])
 
-  val listAclGrants: PublicEndpoint[Option[String], (sttp.model.StatusCode, ErrorResponse), AclGrantListResponse, Any] =
-    base.get.in("acl" / "grant" / "list").in(query[Option[String]]("tenant")).out(jsonBody[AclGrantListResponse])
+  val setTenantAuth: PublicEndpoint[SetTenantAuthRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
+    base.post.in("tenant" / "setAuth").in(jsonBody[SetTenantAuthRequest]).out(jsonBody[TenantResponse])
 
-  val deleteAclGrant: PublicEndpoint[Long, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("acl" / "grant" / "delete" / path[Long]("id"))
+  val setPoolDisabled: PublicEndpoint[SetPoolDisabledRequest, (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
+    base.post.in("pool" / "setDisabled").in(jsonBody[SetPoolDisabledRequest]).out(jsonBody[PoolResponse])
 
-  val uploadAclGrants: PublicEndpoint[AclGrantBulkRequest, (sttp.model.StatusCode, ErrorResponse), AclGrantListResponse, Any] =
-    base.post.in("acl" / "grant" / "upload").in(jsonBody[AclGrantBulkRequest]).out(jsonBody[AclGrantListResponse])
+  // ----- Tenant databases -----
+  val createTenantDb: PublicEndpoint[TenantDbRequest, (sttp.model.StatusCode, ErrorResponse), TenantDbResponse, Any] =
+    base.post.in("database" / "create").in(jsonBody[TenantDbRequest]).out(jsonBody[TenantDbResponse])
+
+  val listTenantDbs: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), TenantDbListResponse, Any] =
+    base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
+
+  val deleteTenantDb: PublicEndpoint[TenantDbOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
+    base.post.in("database" / "delete").in(jsonBody[TenantDbOpRequest])
 
   // ----- UI login -----
   val login: PublicEndpoint[LoginRequest, (sttp.model.StatusCode, ErrorResponse), LoginResponse, Any] =
@@ -96,27 +101,30 @@ object Endpoints:
 
   // ----- Catalog browser -----
 
-  val listSchemasEndpoint: PublicEndpoint[String, Unit, List[CatalogSchemaEntry], Any] =
+  val listSchemasEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogSchemaEntry], Any] =
     endpoint
       .get
-      .in("api" / "catalog" / "tenant" / path[String]("tenant") / "schemas")
+      .in("api" / "catalog" / "tenant" / path[String]("tenant") /
+          "database" / path[String]("tenantDb") / "schemas")
       .out(jsonBody[List[CatalogSchemaEntry]])
-      .description("List schemas in the DuckLake catalog backing the tenant.")
+      .description("List schemas in the DuckLake catalog of the (tenant, tenantDb).")
 
-  val listTablesEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogTableEntry], Any] =
+  val listTablesEndpoint: PublicEndpoint[(String, String, String), Unit, List[CatalogTableEntry], Any] =
     endpoint
       .get
       .in("api" / "catalog" / "tenant" / path[String]("tenant") /
-          "schemas" / path[String]("schema") / "tables")
+          "database" / path[String]("tenantDb") /
+          "schemas"  / path[String]("schema") / "tables")
       .out(jsonBody[List[CatalogTableEntry]])
-      .description("List tables in a schema of the tenant's catalog.")
+      .description("List tables in a schema of the (tenant, tenantDb)'s catalog.")
 
-  val getTableEndpoint: PublicEndpoint[(String, String, String), String, CatalogTableDetailResponse, Any] =
+  val getTableEndpoint: PublicEndpoint[(String, String, String, String), String, CatalogTableDetailResponse, Any] =
     endpoint
       .get
       .in("api" / "catalog" / "tenant" / path[String]("tenant") /
-          "schemas" / path[String]("schema") /
-          "tables"  / path[String]("table"))
+          "database" / path[String]("tenantDb") /
+          "schemas"  / path[String]("schema") /
+          "tables"   / path[String]("table"))
       .out(jsonBody[CatalogTableDetailResponse])
       .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
       .description("Get one table's columns + parquet data files.")

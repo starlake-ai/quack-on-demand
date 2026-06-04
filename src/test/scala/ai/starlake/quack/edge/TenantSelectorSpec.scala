@@ -11,109 +11,127 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
   // Decoded JWT body: { "sub": "bob" }  (no tenant claim)
   private val noTenantToken = "header.eyJzdWIiOiJib2IifQ.sig"
 
-  private val dT = "tenant-default"
-  private val dP = "pool-default"
+  // Stub catalog: (tenant, pool) -> tenantDb, mimicking the
+  // PoolSupervisor.findPoolKeyByTenantAndPoolName(...).map(_.tenantDb)
+  // wiring that Main.scala plugs in. `sales` lives under `acme_default`;
+  // any other (tenant, pool) is unknown.
+  private val lookup: (String, String) => Either[String, String] =
+    case ("acme",  "sales") => Right("acme_default")
+    case ("other", "sales") => Right("other_default")
+    case (t, p)             => Left(s"pool '$p' not found in tenant '$t'")
 
-  "TenantSelector" should "prefer JWT claim + X-Pool header when both present" in:
+  "TenantSelector (JWT)" should "accept tenant claim + pool header" in:
     val out = TenantSelector.resolve(
       bearer  = Some(validToken),
-      headers = Map("X-Pool" -> "sales"),
+      headers = Map("pool" -> "sales"),
       username = Some("alice"),
       tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey("acme", "sales"), "alice"))
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
 
-  it should "fall back to defaultTenant when JWT lacks the tenant claim" in:
+  it should "let a `tenant` header override the JWT claim" in:
+    val out = TenantSelector.resolve(
+      bearer  = Some(validToken),
+      headers = Map("tenant" -> "other", "pool" -> "sales"),
+      username = Some("alice"),
+      tenantClaim = "tenant",
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("other", "other_default", "sales"), "alice"))
+
+  it should "accept tenant header even when JWT lacks the claim" in:
     val out = TenantSelector.resolve(
       bearer  = Some(noTenantToken),
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = None, tenantClaim = "tenant",
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "bob"))
+
+  it should "reject when pool header is missing" in:
+    val out = TenantSelector.resolve(
+      bearer  = Some(validToken),
       headers = Map.empty,
-      username = None,
-      tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      username = None, tenantClaim = "tenant",
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey(dT, dP), "bob"))
+    out shouldBe a [Left[_, _]]
 
-  it should "fall back to structured 3-part username when no JWT" in:
+  it should "reject when JWT lacks tenant claim and no tenant header" in:
     val out = TenantSelector.resolve(
-      bearer = None, headers = Map.empty,
-      username = Some("acme/sales/alice"),
-      tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      bearer  = Some(noTenantToken),
+      headers = Map("pool" -> "sales"),
+      username = None, tenantClaim = "tenant",
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey("acme", "sales"), "alice"))
+    out shouldBe a [Left[_, _]]
 
-  it should "accept 2-part username 'pool/user' with default tenant" in:
+  it should "reject when the lookup can't find the (tenant, pool) pair" in:
     val out = TenantSelector.resolve(
-      bearer = None, headers = Map.empty,
-      username = Some("sales/alice"),
-      tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
-    )
-    out shouldBe Right(Resolved(PoolKey(dT, "sales"), "alice"))
-
-  it should "NOT let X-Pool override an explicit pool in 2-part username" in:
-    val out = TenantSelector.resolve(
-      bearer = None, headers = Map("X-Pool" -> "ops"),
-      username = Some("sales/alice"),
-      tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
-    )
-    out shouldBe Right(Resolved(PoolKey(dT, "sales"), "alice"))
-
-  it should "NOT let X-Pool override an explicit pool in 3-part username" in:
-    val out = TenantSelector.resolve(
-      bearer = None, headers = Map("X-Pool" -> "ops"),
-      username = Some("acme/sales/alice"),
-      tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
-    )
-    out shouldBe Right(Resolved(PoolKey("acme", "sales"), "alice"))
-
-  it should "accept 1-part username with default tenant and pool" in:
-    val out = TenantSelector.resolve(
-      bearer = None, headers = Map.empty,
+      bearer  = Some(validToken),
+      headers = Map("pool" -> "ghost"),
       username = Some("alice"),
       tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey(dT, dP), "alice"))
+    out shouldBe a [Left[_, _]]
 
-  it should "let X-Pool override the default pool for a 1-part username" in:
+  "TenantSelector (Basic)" should
+    "accept bare username + tenant/pool headers" in:
     val out = TenantSelector.resolve(
-      bearer = None, headers = Map("X-Pool" -> "ops"),
+      bearer = None,
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
       username = Some("alice"),
       tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey(dT, "ops"), "alice"))
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
 
-  it should "default pool to defaultPool when JWT present but no X-Pool" in:
+  it should "reject when the tenant header is missing" in:
     val out = TenantSelector.resolve(
-      bearer = Some(validToken),
-      headers = Map.empty,
+      bearer = None,
+      headers = Map("pool" -> "sales"),
       username = Some("alice"),
       tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      lookupPool = lookup
     )
-    out shouldBe Right(Resolved(PoolKey("acme", dP), "alice"))
+    out shouldBe a [Left[_, _]]
 
-  it should "reject empty-segment usernames" in:
-    val cases = List("acme/", "/sales", "acme//alice", "")
-    cases.foreach { u =>
-      val out = TenantSelector.resolve(
-        bearer = None, headers = Map.empty,
-        username = Some(u),
-        tenantClaim = "tenant",
-        defaultTenant = dT, defaultPool = dP
-      )
-      out shouldBe a [Left[_, _]]
-    }
+  it should "reject when the pool header is missing" in:
+    val out = TenantSelector.resolve(
+      bearer = None,
+      headers = Map("tenant" -> "acme"),
+      username = Some("alice"),
+      tenantClaim = "tenant",
+      lookupPool = lookup
+    )
+    out shouldBe a [Left[_, _]]
 
   it should "reject when neither JWT nor username present" in:
     val out = TenantSelector.resolve(
       bearer = None, headers = Map.empty, username = None,
       tenantClaim = "tenant",
-      defaultTenant = dT, defaultPool = dP
+      lookupPool = lookup
+    )
+    out shouldBe a [Left[_, _]]
+
+  it should "reject when username is the empty string" in:
+    val out = TenantSelector.resolve(
+      bearer = None,
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = Some(""),
+      tenantClaim = "tenant",
+      lookupPool = lookup
+    )
+    out shouldBe a [Left[_, _]]
+
+  it should "reject when the lookup can't find the (tenant, pool) pair" in:
+    val out = TenantSelector.resolve(
+      bearer = None,
+      headers = Map("tenant" -> "acme", "pool" -> "ghost"),
+      username = Some("alice"),
+      tenantClaim = "tenant",
+      lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]

@@ -11,7 +11,7 @@ import scala.concurrent.duration._
 
 class HealthProbeSpec extends AnyFlatSpec with Matchers:
 
-  private val key: PoolKey = PoolKey("acme", "sales")
+  private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
   private def node(id: String): RunningNode =
     RunningNode(id, key, Role.Dual, "127.0.0.1", 0, "tok", Some(1L), None, Instant.EPOCH)
 

@@ -7,11 +7,10 @@ import io.circe.syntax._
 
 final case class CreatePoolRequest(
     tenant: String,
+    tenantDb: String,
     pool: String,
     size: Int,
     roleDistribution: RoleDistribution,
-    metastore: Map[String, String],
-    s3: Map[String, String] = Map.empty,
     idleTimeoutSec: Int = -1,
     maxConcurrentPerNode: Int = 0
 )
@@ -39,21 +38,24 @@ final case class NodeInfo(
 
 final case class PoolResponse(
     tenant: String,
+    tenantDb: String,
     pool: String,
     nodes: List[NodeInfo],
     status: String,
-    metastore: Map[String, String] = Map.empty   // effective merged metastore, password redacted
+    metastore: Map[String, String] = Map.empty,  // effective metastore inherited from the tenant-db, password redacted
+    disabled: Boolean = false                    // when true, the edge rejects fresh handshakes targeting this pool
 )
 
 final case class ScalePoolRequest(
     tenant: String,
+    tenantDb: String,
     pool: String,
     targetSize: Int,
     roleDistribution: RoleDistribution,
     force: Boolean = false
 )
 
-final case class StopPoolRequest(tenant: String, pool: String, force: Boolean = false)
+final case class StopPoolRequest(tenant: String, tenantDb: String, pool: String, force: Boolean = false)
 
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
@@ -69,44 +71,69 @@ final case class ClientConfigResponse(
     authEnabled: Boolean = true
 )
 
-final case class SetRoleRequest(tenant: String, pool: String, nodeId: String, role: String)
-final case class SetMaxConcurrentRequest(tenant: String, pool: String, nodeId: String, max: Int)
-final case class NodeOpRequest(tenant: String, pool: String, nodeId: String)
+final case class SetRoleRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, role: String)
+final case class SetMaxConcurrentRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, max: Int)
+final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
 
 final case class ErrorResponse(error: String, message: String)
 
-final case class TenantRequest(name: String, metastore: Map[String, String] = Map.empty)
+final case class TenantRequest(
+    name:         String,
+    // Auth provider for every user in this tenant. One of
+    // {db, keycloak, google, azure, aws}; defaults to `db` so existing
+    // wire callers and the bootstrap path keep working.
+    authProvider: String              = "db",
+    // Provider-specific config. Empty for `db`; for OIDC providers
+    // expect `issuer` (full URL) plus one of `realm` / `hd` /
+    // `tenantId` / `userPoolId`.
+    authConfig:   Map[String, String] = Map.empty
+)
 final case class TenantResponse(
     name: String,
-    metastore: Map[String, String],          // tenant's own overrides (write-back surface)
-    pools: List[String],
-    effectiveMetastore: Map[String, String] = Map.empty   // global defaults <- tenant overrides, password-redacted
+    // Pool natural keys under this tenant, formatted as `tenantDb/pool`
+    // (the tenant prefix is implicit). Storage configuration lives on
+    // `qodstate_tenant_db` rows, not here.
+    pools:        List[String],
+    disabled:     Boolean             = false,
+    authProvider: String              = "db",
+    authConfig:   Map[String, String] = Map.empty
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
-final case class AclGrantRequest(
-    tenantId: String,
-    principal: String,                  // "user:alice" | "group:eng" | "role:admin"
-    catalogName: Option[String] = None,
-    schemaName: Option[String]  = None,
-    tableName: Option[String]   = None,
-    permission: String                  // SELECT | INSERT | UPDATE | DELETE | ALL
+final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
+final case class SetTenantAuthRequest(
+    name:         String,
+    authProvider: String,
+    authConfig:   Map[String, String] = Map.empty
 )
+final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: String, disabled: Boolean)
 
-final case class AclGrantResponse(
-    id: Long,
-    tenantId: String,
-    principal: String,
-    catalogName: Option[String],
-    schemaName: Option[String],
-    tableName: Option[String],
-    permission: String,
-    grantedAt: String                   // ISO-8601 UTC
+// ----- Tenant databases (qodstate_tenant_db) -----------------------------
+// One row per `(tenant, name)` -- the name being composed
+// `${tenant}_${suffix}` and used verbatim as the actual Postgres
+// database name on the shared server.
+final case class TenantDbRequest(
+    tenant:      String,
+    // Suffix typed by the user; the supervisor composes the full
+    // database name as `${tenant}_${suffix}` (idempotent if the caller
+    // already passed the full form).
+    name:        String,
+    metastore:   Map[String, String] = Map.empty,
+    dataPath:    String              = "",
+    objectStore: Map[String, String] = Map.empty
 )
-
-final case class AclGrantListResponse(grants: List[AclGrantResponse])
-final case class AclGrantBulkRequest(grants: List[AclGrantRequest])
+final case class TenantDbResponse(
+    id:          String,
+    tenant:      String,
+    name:        String,
+    metastore:   Map[String, String],
+    dataPath:    String,
+    objectStore: Map[String, String] = Map.empty,
+    disabled:    Boolean             = false
+)
+final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
+final case class TenantDbOpRequest(tenant: String, name: String)
 
 // ----- UI login -----
 final case class LoginRequest(username: String, password: String)
@@ -126,6 +153,120 @@ final case class StatementHistoryEntry(
     error:      Option[String]
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
+
+// ----- RBAC: users -------------------------------------------------------
+
+final case class UserCreateRequest(
+    tenant:   Option[String],         // None = superuser
+    username: String,
+    password: String,
+    role:     String = "user"
+)
+final case class UserUpdateRequest(
+    id:       String,
+    tenant:   Option[String] = None,  // None = leave unchanged
+    password: Option[String] = None,  // None = no rotation
+    role:     Option[String] = None
+)
+final case class UserDeleteRequest(id: String)
+final case class UserResponse(
+    id:       String,
+    tenant:   Option[String],
+    username: String,
+    role:     String,
+    enabled:  Boolean = true,
+    roles:    List[String] = Nil,     // role NAMES (not ids), tenant-scoped
+    groups:   List[String] = Nil,     // group NAMES
+    poolGrants: List[String] = Nil    // human label "tenant/pool" or "tenant/*"
+)
+final case class UserListResponse(users: List[UserResponse])
+
+/** GET /user/{id}/effective response. Permits the UI to show what a
+  * given user can actually do without spelunking through roles/groups. */
+final case class EffectivePermissionsResponse(
+    user:       UserResponse,
+    roles:      List[RoleResponse],
+    groups:     List[GroupResponse],
+    pools:      List[PoolPermissionResponse],
+    tablePerms: List[RolePermissionResponse]
+)
+
+// ----- RBAC: roles -------------------------------------------------------
+
+final case class RoleCreateRequest(
+    tenant:      String,
+    name:        String,
+    description: Option[String] = None
+)
+final case class RoleDeleteRequest(id: String)
+final case class RoleResponse(
+    id:          String,
+    tenantId:    String,
+    name:        String,
+    description: Option[String],
+    createdAt:   String
+)
+final case class RoleListResponse(roles: List[RoleResponse])
+
+final case class RolePermissionGrantRequest(
+    roleId:  String,
+    catalog: String = "*",
+    schema:  String = "*",
+    table:   String = "*",
+    verb:    String                   // SELECT | INSERT | UPDATE | DELETE | ALL
+)
+final case class RolePermissionRevokeRequest(id: String)
+final case class RolePermissionResponse(
+    id:          String,
+    roleId:      String,
+    catalogName: String,
+    schemaName:  String,
+    tableName:   String,
+    verb:        String,
+    grantedAt:   String
+)
+final case class RolePermissionListResponse(permissions: List[RolePermissionResponse])
+
+// ----- RBAC: groups ------------------------------------------------------
+
+final case class GroupCreateRequest(
+    tenant:      String,
+    name:        String,
+    description: Option[String] = None
+)
+final case class GroupDeleteRequest(id: String)
+final case class GroupResponse(
+    id:          String,
+    tenantId:    String,
+    name:        String,
+    description: Option[String]
+)
+final case class GroupListResponse(groups: List[GroupResponse])
+
+// ----- RBAC: memberships -------------------------------------------------
+
+final case class UserRoleMembershipRequest (userId: String, roleId:  String)
+final case class UserGroupMembershipRequest(userId: String, groupId: String)
+final case class GroupRoleMembershipRequest(groupId: String, roleId: String)
+
+// ----- RBAC: pool permissions --------------------------------------------
+
+final case class PoolPermissionGrantRequest(
+    tenant:  String,
+    poolId:  Option[String] = None,   // None = all pools in tenant
+    userId:  Option[String] = None,
+    groupId: Option[String] = None    // exactly one of userId / groupId must be set
+)
+final case class PoolPermissionRevokeRequest(id: String)
+final case class PoolPermissionResponse(
+    id:        String,
+    tenantId:  String,
+    poolId:    Option[String],
+    userId:    Option[String],
+    groupId:   Option[String],
+    grantedAt: String
+)
+final case class PoolPermissionListResponse(permissions: List[PoolPermissionResponse])
 
 // ----- Catalog browser DTOs -----
 final case class CatalogSchemaEntry(
@@ -172,42 +313,41 @@ object Dtos:
     Decoder.instance { (c: HCursor) =>
       for
         tenant               <- c.get[String]("tenant")
+        tenantDb             <- c.get[String]("tenantDb")
         pool                 <- c.get[String]("pool")
         size                 <- c.get[Int]("size")
         roleDistribution     <- c.get[RoleDistribution]("roleDistribution")
-        metastore            <- c.get[Map[String, String]]("metastore")
-        s3                   <- c.getOrElse[Map[String, String]]("s3")(Map.empty)
         idleTimeoutSec       <- c.getOrElse[Int]("idleTimeoutSec")(-1)
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
-      yield CreatePoolRequest(tenant, pool, size, roleDistribution, metastore, s3, idleTimeoutSec, maxConcurrentPerNode)
+      yield CreatePoolRequest(tenant, tenantDb, pool, size, roleDistribution, idleTimeoutSec, maxConcurrentPerNode)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
         "tenant"               -> r.tenant.asJson,
+        "tenantDb"             -> r.tenantDb.asJson,
         "pool"                 -> r.pool.asJson,
         "size"                 -> r.size.asJson,
         "roleDistribution"     -> r.roleDistribution.asJson,
-        "metastore"            -> r.metastore.asJson,
-        "s3"                   -> r.s3.asJson,
         "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
         "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson
       ))
     }
   )
-  // Same pattern: optional `force` should default to false when absent.
-  given Codec[ScalePoolRequest] = Codec.from(
+  given Codec[ScalePoolRequest]  = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
         tenant           <- c.get[String]("tenant")
+        tenantDb         <- c.get[String]("tenantDb")
         pool             <- c.get[String]("pool")
         targetSize       <- c.get[Int]("targetSize")
         roleDistribution <- c.get[RoleDistribution]("roleDistribution")
         force            <- c.getOrElse[Boolean]("force")(false)
-      yield ScalePoolRequest(tenant, pool, targetSize, roleDistribution, force)
+      yield ScalePoolRequest(tenant, tenantDb, pool, targetSize, roleDistribution, force)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
         "tenant"           -> r.tenant.asJson,
+        "tenantDb"         -> r.tenantDb.asJson,
         "pool"             -> r.pool.asJson,
         "targetSize"       -> r.targetSize.asJson,
         "roleDistribution" -> r.roleDistribution.asJson,
@@ -218,16 +358,18 @@ object Dtos:
   given Codec[StopPoolRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        tenant <- c.get[String]("tenant")
-        pool   <- c.get[String]("pool")
-        force  <- c.getOrElse[Boolean]("force")(false)
-      yield StopPoolRequest(tenant, pool, force)
+        tenant   <- c.get[String]("tenant")
+        tenantDb <- c.get[String]("tenantDb")
+        pool     <- c.get[String]("pool")
+        force    <- c.getOrElse[Boolean]("force")(false)
+      yield StopPoolRequest(tenant, tenantDb, pool, force)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
-        "tenant" -> r.tenant.asJson,
-        "pool"   -> r.pool.asJson,
-        "force"  -> r.force.asJson
+        "tenant"   -> r.tenant.asJson,
+        "tenantDb" -> r.tenantDb.asJson,
+        "pool"     -> r.pool.asJson,
+        "force"    -> r.force.asJson
       ))
     }
   )
@@ -280,60 +422,131 @@ object Dtos:
   given Codec[SetMaxConcurrentRequest] = deriveCodec
   given Codec[NodeOpRequest]           = deriveCodec
   given Codec[ErrorResponse]           = deriveCodec
-  // Hand-rolled so `metastore` defaults to Map.empty when absent - matches the
-  // CreatePoolRequest pattern. Lets a client POST `{"name":"acme"}` alone.
+  // TenantRequest: hand-rolled so the optional auth fields default
+  // correctly when absent from the wire JSON.
   given Codec[TenantRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        name      <- c.get[String]("name")
-        metastore <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
-      yield TenantRequest(name, metastore)
+        name         <- c.get[String]("name")
+        authProvider <- c.getOrElse[String]("authProvider")("db")
+        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
+      yield TenantRequest(name, authProvider, authConfig)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
-        "name"      -> r.name.asJson,
-        "metastore" -> r.metastore.asJson
+        "name"         -> r.name.asJson,
+        "authProvider" -> r.authProvider.asJson,
+        "authConfig"   -> r.authConfig.asJson
       ))
     }
   )
-  given Codec[TenantResponse]     = deriveCodec
-  given Codec[TenantListResponse] = deriveCodec
-  given Codec[TenantOpRequest]    = deriveCodec
-  given Codec[ClientConfigResponse] = deriveCodec
-
-  // ACL grants. Hand-rolled AclGrantRequest decoder so Option fields default
-  // to None when absent (circe 0.14 deriveCodec wouldn't honor the case-class
-  // defaults on decode).
-  given Codec[AclGrantRequest] = Codec.from(
+  given Codec[TenantResponse]           = deriveCodec
+  given Codec[TenantListResponse]       = deriveCodec
+  given Codec[TenantOpRequest]          = deriveCodec
+  given Codec[SetTenantDisabledRequest] = deriveCodec
+  // Hand-rolled so authConfig defaults to empty when absent from the wire JSON.
+  given Codec[SetTenantAuthRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        tenantId    <- c.get[String]("tenantId")
-        principal   <- c.get[String]("principal")
-        catalogName <- c.getOrElse[Option[String]]("catalogName")(None)
-        schemaName  <- c.getOrElse[Option[String]]("schemaName")(None)
-        tableName   <- c.getOrElse[Option[String]]("tableName")(None)
-        permission  <- c.get[String]("permission")
-      yield AclGrantRequest(tenantId, principal, catalogName, schemaName, tableName, permission)
+        name         <- c.get[String]("name")
+        authProvider <- c.get[String]("authProvider")
+        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
+      yield SetTenantAuthRequest(name, authProvider, authConfig)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
-        "tenantId"    -> r.tenantId.asJson,
-        "principal"   -> r.principal.asJson,
-        "catalogName" -> r.catalogName.asJson,
-        "schemaName"  -> r.schemaName.asJson,
-        "tableName"   -> r.tableName.asJson,
-        "permission"  -> r.permission.asJson
+        "name"         -> r.name.asJson,
+        "authProvider" -> r.authProvider.asJson,
+        "authConfig"   -> r.authConfig.asJson
       ))
     }
   )
-  given Codec[AclGrantResponse]     = deriveCodec
-  given Codec[AclGrantListResponse] = deriveCodec
-  given Codec[AclGrantBulkRequest]  = deriveCodec
+  given Codec[SetPoolDisabledRequest]   = deriveCodec
+  given Codec[ClientConfigResponse] = deriveCodec
+
+  given Codec[TenantDbRequest]      = deriveCodec
+  given Codec[TenantDbResponse]     = deriveCodec
+  given Codec[TenantDbListResponse] = deriveCodec
+  given Codec[TenantDbOpRequest]    = deriveCodec
+
   given Codec[LoginRequest]         = deriveCodec
   given Codec[LoginResponse]        = deriveCodec
   given Codec[WhoamiResponse]       = deriveCodec
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
+
+  // RBAC: users
+  // Custom decoders so Option[String] fields keep their case-class defaults
+  // when absent from the wire JSON (circe deriveCodec doesn't honor those).
+  given Codec[UserCreateRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        tenant   <- c.getOrElse[Option[String]]("tenant")(None)
+        username <- c.get[String]("username")
+        password <- c.get[String]("password")
+        role     <- c.getOrElse[String]("role")("user")
+      yield UserCreateRequest(tenant, username, password, role)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "tenant"   -> r.tenant.asJson,
+        "username" -> r.username.asJson,
+        "password" -> r.password.asJson,
+        "role"     -> r.role.asJson
+      ))
+    }
+  )
+  given Codec[UserUpdateRequest]            = deriveCodec
+  given Codec[UserDeleteRequest]            = deriveCodec
+  given Codec[UserResponse]                 = deriveCodec
+  given Codec[UserListResponse]             = deriveCodec
+
+  // RBAC: roles
+  given Codec[RoleCreateRequest]            = deriveCodec
+  given Codec[RoleDeleteRequest]            = deriveCodec
+  given Codec[RoleResponse]                 = deriveCodec
+  given Codec[RoleListResponse]             = deriveCodec
+  given Codec[RolePermissionGrantRequest]   = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        roleId  <- c.get[String]("roleId")
+        catalog <- c.getOrElse[String]("catalog")("*")
+        schema  <- c.getOrElse[String]("schema") ("*")
+        table   <- c.getOrElse[String]("table")  ("*")
+        verb    <- c.get[String]("verb")
+      yield RolePermissionGrantRequest(roleId, catalog, schema, table, verb)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "roleId"  -> r.roleId.asJson,
+        "catalog" -> r.catalog.asJson,
+        "schema"  -> r.schema.asJson,
+        "table"   -> r.table.asJson,
+        "verb"    -> r.verb.asJson
+      ))
+    }
+  )
+  given Codec[RolePermissionRevokeRequest]  = deriveCodec
+  given Codec[RolePermissionResponse]       = deriveCodec
+  given Codec[RolePermissionListResponse]   = deriveCodec
+
+  // RBAC: groups
+  given Codec[GroupCreateRequest]           = deriveCodec
+  given Codec[GroupDeleteRequest]           = deriveCodec
+  given Codec[GroupResponse]                = deriveCodec
+  given Codec[GroupListResponse]            = deriveCodec
+
+  given Codec[UserRoleMembershipRequest]    = deriveCodec
+  given Codec[UserGroupMembershipRequest]   = deriveCodec
+  given Codec[GroupRoleMembershipRequest]   = deriveCodec
+
+  // RBAC: pool permissions
+  given Codec[PoolPermissionGrantRequest]   = deriveCodec
+  given Codec[PoolPermissionRevokeRequest]  = deriveCodec
+  given Codec[PoolPermissionResponse]       = deriveCodec
+  given Codec[PoolPermissionListResponse]   = deriveCodec
+
+  given Codec[EffectivePermissionsResponse] = deriveCodec
 
   // Catalog browser
   given Codec[CatalogSchemaEntry]         = deriveCodec
