@@ -65,6 +65,14 @@ DISTRIB_DIR="$REPO_DIR/distrib"
 # the user called this script from.
 cd "$REPO_DIR"
 
+# Anchor the DuckLake data path to the repo unless the caller already set
+# it. `application.conf` defaults to "./ducklake/tpch" which, combined
+# with the cd above, would also land here -- but exporting an absolute
+# path makes startup logs unambiguous AND survives any later JVM cwd
+# changes (e.g. tests that fork). Override by exporting QOD_DUCKLAKE_DATA_PATH
+# before invoking this script.
+export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/tpch}"
+
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
 GROUP_PATH="ai/starlake"
@@ -367,7 +375,21 @@ pg_reachable=0
 if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
   if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc 'SELECT 1' >/dev/null 2>&1; then
-    echo "postgres: OK ($pg_user@$pg_host:$pg_port)  [state storage]"
+    # Version gate: the control plane uses `gen_random_uuid()` (PG13+
+    # built-in), `DROP DATABASE ... WITH (FORCE)` (PG13+), and the
+    # 0006-rbac changeset's modern partial-index shape. The project's
+    # documented minimum is Postgres 16 -- refuse to proceed against
+    # an older server so we fail BEFORE the migration / NUKE syntax
+    # error appears in the log and confuses the operator.
+    pg_major="$(PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
+        -tAc 'SHOW server_version_num' 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$pg_major" ]] || [[ "$pg_major" -lt 160000 ]]; then
+      echo "ERROR: Postgres at $pg_user@$pg_host:$pg_port reports server_version_num=$pg_major (need >= 160000 / PG 16)." >&2
+      echo "       This project requires Postgres 16+. Point QOD_PG_HOST / QOD_PG_PORT / QOD_PG_PASSWORD" >&2
+      echo "       at a PG16 server (e.g. the postgres:16-alpine container the docker-compose ships)." >&2
+      exit 1
+    fi
+    echo "postgres: OK ($pg_user@$pg_host:$pg_port, server_version_num=$pg_major)  [state storage]"
     pg_reachable=1
   else
     echo "WARN: cannot reach Postgres at $pg_user@$pg_host:$pg_port; manager will fail at startup if it cannot persist state." >&2
