@@ -133,8 +133,6 @@ object Main extends IOApp.Simple with LazyLogging:
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
-    val identityStore = ai.starlake.quack.ondemand.state.TenantIdentityStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-    val identities = new IdentityHandlers(identityStore, sup)
     val tenantDbs = new TenantDbHandlers(sup)
     val health   = new HealthHandler(sup)
 
@@ -267,8 +265,12 @@ object Main extends IOApp.Simple with LazyLogging:
           if sup.getTenant(bs.tenant).isDefined then
             IO.delay(logger.info(s"bootstrap: tenant '${bs.tenant}' already exists; skipping"))
           else
-            sup.createTenant(ai.starlake.quack.model.Tenant(bs.tenant, Map.empty)).flatMap {
-              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}'"))
+            // Bootstrap tenant uses the `db` auth provider -- the only
+            // provider that needs zero out-of-band config to be useful.
+            sup.createTenant(
+              ai.starlake.quack.model.Tenant(name = bs.tenant, authProvider = "db")
+            ).flatMap {
+              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}' (auth=db)"))
               case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
             }
 
@@ -300,23 +302,12 @@ object Main extends IOApp.Simple with LazyLogging:
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
             }
 
-        // Idempotent: looks the bootstrap admin(s) up in
-        // qodstate_tenant_identity and inserts the rows that don't
-        // already exist. After Phase C the seeder no longer touches a
-        // grant table -- superuser admins (tenant=NULL) bypass the
-        // per-statement ACL gate outright.
-        val seedBootstrapAccessIO: IO[Unit] = IO.blocking {
-          sup.getTenant(bs.tenant).foreach { t =>
-            BootstrapAccessSeeder.seed(
-              tenantId      = t.id,
-              tenantLabel   = t.displayName,
-              adminNames    = mgrCfg.admin.usernameList,
-              identityStore = identityStore
-            )
-          }
-        }
-
-        createTenantIO *> createTenantDbIO *> createPoolIO *> seedBootstrapAccessIO
+        // Per-tenant auth model: the bootstrap tenant uses provider=db,
+        // identity is implicit in `qodstate_user.username`. No identity
+        // table to seed any more -- superuser admins (tenant=NULL)
+        // bypass the per-statement ACL gate; tenant-scoped admins
+        // authenticate through the qodstate_user partial unique index.
+        createTenantIO *> createTenantDbIO *> createPoolIO
     }
 
     def runWithMetrics(
@@ -377,7 +368,7 @@ object Main extends IOApp.Simple with LazyLogging:
       val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
 
       val mgr = new ManagerServer(
-        mgrCfg, edgeCfg, pools, nodes, tenants, identities, tenantDbs, health,
+        mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
         authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint,
         userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers

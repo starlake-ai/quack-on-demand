@@ -77,33 +77,32 @@ final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, n
 
 final case class ErrorResponse(error: String, message: String)
 
-final case class TenantRequest(name: String)
+final case class TenantRequest(
+    name:         String,
+    // Auth provider for every user in this tenant. One of
+    // {db, keycloak, google, azure, aws}; defaults to `db` so existing
+    // wire callers and the bootstrap path keep working.
+    authProvider: String              = "db",
+    // Provider-specific config. Empty for `db`; for OIDC providers
+    // expect `issuer` (full URL) plus one of `realm` / `hd` /
+    // `tenantId` / `userPoolId`.
+    authConfig:   Map[String, String] = Map.empty
+)
 final case class TenantResponse(
     name: String,
     // Pool natural keys under this tenant, formatted as `tenantDb/pool`
     // (the tenant prefix is implicit). Storage configuration lives on
     // `qodstate_tenant_db` rows, not here.
-    pools: List[String],
-    disabled: Boolean = false   // when true, the edge rejects fresh handshakes targeting this tenant
+    pools:        List[String],
+    disabled:     Boolean             = false,
+    authProvider: String              = "db",
+    authConfig:   Map[String, String] = Map.empty
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
 final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
 final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: String, disabled: Boolean)
-
-// ----- Tenant identity allowlist -----------------------------------------
-// One verified `(issuer, externalId)` pair per row, mapped to a tenant id.
-final case class IdentityRequest(tenantId: String, issuer: String, externalId: String)
-final case class IdentityResponse(
-    id:         String,
-    tenantId:   String,
-    issuer:     String,
-    externalId: String,
-    createdAt:  String
-)
-final case class IdentityListResponse(identities: List[IdentityResponse])
-final case class IdentityOpRequest(id: String)
 
 // ----- Tenant databases (qodstate_tenant_db) -----------------------------
 // One row per `(tenant, name)` -- the name being composed
@@ -418,18 +417,30 @@ object Dtos:
   given Codec[SetMaxConcurrentRequest] = deriveCodec
   given Codec[NodeOpRequest]           = deriveCodec
   given Codec[ErrorResponse]           = deriveCodec
-  given Codec[TenantRequest]            = deriveCodec
+  // TenantRequest: hand-rolled so the optional auth fields default
+  // correctly when absent from the wire JSON.
+  given Codec[TenantRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        name         <- c.get[String]("name")
+        authProvider <- c.getOrElse[String]("authProvider")("db")
+        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
+      yield TenantRequest(name, authProvider, authConfig)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "name"         -> r.name.asJson,
+        "authProvider" -> r.authProvider.asJson,
+        "authConfig"   -> r.authConfig.asJson
+      ))
+    }
+  )
   given Codec[TenantResponse]           = deriveCodec
   given Codec[TenantListResponse]       = deriveCodec
   given Codec[TenantOpRequest]          = deriveCodec
   given Codec[SetTenantDisabledRequest] = deriveCodec
   given Codec[SetPoolDisabledRequest]   = deriveCodec
   given Codec[ClientConfigResponse] = deriveCodec
-
-  given Codec[IdentityRequest]      = deriveCodec
-  given Codec[IdentityResponse]     = deriveCodec
-  given Codec[IdentityListResponse] = deriveCodec
-  given Codec[IdentityOpRequest]    = deriveCodec
 
   given Codec[TenantDbRequest]      = deriveCodec
   given Codec[TenantDbResponse]     = deriveCodec

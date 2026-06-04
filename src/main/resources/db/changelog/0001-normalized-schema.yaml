@@ -3,12 +3,22 @@ databaseChangeLog:
       id: 0001-qodstate-tenant
       author: quack-on-demand
       changes:
+        # auth_provider picks one of {db, keycloak, google, azure, aws}. A
+        # tenant uses exactly one provider for all its users; the
+        # provider-specific configuration (issuer URL, realm name, hd
+        # domain, ...) lives in auth_config JSONB so the schema doesn't
+        # learn the shape of every new provider. JSONB is empty for the
+        # `db` provider: the username on qodstate_user IS the identity.
         - createTable:
             tableName: qodstate_tenant
             columns:
-              - column: { name: id,           type: TEXT, constraints: { primaryKey: true, nullable: false } }
-              - column: { name: display_name, type: TEXT, constraints: { nullable: false, unique: true, uniqueConstraintName: qodstate_tenant_display_name_unique } }
-              - column: { name: disabled,     type: BOOLEAN, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: id,            type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: display_name,  type: TEXT, constraints: { nullable: false, unique: true, uniqueConstraintName: qodstate_tenant_display_name_unique } }
+              - column: { name: disabled,      type: BOOLEAN, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: auth_provider, type: TEXT,   defaultValue: 'db',                  constraints: { nullable: false } }
+              - column: { name: auth_config,   type: JSONB,  defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+        - sql:
+            sql: "ALTER TABLE qodstate_tenant ADD CONSTRAINT qodstate_tenant_auth_provider_check CHECK (auth_provider IN ('db','keycloak','google','azure','aws'))"
 
   - changeSet:
       id: 0001-qodstate-tenant-db

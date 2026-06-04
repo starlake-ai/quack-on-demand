@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { TenantResponse } from '../api/types';
 import GroupSection from '../components/GroupSection';
-import IdentitySection from '../components/IdentitySection';
 import RoleSection from '../components/RoleSection';
 import Tabs from '../components/Tabs';
 import UserSection from '../components/UserSection';
@@ -12,8 +11,10 @@ import UserSection from '../components/UserSection';
   *   - "(all)"        : list every user across every tenant + the superusers
   *   - "(superusers)" : tenant IS NULL filter only
   *
-  * Roles, Groups, and Identities all need a concrete tenant scope --
-  * those tabs show a hint when the selector is on a synthetic value. */
+  * Roles and Groups need a concrete tenant scope -- those tabs show a
+  * hint when the selector is on a synthetic value. Identities aren't a
+  * separate tab any more: the auth provider is a tenant attribute,
+  * configured on the tenant create / detail page. */
 type Selector = string | null;
 const ALL = ''; // empty string sentinel for the "(all)" option
 
@@ -25,26 +26,22 @@ export default function Users() {
     api.listTenants()
       .then(r => {
         setTenants(r.tenants);
-        // Default to the first concrete tenant if there is one; otherwise
-        // (all). The selector is a free-text-but-discrete <select> so
-        // the value is one of: "" (all), "(superusers)", or a tenant name.
         if (r.tenants.length > 0) setSelected(r.tenants[0].name);
         else setSelected(ALL);
       })
       .catch(() => setSelected(ALL));
   }, []);
 
-  // The Users tab accepts a tenant string (or undefined = every user);
-  // the other tabs need a concrete tenant.
   const usersFilter   = selected === ALL ? null : selected;
   const tenantForRoles = (selected && selected !== ALL && selected !== '(superusers)')
     ? selected
     : null;
+  const tenantRow = tenants.find(t => t.name === tenantForRoles);
 
   return (
     <>
       <h1>Users &amp; access control</h1>
-      <div className="row" style={{ gap: 12, alignItems: 'center', marginBottom: '1rem' }}>
+      <div className="row" style={{ gap: 12, alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <label>
           Tenant:&nbsp;
           <select
@@ -58,23 +55,24 @@ export default function Users() {
             ))}
           </select>
         </label>
-        <span className="subtle">
-          Roles, Groups, and Identities are per-tenant; the Users tab accepts <code>(all)</code>.
-        </span>
+        {tenantRow && (
+          <span className="subtle">
+            Auth provider: <code>{tenantRow.authProvider}</code>
+            {Object.keys(tenantRow.authConfig).length > 0 && (
+              <> — <code>{JSON.stringify(tenantRow.authConfig)}</code></>
+            )}
+          </span>
+        )}
       </div>
 
       <Tabs
         tabs={[
-          { id: 'users',      label: 'Users',
+          { id: 'users',  label: 'Users',
             body: <UserSection tenant={usersFilter === '(superusers)' ? null : usersFilter} /> },
-          { id: 'groups',     label: 'Groups',
+          { id: 'groups', label: 'Groups',
             body: <GroupSection tenant={tenantForRoles} /> },
-          { id: 'roles',      label: 'Roles',
+          { id: 'roles',  label: 'Roles',
             body: <RoleSection tenant={tenantForRoles} /> },
-          { id: 'identities', label: 'Identities',
-            body: tenantForRoles
-              ? <IdentitySection tenantId={tenantForRoles} />
-              : <div className="card subtle">Pick a concrete tenant above to manage its identity allowlist.</div> },
         ]}
       />
     </>

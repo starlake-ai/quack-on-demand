@@ -94,14 +94,20 @@ export interface ClientConfigResponse {
   authEnabled: boolean;
 }
 
+export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
+
 export interface TenantRequest {
   name: string;
+  authProvider?: AuthProvider;
+  authConfig?: Record<string, string>;
 }
 
 export interface TenantResponse {
   name: string;
   pools: string[];
   disabled: boolean;
+  authProvider: AuthProvider;
+  authConfig: Record<string, string>;
 }
 
 export interface SetTenantDisabledRequest {
@@ -115,29 +121,6 @@ export interface TenantListResponse {
 
 export interface TenantOpRequest {
   name: string;
-}
-
-// ----- Tenant identity allowlist -----
-export interface IdentityRequest {
-  tenantId: string;
-  issuer: string;
-  externalId: string;
-}
-
-export interface IdentityResponse {
-  id: string;
-  tenantId: string;
-  issuer: string;
-  externalId: string;
-  createdAt: string;
-}
-
-export interface IdentityListResponse {
-  identities: IdentityResponse[];
-}
-
-export interface IdentityOpRequest {
-  id: string;
 }
 
 // ----- Tenant databases -----

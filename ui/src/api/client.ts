@@ -11,10 +11,6 @@ import type {
   TenantResponse,
   TenantListResponse,
   TenantOpRequest,
-  IdentityRequest,
-  IdentityResponse,
-  IdentityListResponse,
-  IdentityOpRequest,
   TenantDbRequest,
   TenantDbResponse,
   TenantDbListResponse,
@@ -131,14 +127,6 @@ export const api = {
   createTenant:     (req: TenantRequest)            => post<TenantResponse>('/tenant/create', req),
   deleteTenant:     (req: TenantOpRequest)          => post<void>('/tenant/delete', req),
   setTenantDisabled:(req: SetTenantDisabledRequest) => post<TenantResponse>('/tenant/setDisabled', req),
-
-  // Tenant identities
-  listIdentities: (tenantId?: string) => {
-    const q = tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : '';
-    return get<IdentityListResponse>(`/identity/list${q}`);
-  },
-  createIdentity: (req: IdentityRequest)   => post<IdentityResponse>('/identity/create', req),
-  deleteIdentity: (req: IdentityOpRequest) => post<void>('/identity/delete', req),
 
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>

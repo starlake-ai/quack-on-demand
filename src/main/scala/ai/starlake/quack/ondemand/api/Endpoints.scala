@@ -70,16 +70,6 @@ object Endpoints:
   val setPoolDisabled: PublicEndpoint[SetPoolDisabledRequest, (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
     base.post.in("pool" / "setDisabled").in(jsonBody[SetPoolDisabledRequest]).out(jsonBody[PoolResponse])
 
-  // ----- Tenant identity allowlist -----
-  val createIdentity: PublicEndpoint[IdentityRequest, (sttp.model.StatusCode, ErrorResponse), IdentityResponse, Any] =
-    base.post.in("identity" / "create").in(jsonBody[IdentityRequest]).out(jsonBody[IdentityResponse])
-
-  val listIdentities: PublicEndpoint[Option[String], (sttp.model.StatusCode, ErrorResponse), IdentityListResponse, Any] =
-    base.get.in("identity" / "list").in(query[Option[String]]("tenantId")).out(jsonBody[IdentityListResponse])
-
-  val deleteIdentity: PublicEndpoint[IdentityOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("identity" / "delete").in(jsonBody[IdentityOpRequest])
-
   // ----- Tenant databases -----
   val createTenantDb: PublicEndpoint[TenantDbRequest, (sttp.model.StatusCode, ErrorResponse), TenantDbResponse, Any] =
     base.post.in("database" / "create").in(jsonBody[TenantDbRequest]).out(jsonBody[TenantDbResponse])
