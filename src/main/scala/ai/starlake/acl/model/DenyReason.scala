@@ -1,17 +1,16 @@
 package ai.starlake.acl.model
 
-import java.time.Instant
-
+/** Reasons the SQL parser can refuse to fully qualify a statement.
+  *
+  * Pre-cutover this enum carried a much larger set of policy-side
+  * outcomes (`NoMatchingGrant`, `ExpiredGrant`, view-resolution cycles,
+  * ...). After the RBAC cutover the only consumer is
+  * [[ai.starlake.acl.parser.SqlParser]], which signals just the
+  * qualification failures it can detect locally; the policy side is
+  * gone and the table-permission check lives in
+  * [[ai.starlake.quack.edge.sql.PostgresAclValidator]] over the
+  * cached EffectiveSet. */
 enum DenyReason {
   case ParseError(message: String)
-  case NoMatchingGrant(table: TableRef, user: UserIdentity)
-  case ViewResolutionCycle(chain: List[TableRef])
-  case UnknownView(viewRef: TableRef)
-  case UnsupportedStatement(statementType: String)
   case UnqualifiedTable(tableName: String, missingPart: String)
-  case ViewParseError(viewRef: TableRef, message: String)
-  case CallbackError(table: TableRef, message: String)
-
-  case ExpiredGrant(table: TableRef, user: UserIdentity, expiredAt: Instant)
-  case MaxViewDepthExceeded(path: List[TableRef])
 }

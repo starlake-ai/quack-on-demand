@@ -41,41 +41,36 @@ final class FlightSqlRouter(
   def session(connectionId: String) = sessions.get(connectionId)
 
   /** Run a statement under the named connection. Success path yields a
-    * [[QueryResult]] streaming Arrow batches from the chosen Quack node; the
-    * caller MUST close it. Failure path is a plain error message.
+    * [[QueryResult]] streaming Arrow batches from the chosen Quack
+    * node; the caller MUST close it. Failure path is a plain error
+    * message.
     *
-    * `groups` + `role` come from the authenticated profile via
-    * ConnectionContext; the ACL validator uses them to expand the
-    * principal set beyond just `user:<username>`. Default empty so the
-    * legacy (no-auth) path keeps working. */
+    * `effectiveSet` carries the RBAC closure pinned on
+    * ConnectionContext at handshake time. `None` is the legacy (no
+    * handshake state) path -- PostgresAclValidator denies anything
+    * tenant-scoped in that case to fail safe. */
   def execute(
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       sql: String,
-      groups: Set[String]              = Set.empty,
-      role:   String                   = "",
       effectiveSet: Option[EffectiveSet] = None
   ): IO[Either[String, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
     val kind = StatementClassifier.classify(sql)
-    // ACL / SQL validation gate. Runs before routing so denied statements
-    // never touch a Quack node and don't burn capacity. Per-pool
-    // dbName/schemaName overrides feed the SQL parser so unqualified table
-    // refs resolve to what the Quack node actually sees at execution time.
-    // `effectiveSet` carries the RBAC closure pinned on ConnectionContext
-    // at handshake time; PostgresAclValidator reads it directly.
+    // ACL / SQL validation gate. Runs before routing so denied
+    // statements never touch a Quack node and don't burn capacity.
+    // Per-pool dbName/schemaName overrides feed the SQL parser so
+    // unqualified table refs resolve to what the Quack node actually
+    // sees at execution time.
     val poolMeta = supervisor.get(poolKey).map(_.metastore).getOrElse(Map.empty)
     val ctx = ValidationContext(
       username        = user,
       database        = poolKey.toString,
       statement       = sql,
       peer            = connectionId,
-      claims          = Map.empty,
       defaultDatabase = poolMeta.get("dbName").filter(_.nonEmpty),
       defaultSchema   = poolMeta.get("schemaName").filter(_.nonEmpty),
-      groups          = groups,
-      role            = role,
       effectiveSet    = effectiveSet
     )
     validator.validate(ctx) match

@@ -6,7 +6,7 @@ import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
   AclConfig, AuthenticationConfig, AwsAuthConfig, AzureAuthConfig,
   DatabaseAuthConfig, GoogleAuthConfig, JwtAuthConfig, KeycloakAuthConfig,
-  OAuthConfig, SessionConfig
+  OAuthConfig
 }
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.observability.metrics.{
@@ -74,21 +74,7 @@ object Main extends IOApp.Simple with LazyLogging:
     val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
-    val sessionCfg = SessionConfig(
-      slProjectId  = "",
-      slDataPath   = "",
-      pgUsername   = mgrCfg.defaultMetastore.getOrElse("pgUser", "postgres"),
-      pgPassword   = mgrCfg.defaultMetastore.getOrElse("pgPassword", ""),
-      pgPort       = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
-      pgHost       = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
-      jwtSecretKey = authCfg.jwt.secretKey,
-      // Phase C: aclTenant is dead config -- the per-statement ACL gate
-      // now reads from the cached EffectiveSet pinned on
-      // ConnectionContext, not a per-tenant grant table. Pass through
-      // the bootstrap tenant for back-compat with the vendored config.
-      aclTenant    = mgrCfg.bootstrap.tenant
-    )
-    val authService = new AuthenticationService(authCfg, sessionCfg)
+    val authService = new AuthenticationService(authCfg, authCfg.jwt.secretKey)
 
     // Bootstrap admin users. Always runs at startup when stateStorage=postgres
     // so the DB auth backend has at least one credential. Re-hashed on every
