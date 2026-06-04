@@ -42,7 +42,7 @@ export default function EffectivePermsModal({
         style={{ width: '90%', maxWidth: 760, maxHeight: '80vh', overflow: 'auto' }}
       >
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="card-title" style={{ margin: 0 }}>Effective permissions</div>
+          <div className="card-title" style={{ margin: 0 }}>Permissions</div>
           <button onClick={onClose}>Close</button>
         </div>
         {error && <div className="login-err">Error: {error}</div>}

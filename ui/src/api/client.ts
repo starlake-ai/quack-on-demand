@@ -4,6 +4,7 @@ import type {
   StopPoolRequest,
   SetMaxConcurrentRequest,
   SetPoolDisabledRequest,
+  SetTenantAuthRequest,
   SetTenantDisabledRequest,
   PoolResponse,
   HealthResponse,
@@ -127,6 +128,7 @@ export const api = {
   createTenant:     (req: TenantRequest)            => post<TenantResponse>('/tenant/create', req),
   deleteTenant:     (req: TenantOpRequest)          => post<void>('/tenant/delete', req),
   setTenantDisabled:(req: SetTenantDisabledRequest) => post<TenantResponse>('/tenant/setDisabled', req),
+  setTenantAuth:    (req: SetTenantAuthRequest)     => post<TenantResponse>('/tenant/setAuth',     req),
 
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>

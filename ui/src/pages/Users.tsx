@@ -68,7 +68,10 @@ export default function Users() {
       <Tabs
         tabs={[
           { id: 'users',  label: 'Users',
-            body: <UserSection tenant={usersFilter === '(superusers)' ? null : usersFilter} /> },
+            body: <UserSection
+                    tenant={usersFilter === '(superusers)' ? null : usersFilter}
+                    tenants={tenants}
+                  /> },
           { id: 'groups', label: 'Groups',
             body: <GroupSection tenant={tenantForRoles} /> },
           { id: 'roles',  label: 'Roles',

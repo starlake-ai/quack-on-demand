@@ -156,6 +156,7 @@ final class ManagerServer(
       Endpoints.listTenants.serverLogic(_ => tenants.listTenants()),
       Endpoints.deleteTenant.serverLogic(tenants.deleteTenant),
       Endpoints.setTenantDisabled.serverLogic(tenants.setTenantDisabled),
+      Endpoints.setTenantAuth    .serverLogic(tenants.setTenantAuth),
       Endpoints.createTenantDb.serverLogic(tenantDbs.createTenantDb),
       Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
       Endpoints.deleteTenantDb.serverLogic(tenantDbs.deleteTenantDb),

@@ -61,6 +61,25 @@ class RbacResolverSpec extends AnyFlatSpec with Matchers:
     methods should not contain "directRoleIdsOf"
     methods should not contain "groupIdsOf"
 
+  it should "resolve JWT-claimed role + group names against the tenant" in:
+    val r = new RbacResolver()
+    r.replace(ControlPlaneSnapshot(
+      roles  = List(role, role2),                                 // tenant t-1: admin, viewer
+      groups = List(group, group.copy(id = "g-2", name = "ops")),  // engineers, ops
+      rolePermissions = List(perm, perm2)
+    ))
+
+    // Names that match → ids.
+    r.rolesByNamesInTenant ("t-1", Set("admin", "viewer", "unknown")) shouldBe Set("r-1", "r-2")
+    r.groupsByNamesInTenant("t-1", Set("engineers", "ops"))           shouldBe Set("g-1", "g-2")
+
+    // Tenant scoping: a name that exists in a different tenant doesn't leak.
+    r.rolesByNamesInTenant ("t-other", Set("admin")) shouldBe Set.empty
+
+    // Empty input short-circuits cheaply.
+    r.rolesByNamesInTenant("t-1", Set.empty)  shouldBe Set.empty
+    r.groupsByNamesInTenant("t-1", Set.empty) shouldBe Set.empty
+
   it should "drop user-bound edges from the snapshot on replace()" in:
     val r = new RbacResolver()
     r.replace(ControlPlaneSnapshot(

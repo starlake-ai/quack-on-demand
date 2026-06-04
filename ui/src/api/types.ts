@@ -115,6 +115,12 @@ export interface SetTenantDisabledRequest {
   disabled: boolean;
 }
 
+export interface SetTenantAuthRequest {
+  name: string;
+  authProvider: AuthProvider;
+  authConfig: Record<string, string>;
+}
+
 export interface TenantListResponse {
   tenants: TenantResponse[];
 }

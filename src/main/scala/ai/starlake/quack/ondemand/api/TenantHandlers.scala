@@ -59,3 +59,15 @@ final class TenantHandlers(sup: PoolSupervisor):
         else
           Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
     }
+
+  def setTenantAuth(req: SetTenantAuthRequest): Out[TenantResponse] =
+    sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
+      case Right(t) => Right(toResponse(t))
+      case Left(msg) =>
+        if msg.startsWith("tenant not found") then
+          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        else if msg.startsWith("authProvider must be") then
+          Left((StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", msg)))
+        else
+          Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+    }
