@@ -53,6 +53,61 @@ final class PostgresControlPlaneStore(
 
   def deleteTenant(id: String): Unit = withConn(c => deleteById(c, "qodstate_tenant", "id", id))
 
+  def createTenantWithAdminRole(
+      tenant:          Tenant,
+      adminRole:       RbacRole,
+      adminPermission: RolePermission
+  ): Unit = withConn { c =>
+    // Single connection + manual commit so the three inserts either all
+    // land or roll back together. INSERT (not upsert) because this is a
+    // bootstrap path -- a duplicate id is a programmer error.
+    c.setAutoCommit(false)
+    try
+      val tps = c.prepareStatement(
+        """INSERT INTO qodstate_tenant (id, display_name, disabled)
+          |VALUES (?, ?, ?)""".stripMargin
+      )
+      try
+        tps.setString(1, tenant.id)
+        tps.setString(2, if tenant.displayName.nonEmpty then tenant.displayName else tenant.name)
+        tps.setBoolean(3, tenant.disabled)
+        tps.executeUpdate()
+      finally tps.close()
+
+      val rps = c.prepareStatement(
+        """INSERT INTO qodstate_role (id, tenant_id, name, description)
+          |VALUES (?, ?, ?, ?)""".stripMargin
+      )
+      try
+        rps.setString(1, adminRole.id)
+        rps.setString(2, adminRole.tenantId)
+        rps.setString(3, adminRole.name)
+        setNullable(rps, 4, adminRole.description)
+        rps.executeUpdate()
+      finally rps.close()
+
+      val pps = c.prepareStatement(
+        """INSERT INTO qodstate_role_permission
+          |  (id, role_id, catalog_name, schema_name, table_name, verb)
+          |VALUES (?, ?, ?, ?, ?, ?)""".stripMargin
+      )
+      try
+        pps.setString(1, adminPermission.id)
+        pps.setString(2, adminPermission.roleId)
+        pps.setString(3, adminPermission.catalogName)
+        pps.setString(4, adminPermission.schemaName)
+        pps.setString(5, adminPermission.tableName)
+        pps.setString(6, adminPermission.verb.toUpperCase)
+        pps.executeUpdate()
+      finally pps.close()
+
+      c.commit()
+    catch case t: Throwable =>
+      try c.rollback() catch case _: Throwable => ()
+      throw t
+    finally c.setAutoCommit(true)
+  }
+
   private def readTenant(rs: ResultSet): Tenant =
     val dn = rs.getString("display_name")
     Tenant(
@@ -623,6 +678,12 @@ final class PostgresControlPlaneStore(
     listEdgeRight(c, "qodstate_user_role", "user_id", "role_id", userId)
   }
 
+  def listDirectRolesByUsers(userIds: List[String]): Map[String, Set[String]] =
+    bulkEdgeByLeft(userIds, "qodstate_user_role", "user_id", "role_id")
+
+  def listGroupsByUsers(userIds: List[String]): Map[String, Set[String]] =
+    bulkEdgeByLeft(userIds, "qodstate_user_group", "user_id", "group_id")
+
   def addGroupRole(groupId: String, roleId: String): Unit = withConn { c =>
     insertEdge(c, "qodstate_group_role", "group_id", "role_id", groupId, roleId)
   }
@@ -734,6 +795,58 @@ final class PostgresControlPlaneStore(
 
   def listPoolPermissionsForGroup(groupId: String): List[PoolPermission] =
     listPoolPermissions(groupId = Some(groupId))
+
+  def listPoolPermissionsByUsers(userIds: List[String]): Map[String, List[PoolPermission]] =
+    if userIds.isEmpty then Map.empty
+    else withConn { c =>
+      val placeholders = userIds.map(_ => "?").mkString(",")
+      val ps = c.prepareStatement(
+        s"""SELECT id, tenant_id, pool_id, user_id, group_id, granted_at
+           |FROM qodstate_pool_permission WHERE user_id IN ($placeholders)""".stripMargin
+      )
+      try
+        userIds.zipWithIndex.foreach { (id, i) => ps.setString(i + 1, id) }
+        val rs = ps.executeQuery()
+        try
+          val buf = scala.collection.mutable.Map.empty[String, scala.collection.mutable.ListBuffer[PoolPermission]]
+          while rs.next() do
+            val pp = readPoolPermission(rs)
+            pp.userId.foreach { u =>
+              buf.getOrElseUpdate(u, scala.collection.mutable.ListBuffer.empty) += pp
+            }
+          buf.view.mapValues(_.toList).toMap
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** Group-by-left helper: bulk-fetch the rightCol values for a list
+    * of leftCol keys in one round-trip. Used by the user-list path to
+    * avoid the N+1 read of user-role + user-group edges. */
+  private def bulkEdgeByLeft(
+      ids:      List[String],
+      table:    String,
+      leftCol:  String,
+      rightCol: String
+  ): Map[String, Set[String]] =
+    if ids.isEmpty then Map.empty
+    else withConn { c =>
+      val placeholders = ids.map(_ => "?").mkString(",")
+      val ps = c.prepareStatement(
+        s"SELECT $leftCol, $rightCol FROM $table WHERE $leftCol IN ($placeholders)"
+      )
+      try
+        ids.zipWithIndex.foreach { (id, i) => ps.setString(i + 1, id) }
+        val rs = ps.executeQuery()
+        try
+          val buf = scala.collection.mutable.Map.empty[String, scala.collection.mutable.Set[String]]
+          while rs.next() do
+            val k = rs.getString(1)
+            val v = rs.getString(2)
+            buf.getOrElseUpdate(k, scala.collection.mutable.Set.empty) += v
+          buf.view.mapValues(_.toSet).toMap
+        finally rs.close()
+      finally ps.close()
+    }
 
   private def readPoolPermission(rs: ResultSet): PoolPermission =
     PoolPermission(

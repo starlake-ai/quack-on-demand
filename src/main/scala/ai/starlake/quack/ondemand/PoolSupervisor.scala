@@ -4,8 +4,12 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   Names, NodeSpec, Pool, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDb
 }
+import ai.starlake.quack.ondemand.rbac.RbacResolver
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, NoopDbAdmin}
+import ai.starlake.quack.ondemand.state.{
+  ControlPlaneStore, DbAdmin, NoopDbAdmin,
+  PoolPermission, RbacGroup, RbacRole, RbacUser, RolePermission
+}
 import ai.starlake.quack.route.PoolSnapshot
 import cats.effect.IO
 import org.slf4j.LoggerFactory
@@ -43,6 +47,13 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
+  /** In-memory mirror of the RBAC slice of the snapshot. Phase B's REST
+    * handlers and (Phase C) the FlightSQL handshake gates read effective
+    * sets from here without re-joining qodstate_role / qodstate_group on
+    * every call. Replaced from the store snapshot at `restore()` and
+    * updated incrementally after each supervisor RBAC mutation. */
+  val rbacResolver: RbacResolver = new RbacResolver()
+
   // ---------- Bootstrap / replay ----------
 
   def restore(): Unit =
@@ -71,6 +82,9 @@ final class PoolSupervisor(
         ))
       }
     }
+    // Hand the RBAC graph to the resolver in one shot. Subsequent
+    // mutations are mirrored incrementally by the methods below.
+    rbacResolver.replace(snap)
 
   /** Re-check every persisted node; respawn dead ones. */
   def reconcile(): IO[Unit] = IO.defer {
@@ -179,8 +193,29 @@ final class PoolSupervisor(
             id          = if t.id.nonEmpty then t.id else newId("t"),
             displayName = name
           )
-          store.upsertTenant(withId)
+          // Every new tenant gets a built-in `admin` role with a
+          // wildcard ALL permission, inserted in the same transaction as
+          // the tenant row so a partial failure leaves no orphans. The
+          // bootstrap admin (qodstate_user superuser) is wired to this
+          // role by BootstrapAccessSeeder at boot time.
+          val adminRole = RbacRole(
+            id          = newId("r"),
+            tenantId    = withId.id,
+            name        = PoolSupervisor.AdminRoleName,
+            description = Some(s"Built-in admin role for tenant ${withId.displayName}")
+          )
+          val adminPerm = RolePermission(
+            id          = newId("rp"),
+            roleId      = adminRole.id,
+            catalogName = RolePermission.Wildcard,
+            schemaName  = RolePermission.Wildcard,
+            tableName   = RolePermission.Wildcard,
+            verb        = "ALL"
+          )
+          store.createTenantWithAdminRole(withId, adminRole, adminPerm)
           tenants.put(withId.id, withId)
+          rbacResolver.putRole(adminRole)
+          rbacResolver.putRolePermission(adminPerm)
           Right(withId)
   }
 
@@ -443,6 +478,308 @@ final class PoolSupervisor(
 
   private def drainAndStop(n: RunningNode): IO[Unit] = backend.stop(n.nodeId)
 
+  // ---------- RBAC: users ----------
+
+  /** Persist a new (tenant, username) principal, including its bcrypt
+    * password hash, and register the row with the resolver so role
+    * grants can FK to it. Returns the persisted [[RbacUser]] (id
+    * assigned). `tenant = None` creates a superuser. */
+  def createUser(
+      tenant:    Option[String],
+      username:  String,
+      password:  String,
+      role:      String = "user",
+      userStore: ai.starlake.quack.ondemand.state.UserStore
+  ): IO[Either[String, RbacUser]] = IO.blocking {
+    if username.isEmpty || password.isEmpty then
+      Left("username and password are required")
+    else tenant match
+      case Some(t) if t.isEmpty =>
+        Left("tenant must be non-empty (use None for superuser)")
+      case Some(t) if !tenants.values.exists(x => x.id == t || x.displayName == t.toLowerCase) =>
+        Left(s"tenant not found: $t")
+      case _ =>
+        val resolvedTenantId = tenant.flatMap { t =>
+          tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
+        }
+        val out = userStore.upsertUser(resolvedTenantId, username, password, role)
+        val u = RbacUser(out.id, resolvedTenantId, username, role)
+        store.upsertUserIdentity(u)
+        Right(u)
+  }
+
+  def updateUserPassword(
+      userId:    String,
+      password:  Option[String],
+      role:      Option[String],
+      userStore: ai.starlake.quack.ondemand.state.UserStore
+  ): IO[Either[String, RbacUser]] = IO.blocking {
+    store.getUserById(userId) match
+      case None => Left(s"user not found: $userId")
+      case Some(u) =>
+        val newRole = role.getOrElse(u.role)
+        password.foreach(pw => userStore.upsertUser(u.tenant, u.username, pw, newRole))
+        val updated = u.copy(role = newRole)
+        store.upsertUserIdentity(updated)
+        Right(updated)
+  }
+
+  def deleteUser(userId: String): IO[Either[String, Unit]] = IO.blocking {
+    store.getUserById(userId) match
+      case None => Left(s"user not found: $userId")
+      case Some(_) =>
+        // ON DELETE CASCADE in qodstate_user_role / user_group /
+        // pool_permission cleans up the user's edges automatically.
+        store.deleteUser(userId)
+        Right(())
+  }
+
+  def listUsers(tenant: Option[String]): List[RbacUser] = tenant match
+    case Some(t) =>
+      tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase) match
+        case Some(tn) => store.listUsers(Some(tn.id))
+        case None     => Nil
+    case None => store.listUsers(None)
+
+  // ---------- RBAC: roles ----------
+
+  def createRole(
+      tenantId:    String,
+      name:        String,
+      description: Option[String] = None
+  ): IO[Either[String, RbacRole]] = IO.blocking {
+    if name.isEmpty then Left("role name must be non-empty")
+    else if !tenants.contains(tenantId) then Left(s"tenant not found: $tenantId")
+    else if store.findRole(tenantId, name).isDefined then
+      Left(s"role '$name' already exists in tenant '$tenantId'")
+    else
+      val r = RbacRole(newId("r"), tenantId, name, description)
+      store.upsertRole(r)
+      rbacResolver.putRole(r)
+      Right(r)
+  }
+
+  def deleteRole(id: String): IO[Either[String, Unit]] = IO.blocking {
+    rbacResolver.role(id) match
+      case None => Left(s"role not found: $id")
+      case Some(_) =>
+        store.deleteRole(id)
+        rbacResolver.removeRole(id)
+        Right(())
+  }
+
+  def listRoles(tenantId: String): List[RbacRole] = store.listRoles(tenantId)
+
+  def grantRolePermission(
+      roleId:  String,
+      catalog: String,
+      schema:  String,
+      table:   String,
+      verb:    String
+  ): IO[Either[String, RolePermission]] = IO.blocking {
+    val upper = verb.toUpperCase
+    if !RolePermission.ValidVerbs.contains(upper) then
+      Left(s"verb must be one of ${RolePermission.ValidVerbs.mkString(", ")}")
+    else if rbacResolver.role(roleId).isEmpty then Left(s"role not found: $roleId")
+    else
+      val p = RolePermission(newId("rp"), roleId, catalog, schema, table, upper)
+      val persisted = store.insertRolePermission(p)
+      rbacResolver.putRolePermission(persisted)
+      Right(persisted)
+  }
+
+  def revokeRolePermission(id: String): IO[Either[String, Unit]] = IO.blocking {
+    if store.deleteRolePermission(id) then
+      rbacResolver.removeRolePermission(id)
+      Right(())
+    else Left(s"role permission not found: $id")
+  }
+
+  def listRolePermissions(roleId: String): List[RolePermission] =
+    store.listRolePermissions(roleId)
+
+  // ---------- RBAC: groups ----------
+
+  def createGroup(
+      tenantId:    String,
+      name:        String,
+      description: Option[String] = None
+  ): IO[Either[String, RbacGroup]] = IO.blocking {
+    if name.isEmpty then Left("group name must be non-empty")
+    else if !tenants.contains(tenantId) then Left(s"tenant not found: $tenantId")
+    else if store.findGroup(tenantId, name).isDefined then
+      Left(s"group '$name' already exists in tenant '$tenantId'")
+    else
+      val g = RbacGroup(newId("g"), tenantId, name, description)
+      store.upsertGroup(g)
+      rbacResolver.putGroup(g)
+      Right(g)
+  }
+
+  def deleteGroup(id: String): IO[Either[String, Unit]] = IO.blocking {
+    rbacResolver.group(id) match
+      case None => Left(s"group not found: $id")
+      case Some(_) =>
+        store.deleteGroup(id)
+        rbacResolver.removeGroup(id)
+        Right(())
+  }
+
+  def listGroups(tenantId: String): List[RbacGroup] = store.listGroups(tenantId)
+
+  // ---------- RBAC: memberships ----------
+
+  def addUserRole(userId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
+    membershipCheck(userId, roleId, rbacResolver.role(_), "role") match
+      case Some(err) => Left(err)
+      case None      =>
+        store.addUserRole(userId, roleId)
+        Right(())
+  }
+
+  def removeUserRole(userId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
+    store.removeUserRole(userId, roleId)
+    Right(())
+  }
+
+  def addUserGroup(userId: String, groupId: String): IO[Either[String, Unit]] = IO.blocking {
+    membershipCheck(userId, groupId, rbacResolver.group(_), "group") match
+      case Some(err) => Left(err)
+      case None      =>
+        store.addUserGroup(userId, groupId)
+        Right(())
+  }
+
+  def removeUserGroup(userId: String, groupId: String): IO[Either[String, Unit]] = IO.blocking {
+    store.removeUserGroup(userId, groupId)
+    Right(())
+  }
+
+  def addGroupRole(groupId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
+    if rbacResolver.group(groupId).isEmpty then Left(s"group not found: $groupId")
+    else if rbacResolver.role(roleId).isEmpty then Left(s"role not found: $roleId")
+    else
+      store.addGroupRole(groupId, roleId)
+      rbacResolver.addGroupRoleEdge(groupId, roleId)
+      Right(())
+  }
+
+  def removeGroupRole(groupId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
+    store.removeGroupRole(groupId, roleId)
+    rbacResolver.removeGroupRoleEdge(groupId, roleId)
+    Right(())
+  }
+
+  private def membershipCheck[A](
+      userId: String, otherId: String, lookup: String => Option[A], otherLabel: String
+  ): Option[String] =
+    if store.getUserById(userId).isEmpty then Some(s"user not found: $userId")
+    else if lookup(otherId).isEmpty then Some(s"$otherLabel not found: $otherId")
+    else None
+
+  // ---------- RBAC: pool permissions ----------
+
+  def grantPoolPermission(
+      tenantId: String,
+      poolId:   Option[String],
+      userId:   Option[String],
+      groupId:  Option[String]
+  ): IO[Either[String, PoolPermission]] = IO.blocking {
+    // Walk through the predicates in order and short-circuit on the
+    // first failure. Tenant-scoping invariant (principal belongs to
+    // the target tenant) is checked at the end since it requires the
+    // principal lookup to have succeeded.
+    val problem: Option[String] =
+      if !tenants.contains(tenantId) then Some(s"tenant not found: $tenantId")
+      else if userId.isDefined == groupId.isDefined then
+        Some("exactly one of userId / groupId must be set")
+      else poolId.flatMap(p => if poolRows.contains(p) then None else Some(s"pool not found: $p"))
+        .orElse(userId.flatMap(u => if store.getUserById(u).isDefined    then None else Some(s"user not found: $u")))
+        .orElse(groupId.flatMap(g => if rbacResolver.group(g).isDefined  then None else Some(s"group not found: $g")))
+        .orElse {
+          // Principal must belong to the same tenant the grant covers.
+          // A superuser (tenant=None) cannot receive a tenant-scoped
+          // pool grant; the resolver's bypass rule already gives them
+          // every pool.
+          val ok = userId match
+            case Some(u) => store.getUserById(u).exists(_.tenant.contains(tenantId))
+            case None    => groupId.flatMap(rbacResolver.group).exists(_.tenantId == tenantId)
+          if ok then None else Some("principal does not belong to the target tenant")
+        }
+
+    problem match
+      case Some(err) => Left(err)
+      case None =>
+        val pp = PoolPermission(newId("pp"), tenantId, poolId, userId, groupId)
+        val persisted = store.insertPoolPermission(pp)
+        rbacResolver.putPoolPermission(persisted)
+        Right(persisted)
+  }
+
+  def revokePoolPermission(id: String): IO[Either[String, Unit]] = IO.blocking {
+    if store.deletePoolPermission(id) then
+      rbacResolver.removePoolPermission(id)
+      Right(())
+    else Left(s"pool permission not found: $id")
+  }
+
+  def listPoolPermissions(
+      tenantId: Option[String] = None,
+      userId:   Option[String] = None,
+      groupId:  Option[String] = None
+  ): List[PoolPermission] = store.listPoolPermissions(tenantId, userId, groupId)
+
+  // ---------- RBAC: effective-set closure ----------
+
+  /** Compute the closure of `(roles, groups, permissions, pool grants)`
+    * for one user. Combines the user's direct edges (fetched from
+    * Postgres) with the schema-bounded cache in [[rbacResolver]]. This
+    * is the canonical handshake-time computation -- Phase C will call
+    * it once per handshake and pin the result onto ConnectionContext. */
+  def effectiveSetForUser(userId: String): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
+    store.getUserById(userId).map { u =>
+      val directRoleIds = store.listDirectRolesForUser(u.id).toSet
+      val groupIds      = store.listGroupsForUser(u.id).toSet
+      val viaGroups     = groupIds.flatMap(rbacResolver.rolesForGroup)
+      val allRoleIds    = directRoleIds ++ viaGroups
+      val effRoles      = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
+      val effGroups     = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
+      val effPerms      = rbacResolver.permissionsForRoles(allRoleIds)
+      val directPools   = store.listPoolPermissionsForUser(u.id)
+      val viaGroupPools = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
+      ai.starlake.quack.ondemand.rbac.EffectiveSet(
+        u, effRoles, effGroups, effPerms, directPools ++ viaGroupPools
+      )
+    }
+
+  /** Bulk version: one Postgres round-trip per dependency (direct
+    * roles, groups, pool grants) instead of N+1. Returns a map keyed
+    * by user id; users with no edges are still present in the map
+    * with empty lists.  Used by the `/user/list` REST surface. */
+  def effectiveSetsForUsers(
+      users: List[RbacUser]
+  ): Map[String, ai.starlake.quack.ondemand.rbac.EffectiveSet] =
+    if users.isEmpty then Map.empty
+    else
+      val ids       = users.map(_.id)
+      val rolesByU  = store.listDirectRolesByUsers(ids)
+      val groupsByU = store.listGroupsByUsers(ids)
+      val poolsByU  = store.listPoolPermissionsByUsers(ids)
+      users.iterator.map { u =>
+        val directRoleIds = rolesByU .getOrElse(u.id, Set.empty)
+        val groupIds      = groupsByU.getOrElse(u.id, Set.empty)
+        val viaGroups     = groupIds.flatMap(rbacResolver.rolesForGroup)
+        val allRoleIds    = directRoleIds ++ viaGroups
+        val effRoles      = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
+        val effGroups     = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
+        val effPerms      = rbacResolver.permissionsForRoles(allRoleIds)
+        val directPools   = poolsByU.getOrElse(u.id, Nil)
+        val viaGroupPools = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
+        u.id -> ai.starlake.quack.ondemand.rbac.EffectiveSet(
+          u, effRoles, effGroups, effPerms, directPools ++ viaGroupPools
+        )
+      }.toMap
+
   // ---------- helpers ----------
 
   private def newId(prefix: String): String = s"$prefix-${UUID.randomUUID().toString.take(8)}"
@@ -453,3 +790,6 @@ final class PoolSupervisor(
       store.upsertPool(updated)
       poolRows.put(updated.id, updated)
     }
+
+object PoolSupervisor:
+  val AdminRoleName: String = "admin"

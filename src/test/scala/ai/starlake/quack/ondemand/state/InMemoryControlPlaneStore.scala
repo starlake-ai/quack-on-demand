@@ -21,6 +21,17 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
   private val nodes     = TrieMap.empty[String, RunningNode]
 
   def upsertTenant(t: Tenant): Unit = tenants.put(t.id, t)
+
+  def createTenantWithAdminRole(
+      tenant:          Tenant,
+      adminRole:       RbacRole,
+      adminPermission: RolePermission
+  ): Unit =
+    if tenants.contains(tenant.id) then
+      throw new java.sql.SQLException(s"tenant id ${tenant.id} already exists")
+    tenants.put(tenant.id, tenant)
+    upsertRole(adminRole)
+    insertRolePermission(adminPermission)
   def listTenants(): List[Tenant]   = tenants.values.toList.sortBy(_.displayName)
   def deleteTenant(id: String): Unit =
     if tenantDbs.values.exists(_.tenantId == id) then
@@ -146,6 +157,16 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
   def listDirectRolesForUser(userId: String): List[String] =
     userRoles.collect { case (u, r) if u == userId => r }.toList.sorted
 
+  def listDirectRolesByUsers(userIds: List[String]): Map[String, Set[String]] =
+    val want = userIds.toSet
+    userRoles.collect { case (u, r) if want(u) => (u, r) }
+      .groupMap(_._1)(_._2).view.mapValues(_.toSet).toMap
+
+  def listGroupsByUsers(userIds: List[String]): Map[String, Set[String]] =
+    val want = userIds.toSet
+    userGroups.collect { case (u, g) if want(u) => (u, g) }
+      .groupMap(_._1)(_._2).view.mapValues(_.toSet).toMap
+
   def addGroupRole(groupId: String, roleId: String): Unit = groupRoles += ((groupId, roleId))
   def removeGroupRole(groupId: String, roleId: String): Boolean = groupRoles.remove((groupId, roleId))
   def listRolesForGroup(groupId: String): List[String] =
@@ -174,6 +195,13 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     listPoolPermissions(userId = Some(userId))
   def listPoolPermissionsForGroup(groupId: String): List[PoolPermission] =
     listPoolPermissions(groupId = Some(groupId))
+
+  def listPoolPermissionsByUsers(userIds: List[String]): Map[String, List[PoolPermission]] =
+    val want = userIds.toSet
+    poolPermissions.values
+      .filter(p => p.userId.exists(want.contains))
+      .toList
+      .groupBy(_.userId.get)
 
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants         = listTenants(),

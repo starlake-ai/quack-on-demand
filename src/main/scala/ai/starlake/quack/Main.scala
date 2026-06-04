@@ -395,10 +395,22 @@ object Main extends IOApp.Simple with LazyLogging:
           throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
 
+      // RBAC handlers wire through the supervisor + user store so persistence
+      // and the in-memory RbacResolver cache stay in lockstep. The user
+      // handler is built first because role / group / pool-permission
+      // handlers share its DTO mappers.
+      val userStoreForRbac = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+      val userHandlers     = new UserHandlers(sup, userStoreForRbac)
+      val roleHandlers     = new RoleHandlers(sup, userHandlers)
+      val groupHandlers    = new GroupHandlers(sup, userHandlers)
+      val membershipHandlers = new MembershipHandlers(sup)
+      val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
+
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, identities, tenantDbs, health,
         aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
-        historyHandlers, catalogHandlers, metricsEndpoint
+        historyHandlers, catalogHandlers, metricsEndpoint,
+        userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

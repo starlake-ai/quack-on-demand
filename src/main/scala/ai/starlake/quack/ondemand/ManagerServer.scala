@@ -29,7 +29,15 @@ final class ManagerServer(
     authEnabled: Boolean,
     statementHistory: StatementHistoryHandlers,
     catalog: Option[CatalogHandlers],
-    metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint
+    metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
+    // Phase B: RBAC handlers. All mounted unconditionally -- the
+    // legacy ACL endpoints (above) are still mounted alongside until
+    // Phase C drops them.
+    users:           UserHandlers,
+    roles:           RoleHandlers,
+    groups:          GroupHandlers,
+    memberships:     MembershipHandlers,
+    poolPermissions: PoolPermissionHandlers
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -114,6 +122,36 @@ final class ManagerServer(
       Endpoints.statementHistory.serverLogic(statementHistory.recent)
     )
 
+    val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
+      RbacEndpoints.createUser.serverLogic(users.createUser),
+      RbacEndpoints.updateUser.serverLogic(users.updateUser),
+      RbacEndpoints.deleteUser.serverLogic(users.deleteUser),
+      RbacEndpoints.listUsers .serverLogic(users.listUsers),
+      RbacEndpoints.effectivePermissions.serverLogic(users.effective),
+
+      RbacEndpoints.createRole.serverLogic(roles.createRole),
+      RbacEndpoints.deleteRole.serverLogic(roles.deleteRole),
+      RbacEndpoints.listRoles .serverLogic(roles.listRoles),
+      RbacEndpoints.grantRolePermission .serverLogic(roles.grantPermission),
+      RbacEndpoints.revokeRolePermission.serverLogic(roles.revokePermission),
+      RbacEndpoints.listRolePermissions .serverLogic(roles.listPermissions),
+
+      RbacEndpoints.createGroup.serverLogic(groups.createGroup),
+      RbacEndpoints.deleteGroup.serverLogic(groups.deleteGroup),
+      RbacEndpoints.listGroups .serverLogic(groups.listGroups),
+
+      RbacEndpoints.addUserRoleMembership    .serverLogic(memberships.addUserRole),
+      RbacEndpoints.removeUserRoleMembership .serverLogic(memberships.removeUserRole),
+      RbacEndpoints.addUserGroupMembership   .serverLogic(memberships.addUserGroup),
+      RbacEndpoints.removeUserGroupMembership.serverLogic(memberships.removeUserGroup),
+      RbacEndpoints.addGroupRoleMembership   .serverLogic(memberships.addGroupRole),
+      RbacEndpoints.removeGroupRoleMembership.serverLogic(memberships.removeGroupRole),
+
+      RbacEndpoints.grantPoolPermission .serverLogic(poolPermissions.grant),
+      RbacEndpoints.revokePoolPermission.serverLogic(poolPermissions.revoke),
+      RbacEndpoints.listPoolPermissions .serverLogic { case (t, u, g) => poolPermissions.list(t, u, g) }
+    )
+
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
@@ -147,7 +185,7 @@ final class ManagerServer(
           authEnabled   = authEnabled
         )
       )))
-    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints
+    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 
