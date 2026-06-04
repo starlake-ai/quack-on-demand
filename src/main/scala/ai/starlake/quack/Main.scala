@@ -347,9 +347,11 @@ object Main extends IOApp.Simple with LazyLogging:
                           Right(key.tenantDb),
             // Phase C handshake authorize: user-scope + pool-access +
             // EffectiveSet. Failures bubble up as PERMISSION_DENIED on
-            // the FlightSQL handshake.
-            (tenant, pool, username) =>
-              sup.authorizeHandshake(tenant, pool, username))
+            // the FlightSQL handshake. JWT role + groups claims flow in
+            // from FlightEdgeServer.handshake and get union-merged with
+            // the user's local membership edges inside the supervisor.
+            (tenant, pool, username, jwtRoles, jwtGroups) =>
+              sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups))
           srv.start()
           srv
         catch case t: Throwable =>

@@ -229,6 +229,27 @@ final class PoolSupervisor(
         Right(updated)
   }
 
+  /** Mutate the tenant's auth provider + provider-specific config. The
+    * existing users / roles / groups are unchanged -- this is a config
+    * swap, not a wipe. Validation of the new config shape (issuer URL,
+    * required keys per provider) lives in the REST handler so the
+    * supervisor stays storage-only. */
+  def setTenantAuth(
+      name:         String,
+      authProvider: String,
+      authConfig:   Map[String, String]
+  ): IO[Either[String, Tenant]] = IO.blocking {
+    if !Tenant.ValidAuthProviders.contains(authProvider) then
+      Left(s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}")
+    else getTenant(name) match
+      case None    => Left(s"tenant not found: $name")
+      case Some(t) =>
+        val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
+        store.upsertTenant(updated)
+        tenants.put(updated.id, updated)
+        Right(updated)
+  }
+
   def deleteTenant(name: String): IO[Either[String, Unit]] = IO.blocking {
     getTenant(name) match
       case None => Left(s"tenant not found: $name")
@@ -746,7 +767,9 @@ final class PoolSupervisor(
   def authorizeHandshake(
       tenantName: String,
       poolName:   String,
-      username:   String
+      username:   String,
+      jwtRoles:   Set[String] = Set.empty,
+      jwtGroups:  Set[String] = Set.empty
   ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
     // 1. Pool + kill switches.
     findPoolKeyByTenantAndPoolName(tenantName, poolName).toRight(
@@ -779,7 +802,7 @@ final class PoolSupervisor(
                       if user.tenant.isEmpty then
                         ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
                       else
-                        effectiveSetForUser(user.id).getOrElse(
+                        effectiveSetForUser(user.id, jwtRoles, jwtGroups).getOrElse(
                           ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
                         )
                     // 5. Pool-access check.
@@ -806,20 +829,38 @@ final class PoolSupervisor(
 
   /** Compute the closure of `(roles, groups, permissions, pool grants)`
     * for one user. Combines the user's direct edges (fetched from
-    * Postgres) with the schema-bounded cache in [[rbacResolver]]. This
-    * is the canonical handshake-time computation -- Phase C will call
-    * it once per handshake and pin the result onto ConnectionContext. */
-  def effectiveSetForUser(userId: String): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
+    * Postgres) with the schema-bounded cache in [[rbacResolver]] AND
+    * with any JWT-claimed role / group names -- those are resolved
+    * against `qodstate_role.name` / `qodstate_group.name` in the
+    * user's tenant and union-merged before the closure is computed.
+    *
+    * `jwtRoles` / `jwtGroups` are pass-through name sets: empty means
+    * "no JWT claims" (Basic auth path or no `roles`/`groups` in the
+    * token). Names unknown to the manager are silently dropped, so a
+    * JWT claiming `[admin, foo, bar]` against a tenant with only an
+    * `admin` role grants exactly the admin role and nothing else. */
+  def effectiveSetForUser(
+      userId:    String,
+      jwtRoles:  Set[String] = Set.empty,
+      jwtGroups: Set[String] = Set.empty
+  ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
     store.getUserById(userId).map { u =>
-      val directRoleIds = store.listDirectRolesForUser(u.id).toSet
-      val groupIds      = store.listGroupsForUser(u.id).toSet
-      val viaGroups     = groupIds.flatMap(rbacResolver.rolesForGroup)
-      val allRoleIds    = directRoleIds ++ viaGroups
-      val effRoles      = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
-      val effGroups     = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
-      val effPerms      = rbacResolver.permissionsForRoles(allRoleIds)
-      val directPools   = store.listPoolPermissionsForUser(u.id)
-      val viaGroupPools = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
+      val directRoleIdsLocal = store.listDirectRolesForUser(u.id).toSet
+      val groupIdsLocal      = store.listGroupsForUser(u.id).toSet
+      // JWT-claim resolution. Only tenant-scoped users carry a tenant
+      // id; superusers (u.tenant.isEmpty) bypass per-statement
+      // validation entirely upstream, so the union here is a no-op.
+      val jwtRoleIds         = u.tenant.toSet.flatMap(t => rbacResolver.rolesByNamesInTenant(t, jwtRoles))
+      val jwtGroupIds        = u.tenant.toSet.flatMap(t => rbacResolver.groupsByNamesInTenant(t, jwtGroups))
+      val directRoleIds      = directRoleIdsLocal ++ jwtRoleIds
+      val groupIds           = groupIdsLocal      ++ jwtGroupIds
+      val viaGroups          = groupIds.flatMap(rbacResolver.rolesForGroup)
+      val allRoleIds         = directRoleIds ++ viaGroups
+      val effRoles           = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
+      val effGroups          = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
+      val effPerms           = rbacResolver.permissionsForRoles(allRoleIds)
+      val directPools        = store.listPoolPermissionsForUser(u.id)
+      val viaGroupPools      = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
       ai.starlake.quack.ondemand.rbac.EffectiveSet(
         u, effRoles, effGroups, effPerms, directPools ++ viaGroupPools
       )

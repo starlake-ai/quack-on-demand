@@ -67,6 +67,9 @@ object Endpoints:
   val setTenantDisabled: PublicEndpoint[SetTenantDisabledRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
     base.post.in("tenant" / "setDisabled").in(jsonBody[SetTenantDisabledRequest]).out(jsonBody[TenantResponse])
 
+  val setTenantAuth: PublicEndpoint[SetTenantAuthRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
+    base.post.in("tenant" / "setAuth").in(jsonBody[SetTenantAuthRequest]).out(jsonBody[TenantResponse])
+
   val setPoolDisabled: PublicEndpoint[SetPoolDisabledRequest, (sttp.model.StatusCode, ErrorResponse), PoolResponse, Any] =
     base.post.in("pool" / "setDisabled").in(jsonBody[SetPoolDisabledRequest]).out(jsonBody[PoolResponse])
 

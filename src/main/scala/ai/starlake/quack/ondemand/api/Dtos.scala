@@ -102,6 +102,11 @@ final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
 final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
+final case class SetTenantAuthRequest(
+    name:         String,
+    authProvider: String,
+    authConfig:   Map[String, String] = Map.empty
+)
 final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: String, disabled: Boolean)
 
 // ----- Tenant databases (qodstate_tenant_db) -----------------------------
@@ -439,6 +444,23 @@ object Dtos:
   given Codec[TenantListResponse]       = deriveCodec
   given Codec[TenantOpRequest]          = deriveCodec
   given Codec[SetTenantDisabledRequest] = deriveCodec
+  // Hand-rolled so authConfig defaults to empty when absent from the wire JSON.
+  given Codec[SetTenantAuthRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        name         <- c.get[String]("name")
+        authProvider <- c.get[String]("authProvider")
+        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
+      yield SetTenantAuthRequest(name, authProvider, authConfig)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "name"         -> r.name.asJson,
+        "authProvider" -> r.authProvider.asJson,
+        "authConfig"   -> r.authConfig.asJson
+      ))
+    }
+  )
   given Codec[SetPoolDisabledRequest]   = deriveCodec
   given Codec[ClientConfigResponse] = deriveCodec
 

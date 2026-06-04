@@ -1,29 +1,59 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { UserResponse } from '../api/types';
+import type { TenantResponse, UserResponse } from '../api/types';
 import EffectivePermsModal from './EffectivePermsModal';
 
-/** Users tab on the /users page. Renders the user table for the selected
-  * tenant (or every user when `tenant === null`), with inline create +
-  * per-row edit / delete / effective drilldown actions. */
-export default function UserSection({ tenant }: { tenant: string | null }) {
+/** Users tab on the /users page. Renders the user table for the
+  * selected tenant (or every user when `tenant === null`), with inline
+  * create + per-row edit / delete / effective drilldown actions.
+  *
+  * The create form adapts to the tenant's auth provider:
+  *   - `db` tenants: full form (username + password). Submitted user
+  *     can authenticate immediately via Basic / DB-backed login.
+  *   - OIDC tenants (`keycloak` / `google` / `azure` / `aws`): no
+  *     password field. The form becomes a "Pre-provision" affordance --
+  *     it creates a `qodstate_user` row so the admin can attach roles
+  *     / groups / pool grants before the user's first handshake; the
+  *     IdP still owns authentication, and the row will be reused (not
+  *     duplicated) when the user actually signs in.
+  *
+  * `tenants` is passed in by the parent page so the tenant `<select>`
+  * stays in sync with the page-level filter without a second fetch. */
+export default function UserSection({
+  tenant,
+  tenants,
+}: {
+  tenant:  string | null;
+  tenants: TenantResponse[];
+}) {
   const [rows, setRows]       = useState<UserResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
   const [effectiveFor, setEffectiveFor] = useState<string | null>(null);
 
-  // New-user form state. `tenant` defaults to the selected tenant, but
-  // the admin can leave it blank to create a superuser when on the
-  // "(all)" filter.
+  // New-user form state. `newTenant` is the dropdown selection;
+  // it defaults to the page-level filter and can be overridden when
+  // creating on the "(all)" view. Empty string sentinel = superuser.
+  const SUPERUSER = '';
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [newRole,     setNewRole]     = useState('user');
-  const [newTenant,   setNewTenant]   = useState<string | null>(tenant ?? null);
+  const [newRole,     setNewRole]     = useState<'user' | 'admin'>('user');
+  const [newTenant,   setNewTenant]   = useState<string>(tenant ?? SUPERUSER);
 
-  // Per-row edit (password rotation only). Edit form opens inline below
-  // the table row.
+  // Per-row edit (password rotation only). Edit form opens inline
+  // below the table row. Skipped for OIDC-tenant users -- the IdP
+  // owns password rotation there.
   const [editingId, setEditingId]     = useState<string | null>(null);
   const [editPassword, setEditPassword] = useState('');
+
+  // Resolve the selected new-tenant to its provider so the form can
+  // adapt. Superuser always uses the db backend (no IdP routing).
+  const newTenantRow = tenants.find(t => t.name === newTenant);
+  const newTenantIsDb = newTenant === SUPERUSER || newTenantRow?.authProvider === 'db';
+
+  // Same lookup but for the rows currently displayed.
+  const tenantProviderOf = (tenantName: string | null): string =>
+    tenantName ? (tenants.find(t => t.name === tenantName)?.authProvider ?? 'db') : 'db';
 
   function reload() {
     setError(null);
@@ -33,7 +63,7 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
   }
 
   useEffect(() => {
-    setNewTenant(tenant ?? null);
+    setNewTenant(tenant ?? SUPERUSER);
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
@@ -43,10 +73,14 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
     setError(null);
     try {
       await api.createUser({
-        tenant:   newTenant && newTenant.length > 0 ? newTenant : null,
+        tenant:   newTenant === SUPERUSER ? null : newTenant,
         username: newUsername.trim(),
-        password: newPassword,
-        role:     newRole.trim() || 'user',
+        // For OIDC tenants we pre-provision with a random throwaway
+        // password -- the server still requires SOMETHING (DB column
+        // is NOT NULL) but the user will never authenticate via Basic
+        // against it. The IdP is authoritative.
+        password: newTenantIsDb ? newPassword : crypto.randomUUID(),
+        role:     newRole,
       });
       setAdding(false);
       setNewUsername(''); setNewPassword(''); setNewRole('user');
@@ -78,12 +112,17 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
     }
   }
 
+  // Choose the create-button label based on tenant provider. "Add" for
+  // db tenants (the typical full-create), "Pre-provision" for OIDC
+  // tenants where the user actually comes from the IdP.
+  const createLabel = newTenantIsDb ? '+ New user' : '+ Pre-provision user';
+
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>Users</div>
         {!adding && (
-          <button onClick={() => setAdding(true)}>+ New user</button>
+          <button onClick={() => setAdding(true)}>{createLabel}</button>
         )}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
@@ -104,6 +143,8 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
           </thead>
           <tbody>
             {rows.flatMap(u => {
+              const rowProvider = tenantProviderOf(u.tenant);
+              const allowEdit = rowProvider === 'db' || u.tenant === null;
               const row = (
                 <tr key={u.id}>
                   <td><code>{u.username}</code></td>
@@ -115,7 +156,14 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
                   <td>
                     <button onClick={() => setEffectiveFor(u.id)}>Effective…</button>
                     {' '}
-                    <button onClick={() => { setEditingId(u.id); setEditPassword(''); }}>Edit</button>
+                    {allowEdit ? (
+                      <button onClick={() => { setEditingId(u.id); setEditPassword(''); }}>Edit</button>
+                    ) : (
+                      <button
+                        disabled
+                        title={`Password is managed by the tenant's ${rowProvider} provider`}
+                      >Edit</button>
+                    )}
                     {' '}
                     <button className="danger" onClick={() => handleDelete(u)}>Delete</button>
                   </td>
@@ -153,40 +201,54 @@ export default function UserSection({ tenant }: { tenant: string | null }) {
       )}
 
       {adding && (
-        <form
-          onSubmit={handleCreate}
-          style={{ marginTop: '0.75rem' }}
-        >
+        <form onSubmit={handleCreate} style={{ marginTop: '0.75rem' }}>
           <fieldset>
-            <legend>New user</legend>
+            <legend>{createLabel}</legend>
+            {!newTenantIsDb && (
+              <p className="subtle" style={{ marginTop: 0 }}>
+                <code>{newTenantRow?.authProvider}</code> tenant: the IdP owns
+                authentication. This form creates a local <code>qodstate_user</code>
+                row so role / group / pool grants can be attached now; the
+                same row is reused on the user's first sign-in.
+              </p>
+            )}
             <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
               <label>
                 Username
                 <input value={newUsername} onChange={ev => setNewUsername(ev.target.value)} required />
               </label>
-              <label>
-                Password
-                <input type="password" value={newPassword} onChange={ev => setNewPassword(ev.target.value)} required />
-              </label>
+              {newTenantIsDb && (
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={ev => setNewPassword(ev.target.value)}
+                    required
+                  />
+                </label>
+              )}
               <label>
                 Tenant
-                <input
-                  value={newTenant ?? ''}
-                  onChange={ev => setNewTenant(ev.target.value || null)}
-                  placeholder="(blank = superuser)"
-                />
+                <select value={newTenant} onChange={ev => setNewTenant(ev.target.value)}>
+                  <option value={SUPERUSER}>(superuser)</option>
+                  {tenants.map(t => (
+                    <option key={t.name} value={t.name}>
+                      {t.name} — {t.authProvider}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
                 Role label
-                <input
-                  value={newRole}
-                  onChange={ev => setNewRole(ev.target.value)}
-                  placeholder="user"
-                />
+                <select value={newRole} onChange={ev => setNewRole(ev.target.value as 'user' | 'admin')}>
+                  <option value="user">user</option>
+                  <option value="admin">admin</option>
+                </select>
               </label>
             </div>
             <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
-              <button type="submit">Create</button>
+              <button type="submit">{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
               <button type="button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
             </div>
           </fieldset>

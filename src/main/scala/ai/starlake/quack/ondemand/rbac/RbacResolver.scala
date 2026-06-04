@@ -116,6 +116,24 @@ final class RbacResolver:
   def rolesForGroup(groupId: String): Set[String] =
     groupToRoles.getOrElse(groupId, Set.empty)
 
+  /** Resolve a tenant-scoped set of role NAMES (as a JWT `roles` claim
+    * would carry) to the corresponding `qodstate_role.id` set. Names
+    * that don't match a known role in the tenant are silently dropped
+    * -- callers union the result with the user's local direct roles. */
+  def rolesByNamesInTenant(tenantId: String, names: Set[String]): Set[String] =
+    if names.isEmpty then Set.empty
+    else roles.values.iterator
+      .filter(r => r.tenantId == tenantId && names.contains(r.name))
+      .map(_.id).toSet
+
+  /** Same as [[rolesByNamesInTenant]] but for groups -- JWT `groups`
+    * claim → `qodstate_group.id`. */
+  def groupsByNamesInTenant(tenantId: String, names: Set[String]): Set[String] =
+    if names.isEmpty then Set.empty
+    else groups.values.iterator
+      .filter(g => g.tenantId == tenantId && names.contains(g.name))
+      .map(_.id).toSet
+
   def permissionsForRoles(roleIds: Set[String]): List[RolePermission] =
     if roleIds.isEmpty then Nil
     else rolePermissions.values.filter(p => roleIds.contains(p.roleId)).toList

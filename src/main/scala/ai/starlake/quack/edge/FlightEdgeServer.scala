@@ -23,10 +23,16 @@ final class FlightEdgeServer(
     // Phase C: post-authentication authorize callback. Runs once per
     // handshake after the auth chain validated the credentials. It
     // performs the user-scope and pool-access gates, computes the
-    // EffectiveSet, and returns an AuthorizedHandshake. The result
-    // is pinned onto ConnectionContext so the per-statement ACL gate
-    // can read it without further joins.
-    authorize: (String, String, String) => Either[String, AuthorizedHandshake]
+    // EffectiveSet (union-merging any JWT-claimed role / group names),
+    // and returns an AuthorizedHandshake. The result is pinned onto
+    // ConnectionContext so the per-statement ACL gate can read it
+    // without further joins.
+    //
+    // Last two args: the JWT `role` claim wrapped as a Set (empty when
+    // Basic auth / no role claim) and the JWT `groups` claim. Names
+    // resolve against qodstate_role.name / qodstate_group.name in the
+    // user's tenant; unknown names are silently dropped.
+    authorize: (String, String, String, Set[String], Set[String]) => Either[String, AuthorizedHandshake]
 ) extends LazyLogging:
 
   private val allocator = new RootAllocator()
@@ -226,8 +232,13 @@ final class FlightEdgeServer(
                 // Phase C handshake gates 4 + 5: user-scope + pool-access.
                 // EffectiveSet is computed once here and pinned to
                 // ConnectionContext; the per-statement validator reads it
-                // without re-querying Postgres.
-                authorize(resolved.poolKey.tenant, resolved.poolKey.pool, resolved.user) match
+                // without re-querying Postgres. JWT role + groups claims
+                // are passed through so the union-merge with local edges
+                // happens inside `effectiveSetForUser`.
+                val jwtRoles  =
+                  profileOpt.map(_.role).filter(_.nonEmpty).toSet
+                val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
+                authorize(resolved.poolKey.tenant, resolved.poolKey.pool, resolved.user, jwtRoles, jwtGroups) match
                   case Left(err) =>
                     // Arrow Flight's CallStatus has UNAUTHENTICATED but no
                     // dedicated PERMISSION_DENIED until later versions; reuse
