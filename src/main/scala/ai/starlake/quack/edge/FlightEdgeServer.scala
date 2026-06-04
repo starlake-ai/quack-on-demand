@@ -188,10 +188,10 @@ final class FlightEdgeServer(
                 preResolved match
                   case Right(r) =>
                     authService.authenticateBasic(
-                      Some(r.poolKey.tenant), Some(r.poolKey.pool), r.user, p
+                      Some(r.poolKey.tenant), r.user, p
                     ).map(Some(_))
                   case Left(err) =>
-                    Left(s"missing tenant/pool scope for Basic auth: $err")
+                    Left(s"missing tenant scope for Basic auth: $err")
               case _ =>
                 Left("no credentials presented")
 
@@ -239,15 +239,12 @@ final class FlightEdgeServer(
                   case Right(auth) =>
                     val peerId = UUID.randomUUID().toString
                     val connId = UUID.randomUUID().toString
-                    val groups = profileOpt.map(_.groups).getOrElse(Set.empty)
-                    val role   = profileOpt.map(_.role).getOrElse("")
+                    val _      = profileOpt // role/groups from JWT no longer threaded
                     ConnectionContext.bind(
                       peer         = peerId,
                       key          = resolved.poolKey,
                       connectionId = connId,
                       user         = resolved.user,
-                      groups       = groups,
-                      role         = role,
                       effectiveSet = Some(auth.effectiveSet),
                       ttlSec       = cfg.sessionTtlSec
                     )

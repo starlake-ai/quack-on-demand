@@ -52,13 +52,9 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
 
   override def authenticate(
       tenant:   Option[String],
-      pool:     Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
-    // `pool` is ignored -- the directory is keyed by (tenant, username)
-    // only. Pool access is checked separately at handshake time.
-    val _ = pool
     try
       val conn = dataSource.getConnection
       try
