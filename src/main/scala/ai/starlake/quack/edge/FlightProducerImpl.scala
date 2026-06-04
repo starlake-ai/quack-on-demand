@@ -66,7 +66,8 @@ final class FlightProducerImpl(
       case (Some(poolKey), Some(connId), Some(user)) =>
         val groups = ConnectionContext.groupsFor(peer)
         val role   = ConnectionContext.roleFor(peer)
-        scala.util.Try(router.execute(connId, user, poolKey, sql, groups, role).unsafeRunSync()) match
+        val eff    = ConnectionContext.effectiveSetFor(peer)
+        scala.util.Try(router.execute(connId, user, poolKey, sql, groups, role, eff).unsafeRunSync()) match
           case scala.util.Success(Right(result)) =>
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(handle, result)
@@ -264,8 +265,9 @@ final class FlightProducerImpl(
       case (Some(poolKey), Some(connId), Some(user)) =>
         val groups = ConnectionContext.groupsFor(peer)
         val role   = ConnectionContext.roleFor(peer)
+        val eff    = ConnectionContext.effectiveSetFor(peer)
         val tablesAttempt = scala.util.Try(
-          router.execute(connId, user, poolKey, listSql, groups, role).unsafeRunSync()
+          router.execute(connId, user, poolKey, listSql, groups, role, eff).unsafeRunSync()
         )
         tablesAttempt match
           case scala.util.Failure(t) =>
@@ -278,7 +280,7 @@ final class FlightProducerImpl(
           case scala.util.Success(Right(listResult)) =>
             val rows = collectRowsAndClose(listResult)
             val withSchemas = rows.map { case (cat, sch, name, typ) =>
-              val schemaBytes = probeTableSchema(connId, user, poolKey, cat, sch, name, groups, role)
+              val schemaBytes = probeTableSchema(connId, user, poolKey, cat, sch, name, groups, role, eff)
               (cat, sch, name, typ, schemaBytes)
             }
             emitTablesWithSchema(withSchemas, listener)
@@ -322,12 +324,13 @@ final class FlightProducerImpl(
       cat: String,
       sch: String,
       name: String,
-      groups: Set[String] = Set.empty,
-      role:   String      = ""
+      groups: Set[String]                                                    = Set.empty,
+      role:   String                                                         = "",
+      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet]      = None
   ): Array[Byte] =
     val ident = s""""${cat.replace("\"", "\"\"")}"."${sch.replace("\"", "\"\"")}"."${name.replace("\"", "\"\"")}""""
     val probe = s"SELECT * FROM $ident LIMIT 0"
-    scala.util.Try(router.execute(connId, user, poolKey, probe, groups, role).unsafeRunSync()) match
+    scala.util.Try(router.execute(connId, user, poolKey, probe, groups, role, effectiveSet).unsafeRunSync()) match
       case scala.util.Success(Right(qr)) =>
         try
           // Drain one batch so the IPC schema message is fully parsed.
@@ -544,7 +547,8 @@ final class FlightProducerImpl(
         logger.debug(s"runStatement pool=$poolKey sql='$sql'")
         val groups = ConnectionContext.groupsFor(peer)
         val role   = ConnectionContext.roleFor(peer)
-        val outcome = scala.util.Try(router.execute(connId, user, poolKey, sql, groups, role).unsafeRunSync())
+        val eff    = ConnectionContext.effectiveSetFor(peer)
+        val outcome = scala.util.Try(router.execute(connId, user, poolKey, sql, groups, role, eff).unsafeRunSync())
         outcome match
           case scala.util.Failure(t) =>
             logger.error(s"router.execute threw: ${t.getMessage}", t)

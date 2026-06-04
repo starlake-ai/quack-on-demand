@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.sql
 
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import com.auth0.jwt.interfaces.Claim
 
 case class ValidationContext(
@@ -14,12 +15,18 @@ case class ValidationContext(
     // a validator instance was built with its own defaults.
     defaultDatabase: Option[String] = None,
     defaultSchema:   Option[String] = None,
-    // Groups + role propagated from `AuthenticatedProfile` via
-    // ConnectionContext. The ACL validator expands them into
-    // `group:<g>` and `role:<r>` principals so grants targeted at
-    // groups / roles match alongside `user:<username>`.
+    // Legacy free-text groups + role from `AuthenticatedProfile` (JWT
+    // claims). Retained for back-compat with the JWT-claim ACL path; new
+    // code reads the RBAC graph through [[effectiveSet]] instead.
     groups: Set[String] = Set.empty,
-    role:   String      = ""
+    role:   String      = "",
+    // Phase C: the closure of (roles, groups, permissions, pool grants)
+    // computed once at handshake. PostgresAclValidator reads
+    // `effectiveSet.permissions` instead of querying qodstate_role_permission
+    // per statement. `None` means "no handshake state pinned" -- the
+    // validator denies any tenant-scoped statement in that case so a
+    // misconfigured wiring can't accidentally grant unfiltered access.
+    effectiveSet: Option[EffectiveSet] = None
 )
 
 sealed trait ValidationResult

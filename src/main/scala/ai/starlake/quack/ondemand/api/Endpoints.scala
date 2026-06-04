@@ -90,19 +90,6 @@ object Endpoints:
   val deleteTenantDb: PublicEndpoint[TenantDbOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("database" / "delete").in(jsonBody[TenantDbOpRequest])
 
-  // ----- ACL grants (Postgres-relational store, slkstate_acl_grant) -----
-  val createAclGrant: PublicEndpoint[AclGrantRequest, (sttp.model.StatusCode, ErrorResponse), AclGrantResponse, Any] =
-    base.post.in("acl" / "grant" / "create").in(jsonBody[AclGrantRequest]).out(jsonBody[AclGrantResponse])
-
-  val listAclGrants: PublicEndpoint[Option[String], (sttp.model.StatusCode, ErrorResponse), AclGrantListResponse, Any] =
-    base.get.in("acl" / "grant" / "list").in(query[Option[String]]("tenant")).out(jsonBody[AclGrantListResponse])
-
-  val deleteAclGrant: PublicEndpoint[Long, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("acl" / "grant" / "delete" / path[Long]("id"))
-
-  val uploadAclGrants: PublicEndpoint[AclGrantBulkRequest, (sttp.model.StatusCode, ErrorResponse), AclGrantListResponse, Any] =
-    base.post.in("acl" / "grant" / "upload").in(jsonBody[AclGrantBulkRequest]).out(jsonBody[AclGrantListResponse])
-
   // ----- UI login -----
   val login: PublicEndpoint[LoginRequest, (sttp.model.StatusCode, ErrorResponse), LoginResponse, Any] =
     base.post.in("auth" / "login").in(jsonBody[LoginRequest]).out(jsonBody[LoginResponse])

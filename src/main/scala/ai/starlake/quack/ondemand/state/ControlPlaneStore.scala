@@ -60,6 +60,13 @@ trait ControlPlaneStore:
   def listUsers(tenant: Option[String]): List[RbacUser]
   /** All `tenant IS NULL` rows -- the superuser set. */
   def listSuperusers(): List[RbacUser]
+  /** Login-style lookup: prefer the tenant-scoped row when one exists
+    * for `(tenantId, username)`, fall back to the superuser row with
+    * `tenant IS NULL AND username = ?` if the tenant-scoped one is
+    * absent. Mirrors the [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]]
+    * query that the FlightSQL handshake uses to map a Basic
+    * credential onto a [[RbacUser]] before the authorize gate runs. */
+  def findUserForLogin(tenantId: String, username: String): Option[RbacUser]
   def deleteUser(id: String): Unit
 
   // ---------------- RBAC: roles ------------------------------------------

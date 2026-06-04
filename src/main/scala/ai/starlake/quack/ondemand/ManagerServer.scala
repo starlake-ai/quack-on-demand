@@ -23,7 +23,6 @@ final class ManagerServer(
     identities: IdentityHandlers,
     tenantDbs: TenantDbHandlers,
     health: HealthHandler,
-    acl: Option[AclHandlers],
     auth: AuthHandlers,
     sessions: SessionTokenStore,
     authEnabled: Boolean,
@@ -83,17 +82,6 @@ final class ManagerServer(
 
   def serve: Resource[IO, org.http4s.server.Server] =
     val interpreter = Http4sServerInterpreter[IO]()
-
-    val aclEndpoints: List[ServerEndpoint[Any, IO]] = acl.toList.flatMap { h =>
-      // Only mount ACL endpoints when the relational ACL store is available
-      // (i.e. stateStorage = postgres). File-mode deploys get a 404 here.
-      List[ServerEndpoint[Any, IO]](
-        Endpoints.createAclGrant.serverLogic(h.createGrant),
-        Endpoints.listAclGrants.serverLogic(h.listGrants),
-        Endpoints.deleteAclGrant.serverLogic(h.deleteGrant),
-        Endpoints.uploadAclGrants.serverLogic(h.uploadGrants)
-      )
-    }
 
     val catalogEndpoints: List[ServerEndpoint[Any, IO]] = catalog.toList.flatMap { h =>
       // Same gating as ACL: DuckLake catalog reads only make sense with a
@@ -185,7 +173,7 @@ final class ManagerServer(
           authEnabled   = authEnabled
         )
       )))
-    ) ++ aclEndpoints ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.flight.*
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator
@@ -15,7 +16,17 @@ final class FlightEdgeServer(
     cfg: EdgeConfig,
     router: FlightSqlRouter,
     authService: AuthenticationService,
-    lookupPool: (String, String) => Either[String, String]
+    // Pre-resolve callback: (tenant, pool) -> tenantDb. Enforces the
+    // tenant/pool disabled kill switches. Runs BEFORE authentication so
+    // we can hand TenantSelector a fully-qualified target.
+    lookupPool: (String, String) => Either[String, String],
+    // Phase C: post-authentication authorize callback. Runs once per
+    // handshake after the auth chain validated the credentials. It
+    // performs the user-scope and pool-access gates, computes the
+    // EffectiveSet, and returns an AuthorizedHandshake. The result
+    // is pinned onto ConnectionContext so the per-statement ACL gate
+    // can read it without further joins.
+    authorize: (String, String, String) => Either[String, AuthorizedHandshake]
 ) extends LazyLogging:
 
   private val allocator = new RootAllocator()
@@ -212,15 +223,35 @@ final class FlightEdgeServer(
               lookupPool     = lookupPool
             ) match
               case Right(resolved) =>
-                val peerId = UUID.randomUUID().toString
-                val connId = UUID.randomUUID().toString
-                // Carry the authenticated profile's groups + role into the
-                // ConnectionContext so the ACL validator can match
-                // group:<g> / role:<r> principals, not just user:<name>.
-                val groups = profileOpt.map(_.groups).getOrElse(Set.empty)
-                val role   = profileOpt.map(_.role).getOrElse("")
-                ConnectionContext.bind(peerId, resolved.poolKey, connId, resolved.user, groups, role, cfg.sessionTtlSec)
-                authResult(peerId)
+                // Phase C handshake gates 4 + 5: user-scope + pool-access.
+                // EffectiveSet is computed once here and pinned to
+                // ConnectionContext; the per-statement validator reads it
+                // without re-querying Postgres.
+                authorize(resolved.poolKey.tenant, resolved.poolKey.pool, resolved.user) match
+                  case Left(err) =>
+                    // Arrow Flight's CallStatus has UNAUTHENTICATED but no
+                    // dedicated PERMISSION_DENIED until later versions; reuse
+                    // UNAUTHENTICATED with a "permission denied: " prefix so
+                    // FlightSQL clients can still surface the reason text.
+                    throw CallStatus.UNAUTHENTICATED
+                      .withDescription(s"permission denied: $err")
+                      .toRuntimeException()
+                  case Right(auth) =>
+                    val peerId = UUID.randomUUID().toString
+                    val connId = UUID.randomUUID().toString
+                    val groups = profileOpt.map(_.groups).getOrElse(Set.empty)
+                    val role   = profileOpt.map(_.role).getOrElse("")
+                    ConnectionContext.bind(
+                      peer         = peerId,
+                      key          = resolved.poolKey,
+                      connectionId = connId,
+                      user         = resolved.user,
+                      groups       = groups,
+                      role         = role,
+                      effectiveSet = Some(auth.effectiveSet),
+                      ttlSec       = cfg.sessionTtlSec
+                    )
+                    authResult(peerId)
               case Left(err) =>
                 throw CallStatus.UNAUTHENTICATED.withDescription(err).toRuntimeException()
 

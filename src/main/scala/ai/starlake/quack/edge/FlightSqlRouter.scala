@@ -4,6 +4,7 @@ import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext}
 import ai.starlake.quack.model.{PoolKey, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
@@ -52,8 +53,9 @@ final class FlightSqlRouter(
       user: String,
       poolKey: PoolKey,
       sql: String,
-      groups: Set[String] = Set.empty,
-      role:   String      = ""
+      groups: Set[String]              = Set.empty,
+      role:   String                   = "",
+      effectiveSet: Option[EffectiveSet] = None
   ): IO[Either[String, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
     val kind = StatementClassifier.classify(sql)
@@ -61,9 +63,8 @@ final class FlightSqlRouter(
     // never touch a Quack node and don't burn capacity. Per-pool
     // dbName/schemaName overrides feed the SQL parser so unqualified table
     // refs resolve to what the Quack node actually sees at execution time.
-    // Groups/role come from ConnectionContext (populated by the auth
-    // handshake from AuthenticatedProfile) so the validator can match
-    // group:<g> / role:<r> principals alongside user:<username>.
+    // `effectiveSet` carries the RBAC closure pinned on ConnectionContext
+    // at handshake time; PostgresAclValidator reads it directly.
     val poolMeta = supervisor.get(poolKey).map(_.metastore).getOrElse(Map.empty)
     val ctx = ValidationContext(
       username        = user,
@@ -74,7 +75,8 @@ final class FlightSqlRouter(
       defaultDatabase = poolMeta.get("dbName").filter(_.nonEmpty),
       defaultSchema   = poolMeta.get("schemaName").filter(_.nonEmpty),
       groups          = groups,
-      role            = role
+      role            = role,
+      effectiveSet    = effectiveSet
     )
     validator.validate(ctx) match
       case Denied(reason) =>

@@ -418,6 +418,26 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def findUserForLogin(tenantId: String, username: String): Option[RbacUser] = withConn { c =>
+    // ORDER BY (tenant IS NOT NULL) DESC so a tenant-scoped row wins over
+    // the wildcard NULL superuser row when both exist with the same
+    // username. Mirrors application.conf's auth.database.query.
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, username, role, created_at, updated_at
+        |FROM qodstate_user
+        |WHERE (tenant IS NULL OR tenant = ?) AND username = ?
+        |ORDER BY (tenant IS NOT NULL) DESC
+        |LIMIT 1""".stripMargin
+    )
+    try
+      ps.setString(1, tenantId)
+      ps.setString(2, username)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readRbacUser(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
   def deleteUser(id: String): Unit =
     withConn(c => deleteById(c, "qodstate_user", "id", id))
 
