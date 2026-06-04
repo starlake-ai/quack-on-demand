@@ -24,8 +24,11 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 - `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)
-- A reachable Postgres - the catalog DB and the slkstate_* control-plane tables both live there
-  (the catalog DB itself is auto-created on first boot if your `$QOD_PG_USER` has `CREATEDB`)
+- A reachable **PostgreSQL 16+** - the control-plane DB (`qod` by default) hosts the
+  Liquibase-managed `qodstate_*` tables (tenants, pools, nodes, users, RBAC graph);
+  each tenant-db (e.g. `tpch_tpch1`) is auto-provisioned next to it and holds the
+  DuckLake `__ducklake_*` catalog. Both are auto-created on first boot if your
+  `$QOD_PG_USER` has `CREATEDB`. `run-jar.sh` gates the server version.
 - **`sbt` 1.x and `npm` 18+** - only when `BUILD=1` (assembling the jar from this checkout instead of downloading)
 
 ### Run
@@ -87,7 +90,7 @@ Every scalar in `application.conf` has a matching `QOD_*` /
 | Postgres host  | `QOD_PG_HOST`      | `localhost` |
 | Postgres user  | `QOD_PG_USER`      | `postgres` |
 | Postgres password | `QOD_PG_PASSWORD` | `azizam` |
-| Catalog DB name | `QOD_PG_DBNAME`   | `tpch` |
+| Control-plane DB name | `QOD_PG_DBNAME`   | `qod` |
 | DuckLake data dir | `QOD_DUCKLAKE_DATA_PATH` | `<repo>/ducklake/<db>` |
 | Edge TLS on/off | `PROXY_TLS_ENABLED`    | `true` |
 | FlightSQL edge auth | `QOD_AUTH_DB_ENABLED` | `true` |
@@ -101,14 +104,15 @@ Every scalar in `application.conf` has a matching `QOD_*` /
 
 ## Path 2 - Docker container, against an external Postgres
 
-> ⚠️ **Don't share a catalog DB between Docker and native runs.** DuckLake
+> ⚠️ **Don't share a tenant-db between Docker and native runs.** DuckLake
 > bakes the absolute `DATA_PATH` into Postgres metadata. Inside the
-> container that path is `/app/ducklake/<db>`; natively it's
-> `$PWD/ducklake/<db>` on the host. Once a manager writes a path, every
-> future manager reading that catalog must see the same string or every
-> query will fail with *"could not open file ..."*. If you've already
-> booted natively against `PG_DBNAME=tpch`, point Docker at a different
-> DB (e.g. `PG_DBNAME=tpch_docker`) - see the [Path-matching gotcha](#path-matching-gotcha-ducklake)
+> container that path is `/app/ducklake/<tenant>_<db>`; natively it's
+> `$PWD/ducklake/<tenant>_<db>` on the host. Once a manager writes a path,
+> every future manager reading that catalog must see the same string or
+> every query will fail with *"could not open file ..."*. If you've already
+> booted natively against the default control-plane DB (`PG_DBNAME=qod`)
+> and tenant-db `tpch_tpch1`, point Docker at a different control plane
+> (e.g. `PG_DBNAME=qod_docker`) - see the [Path-matching gotcha](#path-matching-gotcha-ducklake)
 > below for the why and the recovery steps.
 
 ### Prerequisites
@@ -176,9 +180,9 @@ Env vars at `run-docker.sh` invocation time:
 | Env var | Default | Notes |
 |---|---|---|
 | `PG_HOST` / `PG_PASSWORD` | **required** | remote Postgres |
-| `PG_PORT` / `PG_USER` / `PG_DBNAME` / `PG_SCHEMA` | 5432 / postgres / tpch / main |
+| `PG_PORT` / `PG_USER` / `PG_DBNAME` / `PG_SCHEMA` | 5432 / postgres / qod / main |
 | `AUTH` | `false` | flip to `true` to enable FlightSQL DB auth |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin` | seeded into `slkstate_user` when `AUTH=true` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin` | seeded into `qodstate_user` (as a superuser, `tenant IS NULL`) when `AUTH=true` |
 | `TLS` | `false` | flip to `true` to keep TLS on |
 | `API_KEY` | unset | gates `/api/*` behind `X-API-Key` |
 | `DATA_PATH` | `$PWD/ducklake` | host dir bind-mounted to `/app/ducklake` |
@@ -233,8 +237,10 @@ hostname `postgres` - no `host.docker.internal` workaround needed.
 
 After the first boot, three directories appear next to `docker-compose.yml`:
 
-- **`pgdata/`** - Postgres data dir. Contains the catalog DB, all
-  `slkstate_*` control-plane tables, and the `ducklake_*` metadata tables.
+- **`pgdata/`** - Postgres data dir. Contains the control-plane DB
+  (`qod` by default, with the Liquibase-managed `qodstate_*` tables),
+  every per-tenant DB the supervisor provisions (e.g. `tpch_tpch1`),
+  and the DuckLake `__ducklake_*` catalog tables that live inside them.
   Persists across `docker compose down`.
 - **`ducklake/`** - DuckLake Parquet files written by Quack nodes.
   Same persistence guarantee.
@@ -380,8 +386,8 @@ To seed against a stack that's already up (no restart needed):
 docker compose exec \
   -e PG_HOST=postgres -e PG_PORT=5432 \
   -e PG_USER=postgres -e PG_PASS=azizam \
-  -e DB_NAME=tpch -e SCHEMA_NAME=tpch1 \
-  -e DATA_PATH=/app/ducklake/tpch -e SF=1 \
+  -e DB_NAME=tpch_tpch1 -e SCHEMA_NAME=tpch1 \
+  -e DATA_PATH=/app/ducklake/tpch_tpch1 -e SF=1 \
   quack /app/scripts/load-tpch-dbgen.sh
 ```
 
@@ -497,26 +503,27 @@ The three seed recipes above keep paths matched by construction
 (native: same shell + same `$PWD`; Paths 2 + 3: `docker exec`/`docker
 compose exec` runs the loader inside the manager container, against the
 same `/app/ducklake` bind-mount the manager itself uses). The
-problem case is **mixing deployment modes against one catalog DB**:
+problem case is **mixing deployment modes against one tenant-db**:
 
 | First boot | Second boot | What breaks |
 |---|---|---|
-| Native (`$PWD/ducklake/tpch`) | Docker (`/app/ducklake/tpch`) | Docker nodes can't find host paths |
-| Docker (`/app/ducklake/tpch`) | Native (`$PWD/ducklake/tpch`) | Native nodes can't find `/app/...` |
+| Native (`$PWD/ducklake/tpch_tpch1`) | Docker (`/app/ducklake/tpch_tpch1`) | Docker nodes can't find host paths |
+| Docker (`/app/ducklake/tpch_tpch1`) | Native (`$PWD/ducklake/tpch_tpch1`) | Native nodes can't find `/app/...` |
 | Native from `/home/a/…` | Native from `/home/b/…` | Second `$PWD` doesn't match catalog |
 
-The `slkstate_*` control-plane tables (tenants, pools, ACLs, admin
-users) don't store paths so they're not the problem - the breakage is
-strictly in the DuckLake `__ducklake_*` metadata.
+The `qodstate_*` control-plane tables (tenants, tenant-dbs, pools, nodes,
+users, RBAC graph) don't store paths so they're not the problem - the
+breakage is strictly in the DuckLake `__ducklake_*` metadata that lives
+inside each tenant-db.
 
 ### How to avoid it
 
 Pick one of:
 
-1. **Isolate by `PG_DBNAME`.** Native uses `QOD_PG_DBNAME=tpch`,
-   Docker uses `PG_DBNAME=tpch_docker`. Two catalogs, no overlap, both
-   can run any time. Recommended for dev machines that toggle between
-   modes.
+1. **Isolate by `PG_DBNAME`.** Native uses `QOD_PG_DBNAME=qod`,
+   Docker uses `PG_DBNAME=qod_docker`. Two control planes (each with
+   its own family of tenant-dbs underneath), no overlap, both can run
+   any time. Recommended for dev machines that toggle between modes.
 2. **Pick one mode and stay there.** If you only ever boot natively (or
    only ever in Docker), there's nothing to coordinate.
 3. **Symlink to match the container path.** Mount `/app/ducklake` to the
@@ -530,14 +537,16 @@ A "stuck" catalog has rows in `__ducklake_data_file` pinned to a path
 that the current manager can't see. Two options:
 
 ```bash
-# Option A - start fresh: drop the catalog DB + the data dir.
-psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch'
-rm -rf ducklake/tpch                    # the on-disk parquet files
+# Option A - start fresh: drop the tenant-db + the data dir.
+# (Leave the `qod` control plane intact; only the tenant-db carries the
+# DuckLake metadata that's gone stale.)
+psql -h $PG_HOST -U $PG_USER -d postgres -c 'DROP DATABASE tpch_tpch1 WITH (FORCE)'
+rm -rf ducklake/tpch_tpch1              # the on-disk parquet files
 # Re-boot with LOAD_TPCH=1 ./scripts/run-jar.sh (Path 1) or
 # LOAD_TPCH=1 ./scripts/run-docker-compose.sh (Path 3).
 
-# Option B - keep the data, use a fresh catalog DB.
-QOD_PG_DBNAME=tpch_native ./scripts/run-jar.sh
+# Option B - keep the data, use a fresh control plane.
+QOD_PG_DBNAME=qod_native ./scripts/run-jar.sh
 ```
 
 ---
