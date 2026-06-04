@@ -729,6 +729,79 @@ final class PoolSupervisor(
       groupId:  Option[String] = None
   ): List[PoolPermission] = store.listPoolPermissions(tenantId, userId, groupId)
 
+  // ---------- RBAC: handshake authorization ----------
+
+  /** End-to-end FlightSQL handshake gate. Runs (in order):
+    *   1. resolve `(tenant, pool) -> PoolKey` + tenant/pool kill switches
+    *   2. lookup the user via [[ControlPlaneStore.findUserForLogin]]
+    *   3. user-scope check (tenant=None bypass OR matching tenant)
+    *   4. compute the effective set (groups, roles, permissions, pool grants)
+    *   5. pool-access check (skipped for superusers): the effective pool
+    *      grants must cover the addressed pool (pool_id NULL = "every pool
+    *      in this tenant")
+    *
+    * Returns a populated [[ai.starlake.quack.ondemand.rbac.AuthorizedHandshake]]
+    * on success; a left-string explains which gate failed, with enough
+    * context for the FlightSQL caller to diagnose the rejection. */
+  def authorizeHandshake(
+      tenantName: String,
+      poolName:   String,
+      username:   String
+  ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
+    // 1. Pool + kill switches.
+    findPoolKeyByTenantAndPoolName(tenantName, poolName).toRight(
+      s"pool '$poolName' not found in tenant '$tenantName'"
+    ).flatMap { key =>
+      getTenant(key.tenant) match
+        case Some(t) if t.disabled =>
+          Left(s"tenant '${key.tenant}' is disabled")
+        case None =>
+          Left(s"tenant '${key.tenant}' is not registered")
+        case Some(tenantRow) =>
+          get(key) match
+            case Some(s) if s.disabled =>
+              Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
+            case Some(_) =>
+              val poolId = poolIdByKey.getOrElse(key, "")
+              // 2. User lookup.
+              store.findUserForLogin(tenantRow.id, username) match
+                case None =>
+                  Left(s"user '$username' is not registered in tenant '${key.tenant}'")
+                case Some(user) =>
+                  // 3. User-scope check.
+                  val scopeOk = user.tenant.isEmpty || user.tenant.contains(tenantRow.id)
+                  if !scopeOk then
+                    Left(s"user '$username' is not scoped to tenant '${key.tenant}'")
+                  else
+                    // 4. Effective set. Superusers get an empty set --
+                    //    the per-statement validator bypasses them.
+                    val eff =
+                      if user.tenant.isEmpty then
+                        ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
+                      else
+                        effectiveSetForUser(user.id).getOrElse(
+                          ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
+                        )
+                    // 5. Pool-access check.
+                    val poolOk =
+                      user.tenant.isEmpty ||
+                        eff.poolPerms.exists(p =>
+                          p.tenantId == tenantRow.id && p.poolId.forall(_ == poolId)
+                        )
+                    if !poolOk then
+                      Left(s"user '$username' has no access to pool '${key.tenant}/${key.pool}'")
+                    else
+                      Right(ai.starlake.quack.ondemand.rbac.AuthorizedHandshake(
+                        poolKey      = key,
+                        tenantId     = tenantRow.id,
+                        poolId       = poolId,
+                        user         = user,
+                        effectiveSet = eff
+                      ))
+            case None =>
+              Left(s"pool '${key.pool}' not found in tenant '${key.tenant}'")
+    }
+
   // ---------- RBAC: effective-set closure ----------
 
   /** Compute the closure of `(roles, groups, permissions, pool grants)`

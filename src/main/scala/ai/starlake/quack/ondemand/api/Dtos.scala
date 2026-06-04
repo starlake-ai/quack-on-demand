@@ -131,29 +131,6 @@ final case class TenantDbResponse(
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
 
-final case class AclGrantRequest(
-    tenantId: String,
-    principal: String,                  // "user:alice" | "group:eng" | "role:admin"
-    catalogName: Option[String] = None,
-    schemaName: Option[String]  = None,
-    tableName: Option[String]   = None,
-    permission: String                  // SELECT | INSERT | UPDATE | DELETE | ALL
-)
-
-final case class AclGrantResponse(
-    id: Long,
-    tenantId: String,
-    principal: String,
-    catalogName: Option[String],
-    schemaName: Option[String],
-    tableName: Option[String],
-    permission: String,
-    grantedAt: String                   // ISO-8601 UTC
-)
-
-final case class AclGrantListResponse(grants: List[AclGrantResponse])
-final case class AclGrantBulkRequest(grants: List[AclGrantRequest])
-
 // ----- UI login -----
 final case class LoginRequest(username: String, password: String)
 final case class LoginResponse(token: String, username: String, role: String)
@@ -459,34 +436,6 @@ object Dtos:
   given Codec[TenantDbListResponse] = deriveCodec
   given Codec[TenantDbOpRequest]    = deriveCodec
 
-  // ACL grants. Hand-rolled AclGrantRequest decoder so Option fields default
-  // to None when absent (circe 0.14 deriveCodec wouldn't honor the case-class
-  // defaults on decode).
-  given Codec[AclGrantRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenantId    <- c.get[String]("tenantId")
-        principal   <- c.get[String]("principal")
-        catalogName <- c.getOrElse[Option[String]]("catalogName")(None)
-        schemaName  <- c.getOrElse[Option[String]]("schemaName")(None)
-        tableName   <- c.getOrElse[Option[String]]("tableName")(None)
-        permission  <- c.get[String]("permission")
-      yield AclGrantRequest(tenantId, principal, catalogName, schemaName, tableName, permission)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "tenantId"    -> r.tenantId.asJson,
-        "principal"   -> r.principal.asJson,
-        "catalogName" -> r.catalogName.asJson,
-        "schemaName"  -> r.schemaName.asJson,
-        "tableName"   -> r.tableName.asJson,
-        "permission"  -> r.permission.asJson
-      ))
-    }
-  )
-  given Codec[AclGrantResponse]     = deriveCodec
-  given Codec[AclGrantListResponse] = deriveCodec
-  given Codec[AclGrantBulkRequest]  = deriveCodec
   given Codec[LoginRequest]         = deriveCodec
   given Codec[LoginResponse]        = deriveCodec
   given Codec[WhoamiResponse]       = deriveCodec

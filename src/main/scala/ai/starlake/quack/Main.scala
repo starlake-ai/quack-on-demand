@@ -8,7 +8,7 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig, GoogleAuthConfig, JwtAuthConfig, KeycloakAuthConfig,
   OAuthConfig, SessionConfig
 }
-import ai.starlake.quack.edge.sql.{AclStatementValidator, PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.observability.metrics.{
   MetricsBindings, MetricsConfig, MetricsConfigCodec, MetricsEndpoint, MetricsRegistry, StatementInstruments
 }
@@ -17,7 +17,7 @@ import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
-  AclGrantStore, ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
+  ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
   PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
 }
 import cats.effect.{IO, IOApp}
@@ -82,9 +82,10 @@ object Main extends IOApp.Simple with LazyLogging:
       pgPort       = mgrCfg.defaultMetastore.getOrElse("pgPort", "5432").toInt,
       pgHost       = mgrCfg.defaultMetastore.getOrElse("pgHost", "localhost"),
       jwtSecretKey = authCfg.jwt.secretKey,
-      // ACL grants are partitioned by tenant_id in slkstate_acl_grant; use
-      // the bootstrap tenant as the partition key since that's the tenant
-      // that gets seeded with an admin + ALL grant on startup.
+      // Phase C: aclTenant is dead config -- the per-statement ACL gate
+      // now reads from the cached EffectiveSet pinned on
+      // ConnectionContext, not a per-tenant grant table. Pass through
+      // the bootstrap tenant for back-compat with the vendored config.
       aclTenant    = mgrCfg.bootstrap.tenant
     )
     val authService = new AuthenticationService(authCfg, sessionCfg)
@@ -151,18 +152,6 @@ object Main extends IOApp.Simple with LazyLogging:
     val tenantDbs = new TenantDbHandlers(sup)
     val health   = new HealthHandler(sup)
 
-    // ACL grant store is always available now that we're Postgres-only.
-    // The relational grant table reuses the control-plane Postgres
-    // database; the AclHandlers REST surface still respects the
-    // stateStorage flag for backwards compat with any operator who
-    // expected file-mode to hide the endpoints.
-    val grantStore = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
-    grantStore.ensureTable()
-    logger.info("ACL grant store ready (slkstate_acl_grant)")
-    val aclHandlers: Option[AclHandlers] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then Some(new AclHandlers(grantStore))
-      else None
-
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
     // Postgres metastore. One reader per tenant, cached so we don't reopen
@@ -192,34 +181,25 @@ object Main extends IOApp.Simple with LazyLogging:
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter  = new QuackHttpAdapter(client, tracker)
-    // SQL ACL validator. Picks between two implementations:
-    //   - PostgresAclValidator (preferred when stateStorage=postgres): reads
-    //     grants from slkstate_acl_grant, enforces them per statement.
-    //   - AclStatementValidator (file-based): reads YAML files under
-    //     acl.base-path. Still useful for read-only ACL configs shipped
-    //     alongside an immutable deploy.
-    // Both honor acl.enabled=false by falling back to allow-all.
+    // SQL ACL validator. Phase C: the only validator is the RBAC-backed
+    // PostgresAclValidator, which reads from the cached EffectiveSet
+    // pinned on ConnectionContext at handshake time. acl.enabled=false
+    // still falls back to allow-all for local-dev workflows.
     val aclValidator: StatementValidator =
       if !aclCfg.enabled then
         logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
         StatementValidator.allowAll
-      else if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+      else
         val defaultDb     = mgrCfg.defaultMetastore.getOrElse("dbName", "")
         val defaultSchema = mgrCfg.defaultMetastore.getOrElse("schemaName", "main")
         logger.info(
-          s"SQL ACL enabled (Postgres slkstate_acl_grant, tenant=${sessionCfg.aclTenant}, " +
-          s"defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
+          s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
         )
         new PostgresAclValidator(
-          store           = AclGrantStore.fromDefaultMetastore(mgrCfg.defaultMetastore),
-          tenantId        = sessionCfg.aclTenant,
           defaultDatabase = defaultDb,
           defaultSchema   = defaultSchema,
           dialect         = aclCfg.dialect
         )
-      else
-        logger.info(s"SQL ACL enabled (file-based, base-path=${aclCfg.basePath}, dialect=${aclCfg.dialect})")
-        new AclStatementValidator(aclCfg, sessionCfg)
 
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
@@ -335,18 +315,17 @@ object Main extends IOApp.Simple with LazyLogging:
             }
 
         // Idempotent: looks the bootstrap admin(s) up in
-        // qodstate_tenant_identity + slkstate_acl_grant and inserts
-        // only the rows that don't already exist. Lets the admin
-        // connect over FlightSQL and run any SQL right after a clean
-        // boot, with no manual UI clicks.
+        // qodstate_tenant_identity and inserts the rows that don't
+        // already exist. After Phase C the seeder no longer touches a
+        // grant table -- superuser admins (tenant=NULL) bypass the
+        // per-statement ACL gate outright.
         val seedBootstrapAccessIO: IO[Unit] = IO.blocking {
           sup.getTenant(bs.tenant).foreach { t =>
             BootstrapAccessSeeder.seed(
               tenantId      = t.id,
               tenantLabel   = t.displayName,
               adminNames    = mgrCfg.admin.usernameList,
-              identityStore = identityStore,
-              grantStore    = grantStore
+              identityStore = identityStore
             )
           }
         }
@@ -388,7 +367,12 @@ object Main extends IOApp.Simple with LazyLogging:
                         case Some(s) if s.disabled =>
                           Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
                         case _ =>
-                          Right(key.tenantDb))
+                          Right(key.tenantDb),
+            // Phase C handshake authorize: user-scope + pool-access +
+            // EffectiveSet. Failures bubble up as PERMISSION_DENIED on
+            // the FlightSQL handshake.
+            (tenant, pool, username) =>
+              sup.authorizeHandshake(tenant, pool, username))
           srv.start()
           srv
         catch case t: Throwable =>
@@ -408,7 +392,7 @@ object Main extends IOApp.Simple with LazyLogging:
 
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, identities, tenantDbs, health,
-        aclHandlers, authHandlers, sessionTokens, authService.hasProviders,
+        authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint,
         userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers
       )

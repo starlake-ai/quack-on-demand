@@ -89,6 +89,12 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     case None    => users.values.toList.sortBy(u => (u.tenant.getOrElse(""), u.username))
   def listSuperusers(): List[RbacUser] =
     users.values.filter(_.tenant.isEmpty).toList.sortBy(_.username)
+  def findUserForLogin(tenantId: String, username: String): Option[RbacUser] =
+    users.values.filter(u =>
+      u.username == username && (u.tenant.isEmpty || u.tenant.contains(tenantId))
+    ).toList
+      .sortBy(u => if u.tenant.isDefined then 0 else 1) // tenant-scoped wins
+      .headOption
   def deleteUser(id: String): Unit =
     users.remove(id)
     userGroups.filterInPlace((u, _) => u != id)

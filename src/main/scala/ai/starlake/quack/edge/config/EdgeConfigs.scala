@@ -34,6 +34,13 @@ case class AclAzureConfig(
     connectionString: Option[String]
 ) derives ConfigReader
 
+/** SQL ACL knobs. Post-Phase-C the file-based store path is dead --
+  * [[ai.starlake.quack.edge.sql.PostgresAclValidator]] reads the cached
+  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] instead. The
+  * `basePath` / `watcher` / `s3` / `gcs` / `azure` / `maxTenants` /
+  * `groupsClaim` fields are kept here only because the vendored
+  * `ai.starlake.acl` package still references them; the FlightSQL
+  * edge no longer consumes any of them. */
 case class AclConfig(
     enabled: Boolean,
     basePath: String,
