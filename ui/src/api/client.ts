@@ -20,10 +20,6 @@ import type {
   TenantDbListResponse,
   TenantDbOpRequest,
   ClientConfigResponse,
-  AclGrant,
-  AclGrantRequest,
-  AclGrantListResponse,
-  AclGrantBulkRequest,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -31,6 +27,32 @@ import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
   CatalogTableDetailResponse,
+  // RBAC
+  UserResponse,
+  UserCreateRequest,
+  UserUpdateRequest,
+  UserDeleteRequest,
+  UserListResponse,
+  RoleResponse,
+  RoleCreateRequest,
+  RoleDeleteRequest,
+  RoleListResponse,
+  RolePermissionResponse,
+  RolePermissionGrantRequest,
+  RolePermissionRevokeRequest,
+  RolePermissionListResponse,
+  GroupResponse,
+  GroupCreateRequest,
+  GroupDeleteRequest,
+  GroupListResponse,
+  UserRoleMembershipRequest,
+  UserGroupMembershipRequest,
+  GroupRoleMembershipRequest,
+  PoolPermissionResponse,
+  PoolPermissionGrantRequest,
+  PoolPermissionRevokeRequest,
+  PoolPermissionListResponse,
+  EffectivePermissionsResponse,
 } from './types';
 
 const BASE = '/api';
@@ -116,22 +138,64 @@ export const api = {
     return get<IdentityListResponse>(`/identity/list${q}`);
   },
   createIdentity: (req: IdentityRequest)   => post<IdentityResponse>('/identity/create', req),
+  deleteIdentity: (req: IdentityOpRequest) => post<void>('/identity/delete', req),
 
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>
     get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
   createTenantDb: (req: TenantDbRequest) => post<TenantDbResponse>('/database/create', req),
   deleteTenantDb: (req: TenantDbOpRequest) => post<void>('/database/delete', req),
-  deleteIdentity: (req: IdentityOpRequest) => post<void>('/identity/delete', req),
 
-  // ACL grants
-  listAclGrants:   (tenant?: string) => {
+  // ----- RBAC: users -----
+  listUsers: (tenant?: string) => {
     const q = tenant ? `?tenant=${encodeURIComponent(tenant)}` : '';
-    return get<AclGrantListResponse>(`/acl/grant/list${q}`);
+    return get<UserListResponse>(`/user/list${q}`);
   },
-  createAclGrant:  (req: AclGrantRequest) => post<AclGrant>('/acl/grant/create', req),
-  deleteAclGrant:  (id: number)           => post<void>(`/acl/grant/delete/${id}`),
-  uploadAclGrants: (req: AclGrantBulkRequest) => post<AclGrantListResponse>('/acl/grant/upload', req),
+  createUser:           (req: UserCreateRequest)  => post<UserResponse>('/user/create', req),
+  updateUser:           (req: UserUpdateRequest)  => post<UserResponse>('/user/update', req),
+  deleteUser:           (req: UserDeleteRequest)  => post<void>('/user/delete', req),
+  effectivePermissions: (id: string) =>
+    get<EffectivePermissionsResponse>(`/user/${encodeURIComponent(id)}/effective`),
+
+  // ----- RBAC: roles -----
+  listRoles:  (tenant: string) =>
+    get<RoleListResponse>(`/role/list?tenant=${encodeURIComponent(tenant)}`),
+  createRole: (req: RoleCreateRequest) => post<RoleResponse>('/role/create', req),
+  deleteRole: (req: RoleDeleteRequest) => post<void>('/role/delete', req),
+  listRolePermissions:  (roleId: string) =>
+    get<RolePermissionListResponse>(`/role/permission/list?roleId=${encodeURIComponent(roleId)}`),
+  grantRolePermission:  (req: RolePermissionGrantRequest)  =>
+    post<RolePermissionResponse>('/role/permission/grant', req),
+  revokeRolePermission: (req: RolePermissionRevokeRequest) =>
+    post<void>('/role/permission/revoke', req),
+
+  // ----- RBAC: groups -----
+  listGroups:  (tenant: string) =>
+    get<GroupListResponse>(`/group/list?tenant=${encodeURIComponent(tenant)}`),
+  createGroup: (req: GroupCreateRequest) => post<GroupResponse>('/group/create', req),
+  deleteGroup: (req: GroupDeleteRequest) => post<void>('/group/delete', req),
+
+  // ----- RBAC: memberships -----
+  addUserRole:    (req: UserRoleMembershipRequest)  => post<void>('/membership/user-role/add',    req),
+  removeUserRole: (req: UserRoleMembershipRequest)  => post<void>('/membership/user-role/remove', req),
+  addUserGroup:   (req: UserGroupMembershipRequest) => post<void>('/membership/user-group/add',    req),
+  removeUserGroup:(req: UserGroupMembershipRequest) => post<void>('/membership/user-group/remove', req),
+  addGroupRole:   (req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/add',    req),
+  removeGroupRole:(req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/remove', req),
+
+  // ----- RBAC: pool permissions -----
+  listPoolPermissions: (filters: { tenant?: string; userId?: string; groupId?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (filters.tenant)  qs.set('tenant',  filters.tenant);
+    if (filters.userId)  qs.set('userId',  filters.userId);
+    if (filters.groupId) qs.set('groupId', filters.groupId);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<PoolPermissionListResponse>(`/pool/permission/list${q}`);
+  },
+  grantPoolPermission:  (req: PoolPermissionGrantRequest)  =>
+    post<PoolPermissionResponse>('/pool/permission/grant', req),
+  revokePoolPermission: (req: PoolPermissionRevokeRequest) =>
+    post<void>('/pool/permission/revoke', req),
 
   // Recent statement history (newest first)
   statementHistory: (limit = 50) =>

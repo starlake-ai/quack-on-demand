@@ -168,29 +168,121 @@ export interface TenantDbOpRequest {
   name: string;
 }
 
-// ----- ACL grants -----
-export interface AclGrant {
-  id: number;
-  tenantId: string;
-  principal: string;                 // e.g. "user:alice", "group:eng", "role:admin"
-  catalogName: string | null;        // null = any
-  schemaName:  string | null;
-  tableName:   string | null;
-  permission:  string;               // SELECT | INSERT | UPDATE | DELETE | ALL
-  grantedAt:   string;               // ISO-8601
+// ----- RBAC: users -----
+export interface UserResponse {
+  id: string;
+  tenant: string | null;            // null = superuser (manager UI + every FlightSQL tenant)
+  username: string;
+  role: string;                     // free-text JWT-claim label, NOT an RBAC role id
+  enabled: boolean;
+  roles:  string[];                 // effective role NAMES
+  groups: string[];                 // effective group NAMES
+  poolGrants: string[];             // human "tenant/pool" or "tenant/*" labels
 }
 
-export interface AclGrantRequest {
-  tenantId: string;
-  principal: string;
-  catalogName?: string | null;
-  schemaName?:  string | null;
-  tableName?:   string | null;
-  permission:   string;
+export interface UserCreateRequest {
+  tenant: string | null;            // null = superuser
+  username: string;
+  password: string;
+  role?: string;
 }
 
-export interface AclGrantListResponse { grants: AclGrant[]; }
-export interface AclGrantBulkRequest  { grants: AclGrantRequest[]; }
+export interface UserUpdateRequest {
+  id: string;
+  tenant?: string | null;
+  password?: string | null;
+  role?: string | null;
+}
+
+export interface UserDeleteRequest { id: string; }
+export interface UserListResponse  { users: UserResponse[]; }
+
+// ----- RBAC: roles -----
+export interface RoleResponse {
+  id:          string;
+  tenantId:    string;
+  name:        string;
+  description: string | null;
+  createdAt:   string;
+}
+
+export interface RoleCreateRequest {
+  tenant:      string;
+  name:        string;
+  description?: string | null;
+}
+export interface RoleDeleteRequest { id: string; }
+export interface RoleListResponse { roles: RoleResponse[]; }
+
+// ----- RBAC: role permissions -----
+export interface RolePermissionResponse {
+  id:          string;
+  roleId:      string;
+  catalogName: string;              // '*' = wildcard
+  schemaName:  string;
+  tableName:   string;
+  verb:        string;              // SELECT | INSERT | UPDATE | DELETE | ALL
+  grantedAt:   string;
+}
+
+export interface RolePermissionGrantRequest {
+  roleId:  string;
+  catalog?: string;
+  schema?:  string;
+  table?:   string;
+  verb:    string;
+}
+export interface RolePermissionRevokeRequest { id: string; }
+export interface RolePermissionListResponse { permissions: RolePermissionResponse[]; }
+
+// ----- RBAC: groups -----
+export interface GroupResponse {
+  id:          string;
+  tenantId:    string;
+  name:        string;
+  description: string | null;
+}
+
+export interface GroupCreateRequest {
+  tenant:      string;
+  name:        string;
+  description?: string | null;
+}
+export interface GroupDeleteRequest { id: string; }
+export interface GroupListResponse { groups: GroupResponse[]; }
+
+// ----- RBAC: memberships -----
+export interface UserRoleMembershipRequest  { userId:  string; roleId:  string; }
+export interface UserGroupMembershipRequest { userId:  string; groupId: string; }
+export interface GroupRoleMembershipRequest { groupId: string; roleId:  string; }
+
+// ----- RBAC: pool permissions -----
+export interface PoolPermissionResponse {
+  id:        string;
+  tenantId:  string;
+  poolId:    string | null;         // null = every pool in tenant
+  userId:    string | null;
+  groupId:   string | null;
+  grantedAt: string;
+}
+
+export interface PoolPermissionGrantRequest {
+  tenant:  string;
+  poolId?: string | null;
+  userId?: string | null;
+  groupId?: string | null;
+}
+export interface PoolPermissionRevokeRequest { id: string; }
+export interface PoolPermissionListResponse { permissions: PoolPermissionResponse[]; }
+
+// ----- RBAC: effective permissions -----
+export interface EffectivePermissionsResponse {
+  user:       UserResponse;
+  roles:      RoleResponse[];
+  groups:     GroupResponse[];
+  pools:      PoolPermissionResponse[];
+  tablePerms: RolePermissionResponse[];
+}
 
 // ----- Auth -----
 export interface LoginRequest  { username: string; password: string; }
