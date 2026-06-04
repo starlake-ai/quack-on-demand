@@ -2,9 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { PoolResponse, TenantResponse } from '../api/types';
-import AclSection from '../components/AclSection';
 import DatabaseSection from '../components/DatabaseSection';
-import IdentitySection from '../components/IdentitySection';
 import PoolSection from '../components/PoolSection';
 import Breadcrumb from '../components/Breadcrumb';
 import Tabs from '../components/Tabs';
@@ -75,8 +73,6 @@ export default function TenantDetail() {
         tabs={[
           { id: 'databases',  label: 'Databases',  body: <DatabaseSection tenant={data.name} /> },
           { id: 'pools',      label: 'Pools',      body: <PoolSection tenant={data.name} /> },
-          { id: 'identities', label: 'Identities', body: <IdentitySection tenantId={data.name} /> },
-          { id: 'acl',        label: 'ACL',        body: <AclSection tenant={data.name} /> },
         ]}
       />
     </>
