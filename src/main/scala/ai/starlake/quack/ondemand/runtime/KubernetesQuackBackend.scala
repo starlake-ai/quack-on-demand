@@ -42,6 +42,7 @@ final class KubernetesQuackBackend(
     val m = new java.util.HashMap[String, String]()
     m.put(labelKey, labelValue)
     m.put("quack-tenant", spec.poolKey.tenant)
+    m.put("quack-tenant-db", spec.poolKey.tenantDb)
     m.put("quack-pool", spec.poolKey.pool)
     m.put("quack-role", spec.role.toString)
     m.put("quack-max-concurrent", spec.maxConcurrent.toString)
@@ -115,6 +116,7 @@ final class KubernetesQuackBackend(
     val selector = new java.util.HashMap[String, String]()
     selector.put(labelKey, labelValue)
     selector.put("quack-tenant", spec.poolKey.tenant)
+    selector.put("quack-tenant-db", spec.poolKey.tenantDb)
     selector.put("quack-pool", spec.poolKey.pool)
     // Pin the Service to exactly one pod by its unique node id. Without
     // this the selector matches every pod in the pool, producing fan-out
@@ -195,13 +197,14 @@ final class KubernetesQuackBackend(
         .map(_.asScala)
         .getOrElse(scala.collection.mutable.Map.empty)
       for
-        tenant <- labels.get("quack-tenant")
-        pool   <- labels.get("quack-pool")
-        roleS  <- labels.get("quack-role")
-        role   <- Role.parse(roleS).toOption
+        tenant   <- labels.get("quack-tenant")
+        tenantDb <- labels.get("quack-tenant-db")
+        pool     <- labels.get("quack-pool")
+        roleS    <- labels.get("quack-role")
+        role     <- Role.parse(roleS).toOption
       yield RunningNode(
         nodeId    = p.getMetadata.getName,
-        poolKey   = PoolKey(tenant, pool),
+        poolKey   = PoolKey(tenant, tenantDb, pool),
         role      = role,
         host      = s"${p.getMetadata.getName}.$namespace.svc.cluster.local",
         port      = quackPort,

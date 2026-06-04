@@ -36,7 +36,7 @@ object QuackNativeBridge:
 
   /** Parses the serialized `QuackMessage` in `bytes` and returns the
     * ordinal of its `MessageType`. Matches [[MessageType.ordinal]] for the
-    * upstream `duckdb::MessageType` enum (non-sequential — `FETCH_REQUEST`
+    * upstream `duckdb::MessageType` enum (non-sequential -- `FETCH_REQUEST`
     * is 7, `ERROR_RESPONSE` is 100, etc).
     *
     * Raises `RuntimeException` if `bytes` is null or cannot be parsed as a
@@ -65,7 +65,7 @@ object QuackNativeBridge:
 
   /** Parses `bytes` as a `PREPARE_RESPONSE` and returns its 128-bit
     * `result_uuid` as a `java.math.BigInteger`. The returned BigInteger
-    * is always non-negative — the JNI layer prepends a 0x00 sign byte
+    * is always non-negative -- the JNI layer prepends a 0x00 sign byte
     * before invoking `BigInteger(byte[])` so the upper byte's high bit
     * does not flip the sign. Pair with [[serializeFetchRequest]] to
     * thread the UUID into subsequent FETCH requests.
@@ -112,7 +112,7 @@ object QuackNativeBridge:
     * the same connection.
     *
     * Note: [[extractArrowStream]] already threads the same names into the
-    * Arrow C-data schema returned for a PREPARE_RESPONSE — this method
+    * Arrow C-data schema returned for a PREPARE_RESPONSE -- this method
     * is exposed as a standalone primitive so callers (logging, tests,
     * future column-pruning) can peek at the names without going through
     * Arrow.

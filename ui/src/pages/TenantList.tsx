@@ -1,15 +1,33 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type { TenantResponse } from '../api/types';
 
 export default function TenantList() {
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
 
-  useEffect(() => {
-    api.listTenants().then(r => setTenants(r.tenants)).catch(e => setError(String(e)));
-  }, []);
+  function reload() {
+    return api.listTenants()
+      .then(r => setTenants(r.tenants))
+      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+  }
+
+  useEffect(() => { void reload(); }, []);
+
+  async function toggle(t: TenantResponse) {
+    setError(null);
+    const next = !t.disabled;
+    // Optimistic update so the toggle feels instant.
+    setTenants(curr => curr.map(x => x.name === t.name ? { ...x, disabled: next } : x));
+    try {
+      await api.setTenantDisabled({ name: t.name, disabled: next });
+    } catch (e) {
+      // Roll back on failure.
+      setTenants(curr => curr.map(x => x.name === t.name ? { ...x, disabled: !next } : x));
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
 
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (tenants.length === 0) return (
@@ -26,37 +44,31 @@ export default function TenantList() {
         <thead>
           <tr>
             <th align="left">Name</th>
-            <th align="left">Pools</th>
-            <th align="left">Data path</th>
-            <th align="left">Catalog DB</th>
-            <th align="left">Schema</th>
-            <th align="left">Postgres</th>
-            <th align="left">Overrides</th>
+            <th align="right">Pools</th>
+            <th align="right">Enabled</th>
           </tr>
         </thead>
         <tbody>
-          {tenants.map(t => {
-            const eff = t.effectiveMetastore;
-            const pg = eff.pgHost
-              ? `${eff.pgUser || '?'}@${eff.pgHost}:${eff.pgPort || '5432'}`
-              : '';
-            const overrideCount = Object.keys(t.metastore).filter(k => k !== 'pgPassword').length;
-            return (
-              <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
-                <td><Link to={`/tenant/${t.name}`}>{t.name}</Link></td>
-                <td>{t.pools.length}</td>
-                <td>{eff.dataPath   ? <code>{eff.dataPath}</code>   : <em style={{ color: '#888' }}>-</em>}</td>
-                <td>{eff.dbName     ? <code>{eff.dbName}</code>     : <em style={{ color: '#888' }}>-</em>}</td>
-                <td>{eff.schemaName ? <code>{eff.schemaName}</code> : <em style={{ color: '#888' }}>-</em>}</td>
-                <td>{pg             ? <code>{pg}</code>             : <em style={{ color: '#888' }}>-</em>}</td>
-                <td>
-                  {overrideCount === 0
-                    ? <em style={{ color: '#888' }}>inherits all defaults</em>
-                    : `${overrideCount} field${overrideCount === 1 ? '' : 's'} overridden`}
-                </td>
-              </tr>
-            );
-          })}
+          {tenants.map(t => (
+            <tr key={t.name} style={{ borderTop: '1px solid #eee', opacity: t.disabled ? 0.55 : 1 }}>
+              <td>
+                <Link to={`/tenant/${t.name}`}>{t.name}</Link>
+                {t.disabled && <span className="subtle"> (disabled)</span>}
+              </td>
+              <td align="right">{t.pools.length}</td>
+              <td align="right">
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={!t.disabled}
+                    onChange={() => void toggle(t)}
+                    aria-label={`Toggle tenant ${t.name} enabled`}
+                  />
+                  <span className="subtle">{t.disabled ? 'off' : 'on'}</span>
+                </label>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>

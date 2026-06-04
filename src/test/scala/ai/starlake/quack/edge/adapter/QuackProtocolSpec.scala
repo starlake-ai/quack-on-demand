@@ -16,9 +16,9 @@ import scala.collection.mutable.ArrayBuffer
   * server on a loopback port) keeps the state-machine tests
   * dependency-free and lets us assert exactly which requests the
   * driver sent. Each test seeds the fake transport with a queue of
-  * canned response byte arrays — built via [[QuackTestFixtures]] (which
+  * canned response byte arrays -- built via [[QuackTestFixtures]] (which
   * round-trips through `libquackwire` so the bytes match the wire
-  * format the real Quack node produces) — and a recorder of the
+  * format the real Quack node produces) -- and a recorder of the
   * outbound request byte arrays.
   */
 class QuackProtocolSpec extends AnyFunSpec with Matchers:
@@ -138,7 +138,7 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
           ),
           // First FETCH_RESPONSE: another batch.
           QuackTestFixtures.serializeSampleFetchResponse(withOneRowOneColChunk = true),
-          // Second FETCH_RESPONSE: empty — server done per
+          // Second FETCH_RESPONSE: empty -- server done per
           // quack_scan.cpp:331.
           QuackTestFixtures.serializeSampleFetchResponse(withOneRowOneColChunk = false),
           // DISCONNECT ack (we route close() through the fake too)
@@ -200,7 +200,7 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
       val transport = FakeTransport(
         Iterator(
           QuackTestFixtures.serializeSampleConnectionResponse(connId),
-          // Any response shape will do for DISCONNECT — we never
+          // Any response shape will do for DISCONNECT -- we never
           // parse it server-side.
           QuackTestFixtures.serializeSampleConnectionResponse("ack-1")
         )

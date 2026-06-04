@@ -8,7 +8,7 @@ import io.micrometer.prometheusmetrics.{PrometheusConfig as MmPrometheusConfig, 
   * pushes, or `Disabled` (no sink). At most one is attached per process.
   *
   * `attach` returns the PrometheusMeterRegistry only when the sink is
-  * Prometheus — that handle lets `MetricsEndpoint` serve `/metrics`. All
+  * Prometheus -- that handle lets `MetricsEndpoint` serve `/metrics`. All
   * other sinks return `None`. Failures (missing required config, init
   * exceptions) are logged at WARN and yield `None`. */
 private[metrics] sealed abstract class MetricsSink(val name: String):

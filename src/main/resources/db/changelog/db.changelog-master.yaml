@@ -1,0 +1,19 @@
+# Liquibase master changelog for quack-on-demand control-plane.
+#
+# Loaded by ai.starlake.quack.ondemand.state.LiquibaseRunner at startup.
+# Liquibase tracks applied changesets in its own DATABASECHANGELOG /
+# DATABASECHANGELOGLOCK tables, so reruns are no-ops.
+#
+# Add a new changeset by creating db/changelog/<NNNN>-<name>.yaml and
+# appending an `include` here. Never edit an applied changeset in place.
+databaseChangeLog:
+  - include:
+      file: db/changelog/0001-normalized-schema.yaml
+  - include:
+      file: db/changelog/0003-user-table.yaml
+  - include:
+      file: db/changelog/0004-pool-tenant-unique.yaml
+  - include:
+      file: db/changelog/0005-pool-disabled.yaml
+  - include:
+      file: db/changelog/0006-rbac.yaml

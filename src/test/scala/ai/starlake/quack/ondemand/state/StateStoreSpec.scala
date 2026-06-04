@@ -10,7 +10,7 @@ class StateStoreSpec extends AnyFlatSpec with Matchers:
 
   private def tmpFile: Path = Files.createTempFile("quack-state-", ".json")
 
-  private val key: PoolKey = PoolKey("acme", "sales")
+  private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
   private val node = RunningNode("n1", key, Role.Dual, "127.0.0.1", 21900, "tok",
                                  Some(12345L), None, Instant.parse("2026-01-01T00:00:00Z"))
   private val pool = StoredPool(
@@ -46,13 +46,15 @@ class StateStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "read legacy state files that lack the `tenants` field" in:
     // Pre-tenants format - only `pools`. Decoder must default `tenants` to empty.
+    // Pool keys are now 3-part (tenant/tenantDb/pool); legacy files with the old
+    // 2-part shape are no longer supported by the file-based StoredState codec.
     val path = tmpFile
     Files.writeString(path,
-      """{"pools":{"acme/sales":{"key":"acme/sales","size":1,
+      """{"pools":{"acme/acme_default/sales":{"key":"acme/acme_default/sales","size":1,
         |"distribution":{"writeonly":0,"readonly":0,"dual":1},
         |"metastore":{},"s3":{},"nodes":[],"maxConcurrentPerNode":0}}}""".stripMargin)
     val s = StateStore(path).load()
-    s.pools.keySet shouldBe Set("acme/sales")
+    s.pools.keySet shouldBe Set("acme/acme_default/sales")
     s.tenants shouldBe Map.empty
 
   it should "round-trip pools and tenants together" in:

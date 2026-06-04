@@ -9,7 +9,7 @@ import java.time.Instant
 
 class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
-  private val key: PoolKey = PoolKey("acme", "sales")
+  private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
   private def node(id: String): RunningNode =
     RunningNode(id, key, Role.Dual, "127.0.0.1", 0, "tok-" + id,
                 Some(1L), None, Instant.EPOCH)

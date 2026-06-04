@@ -94,7 +94,7 @@ class QuackEncodeSpec extends AnyFunSpec with Matchers:
     }
 
     it("rejects a BigInteger that does not fit in 128 bits") {
-      // 17 magnitude bytes + 1 sign byte = 18 bytes total — over the limit.
+      // 17 magnitude bytes + 1 sign byte = 18 bytes total -- over the limit.
       val tooBig = java.math.BigInteger.ONE.shiftLeft(128) // exactly 129 bits set
       val ex = intercept[RuntimeException] {
         QuackNativeBridge.serializeFetchRequest("conn-1", tooBig)

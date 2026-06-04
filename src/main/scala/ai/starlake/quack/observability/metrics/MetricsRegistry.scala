@@ -10,7 +10,7 @@ import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import scala.jdk.CollectionConverters._
 
 /** Container for Micrometer registries. The `composite` is the single
-  * registry consumers (instruments, gauges) write to — Micrometer fans out
+  * registry consumers (instruments, gauges) write to -- Micrometer fans out
   * to every attached child. `prometheus.scrape()` produces the `/metrics`
   * body when the Prometheus sink is active. */
 final class MetricsRegistry(
@@ -31,7 +31,7 @@ object MetricsRegistry extends LazyLogging:
   def resource(cfg: MetricsConfig): Resource[IO, MetricsRegistry] =
     Resource.make(IO.delay(create(cfg)))(reg => IO.delay(reg.close()))
 
-  /** A no-op registry — used as a fallback (e.g. in tests) when no sink is
+  /** A no-op registry -- used as a fallback (e.g. in tests) when no sink is
     * needed. The composite has no children, so counters/timers/gauges
     * registered against it are silently discarded. */
   val dummy: MetricsRegistry =

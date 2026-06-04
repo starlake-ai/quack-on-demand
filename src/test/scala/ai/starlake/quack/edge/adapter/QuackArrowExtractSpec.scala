@@ -16,7 +16,7 @@ import org.scalatest.matchers.should.Matchers
   *   4. We drain the reader and assert schema + row count + value.
   *
   * Successful close of the reader also exercises the native
-  * `chunk_stream_release` callback path — leaks here would show up as
+  * `chunk_stream_release` callback path -- leaks here would show up as
   * RootAllocator's outstanding-allocation assert when the reader closes.
   */
 class QuackArrowExtractSpec extends AnyFunSpec with Matchers:

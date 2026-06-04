@@ -3,17 +3,20 @@ import type {
   ScalePoolRequest,
   StopPoolRequest,
   SetMaxConcurrentRequest,
+  SetPoolDisabledRequest,
+  SetTenantAuthRequest,
+  SetTenantDisabledRequest,
   PoolResponse,
   HealthResponse,
   TenantRequest,
   TenantResponse,
   TenantListResponse,
   TenantOpRequest,
+  TenantDbRequest,
+  TenantDbResponse,
+  TenantDbListResponse,
+  TenantDbOpRequest,
   ClientConfigResponse,
-  AclGrant,
-  AclGrantRequest,
-  AclGrantListResponse,
-  AclGrantBulkRequest,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -21,6 +24,32 @@ import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
   CatalogTableDetailResponse,
+  // RBAC
+  UserResponse,
+  UserCreateRequest,
+  UserUpdateRequest,
+  UserDeleteRequest,
+  UserListResponse,
+  RoleResponse,
+  RoleCreateRequest,
+  RoleDeleteRequest,
+  RoleListResponse,
+  RolePermissionResponse,
+  RolePermissionGrantRequest,
+  RolePermissionRevokeRequest,
+  RolePermissionListResponse,
+  GroupResponse,
+  GroupCreateRequest,
+  GroupDeleteRequest,
+  GroupListResponse,
+  UserRoleMembershipRequest,
+  UserGroupMembershipRequest,
+  GroupRoleMembershipRequest,
+  PoolPermissionResponse,
+  PoolPermissionGrantRequest,
+  PoolPermissionRevokeRequest,
+  PoolPermissionListResponse,
+  EffectivePermissionsResponse,
 } from './types';
 
 const BASE = '/api';
@@ -84,40 +113,97 @@ export const api = {
 
   // Pools + nodes
   listPools:   () => get<{ pools: PoolResponse[] }>('/pool/list'),
-  poolStatus:  (t: string, p: string) => get<PoolResponse>(`/pool/${t}/${p}/status`),
+  poolStatus:  (t: string, td: string, p: string) =>
+    get<PoolResponse>(
+      `/pool/${encodeURIComponent(t)}/${encodeURIComponent(td)}/${encodeURIComponent(p)}/status`
+    ),
   createPool:  (req: CreatePoolRequest) => post<PoolResponse>('/pool/create', req),
   scalePool:   (req: ScalePoolRequest) => post<PoolResponse>('/pool/scale', req),
   stopPool:    (req: StopPoolRequest) => post<void>('/pool/stop', req),
   setMaxConcurrent: (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
+  setPoolDisabled:  (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
 
   // Tenants
-  listTenants:        () => get<TenantListResponse>('/tenant/list'),
-  createTenant:       (req: TenantRequest)   => post<TenantResponse>('/tenant/create', req),
-  setTenantMetastore: (req: TenantRequest)   => post<TenantResponse>('/tenant/setMetastore', req),
-  deleteTenant:       (req: TenantOpRequest) => post<void>('/tenant/delete', req),
+  listTenants:      () => get<TenantListResponse>('/tenant/list'),
+  createTenant:     (req: TenantRequest)            => post<TenantResponse>('/tenant/create', req),
+  deleteTenant:     (req: TenantOpRequest)          => post<void>('/tenant/delete', req),
+  setTenantDisabled:(req: SetTenantDisabledRequest) => post<TenantResponse>('/tenant/setDisabled', req),
+  setTenantAuth:    (req: SetTenantAuthRequest)     => post<TenantResponse>('/tenant/setAuth',     req),
 
-  // ACL grants
-  listAclGrants:   (tenant?: string) => {
+  // Tenant databases
+  listTenantDbs:  (tenant: string)       =>
+    get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
+  createTenantDb: (req: TenantDbRequest) => post<TenantDbResponse>('/database/create', req),
+  deleteTenantDb: (req: TenantDbOpRequest) => post<void>('/database/delete', req),
+
+  // ----- RBAC: users -----
+  listUsers: (tenant?: string) => {
     const q = tenant ? `?tenant=${encodeURIComponent(tenant)}` : '';
-    return get<AclGrantListResponse>(`/acl/grant/list${q}`);
+    return get<UserListResponse>(`/user/list${q}`);
   },
-  createAclGrant:  (req: AclGrantRequest) => post<AclGrant>('/acl/grant/create', req),
-  deleteAclGrant:  (id: number)           => post<void>(`/acl/grant/delete/${id}`),
-  uploadAclGrants: (req: AclGrantBulkRequest) => post<AclGrantListResponse>('/acl/grant/upload', req),
+  createUser:           (req: UserCreateRequest)  => post<UserResponse>('/user/create', req),
+  updateUser:           (req: UserUpdateRequest)  => post<UserResponse>('/user/update', req),
+  deleteUser:           (req: UserDeleteRequest)  => post<void>('/user/delete', req),
+  effectivePermissions: (id: string) =>
+    get<EffectivePermissionsResponse>(`/user/${encodeURIComponent(id)}/effective`),
+
+  // ----- RBAC: roles -----
+  listRoles:  (tenant: string) =>
+    get<RoleListResponse>(`/role/list?tenant=${encodeURIComponent(tenant)}`),
+  createRole: (req: RoleCreateRequest) => post<RoleResponse>('/role/create', req),
+  deleteRole: (req: RoleDeleteRequest) => post<void>('/role/delete', req),
+  listRolePermissions:  (roleId: string) =>
+    get<RolePermissionListResponse>(`/role/permission/list?roleId=${encodeURIComponent(roleId)}`),
+  grantRolePermission:  (req: RolePermissionGrantRequest)  =>
+    post<RolePermissionResponse>('/role/permission/grant', req),
+  revokeRolePermission: (req: RolePermissionRevokeRequest) =>
+    post<void>('/role/permission/revoke', req),
+
+  // ----- RBAC: groups -----
+  listGroups:  (tenant: string) =>
+    get<GroupListResponse>(`/group/list?tenant=${encodeURIComponent(tenant)}`),
+  createGroup: (req: GroupCreateRequest) => post<GroupResponse>('/group/create', req),
+  deleteGroup: (req: GroupDeleteRequest) => post<void>('/group/delete', req),
+
+  // ----- RBAC: memberships -----
+  addUserRole:    (req: UserRoleMembershipRequest)  => post<void>('/membership/user-role/add',    req),
+  removeUserRole: (req: UserRoleMembershipRequest)  => post<void>('/membership/user-role/remove', req),
+  addUserGroup:   (req: UserGroupMembershipRequest) => post<void>('/membership/user-group/add',    req),
+  removeUserGroup:(req: UserGroupMembershipRequest) => post<void>('/membership/user-group/remove', req),
+  addGroupRole:   (req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/add',    req),
+  removeGroupRole:(req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/remove', req),
+
+  // ----- RBAC: pool permissions -----
+  listPoolPermissions: (filters: { tenant?: string; userId?: string; groupId?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (filters.tenant)  qs.set('tenant',  filters.tenant);
+    if (filters.userId)  qs.set('userId',  filters.userId);
+    if (filters.groupId) qs.set('groupId', filters.groupId);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<PoolPermissionListResponse>(`/pool/permission/list${q}`);
+  },
+  grantPoolPermission:  (req: PoolPermissionGrantRequest)  =>
+    post<PoolPermissionResponse>('/pool/permission/grant', req),
+  revokePoolPermission: (req: PoolPermissionRevokeRequest) =>
+    post<void>('/pool/permission/revoke', req),
 
   // Recent statement history (newest first)
   statementHistory: (limit = 50) =>
     get<StatementHistoryResponse>(`/node/statements?limit=${limit}`),
 
   // Catalog browser
-  listCatalogSchemas: (tenant: string) =>
-    get<CatalogSchemaEntry[]>(`/catalog/tenant/${encodeURIComponent(tenant)}/schemas`),
-  listCatalogTables: (tenant: string, schema: string) =>
-    get<CatalogTableEntry[]>(
-      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables`
+  listCatalogSchemas: (tenant: string, tenantDb: string) =>
+    get<CatalogSchemaEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/schemas`
     ),
-  getCatalogTable: (tenant: string, schema: string, table: string) =>
+  listCatalogTables: (tenant: string, tenantDb: string, schema: string) =>
+    get<CatalogTableEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables`
+    ),
+  getCatalogTable: (tenant: string, tenantDb: string, schema: string, table: string) =>
     get<CatalogTableDetailResponse>(
-      `/catalog/tenant/${encodeURIComponent(tenant)}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
     ),
 };

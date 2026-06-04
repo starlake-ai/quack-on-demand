@@ -65,12 +65,16 @@ exercised in that one round-trip.
 ## 3. Browse the admin UI (optional) — 10 seconds
 
 Open <http://localhost:20900/ui/> in a browser. Log in as `admin` /
-`admin`. You can see the bootstrap pool (`acme/sales`), its three Quack
-nodes (`WO`, `RO`, `DUAL`), per-node load and latency, the statement
-history of the query you just ran, and the catalog browser (`Catalog`
-tab) listing each table's row count, parquet file count, and **folder
-on disk** (e.g. `/app/ducklake/tpch/tpch1/lineitem/` or
-`s3://ducklake/tpch/tpch1/lineitem/`).
+`admin`. The Tenants page shows the bootstrap tenant `tpch`; opening it
+reveals the **Databases**, **Pools**, and **Auth provider** tabs. The
+Databases tab drills into `tpch1` and browses the catalog (per-table
+row count, parquet file count, on-disk folder under `./ducklake/tpch_tpch1/`
+or the configured `s3://…` URL). The Pools tab shows `sales` with its
+three Quack nodes (`WO`, `RO`, `DUAL`). The **Nodes** page (top nav)
+hosts the live cluster dashboard plus the recent-statements history of
+the query you just ran. The **Users** page is the RBAC console
+(users · groups · roles · identities + per-user "Effective permissions"
+drilldown).
 
 ## 4. Run a custom SQL — 30 seconds
 

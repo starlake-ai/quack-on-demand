@@ -27,24 +27,35 @@ export interface NodeInfo {
 
 export interface PoolResponse {
   tenant: string;
+  tenantDb: string;
   pool: string;
   nodes: NodeInfo[];
   status: string;
-  metastore: Record<string, string>;   // effective merged metastore; pgPassword redacted
+  // Effective metastore for this pool (inherited from the tenant-db).
+  // pgPassword is redacted.
+  metastore: Record<string, string>;
+  disabled: boolean;
+}
+
+export interface SetPoolDisabledRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  disabled: boolean;
 }
 
 export interface CreatePoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   size: number;
   roleDistribution: RoleDistribution;
-  metastore: Record<string, string>;
-  s3?: Record<string, string>;
   maxConcurrentPerNode?: number; // default 0 = unlimited
 }
 
 export interface ScalePoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   targetSize: number;
   roleDistribution: RoleDistribution;
@@ -53,12 +64,14 @@ export interface ScalePoolRequest {
 
 export interface StopPoolRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   force?: boolean;
 }
 
 export interface SetMaxConcurrentRequest {
   tenant: string;
+  tenantDb: string;
   pool: string;
   nodeId: string;
   max: number;
@@ -81,16 +94,31 @@ export interface ClientConfigResponse {
   authEnabled: boolean;
 }
 
+export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
+
 export interface TenantRequest {
   name: string;
-  metastore?: Record<string, string>;
+  authProvider?: AuthProvider;
+  authConfig?: Record<string, string>;
 }
 
 export interface TenantResponse {
   name: string;
-  metastore: Record<string, string>;             // tenant's own overrides
   pools: string[];
-  effectiveMetastore: Record<string, string>;    // global defaults merged with overrides; pgPassword redacted
+  disabled: boolean;
+  authProvider: AuthProvider;
+  authConfig: Record<string, string>;
+}
+
+export interface SetTenantDisabledRequest {
+  name: string;
+  disabled: boolean;
+}
+
+export interface SetTenantAuthRequest {
+  name: string;
+  authProvider: AuthProvider;
+  authConfig: Record<string, string>;
 }
 
 export interface TenantListResponse {
@@ -101,29 +129,149 @@ export interface TenantOpRequest {
   name: string;
 }
 
-// ----- ACL grants -----
-export interface AclGrant {
-  id: number;
-  tenantId: string;
-  principal: string;                 // e.g. "user:alice", "group:eng", "role:admin"
-  catalogName: string | null;        // null = any
-  schemaName:  string | null;
-  tableName:   string | null;
-  permission:  string;               // SELECT | INSERT | UPDATE | DELETE | ALL
-  grantedAt:   string;               // ISO-8601
+// ----- Tenant databases -----
+export interface TenantDbRequest {
+  tenant: string;
+  name: string; // suffix; server composes `${tenant}_${name}`
+  metastore?: Record<string, string>;
+  dataPath?: string;
+  objectStore?: Record<string, string>;
 }
 
-export interface AclGrantRequest {
-  tenantId: string;
-  principal: string;
-  catalogName?: string | null;
-  schemaName?:  string | null;
-  tableName?:   string | null;
-  permission:   string;
+export interface TenantDbResponse {
+  id: string;
+  tenant: string;
+  name: string;
+  metastore: Record<string, string>;
+  dataPath: string;
+  objectStore: Record<string, string>;
+  disabled: boolean;
 }
 
-export interface AclGrantListResponse { grants: AclGrant[]; }
-export interface AclGrantBulkRequest  { grants: AclGrantRequest[]; }
+export interface TenantDbListResponse {
+  tenantDbs: TenantDbResponse[];
+}
+
+export interface TenantDbOpRequest {
+  tenant: string;
+  name: string;
+}
+
+// ----- RBAC: users -----
+export interface UserResponse {
+  id: string;
+  tenant: string | null;            // null = superuser (manager UI + every FlightSQL tenant)
+  username: string;
+  role: string;                     // free-text JWT-claim label, NOT an RBAC role id
+  enabled: boolean;
+  roles:  string[];                 // effective role NAMES
+  groups: string[];                 // effective group NAMES
+  poolGrants: string[];             // human "tenant/pool" or "tenant/*" labels
+}
+
+export interface UserCreateRequest {
+  tenant: string | null;            // null = superuser
+  username: string;
+  password: string;
+  role?: string;
+}
+
+export interface UserUpdateRequest {
+  id: string;
+  tenant?: string | null;
+  password?: string | null;
+  role?: string | null;
+}
+
+export interface UserDeleteRequest { id: string; }
+export interface UserListResponse  { users: UserResponse[]; }
+
+// ----- RBAC: roles -----
+export interface RoleResponse {
+  id:          string;
+  tenantId:    string;
+  name:        string;
+  description: string | null;
+  createdAt:   string;
+}
+
+export interface RoleCreateRequest {
+  tenant:      string;
+  name:        string;
+  description?: string | null;
+}
+export interface RoleDeleteRequest { id: string; }
+export interface RoleListResponse { roles: RoleResponse[]; }
+
+// ----- RBAC: role permissions -----
+export interface RolePermissionResponse {
+  id:          string;
+  roleId:      string;
+  catalogName: string;              // '*' = wildcard
+  schemaName:  string;
+  tableName:   string;
+  verb:        string;              // SELECT | INSERT | UPDATE | DELETE | ALL
+  grantedAt:   string;
+}
+
+export interface RolePermissionGrantRequest {
+  roleId:  string;
+  catalog?: string;
+  schema?:  string;
+  table?:   string;
+  verb:    string;
+}
+export interface RolePermissionRevokeRequest { id: string; }
+export interface RolePermissionListResponse { permissions: RolePermissionResponse[]; }
+
+// ----- RBAC: groups -----
+export interface GroupResponse {
+  id:          string;
+  tenantId:    string;
+  name:        string;
+  description: string | null;
+}
+
+export interface GroupCreateRequest {
+  tenant:      string;
+  name:        string;
+  description?: string | null;
+}
+export interface GroupDeleteRequest { id: string; }
+export interface GroupListResponse { groups: GroupResponse[]; }
+
+// ----- RBAC: memberships -----
+export interface UserRoleMembershipRequest  { userId:  string; roleId:  string; }
+export interface UserGroupMembershipRequest { userId:  string; groupId: string; }
+export interface GroupRoleMembershipRequest { groupId: string; roleId:  string; }
+
+// ----- RBAC: pool permissions -----
+export interface PoolPermissionResponse {
+  id:        string;
+  tenantId:  string;
+  poolId:    string | null;         // null = every pool in tenant
+  userId:    string | null;
+  groupId:   string | null;
+  grantedAt: string;
+}
+
+export interface PoolPermissionGrantRequest {
+  tenant:  string;
+  poolId?: string | null;
+  userId?: string | null;
+  groupId?: string | null;
+}
+export interface PoolPermissionRevokeRequest { id: string; }
+export interface PoolPermissionListResponse { permissions: PoolPermissionResponse[]; }
+
+// ----- RBAC: effective permissions -----
+export interface EffectivePermissionsResponse {
+  user:       UserResponse;
+  roles:      RoleResponse[];
+  groups:     GroupResponse[];
+  pools:      PoolPermissionResponse[];
+  tablePerms: RolePermissionResponse[];
+}
 
 // ----- Auth -----
 export interface LoginRequest  { username: string; password: string; }
