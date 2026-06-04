@@ -105,18 +105,17 @@ object Main extends IOApp.Simple with LazyLogging:
         logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
       else
         admins.foreach { name =>
-          // System-admin scope: tenant=NULL, pool=NULL. The qodstate_user
-          // CHECK constraint requires both NULL together.
-          val inserted = userStore.upsertUser(
+          // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
+          // CHECK only forbids empty-string tenants now; NULL alone is fine.
+          val out = userStore.upsertUser(
             tenant    = None,
-            pool      = None,
             username  = name,
             plaintext = mgrCfg.admin.password,
             role      = mgrCfg.admin.role
           )
-          val verb = if inserted then "created" else "updated"
+          val verb = if out.inserted then "created" else "updated"
           logger.info(
-            s"admin user $verb: $name (role=${mgrCfg.admin.role}) in qodstate_user"
+            s"admin user $verb: $name (id=${out.id}, role=${mgrCfg.admin.role}) in qodstate_user"
           )
         }
 

@@ -7,25 +7,28 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
 import java.sql.Types
 
-/** Authenticates `(tenant, pool, username, password)` against the
-  * `qodstate_user` table on the control-plane Postgres.
+/** Authenticates `(tenant, username, password)` against the
+  * `qodstate_user` table on the control-plane Postgres. The `pool`
+  * parameter is kept on the [[BasicAuthProvider]] signature for
+  * back-compat with the auth chain but is no longer used here -- pool
+  * access is enforced at the FlightSQL handshake via
+  * [[ai.starlake.quack.ondemand.state.PoolPermission]], not in the
+  * password lookup.
   *
   * The query MUST return two columns `(password_hash, role)` and accept
-  * three placeholders in order: `tenant`, `pool`, `username`. `tenant`
-  * and `pool` are bound as SQL NULL for the manager UI / REST login.
+  * two placeholders in order: `tenant`, `username`. `tenant` is bound
+  * as SQL NULL for the manager UI / REST login.
   *
-  * Default query in `application.conf` treats a row with NULL
-  * tenant/pool as a wildcard matching any caller (tenant, pool), so the
-  * bootstrap admin works on both the manager UI and any FlightSQL
-  * (tenant, pool). A scoped row `(tenant, pool, username)` wins over
-  * the wildcard NULL row when both exist:
+  * Default query in `application.conf` treats a row with `tenant IS
+  * NULL` as a wildcard matching any caller, so the bootstrap superuser
+  * works on both the manager UI and any FlightSQL tenant. A
+  * tenant-scoped row `(tenant, username)` wins over the wildcard NULL
+  * row when both exist:
   * {{{
   *   SELECT password_hash, role FROM qodstate_user
   *   WHERE (tenant IS NULL OR tenant = ?)
-  *     AND (pool   IS NULL OR pool   = ?)
   *     AND username = ?
-  *   ORDER BY (tenant IS NOT NULL) DESC,
-  *            (pool   IS NOT NULL) DESC
+  *   ORDER BY (tenant IS NOT NULL) DESC
   *   LIMIT 1
   * }}}
   */
@@ -53,6 +56,9 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
+    // `pool` is ignored -- the directory is keyed by (tenant, username)
+    // only. Pool access is checked separately at handshake time.
+    val _ = pool
     try
       val conn = dataSource.getConnection
       try
@@ -61,10 +67,7 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
           tenant match
             case Some(t) => ps.setString(1, t)
             case None    => ps.setNull(1, Types.VARCHAR)
-          pool match
-            case Some(p) => ps.setString(2, p)
-            case None    => ps.setNull(2, Types.VARCHAR)
-          ps.setString(3, username)
+          ps.setString(2, username)
           val rs = ps.executeQuery()
           if rs.next() then
             val storedHash = rs.getString(1)

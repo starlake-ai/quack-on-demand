@@ -1,0 +1,211 @@
+# RBAC cutover: replaces the free-text slkstate_acl_grant table and the
+# qodstate_user.pool column with a first-class Role/Group/Permission model.
+#
+# What this changeset does (Phase A of the Users.pdf spec):
+#   - drops slkstate_acl_grant (data discarded; admin re-seeds at boot)
+#   - adds qodstate_user.id PK so the new graph can FK to it
+#   - drops qodstate_user.pool; relaxes scope CHECK so tenant=NULL alone
+#     is a valid superuser; rewrites the partial unique index on
+#     (tenant, username) WHERE tenant IS NOT NULL
+#   - creates qodstate_role / qodstate_role_permission
+#   - creates qodstate_group + the user-group, user-role, group-role edges
+#   - creates qodstate_pool_permission (granted to user OR group) with
+#     partial-unique indexes that treat pool_id NULL as a wildcard
+#
+# Pre-existing data in slkstate_acl_grant is discarded. The bootstrap
+# admin's superuser row in qodstate_user is preserved (id gets generated
+# for it) and reused by BootstrapAccessSeeder against the new tables.
+databaseChangeLog:
+
+  - changeSet:
+      id: 0006-rbac-drop-legacy-acl
+      author: quack-on-demand
+      changes:
+        - sql:
+            sql: DROP TABLE IF EXISTS slkstate_acl_grant
+
+  - changeSet:
+      id: 0006-rbac-user-id
+      author: quack-on-demand
+      changes:
+        # qodstate_user had no PK -- (tenant, pool, username) was the
+        # logical identity. Add a surrogate id so the new RBAC FKs
+        # (user_group.user_id, user_role.user_id, pool_permission.user_id)
+        # have something to point at. `gen_random_uuid()` is a Postgres
+        # 13+ built-in (the project targets PG16+); the substring keeps
+        # the id shape consistent with the app-side `${prefix}-<8 hex>`
+        # IDs from PoolSupervisor.
+        - sql:
+            sql: ALTER TABLE qodstate_user ADD COLUMN id TEXT
+        - sql:
+            sql: UPDATE qodstate_user SET id = 'u-' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8) WHERE id IS NULL
+        - sql:
+            sql: ALTER TABLE qodstate_user ALTER COLUMN id SET NOT NULL
+        - addPrimaryKey:
+            tableName:      qodstate_user
+            columnNames:    id
+            constraintName: qodstate_user_pkey
+
+  - changeSet:
+      id: 0006-rbac-user-drop-pool
+      author: quack-on-demand
+      changes:
+        # The scoped unique index references `pool`, so drop it before
+        # the column. The admin partial index (username) WHERE tenant
+        # IS NULL AND pool IS NULL only references pool inside its
+        # WHERE clause -- it's also re-created here to drop the
+        # vestigial pool predicate.
+        - sql:
+            sql: DROP INDEX IF EXISTS qodstate_user_scoped_unique
+        - sql:
+            sql: DROP INDEX IF EXISTS qodstate_user_admin_unique
+        - sql:
+            sql: ALTER TABLE qodstate_user DROP CONSTRAINT IF EXISTS qodstate_user_scope_consistency
+        - sql:
+            sql: ALTER TABLE qodstate_user DROP COLUMN pool
+        - sql:
+            sql: ALTER TABLE qodstate_user ADD CONSTRAINT qodstate_user_scope_consistency CHECK (tenant IS NULL OR length(tenant) > 0)
+        - sql:
+            sql: CREATE UNIQUE INDEX qodstate_user_admin_unique ON qodstate_user (username) WHERE tenant IS NULL
+        - sql:
+            sql: CREATE UNIQUE INDEX qodstate_user_scoped_unique ON qodstate_user (tenant, username) WHERE tenant IS NOT NULL
+
+  - changeSet:
+      id: 0006-rbac-role
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_role
+            columns:
+              - column: { name: id,          type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,   type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_role_tenant, references: 'qodstate_tenant(id)', deleteCascade: true } }
+              - column: { name: name,        type: TEXT, constraints: { nullable: false } }
+              - column: { name: description, type: TEXT }
+              - column: { name: created_at,  type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+        - addUniqueConstraint:
+            tableName:      qodstate_role
+            columnNames:    tenant_id, name
+            constraintName: qodstate_role_tenant_name_unique
+        - createIndex:
+            indexName: qodstate_role_tenant
+            tableName: qodstate_role
+            columns:
+              - column: { name: tenant_id }
+
+  - changeSet:
+      id: 0006-rbac-role-permission
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_role_permission
+            columns:
+              - column: { name: id,           type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: role_id,      type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_role_permission_role, references: 'qodstate_role(id)', deleteCascade: true } }
+              - column: { name: catalog_name, type: TEXT, constraints: { nullable: false } }
+              - column: { name: schema_name,  type: TEXT, constraints: { nullable: false } }
+              - column: { name: table_name,   type: TEXT, constraints: { nullable: false } }
+              - column: { name: verb,         type: TEXT, constraints: { nullable: false } }
+              - column: { name: granted_at,   type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+        - sql:
+            sql: "ALTER TABLE qodstate_role_permission ADD CONSTRAINT qodstate_role_permission_verb_check CHECK (verb IN ('SELECT','INSERT','UPDATE','DELETE','ALL'))"
+        - addUniqueConstraint:
+            tableName:      qodstate_role_permission
+            columnNames:    role_id, catalog_name, schema_name, table_name, verb
+            constraintName: qodstate_role_permission_unique
+        - createIndex:
+            indexName: qodstate_role_permission_role
+            tableName: qodstate_role_permission
+            columns:
+              - column: { name: role_id }
+
+  - changeSet:
+      id: 0006-rbac-group
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_group
+            columns:
+              - column: { name: id,          type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,   type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_group_tenant, references: 'qodstate_tenant(id)', deleteCascade: true } }
+              - column: { name: name,        type: TEXT, constraints: { nullable: false } }
+              - column: { name: description, type: TEXT }
+        - addUniqueConstraint:
+            tableName:      qodstate_group
+            columnNames:    tenant_id, name
+            constraintName: qodstate_group_tenant_name_unique
+        - createIndex:
+            indexName: qodstate_group_tenant
+            tableName: qodstate_group
+            columns:
+              - column: { name: tenant_id }
+
+  - changeSet:
+      id: 0006-rbac-user-group
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_user_group
+            columns:
+              - column: { name: user_id,  type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_user_group_user,  references: 'qodstate_user(id)',  deleteCascade: true } }
+              - column: { name: group_id, type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_user_group_group, references: 'qodstate_group(id)', deleteCascade: true } }
+        - addPrimaryKey:
+            tableName:      qodstate_user_group
+            columnNames:    user_id, group_id
+            constraintName: qodstate_user_group_pkey
+
+  - changeSet:
+      id: 0006-rbac-user-role
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_user_role
+            columns:
+              - column: { name: user_id, type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_user_role_user, references: 'qodstate_user(id)', deleteCascade: true } }
+              - column: { name: role_id, type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_user_role_role, references: 'qodstate_role(id)', deleteCascade: true } }
+        - addPrimaryKey:
+            tableName:      qodstate_user_role
+            columnNames:    user_id, role_id
+            constraintName: qodstate_user_role_pkey
+
+  - changeSet:
+      id: 0006-rbac-group-role
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_group_role
+            columns:
+              - column: { name: group_id, type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_group_role_group, references: 'qodstate_group(id)', deleteCascade: true } }
+              - column: { name: role_id,  type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_group_role_role,  references: 'qodstate_role(id)',  deleteCascade: true } }
+        - addPrimaryKey:
+            tableName:      qodstate_group_role
+            columnNames:    group_id, role_id
+            constraintName: qodstate_group_role_pkey
+
+  - changeSet:
+      id: 0006-rbac-pool-permission
+      author: quack-on-demand
+      changes:
+        # pool_id NULL = "every pool in tenant". Exactly one of user_id /
+        # group_id must be set; that's the principal_check CHECK. The two
+        # partial unique indexes use COALESCE(pool_id, '') so the
+        # "every pool" rows can't be duplicated per principal.
+        - createTable:
+            tableName: qodstate_pool_permission
+            columns:
+              - column: { name: id,         type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant_id,  type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_pool_permission_tenant, references: 'qodstate_tenant(id)', deleteCascade: true } }
+              - column: { name: pool_id,    type: TEXT, constraints: { foreignKeyName: fk_qodstate_pool_permission_pool, references: 'qodstate_pool(id)', deleteCascade: true } }
+              - column: { name: user_id,    type: TEXT, constraints: { foreignKeyName: fk_qodstate_pool_permission_user, references: 'qodstate_user(id)', deleteCascade: true } }
+              - column: { name: group_id,   type: TEXT, constraints: { foreignKeyName: fk_qodstate_pool_permission_group, references: 'qodstate_group(id)', deleteCascade: true } }
+              - column: { name: granted_at, type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
+        - sql:
+            sql: "ALTER TABLE qodstate_pool_permission ADD CONSTRAINT qodstate_pool_permission_principal_check CHECK ((user_id IS NULL) <> (group_id IS NULL))"
+        - sql:
+            sql: "CREATE UNIQUE INDEX qodstate_pool_permission_user_unique  ON qodstate_pool_permission (tenant_id, COALESCE(pool_id, ''), user_id)  WHERE user_id  IS NOT NULL"
+        - sql:
+            sql: "CREATE UNIQUE INDEX qodstate_pool_permission_group_unique ON qodstate_pool_permission (tenant_id, COALESCE(pool_id, ''), group_id) WHERE group_id IS NOT NULL"
+        - createIndex:
+            indexName: qodstate_pool_permission_tenant
+            tableName: qodstate_pool_permission
+            columns:
+              - column: { name: tenant_id }

@@ -4,30 +4,34 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 
 import java.sql.{Connection, DriverManager, Types}
+import java.util.UUID
 
-/** Manages the `qodstate_user` table used by `DatabaseAuthenticator`.
+/** Manages the `qodstate_user` table -- the principal directory used by
+  * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] and as the FK
+  * target for the RBAC user-group / user-role / pool-permission edges.
   *
-  * Schema (owned by Liquibase changelog `0003-user-table.yaml`):
+  * Schema (owned by Liquibase changelogs `0003-user-table.yaml` +
+  * `0006-rbac.yaml`):
   * {{{
   *   CREATE TABLE qodstate_user (
-  *     tenant        TEXT NULL,
-  *     pool          TEXT NULL,
+  *     id            TEXT PRIMARY KEY,                -- u-<8 hex>
+  *     tenant        TEXT NULL,                       -- NULL = superuser
   *     username      TEXT NOT NULL,
   *     password_hash TEXT NOT NULL,
-  *     role          TEXT NOT NULL DEFAULT 'user',
+  *     role          TEXT NOT NULL DEFAULT 'user',    -- free-text auth label
   *     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   *     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
   *   );
   *   -- partial unique indexes:
-  *   --   admin   (tenant IS NULL AND pool IS NULL): UNIQUE (username)
-  *   --   scoped  (tenant IS NOT NULL AND pool IS NOT NULL): UNIQUE (tenant, pool, username)
-  *   -- CHECK ((tenant IS NULL) = (pool IS NULL))
+  *   --   admin   (tenant IS NULL):     UNIQUE (username)
+  *   --   scoped  (tenant IS NOT NULL): UNIQUE (tenant, username)
+  *   -- CHECK (tenant IS NULL OR length(tenant) > 0)
   * }}}
   *
-  * A user is identified by `(tenant, pool, username)`. `(NULL, NULL, name)`
-  * is the system admin (manager UI / REST). Non-NULL rows are tenant-scoped
-  * principals that the FlightSQL edge looks up using the `tenant` and
-  * `pool` headers (or URL params) attached to the connection. */
+  * A user is identified by `(tenant, username)`. `(NULL, name)` is a
+  * superuser; tenant-scoped principals carry a non-empty tenant. The
+  * `pool` column from the pre-RBAC schema is gone -- pool access lives
+  * in [[PoolPermission]] now. */
 final class UserStore(jdbcUrl: String, dbUser: String, dbPassword: String) extends LazyLogging:
 
   // Force driver registration for the same reason as PostgresStateStore.
@@ -37,64 +41,80 @@ final class UserStore(jdbcUrl: String, dbUser: String, dbPassword: String) exten
     val c = DriverManager.getConnection(jdbcUrl, dbUser, dbPassword)
     try f(c) finally c.close()
 
-  /** Upsert a user. Both `tenant` and `pool` must be either both `Some`
-    * (tenant-scoped principal) or both `None` (system admin) -- the
-    * `qodstate_user_scope_consistency` CHECK constraint enforces this.
+  /** Upsert a user identified by `(tenant, username)`. `tenant = None`
+    * is a superuser. Returns the persisted row (with id assigned if the
+    * row is new, or reused if it already existed).
     *
-    * Returns `true` if a new row was inserted, `false` if an existing row
-    * was updated. */
+    * On a new row the id is freshly generated (`u-<8 hex>`); on an
+    * update the existing id is preserved -- callers (RBAC membership
+    * edges, pool-permission grants) keep their FK targets across
+    * password rotations. */
   def upsertUser(
       tenant:    Option[String],
-      pool:      Option[String],
       username:  String,
       plaintext: String,
       role:      String
-  ): Boolean =
-    require((tenant.isEmpty) == (pool.isEmpty),
-            "tenant and pool must be both set or both empty")
+  ): UserStore.Upsert =
+    require(tenant.forall(_.nonEmpty),
+            "tenant must be either None (superuser) or a non-empty string")
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, plaintext.toCharArray)
-      // ON CONFLICT can only target one unique index at a time, and our
-      // unique indexes are partial. Pick the right one based on whether
-      // the row is system or scoped.
+      // Two queries: look up the existing id first so the upsert can
+      // preserve it. The partial unique indexes (admin vs scoped) mean
+      // ON CONFLICT cannot target a single index without knowing the
+      // tenant kind, so the lookup is the cleanest path.
+      val existing = lookupId(c, tenant, username)
+      val id = existing.getOrElse(UserStore.newId())
       val sql =
-        if tenant.isEmpty then
-          """INSERT INTO qodstate_user (tenant, pool, username, password_hash, role, updated_at)
-            |VALUES (NULL, NULL, ?, ?, ?, NOW())
-            |ON CONFLICT (username) WHERE tenant IS NULL AND pool IS NULL DO UPDATE SET
-            |  password_hash = EXCLUDED.password_hash,
-            |  role          = EXCLUDED.role,
-            |  updated_at    = NOW()
-            |RETURNING (xmax = 0) AS inserted""".stripMargin
-        else
-          """INSERT INTO qodstate_user (tenant, pool, username, password_hash, role, updated_at)
-            |VALUES (?, ?, ?, ?, ?, NOW())
-            |ON CONFLICT (tenant, pool, username) WHERE tenant IS NOT NULL AND pool IS NOT NULL DO UPDATE SET
-            |  password_hash = EXCLUDED.password_hash,
-            |  role          = EXCLUDED.role,
-            |  updated_at    = NOW()
-            |RETURNING (xmax = 0) AS inserted""".stripMargin
+        """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, updated_at)
+          |VALUES (?, ?, ?, ?, ?, NOW())
+          |ON CONFLICT (id) DO UPDATE SET
+          |  password_hash = EXCLUDED.password_hash,
+          |  role          = EXCLUDED.role,
+          |  updated_at    = NOW()""".stripMargin
       val ps = c.prepareStatement(sql)
       try
-        if tenant.isEmpty then
-          ps.setString(1, username)
-          ps.setString(2, hash)
-          ps.setString(3, role)
-        else
-          ps.setString(1, tenant.get)
-          ps.setString(2, pool.get)
-          ps.setString(3, username)
-          ps.setString(4, hash)
-          ps.setString(5, role)
-        val rs = ps.executeQuery()
-        try
-          rs.next()
-          rs.getBoolean("inserted")
-        finally rs.close()
+        ps.setString(1, id)
+        tenant match
+          case Some(t) => ps.setString(2, t)
+          case None    => ps.setNull(2, Types.VARCHAR)
+        ps.setString(3, username)
+        ps.setString(4, hash)
+        ps.setString(5, role)
+        ps.executeUpdate()
+        UserStore.Upsert(id = id, inserted = existing.isEmpty)
       finally ps.close()
     }
 
+  private def lookupId(c: Connection, tenant: Option[String], username: String): Option[String] =
+    val ps = tenant match
+      case Some(t) =>
+        val p = c.prepareStatement(
+          "SELECT id FROM qodstate_user WHERE tenant = ? AND username = ?"
+        )
+        p.setString(1, t)
+        p.setString(2, username)
+        p
+      case None =>
+        val p = c.prepareStatement(
+          "SELECT id FROM qodstate_user WHERE tenant IS NULL AND username = ?"
+        )
+        p.setString(1, username)
+        p
+    try
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(rs.getString(1)) else None
+      finally rs.close()
+    finally ps.close()
+
 object UserStore:
+
+  /** Outcome of an upsert: the persisted id and whether the row was
+    * freshly inserted (`true`) or an existing row got its password +
+    * role refreshed (`false`). */
+  final case class Upsert(id: String, inserted: Boolean)
+
+  private def newId(): String = s"u-${UUID.randomUUID().toString.take(8)}"
 
   /** Build a store from the global `defaultMetastore` map. Same shape as
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next

@@ -173,4 +173,183 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     s.tenantDbs shouldBe List(tenantDb)
     s.pools     shouldBe List(pool)
     s.nodes     shouldBe List(node)
+    s.users           shouldBe Nil
+    s.roles           shouldBe Nil
+    s.rolePermissions shouldBe Nil
+    s.groups          shouldBe Nil
+    s.poolPermissions shouldBe Nil
+  }
+
+  // ---------- RBAC: roles + role permissions ----------
+
+  private val role = RbacRole(
+    id          = "r-1",
+    tenantId    = "tenant-1",
+    name        = "admin",
+    description = Some("Built-in admin role for tenant")
+  )
+
+  "RBAC: roles" should "round-trip a role" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertRole(role)
+    val out = store.listRoles("tenant-1")
+    out.map(_.copy(createdAt = None)) shouldBe List(role)
+    out.head.createdAt should not be empty
+  }
+
+  it should "find a role by (tenant, name)" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertRole(role)
+    store.findRole("tenant-1", "admin").map(_.id) shouldBe Some("r-1")
+    store.findRole("tenant-1", "missing")        shouldBe None
+  }
+
+  it should "cascade role permissions on role delete" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertRole(role)
+    val perm = RolePermission(
+      id = "rp-1", roleId = "r-1",
+      catalogName = "*", schemaName = "*", tableName = "*", verb = "ALL"
+    )
+    val inserted = store.insertRolePermission(perm)
+    inserted.grantedAt should not be empty
+    store.listRolePermissions("r-1") should have size 1
+    store.deleteRole("r-1")
+    store.listRolePermissions("r-1") shouldBe empty
+  }
+
+  it should "bulk-fetch role permissions across multiple roles" in withStore { store =>
+    store.upsertTenant(tenant)
+    val r1 = role
+    val r2 = role.copy(id = "r-2", name = "viewer")
+    store.upsertRole(r1)
+    store.upsertRole(r2)
+    store.insertRolePermission(RolePermission("rp-1", "r-1", "*",    "*", "*",        "ALL"))
+    store.insertRolePermission(RolePermission("rp-2", "r-2", "tpch", "*", "customer", "SELECT"))
+    val out = store.listRolePermissionsForRoles(Set("r-1", "r-2")).map(_.id).toSet
+    out shouldBe Set("rp-1", "rp-2")
+    store.listRolePermissionsForRoles(Set.empty) shouldBe empty
+  }
+
+  // ---------- RBAC: groups + membership ----------
+
+  private val group = RbacGroup(id = "g-1", tenantId = "tenant-1", name = "engineers")
+
+  "RBAC: groups" should "round-trip a group" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertGroup(group)
+    store.listGroups("tenant-1") shouldBe List(group)
+    store.findGroup("tenant-1", "engineers").map(_.id) shouldBe Some("g-1")
+  }
+
+  it should "wire user-group + user-role + group-role memberships idempotently" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertRole(role)
+    store.upsertGroup(group)
+    val user = RbacUser(id = "u-1", tenant = Some("tenant-1"), username = "alice", role = "user")
+    store.upsertUserIdentity(user)
+
+    store.addUserGroup("u-1", "g-1")
+    store.addUserGroup("u-1", "g-1")  // idempotent
+    store.listGroupsForUser("u-1") shouldBe List("g-1")
+    store.listUsersInGroup("g-1")  shouldBe List("u-1")
+
+    store.addUserRole("u-1", "r-1")
+    store.listDirectRolesForUser("u-1") shouldBe List("r-1")
+
+    store.addGroupRole("g-1", "r-1")
+    store.listRolesForGroup("g-1") shouldBe List("r-1")
+
+    store.removeUserGroup("u-1", "g-1") shouldBe true
+    store.removeUserGroup("u-1", "g-1") shouldBe false
+    store.listGroupsForUser("u-1") shouldBe empty
+  }
+
+  // ---------- RBAC: users ----------
+
+  "RBAC: users" should "round-trip a superuser (tenant = NULL)" in withStore { store =>
+    val u = RbacUser(id = "u-root", tenant = None, username = "root", role = "admin")
+    store.upsertUserIdentity(u)
+    val got = store.getUserById("u-root")
+    got.map(_.copy(createdAt = None, updatedAt = None)) shouldBe Some(u)
+    store.listSuperusers().map(_.username) shouldBe List("root")
+  }
+
+  it should "find a tenant-scoped user by (tenant, username)" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertUserIdentity(RbacUser("u-a", Some("tenant-1"), "alice", "user"))
+    store.findUser(Some("tenant-1"), "alice").map(_.id) shouldBe Some("u-a")
+    store.findUser(Some("tenant-1"), "bob")             shouldBe None
+    store.findUser(None,             "alice")           shouldBe None
+  }
+
+  // ---------- RBAC: pool permissions ----------
+
+  "RBAC: pool permissions" should "grant a user access to a specific pool" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    val u = RbacUser("u-a", Some("tenant-1"), "alice", "user")
+    store.upsertUserIdentity(u)
+    val perm = store.insertPoolPermission(PoolPermission(
+      id = "pp-1", tenantId = "tenant-1", poolId = Some("pool-1"), userId = Some("u-a")
+    ))
+    perm.grantedAt should not be empty
+    store.listPoolPermissionsForUser("u-a") should have size 1
+    store.listPoolPermissions(tenantId = Some("tenant-1")) should have size 1
+  }
+
+  it should "grant a group access to every pool in tenant (pool_id NULL)" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertGroup(group)
+    val perm = PoolPermission("pp-2", "tenant-1", poolId = None, groupId = Some("g-1"))
+    store.insertPoolPermission(perm)
+    store.listPoolPermissionsForGroup("g-1").map(_.poolId) shouldBe List(None)
+  }
+
+  it should "reject a pool permission with both user_id and group_id set" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertGroup(group)
+    val u = RbacUser("u-a", Some("tenant-1"), "alice", "user")
+    store.upsertUserIdentity(u)
+    val bad = PoolPermission("pp-bad", "tenant-1", None, Some("u-a"), Some("g-1"))
+    intercept[java.sql.SQLException](store.insertPoolPermission(bad))
+  }
+
+  it should "cascade pool permissions when the principal user is deleted" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    val u = RbacUser("u-a", Some("tenant-1"), "alice", "user")
+    store.upsertUserIdentity(u)
+    store.insertPoolPermission(PoolPermission("pp-1", "tenant-1", Some("pool-1"), Some("u-a"), None))
+    store.deleteUser("u-a")
+    store.listPoolPermissions(tenantId = Some("tenant-1")) shouldBe empty
+  }
+
+  // ---------- RBAC: snapshot covers the full graph ----------
+
+  "RBAC snapshot" should "round-trip every entity in one call" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    store.upsertRole(role)
+    store.upsertGroup(group)
+    val u = RbacUser("u-a", Some("tenant-1"), "alice", "user")
+    store.upsertUserIdentity(u)
+    store.insertRolePermission(RolePermission("rp-1", "r-1", "*", "*", "*", "ALL"))
+    store.addUserGroup("u-a", "g-1")
+    store.addUserRole("u-a", "r-1")
+    store.addGroupRole("g-1", "r-1")
+    store.insertPoolPermission(PoolPermission("pp-1", "tenant-1", Some("pool-1"), Some("u-a"), None))
+
+    val s = store.snapshot()
+    s.users.map(_.username)             shouldBe List("alice")
+    s.roles.map(_.name)                 shouldBe List("admin")
+    s.groups.map(_.name)                shouldBe List("engineers")
+    s.rolePermissions.map(_.verb)       shouldBe List("ALL")
+    s.userGroups                        shouldBe List(UserGroupEdge("u-a", "g-1"))
+    s.userRoles                         shouldBe List(UserRoleEdge ("u-a", "r-1"))
+    s.groupRoles                        shouldBe List(GroupRoleEdge("g-1", "r-1"))
+    s.poolPermissions.map(_.id)         shouldBe List("pp-1")
   }
