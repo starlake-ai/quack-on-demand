@@ -173,6 +173,120 @@ final case class StatementHistoryEntry(
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
+// ----- RBAC: users -------------------------------------------------------
+
+final case class UserCreateRequest(
+    tenant:   Option[String],         // None = superuser
+    username: String,
+    password: String,
+    role:     String = "user"
+)
+final case class UserUpdateRequest(
+    id:       String,
+    tenant:   Option[String] = None,  // None = leave unchanged
+    password: Option[String] = None,  // None = no rotation
+    role:     Option[String] = None
+)
+final case class UserDeleteRequest(id: String)
+final case class UserResponse(
+    id:       String,
+    tenant:   Option[String],
+    username: String,
+    role:     String,
+    enabled:  Boolean = true,
+    roles:    List[String] = Nil,     // role NAMES (not ids), tenant-scoped
+    groups:   List[String] = Nil,     // group NAMES
+    poolGrants: List[String] = Nil    // human label "tenant/pool" or "tenant/*"
+)
+final case class UserListResponse(users: List[UserResponse])
+
+/** GET /user/{id}/effective response. Permits the UI to show what a
+  * given user can actually do without spelunking through roles/groups. */
+final case class EffectivePermissionsResponse(
+    user:       UserResponse,
+    roles:      List[RoleResponse],
+    groups:     List[GroupResponse],
+    pools:      List[PoolPermissionResponse],
+    tablePerms: List[RolePermissionResponse]
+)
+
+// ----- RBAC: roles -------------------------------------------------------
+
+final case class RoleCreateRequest(
+    tenant:      String,
+    name:        String,
+    description: Option[String] = None
+)
+final case class RoleDeleteRequest(id: String)
+final case class RoleResponse(
+    id:          String,
+    tenantId:    String,
+    name:        String,
+    description: Option[String],
+    createdAt:   String
+)
+final case class RoleListResponse(roles: List[RoleResponse])
+
+final case class RolePermissionGrantRequest(
+    roleId:  String,
+    catalog: String = "*",
+    schema:  String = "*",
+    table:   String = "*",
+    verb:    String                   // SELECT | INSERT | UPDATE | DELETE | ALL
+)
+final case class RolePermissionRevokeRequest(id: String)
+final case class RolePermissionResponse(
+    id:          String,
+    roleId:      String,
+    catalogName: String,
+    schemaName:  String,
+    tableName:   String,
+    verb:        String,
+    grantedAt:   String
+)
+final case class RolePermissionListResponse(permissions: List[RolePermissionResponse])
+
+// ----- RBAC: groups ------------------------------------------------------
+
+final case class GroupCreateRequest(
+    tenant:      String,
+    name:        String,
+    description: Option[String] = None
+)
+final case class GroupDeleteRequest(id: String)
+final case class GroupResponse(
+    id:          String,
+    tenantId:    String,
+    name:        String,
+    description: Option[String]
+)
+final case class GroupListResponse(groups: List[GroupResponse])
+
+// ----- RBAC: memberships -------------------------------------------------
+
+final case class UserRoleMembershipRequest (userId: String, roleId:  String)
+final case class UserGroupMembershipRequest(userId: String, groupId: String)
+final case class GroupRoleMembershipRequest(groupId: String, roleId: String)
+
+// ----- RBAC: pool permissions --------------------------------------------
+
+final case class PoolPermissionGrantRequest(
+    tenant:  String,
+    poolId:  Option[String] = None,   // None = all pools in tenant
+    userId:  Option[String] = None,
+    groupId: Option[String] = None    // exactly one of userId / groupId must be set
+)
+final case class PoolPermissionRevokeRequest(id: String)
+final case class PoolPermissionResponse(
+    id:        String,
+    tenantId:  String,
+    poolId:    Option[String],
+    userId:    Option[String],
+    groupId:   Option[String],
+    grantedAt: String
+)
+final case class PoolPermissionListResponse(permissions: List[PoolPermissionResponse])
+
 // ----- Catalog browser DTOs -----
 final case class CatalogSchemaEntry(
     name: String,
@@ -378,6 +492,79 @@ object Dtos:
   given Codec[WhoamiResponse]       = deriveCodec
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
+
+  // RBAC: users
+  // Custom decoders so Option[String] fields keep their case-class defaults
+  // when absent from the wire JSON (circe deriveCodec doesn't honor those).
+  given Codec[UserCreateRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        tenant   <- c.getOrElse[Option[String]]("tenant")(None)
+        username <- c.get[String]("username")
+        password <- c.get[String]("password")
+        role     <- c.getOrElse[String]("role")("user")
+      yield UserCreateRequest(tenant, username, password, role)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "tenant"   -> r.tenant.asJson,
+        "username" -> r.username.asJson,
+        "password" -> r.password.asJson,
+        "role"     -> r.role.asJson
+      ))
+    }
+  )
+  given Codec[UserUpdateRequest]            = deriveCodec
+  given Codec[UserDeleteRequest]            = deriveCodec
+  given Codec[UserResponse]                 = deriveCodec
+  given Codec[UserListResponse]             = deriveCodec
+
+  // RBAC: roles
+  given Codec[RoleCreateRequest]            = deriveCodec
+  given Codec[RoleDeleteRequest]            = deriveCodec
+  given Codec[RoleResponse]                 = deriveCodec
+  given Codec[RoleListResponse]             = deriveCodec
+  given Codec[RolePermissionGrantRequest]   = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        roleId  <- c.get[String]("roleId")
+        catalog <- c.getOrElse[String]("catalog")("*")
+        schema  <- c.getOrElse[String]("schema") ("*")
+        table   <- c.getOrElse[String]("table")  ("*")
+        verb    <- c.get[String]("verb")
+      yield RolePermissionGrantRequest(roleId, catalog, schema, table, verb)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(JsonObject(
+        "roleId"  -> r.roleId.asJson,
+        "catalog" -> r.catalog.asJson,
+        "schema"  -> r.schema.asJson,
+        "table"   -> r.table.asJson,
+        "verb"    -> r.verb.asJson
+      ))
+    }
+  )
+  given Codec[RolePermissionRevokeRequest]  = deriveCodec
+  given Codec[RolePermissionResponse]       = deriveCodec
+  given Codec[RolePermissionListResponse]   = deriveCodec
+
+  // RBAC: groups
+  given Codec[GroupCreateRequest]           = deriveCodec
+  given Codec[GroupDeleteRequest]           = deriveCodec
+  given Codec[GroupResponse]                = deriveCodec
+  given Codec[GroupListResponse]            = deriveCodec
+
+  given Codec[UserRoleMembershipRequest]    = deriveCodec
+  given Codec[UserGroupMembershipRequest]   = deriveCodec
+  given Codec[GroupRoleMembershipRequest]   = deriveCodec
+
+  // RBAC: pool permissions
+  given Codec[PoolPermissionGrantRequest]   = deriveCodec
+  given Codec[PoolPermissionRevokeRequest]  = deriveCodec
+  given Codec[PoolPermissionResponse]       = deriveCodec
+  given Codec[PoolPermissionListResponse]   = deriveCodec
+
+  given Codec[EffectivePermissionsResponse] = deriveCodec
 
   // Catalog browser
   given Codec[CatalogSchemaEntry]         = deriveCodec

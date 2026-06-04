@@ -18,6 +18,17 @@ trait ControlPlaneStore:
   def listTenants(): List[Tenant]
   def deleteTenant(id: String): Unit
 
+  /** Bootstrap a new tenant atomically: insert the tenant row, its
+    * built-in `admin` role, and the `*.*.* ALL` permission attached to
+    * that role -- all three in a single transaction so a partial
+    * failure leaves no orphan role / permission rows. Caller picks the
+    * role / permission ids. Throws on uniqueness violation. */
+  def createTenantWithAdminRole(
+      tenant:          Tenant,
+      adminRole:       RbacRole,
+      adminPermission: RolePermission
+  ): Unit
+
   def upsertTenantDb(t: TenantDb): Unit
   def listTenantDbs(tenantId: String): List[TenantDb]
   def deleteTenantDb(id: String): Unit
@@ -85,10 +96,17 @@ trait ControlPlaneStore:
   def removeUserGroup(userId: String, groupId: String): Boolean
   def listGroupsForUser(userId: String): List[String]
   def listUsersInGroup(groupId: String): List[String]
+  /** Bulk-fetch group ids for a batch of users. Same semantics as
+    * [[listDirectRolesByUsers]]. */
+  def listGroupsByUsers(userIds: List[String]): Map[String, Set[String]]
 
   def addUserRole(userId: String, roleId: String): Unit
   def removeUserRole(userId: String, roleId: String): Boolean
   def listDirectRolesForUser(userId: String): List[String]
+  /** Bulk-fetch direct role ids for a batch of users. Empty input
+    * returns `Map.empty`; users with no roles are omitted from the
+    * result so callers can `getOrElse(uid, Set.empty)`. */
+  def listDirectRolesByUsers(userIds: List[String]): Map[String, Set[String]]
 
   def addGroupRole(groupId: String, roleId: String): Unit
   def removeGroupRole(groupId: String, roleId: String): Boolean
@@ -109,6 +127,9 @@ trait ControlPlaneStore:
   ): List[PoolPermission]
   def listPoolPermissionsForUser(userId: String):   List[PoolPermission]
   def listPoolPermissionsForGroup(groupId: String): List[PoolPermission]
+  /** Bulk-fetch user-scoped pool grants. Map keys are user ids with at
+    * least one grant; users with none are omitted. */
+  def listPoolPermissionsByUsers(userIds: List[String]): Map[String, List[PoolPermission]]
 
   /** Load the full topology in one round-trip. Used by the supervisor
     * at boot to seed its in-memory caches. The RBAC graph is included

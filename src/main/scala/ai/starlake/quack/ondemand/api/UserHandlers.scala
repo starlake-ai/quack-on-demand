@@ -1,0 +1,155 @@
+package ai.starlake.quack.ondemand.api
+
+import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.ondemand.state.{PoolPermission, RbacGroup, RbacRole, RbacUser, RolePermission, UserStore}
+import cats.effect.IO
+import sttp.model.StatusCode
+
+import java.time.format.DateTimeFormatter
+
+/** REST handlers for the RBAC user surface (`/api/user/...`). Owns the
+  * mapping between the wire DTOs and the user graph; the in-memory
+  * [[ai.starlake.quack.ondemand.rbac.RbacResolver]] only caches the
+  * schema-bounded slice (roles, groups, group memberships, role
+  * permissions, group-scoped pool grants), so each handler invocation
+  * resolves the user-scoped state through the
+  * [[ai.starlake.quack.ondemand.state.ControlPlaneStore]] via
+  * [[PoolSupervisor.effectiveSetForUser]] / `effectiveSetsForUsers`. */
+final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
+
+  type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
+
+  // ---------- mappers ----------
+
+  /** Build the wire response from a precomputed effective-set so the
+    * caller controls how many users to resolve. The tenant column is
+    * the human-readable display name when known. */
+  def toResponse(eff: EffectiveSet, tenantNameForId: Map[String, String]): UserResponse =
+    val u      = eff.user
+    val roles  = eff.roles .map(_.name)
+    val groups = eff.groups.map(_.name)
+    val grants = eff.poolPerms.map { pp =>
+      val tn = tenantNameForId.getOrElse(pp.tenantId, pp.tenantId)
+      val pn = pp.poolId.getOrElse("*")
+      s"$tn/$pn"
+    }
+    UserResponse(
+      id        = u.id,
+      tenant    = u.tenant.map(tid => tenantNameForId.getOrElse(tid, tid)),
+      username  = u.username,
+      role      = u.role,
+      enabled   = true,
+      roles     = roles,
+      groups    = groups,
+      poolGrants = grants
+    )
+
+  /** Convenience: build the response for one user, doing the supervisor
+    * lookup inline. Returns `None` if the user no longer exists. */
+  def toResponseFor(userId: String): Option[UserResponse] =
+    sup.effectiveSetForUser(userId).map(eff => toResponse(eff, tenantNameMap))
+
+  private def tenantNameMap: Map[String, String] =
+    sup.listTenants().map(t => t.id -> t.displayName).toMap
+
+  // ---------- /user/create ----------
+
+  def createUser(req: UserCreateRequest): Out[UserResponse] =
+    sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
+      case Right(u)  =>
+        toResponseFor(u.id) match
+          case Some(r) => Right(r)
+          case None    => Left((StatusCode.InternalServerError,
+                                ErrorResponse("missing", s"created user ${u.id} not found")))
+      case Left(err) => Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err)))
+    }
+
+  // ---------- /user/update ----------
+
+  def updateUser(req: UserUpdateRequest): Out[UserResponse] =
+    sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
+      case Right(u)  =>
+        toResponseFor(u.id) match
+          case Some(r) => Right(r)
+          case None    => Left((StatusCode.NotFound,
+                                ErrorResponse("not_found", s"user ${u.id} not found")))
+      case Left(err) =>
+        val code = if err.startsWith("user not found") then StatusCode.NotFound else StatusCode.BadRequest
+        Left((code, ErrorResponse("invalid_user", err)))
+    }
+
+  // ---------- /user/delete ----------
+
+  def deleteUser(req: UserDeleteRequest): Out[Unit] =
+    sup.deleteUser(req.id).map {
+      case Right(_)  => Right(())
+      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+    }
+
+  // ---------- /user/list ----------
+
+  def listUsers(tenant: Option[String]): Out[UserListResponse] = IO.blocking {
+    val users     = sup.listUsers(tenant)
+    val tenantMap = tenantNameMap
+    val effs      = sup.effectiveSetsForUsers(users)
+    val rows      = users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
+    Right(UserListResponse(rows))
+  }
+
+  // ---------- /user/{id}/effective ----------
+
+  def effective(id: String): Out[EffectivePermissionsResponse] = IO.blocking {
+    sup.effectiveSetForUser(id) match
+      case None => Left((StatusCode.NotFound, ErrorResponse("not_found", s"user not found: $id")))
+      case Some(eff) =>
+        Right(EffectivePermissionsResponse(
+          user       = toResponse(eff, tenantNameMap),
+          roles      = eff.roles.map(toRoleResponse),
+          groups     = eff.groups.map(toGroupResponse),
+          pools      = eff.poolPerms.map(toPoolPermissionResponse),
+          tablePerms = eff.permissions.map(toRolePermissionResponse)
+        ))
+  }
+
+  // ---------- mapper helpers (shared with Role/Group/Pool handlers) ----------
+
+  def toRoleResponse(r: RbacRole): RoleResponse =
+    RoleResponse(
+      id          = r.id,
+      tenantId    = r.tenantId,
+      name        = r.name,
+      description = r.description,
+      createdAt   = r.createdAt
+        .map(_.toString)
+        .getOrElse(DateTimeFormatter.ISO_INSTANT.format(java.time.Instant.now()))
+    )
+
+  def toGroupResponse(g: RbacGroup): GroupResponse =
+    GroupResponse(
+      id          = g.id,
+      tenantId    = g.tenantId,
+      name        = g.name,
+      description = g.description
+    )
+
+  def toPoolPermissionResponse(p: PoolPermission): PoolPermissionResponse =
+    PoolPermissionResponse(
+      id        = p.id,
+      tenantId  = p.tenantId,
+      poolId    = p.poolId,
+      userId    = p.userId,
+      groupId   = p.groupId,
+      grantedAt = p.grantedAt.map(_.toString).getOrElse("")
+    )
+
+  def toRolePermissionResponse(p: RolePermission): RolePermissionResponse =
+    RolePermissionResponse(
+      id          = p.id,
+      roleId      = p.roleId,
+      catalogName = p.catalogName,
+      schemaName  = p.schemaName,
+      tableName   = p.tableName,
+      verb        = p.verb,
+      grantedAt   = p.grantedAt.map(_.toString).getOrElse("")
+    )
