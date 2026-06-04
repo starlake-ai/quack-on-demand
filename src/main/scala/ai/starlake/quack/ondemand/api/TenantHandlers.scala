@@ -11,17 +11,27 @@ final class TenantHandlers(sup: PoolSupervisor):
 
   private def toResponse(t: Tenant): TenantResponse =
     TenantResponse(
-      name     = t.displayName,
-      pools    = sup.listPoolsOfTenant(t.displayName),
-      disabled = t.disabled
+      name         = t.displayName,
+      pools        = sup.listPoolsOfTenant(t.displayName),
+      disabled     = t.disabled,
+      authProvider = t.authProvider,
+      authConfig   = t.authConfig
     )
 
   def createTenant(req: TenantRequest): Out[TenantResponse] =
     if req.name.isEmpty then
       IO.pure(Left((StatusCode.BadRequest,
         ErrorResponse("invalid_name", "tenant name must be non-empty"))))
+    else if !Tenant.ValidAuthProviders.contains(req.authProvider) then
+      IO.pure(Left((StatusCode.BadRequest,
+        ErrorResponse("invalid_auth_provider",
+          s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"))))
     else
-      sup.createTenant(Tenant(req.name)).map {
+      sup.createTenant(Tenant(
+        name         = req.name,
+        authProvider = req.authProvider,
+        authConfig   = req.authConfig
+      )).map {
         case Right(t)  => Right(toResponse(t))
         case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
       }

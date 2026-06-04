@@ -70,7 +70,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
         "qodstate_group", "qodstate_group_role",
         "qodstate_node", "qodstate_pool", "qodstate_pool_permission",
         "qodstate_role", "qodstate_role_permission",
-        "qodstate_tenant", "qodstate_tenant_db", "qodstate_tenant_identity",
+        "qodstate_tenant", "qodstate_tenant_db",
         "qodstate_user", "qodstate_user_group", "qodstate_user_role"
       )
     finally c.close()
@@ -87,8 +87,10 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "WHERE table_schema = 'public' AND table_name LIKE 'qodstate_%'"
       )
       rs.next()
-      // 6 control-plane tables + 7 RBAC tables (role, role_permission,
-      // group, user_group, user_role, group_role, pool_permission).
-      rs.getInt(1) shouldBe 13
+      // 5 control-plane tables (tenant, tenant_db, pool, node, user) +
+      // 7 RBAC tables (role, role_permission, group, user_group,
+      // user_role, group_role, pool_permission). qodstate_tenant_identity
+      // is gone -- auth provider is a tenant attribute now.
+      rs.getInt(1) shouldBe 12
     finally c.close()
   }

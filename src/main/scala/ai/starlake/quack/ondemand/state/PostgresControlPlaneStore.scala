@@ -29,23 +29,28 @@ final class PostgresControlPlaneStore(
 
   def upsertTenant(t: Tenant): Unit = withConn { c =>
     val ps = c.prepareStatement(
-      """INSERT INTO qodstate_tenant (id, display_name, disabled)
-        |VALUES (?, ?, ?)
+      """INSERT INTO qodstate_tenant
+        |  (id, display_name, disabled, auth_provider, auth_config)
+        |VALUES (?, ?, ?, ?, ?::jsonb)
         |ON CONFLICT (id) DO UPDATE SET
-        |  display_name = EXCLUDED.display_name,
-        |  disabled     = EXCLUDED.disabled""".stripMargin
+        |  display_name  = EXCLUDED.display_name,
+        |  disabled      = EXCLUDED.disabled,
+        |  auth_provider = EXCLUDED.auth_provider,
+        |  auth_config   = EXCLUDED.auth_config""".stripMargin
     )
     try
       ps.setString(1, t.id)
       ps.setString(2, if t.displayName.nonEmpty then t.displayName else t.name)
       ps.setBoolean(3, t.disabled)
+      ps.setString(4, t.authProvider)
+      ps.setString(5, mapToJson(t.authConfig))
       ps.executeUpdate()
     finally ps.close()
   }
 
   def listTenants(): List[Tenant] = withConn { c =>
     val rs = c.createStatement().executeQuery(
-      "SELECT id, display_name, disabled FROM qodstate_tenant ORDER BY display_name"
+      "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name"
     )
     try drain(rs)(readTenant)
     finally rs.close()
@@ -64,13 +69,16 @@ final class PostgresControlPlaneStore(
     c.setAutoCommit(false)
     try
       val tps = c.prepareStatement(
-        """INSERT INTO qodstate_tenant (id, display_name, disabled)
-          |VALUES (?, ?, ?)""".stripMargin
+        """INSERT INTO qodstate_tenant
+          |  (id, display_name, disabled, auth_provider, auth_config)
+          |VALUES (?, ?, ?, ?, ?::jsonb)""".stripMargin
       )
       try
         tps.setString(1, tenant.id)
         tps.setString(2, if tenant.displayName.nonEmpty then tenant.displayName else tenant.name)
         tps.setBoolean(3, tenant.disabled)
+        tps.setString(4, tenant.authProvider)
+        tps.setString(5, mapToJson(tenant.authConfig))
         tps.executeUpdate()
       finally tps.close()
 
@@ -111,10 +119,12 @@ final class PostgresControlPlaneStore(
   private def readTenant(rs: ResultSet): Tenant =
     val dn = rs.getString("display_name")
     Tenant(
-      id          = rs.getString("id"),
-      name        = dn,
-      displayName = dn,
-      disabled    = rs.getBoolean("disabled")
+      id           = rs.getString("id"),
+      name         = dn,
+      displayName  = dn,
+      disabled     = rs.getBoolean("disabled"),
+      authProvider = rs.getString("auth_provider"),
+      authConfig   = jsonToMap(rs.getString("auth_config"))
     )
 
   // ---------------- TenantDb ----------------
@@ -882,7 +892,7 @@ final class PostgresControlPlaneStore(
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
     ControlPlaneSnapshot(
-      tenants   = selectAll(c, "SELECT id, display_name, disabled FROM qodstate_tenant ORDER BY display_name", readTenant),
+      tenants   = selectAll(c, "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name", readTenant),
       tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled FROM qodstate_tenant_db ORDER BY name", readTenantDb),
       pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled FROM qodstate_pool ORDER BY name", readPool),
       nodes     = selectAll(c,
