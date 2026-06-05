@@ -140,9 +140,9 @@ gaps in the operator-visible signal.
 
 ---
 
-## Known gaps (ranked by ROI)
+## Known gaps
 
-### Tier 1 - make crash-restart boring
+### Make crash-restart boring
 
 1. **Graceful shutdown** - JVM SIGTERM handler that drains FlightSQL connections, signals
    the supervisor to persist final state, and exits cleanly. Today a `kill` mid-statement
@@ -160,7 +160,7 @@ gaps in the operator-visible signal.
    parks on `IO.never` keeping the JVM alive. Better: exit non-zero so the supervisor
    restarts the whole process.
 
-### Tier 2 - make node failures invisible
+### Make node failures invisible
 
 6. **Cold-boot node quarantine** - newly-restored nodes start with `healthy=false` for one
    `HealthProbe` tick (~5 s). Avoids routing traffic to a node that hasn't responded since
@@ -169,7 +169,7 @@ gaps in the operator-visible signal.
    `List.empty`, so every local-mode restart respawns nodes. Reading the PID file written
    at spawn time would let the manager adopt live children across restart.
 
-### Tier 3 - true multi-manager HA
+### True multi-manager HA
 
 8. **Postgres advisory-lock leader election** - [#11](https://github.com/starlake-ai/quack-on-demand/issues/11). Two managers run; the leader holds an advisory lock and serves all writes; the
    standby takes over within seconds when the lock expires. The hard part is *not* the

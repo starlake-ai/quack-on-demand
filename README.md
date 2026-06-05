@@ -26,19 +26,16 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 ## Contents
 
 - [Who is this for?](#who-is-this-for)
+- [Quick start](#quick-start)
 - [Features](#features)
 - [Architecture](#architecture)
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
 - [Configuration](#configuration)
-- [REST API](#rest-api)
-- [Admin UI](#admin-ui)
 - [Access control (RBAC)](#access-control-rbac)
-- [Tech stack](#tech-stack)
-- [Development](#development)
 - [License](#license)
 - [Community](#community)
 - [Contributing](#contributing)
+
+Companion files: [`QUICKSTART.md`](QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](RUNNING.md) (deployment paths + operator notes) - [`API.md`](API.md) (REST API reference) - [`RESILIENCE.md`](RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
 
 ---
 
@@ -125,7 +122,7 @@ Latency  p50:     ~60 ms
 **Browse the admin UI (optional) - 10 seconds**
    Open http://localhost:20900/ui/ in a browser. Log in as admin / admin
 
-Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, REST API recipes, the full loadtest parameter table, and the [operator's pre-prod checklist](RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](RUNNING.md)**.
+Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full loadtest parameter table, and the [operator's pre-prod checklist](RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](RUNNING.md)**. REST API reference is in **[`API.md`](API.md)**.
 
 ---
 
@@ -149,7 +146,7 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 ### Operability
 
-- **React admin console** at `/ui/` - tenant CRUD (with Databases · Pools · Auth provider tabs), pool CRUD, a dedicated **/users page** (Users · Groups · Roles · Identities tabs) with a per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
+- **React admin console** at `http://lcoalhost:20900/ui/` - tenant CRUD (with Databases · Pools · Auth provider tabs), pool CRUD, a dedicated **/users page** (Users · Groups · Roles · Identities tabs) with a per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
 - **Observability built in** - Prometheus scrape endpoint at `/metrics`, or push to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring (one sink at a time, picked via `metrics.sink`). Ships with a Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
 - **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](RESILIENCE.md)
 - **Every config key is overridable** via a `QOD_*` env var
@@ -229,20 +226,6 @@ Two databases per tenant-db deployment (control-plane `qod` + tenant-db `${tenan
 
 ---
 
-## Requirements
-
-| | Version | Notes |
-|---|---|---|
-| **JDK** | 17+ | Built and shipped on Temurin 17 (Dockerfile). Arrow's `arrow-memory-unsafe` allocator needs `--add-opens=java.base/java.nio` and `java.base/sun.nio.ch` on 17+. The assembly jar sets these via an `Add-Opens` manifest attribute so `java -jar` just works |
-| **Postgres** | **16+** | Bundled `postgres:16-alpine` image used by `docker-compose.yml`. The control-plane DB (`qod` by default) hosts the Liquibase-managed `qodstate_*` tables; each managed tenant-db (`${tenant}_${tenantDb}`, e.g. `tpch_tpch1`) is a separate database next to it carrying the DuckLake `__ducklake_*` catalog. `scripts/run-jar.sh` gates the server version |
-| **DuckDB CLI + libduckdb** | matched to the bundled `libduckdb_java` | Each Quack node is a child `duckdb` process; the manager also loads `libduckdb` natively for the DuckLake catalog reader. The Docker image ships both. For **native** runs install `duckdb` on `$PATH` and `libduckdb.{so,dylib}` somewhere `System.loadLibrary` finds it, or set `QOD_NATIVE_CLIENT=false` to disable the native reader (see [`RUNNING.md`](RUNNING.md)) |
-| **Docker** | Engine 24+, Compose v2 | Compose path only |
-| **Scala / sbt** | 3.7, sbt 1.x | Source builds only not needed if you run the published jar or Docker image |
-| **OS** | Linux, macOS | Manager and nodes; the assembly jar bundles `libduckdb_java.so` for `linux_amd64`, `linux_arm64`, and `osx_universal` |
-
----
-
-
 ## Configuration
 
 Every scalar in `src/main/resources/application.conf` accepts a matching `QOD_*` env-var override. The most-used:
@@ -264,68 +247,6 @@ Every scalar in `src/main/resources/application.conf` accepts a matching `QOD_*`
 | Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
 
 Pluggable auth backends, K8s runtime, JWT keys, per-tenant bootstrap overrides - see `application.conf` for the full surface.
-
----
-
-## REST API
-
-All endpoints under `/api/*` require a valid `X-API-Key` (either the static `QOD_API_KEY` or a UI session token from `/api/auth/login`). `/health` and `/api/config/client` are open; `/ui/*` is open (the React app gates itself).
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/auth/login`           | mint a session token (admin role required) |
-| `POST` | `/api/auth/logout`          | revoke the current token |
-| `GET`  | `/api/auth/whoami`          | verify session |
-| `GET`  | `/api/tenant/list`          | list tenants + effective metastore |
-| `POST` | `/api/tenant/create`        | create a tenant |
-| `POST` | `/api/tenant/setMetastore`  | patch a tenant's metastore overrides |
-| `POST` | `/api/tenant/delete`        | delete a tenant (must have no pools) |
-| `GET`  | `/api/pool/list`            | list pools with live node metrics |
-| `POST` | `/api/pool/create`          | spin up a pool |
-| `POST` | `/api/pool/scale`           | scale up/down with role redistribution |
-| `POST` | `/api/pool/stop`            | tear down |
-| `POST` | `/api/node/setMaxConcurrent`| per-node concurrency cap |
-| `POST` | `/api/node/quarantine`      | mark a node unhealthy |
-| `POST` | `/api/node/restart`         | drain + restart a node |
-| `GET`  | `/api/user/list?tenant=…`   | list users (omit `tenant` for every user incl. superusers) |
-| `POST` | `/api/user/create`          | create a `(tenant?, username, password, role)` principal; `tenant=null` = superuser |
-| `POST` | `/api/user/update`          | rotate password / role |
-| `POST` | `/api/user/delete`          | delete a user (cascades memberships + pool grants) |
-| `GET`  | `/api/user/:id/effective`   | closure of roles · groups · table permissions · pool grants for one user |
-| `GET`  | `/api/role/list?tenant=…`   | list roles in a tenant |
-| `POST` | `/api/role/create`          | create a role |
-| `POST` | `/api/role/delete`          | delete a role |
-| `GET`  | `/api/role/permission/list?roleId=…` | list table permissions attached to a role |
-| `POST` | `/api/role/permission/grant`| attach `(catalog, schema, table, verb)` to a role (`*` wildcard, `verb in SELECT/INSERT/UPDATE/DELETE/ALL`) |
-| `POST` | `/api/role/permission/revoke` | detach a single permission row |
-| `GET`  | `/api/group/list?tenant=…`  | list groups |
-| `POST` | `/api/group/create`         | create a group |
-| `POST` | `/api/group/delete`         | delete a group |
-| `POST` | `/api/membership/user/role` | add/remove a user ↔ role membership |
-| `POST` | `/api/membership/user/group` | add/remove a user ↔ group membership |
-| `POST` | `/api/membership/group/role` | add/remove a group ↔ role membership |
-| `GET`  | `/api/pool/permission/list?tenant=&userId=&groupId=` | list pool grants |
-| `POST` | `/api/pool/permission/grant`| grant a `(tenant, pool?)` to a user OR a group (`pool=null` = every pool in tenant) |
-| `POST` | `/api/pool/permission/revoke` | revoke a pool grant |
-| `GET`  | `/api/identity/list?tenantId=…` | list verified-identity → tenant rows |
-| `POST` | `/api/identity/create`      | add an `(issuer, externalId)` → tenant mapping |
-| `POST` | `/api/identity/delete`      | revoke an identity row |
-| `GET`  | `/api/config/client`        | discovery: edge host/port/TLS (open) |
-| `GET`  | `/health`                   | liveness + pool/node counts (open) |
-| `GET`  | `/metrics`                  | Prometheus text-format scrape (open). Disabled when `metrics.sink` pushes to CloudWatch / Azure Monitor / GCP Cloud Monitoring |
-
----
-
-## Admin UI
-
-| Page | What it shows |
-|---|---|
-| **Login** | Username/password, admin-role gated |
-| **/ ** (Tenants) | List + create + delete tenants, effective metastore preview |
-| **/tenant/:tenant** | Tenant detail · **Databases · Pools · Auth provider** tabs |
-| **/users** | Tenant selector + **Users · Groups · Roles · Identities** tabs. Per-user "Effective…" drilldown showing the closure of roles, groups, table permissions and pool grants |
-| **/pool/:tenant/:pool** | Pool nodes, JDBC/ODBC/ADBC connection strings (with `tenant`/`pool` baked in), scale/stop |
-| **/nodes** | Live cluster dashboard: per-node `inFlight`, `totalServed`, EWMA latency, role + health badges, per-tenant filter, auto-refresh every 2s |
 
 ---
 
@@ -399,67 +320,6 @@ curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/membership/user
 
 # Inspect the closure
 curl -sS -H "X-API-Key: $TOK" http://localhost:20900/api/user/5/effective
-```
-
----
-
-## Tech stack
-
-- **Scala 3.7** - `enum`, given/using, derived ConfigReader
-- **Cats Effect** + **fs2** for the runtime
-- **Tapir** + **HTTP4s Ember** for the REST API
-- **Apache Arrow Flight SQL 14** + `arrow-memory-unsafe` (pinned via `-Darrow.allocation.manager.type=Unsafe`)
-- **DuckLake** for per-tenant catalog metadata + S3/FS data storage
-- **PostgreSQL 16+** for catalog metadata + control-plane state (Liquibase-managed `qodstate_*` tables for tenants/pools/users/RBAC; legacy `slkstate_pool_state` blob when `stateStorage=file`)
-- **React 18** + **Vite** + **react-router-dom** for the SPA (no UI framework - single dark-theme CSS file)
-
----
-
-## Development
-
-```bash
-# Run the manager from sbt (forks JVM so `--add-opens` takes effect)
-sbt run
-
-# Run the test suite (714+ tests)
-sbt test
-
-# Build the uber-jar at distrib/quack-on-demand-assembly-*.jar
-sbt assembly
-
-# UI dev loop (proxies /api/* to localhost:20900)
-cd ui && npm install && npm run dev
-```
-
-Project layout:
-
-```
-src/main/scala/ai/starlake/
-├── quack/
-│   ├── Main.scala                 # IOApp + wiring
-│   ├── Config.scala               # ManagerConfig, FlightConfig, AdminConfig
-│   ├── edge/                      # FlightSQL edge + router + adapter
-│   │   ├── auth/                  # AuthenticationService + provider chain
-│   │   ├── catalog/               # DuckLakeCatalogResolver (table/view lookup)
-│   │   ├── config/                # AuthenticationConfig, AclConfig, SessionConfig, …
-│   │   └── sql/                   # RBAC + statement validators (PostgresAclValidator over EffectiveSet)
-│   ├── rbac/                      # RBAC graph models + EffectiveSet resolver
-│   ├── ondemand/                  # Pool supervisor + handlers + state
-│   │   ├── api/                   # Tapir endpoints + DTOs + handlers
-│   │   │                          # (user/role/group/membership/pool-permission/identity)
-│   │   ├── runtime/               # Local + Kubernetes backends
-│   │   └── state/                 # ControlPlaneStore (Postgres / file)
-│   └── route/                     # StatementClassifier + Router + RoleMatcher
-└── acl/                           # SQL parser (parser-only after Phase C; file-based store unwired)
-scripts/
-├── run-jar.sh                     # Boot the manager from the uber-jar
-├── stop-jar.sh                    # SIGTERM → SIGKILL escalation
-├── run-docker-compose.sh          # Full stack (Postgres + manager) with optional LOAD_TPCH=N seed
-├── stop-docker-compose.sh         # compose down (+ NUKE=1 to wipe host state)
-├── load-tpch-dbgen.sh             # Generate TPC-H (SF override via $SF) into a tenant-db via dbgen()
-└── spawn-quack-node.sh            # Called by LocalQuackBackend; do not invoke directly
-ui/
-└── src/                           # React SPA, built into src/main/resources/ui
 ```
 
 ---
