@@ -5,9 +5,9 @@ that matches what you already have on hand.
 
 | | Postgres | Quack manager | Use when |
 |---|---|---|---|
-| **[Path 1 - Native](#path-1--native-run-against-an-external-postgres)** | external | bare JVM (`java -jar`) | you already have Postgres locally or in your network, and want the fastest dev loop |
-| **[Path 2 - Docker, external Postgres](#path-2--docker-container-against-an-external-postgres)** | external | container | you want the manager isolated (Docker) but Postgres is somewhere else (RDS, Cloud SQL, hosted, host-installed) |
-| **[Path 3 - Docker compose](#path-3--docker-compose-bundled-postgres--host-volumes)** | container | container | you want one command to bring up the whole stack; Postgres + DuckLake files persist on the host |
+| **[Path 1 - Native](#path-1---native-run-against-an-external-postgres)** | external | bare JVM (`java -jar`) | you already have Postgres locally or in your network, and want the fastest dev loop |
+| **[Path 2 - Docker, external Postgres](#path-2---docker-container-against-an-external-postgres)** | external | container | you want the manager isolated (Docker) but Postgres is somewhere else (RDS, Cloud SQL, hosted, host-installed) |
+| **[Path 3 - Docker compose](#path-3---docker-compose-bundled-postgres--host-volumes)** | container | container | you want one command to bring up the whole stack; Postgres + DuckLake files persist on the host |
 
 All three paths use **the same `application.conf`** at runtime - knobs are
 flipped via `QOD_*` env vars. None require the loading of any dataset.
@@ -154,24 +154,34 @@ with `STOP_TIMEOUT=60`).
 
 ### Seed with TPC-H and Run
 
-The image ships `/app/scripts/load-tpch-dbgen.sh`. `PG_*` and DuckLake env
-vars are already set inside the container, so once the manager is up:
+The image ships `/app/scripts/load-tpch-dbgen.sh`. `PG_*` env vars are
+already set inside the container; the loader needs to be pointed at the
+right tenant-db (`tpch_tpch1` by default; the loader's own default of
+`tpch` is pre-refactor):
 
 ```bash
 # Default scale factor 1.
-docker exec -it quack-on-demand /app/scripts/load-tpch-dbgen.sh
+docker exec -it \
+  -e DB_NAME=tpch_tpch1 \
+  -e DATA_PATH=/app/ducklake/tpch_tpch1 \
+  quack-on-demand /app/scripts/load-tpch-dbgen.sh
 
 # Larger scale. The low-level loader takes its scale factor via an
 # internal `SF` env var (matches DuckDB's dbgen(sf=...) API). The
 # user-facing wrappers (run-jar.sh / run-docker-compose.sh) use
 # `LOAD_TPCH=N` instead and forward it to the loader as `SF=N`.
-docker exec -it -e SF=10 quack-on-demand /app/scripts/load-tpch-dbgen.sh
+docker exec -it \
+  -e DB_NAME=tpch_tpch1 \
+  -e DATA_PATH=/app/ducklake/tpch_tpch1 \
+  -e SF=10 \
+  quack-on-demand /app/scripts/load-tpch-dbgen.sh
 ```
 
 Paths match by construction because the loader runs inside the container
-(it sees `DATA_PATH=/app/ducklake/<db>`, the same path the manager later
-spawns Quack nodes for). The loader is idempotent: a second `docker exec`
-returns immediately when `tpch1.lineitem` is already populated.
+(it sees `DATA_PATH=/app/ducklake/tpch_tpch1`, the same path the manager
+derives from the global `QOD_DUCKLAKE_DATA_PATH=/app/ducklake/tpch` root
+plus the bootstrap tenant-db name). The loader is idempotent: a second
+`docker exec` returns immediately when `tpch1.lineitem` is already populated.
 
 ### Override knobs
 
@@ -185,7 +195,7 @@ Env vars at `run-docker.sh` invocation time:
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin` | seeded into `qodstate_user` (as a superuser, `tenant IS NULL`) when `AUTH=true` |
 | `TLS` | `false` | flip to `true` to keep TLS on |
 | `API_KEY` | unset | gates `/api/*` behind `X-API-Key` |
-| `DATA_PATH` | `$PWD/ducklake` | host dir bind-mounted to `/app/ducklake` |
+| `DATA_PATH` | `$PWD/ducklake` | host dir bind-mounted to `/app/ducklake` (root; manager derives `/app/ducklake/<tenant>_<db>` per tenant-db) |
 | `MANAGER_PORT` / `EDGE_PORT` | 20900 / 31338 | host port mappings |
 
 > **Linux note:** the script doesn't add `--add-host=host.docker.internal:host-gateway`.
@@ -293,11 +303,14 @@ EOF
 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge end-to-end.
+#    --tenant/--pool default to tpch/sales (the bootstrap), no flag needed.
 ./scripts/loadtest/loadtest.py -w 2 -i 5
 ```
 
 Verified path on a fresh boot: TPC-H at scale factor 1 -> ~313 MB of
-parquet under `./seaweedfs/`, loadtest 10/10 OK at p50 ~40 ms over TLS.
+parquet under `./seaweedfs/` (the manager derives `s3://ducklake/tpch_tpch1/`
+from the `QOD_DUCKLAKE_DATA_PATH=s3://ducklake/tpch` root + the bootstrap
+tenant-db name). Loadtest 10/10 OK at p50 ~60 ms over TLS.
 
 Persistence: `./seaweedfs/` on the host (parquet) and
 `./seaweedfs-config/s3.json` (gateway credentials). `NUKE=1
@@ -312,7 +325,7 @@ The S3 API is also exposed on the host at `localhost:8333` for
 ```bash
 aws --endpoint-url http://localhost:8333 \
     --region us-east-1 \
-    s3 ls s3://ducklake/tpch/ --recursive
+    s3 ls s3://ducklake/tpch_tpch1/ --recursive
 ```
 
 #### Option B - external S3 (AWS, MinIO, R2, GCS HMAC)
@@ -347,6 +360,7 @@ EOF
 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge.
+#    --tenant/--pool default to tpch/sales (the bootstrap), no flag needed.
 ./scripts/loadtest/loadtest.py -w 2 -i 5
 ```
 
@@ -557,7 +571,11 @@ Once the manager is up:
 
 - **Admin console:** `http://localhost:20900/ui/`
 - **FlightSQL JDBC:**
-  `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true`
+  `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales`
+
+  `tenant` / `pool` are required (post-RBAC the edge needs them to pick
+  the right Quack-node pool, even for the superuser admin). The JDBC
+  driver forwards every URL query parameter as a gRPC header.
 - **FlightSQL ODBC** (Apache Arrow Flight SQL ODBC Driver from
   [arrow-adbc](https://arrow.apache.org/adbc/main/driver/flight_sql.html#odbc)
   or the [Dremio ODBC connector](https://github.com/apache/arrow-adbc/tree/main/c/driver/flightsql)):
@@ -577,7 +595,9 @@ Once the manager is up:
   Driver={Apache Arrow Flight SQL ODBC Driver};
   HOST=localhost;PORT=31338;
   UseEncryption=true;DisableCertificateVerification=true;
-  UID=admin;PWD=admin
+  UID=admin;PWD=admin;
+  adbc.flight.sql.rpc.call_header.tenant=tpch;
+  adbc.flight.sql.rpc.call_header.pool=sales
   ```
 
   Or define a DSN in `~/.odbc.ini`:
@@ -591,7 +611,13 @@ Once the manager is up:
   DisableCertificateVerification = true
   UID          = admin
   PWD          = admin
+  adbc.flight.sql.rpc.call_header.tenant = tpch
+  adbc.flight.sql.rpc.call_header.pool   = sales
   ```
+
+  The two `adbc.flight.sql.rpc.call_header.*` entries are the ODBC
+  equivalent of the JDBC URL's `tenant=...&pool=...` params; without
+  them the handshake fails with `missing tenant scope for Basic auth`.
 
   Smoke test with `isql`:
 
@@ -608,8 +634,11 @@ Once the manager is up:
   `POST /api/auth/login` to get an `X-API-Key` session token when
   `AUTH=true`)
 - **Load tester (Python ADBC):** drives the FlightSQL edge concurrently and
-  reports throughput + latency percentiles. Defaults to a TPC-H query mix -
-  pair it with [Seed with TPC-H and Run](#seed-with-tpc-h-and-run) above.
+  reports throughput + latency percentiles. Defaults to a TPC-H query mix
+  against `tenant=tpch / pool=sales` (the bootstrap), so the zero-arg
+  invocation works out of the box; override with `--tenant`/`--pool` or
+  `LT_TENANT`/`LT_POOL`. Pair it with
+  [Seed with TPC-H and Run](#seed-with-tpc-h-and-run) above.
 
   > **URL scheme must match the server's TLS setting.** Native and the
   > shipped compose `.env.example` both default to TLS **on**, so
@@ -660,6 +689,8 @@ Once the manager is up:
   | `--warmup` | `LT_WARMUP` | `5` | throwaway iterations per worker before timing starts |
   | `-q`, `--query` | `LT_QUERY` | unset | single SQL to repeat; unset cycles the TPC-H mix (Q1, Q3, Q5, Q6, Q10, Q12, Q14) |
   | `--schema` | `LT_SCHEMA` | `tpch1` | schema prefix injected into the default mix so it resolves regardless of the session's default schema (ignored with `-q`) |
+  | `--tenant` | `LT_TENANT` | `tpch` | `tenant` gRPC header (FlightSQL routing). Set to `""` to skip the header (which will then fail the handshake unless the server has been changed) |
+  | `--pool`   | `LT_POOL`   | `sales` | `pool` gRPC header (FlightSQL routing). Same `""` escape hatch as `--tenant`. |
   | `--insecure` | `LT_INSECURE` | `true` | skip TLS cert verification (the auto-generated cert is self-signed). Only meaningful when `--url` is `grpc+tls://`. |
 
   Start small (`-w 2 -i 5`) to confirm URL scheme / auth / TLS work, then
