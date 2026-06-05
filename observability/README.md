@@ -24,36 +24,77 @@ scrape_configs:
 
 ### 2.1 Local stack (Prometheus + Grafana via docker compose)
 
-For testing on a laptop, this directory ships a tiny compose stack that
-scrapes the manager running on the host and serves a Grafana with the
-dashboard auto-loaded.
+The bundled `scripts/run-docker-compose.sh` brings up the whole stack
+in one shot: manager + Postgres + Prometheus + Grafana, with TPC-H
+SF=1 already loaded into the bootstrap tenant-db so the dashboard
+has live data to chart the moment Grafana opens.
 
 ```bash
-# 1. Start the manager on the host (Prometheus sink is the default).
-./scripts/run-jar.sh                       # or NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+# One command: manager + Postgres + TPC-H SF=1 seed + Prometheus + Grafana.
+LOAD_TPCH=1 PROFILES=observability ./scripts/run-docker-compose.sh
 
-# 2. Bring up Prometheus + Grafana.
+# Wipe first if you want a clean slate.
+NUKE=1 LOAD_TPCH=1 PROFILES=observability ./scripts/run-docker-compose.sh
+```
+
+The `observability` compose profile pulls in the Prometheus + Grafana
+containers defined in the top-level `docker-compose.yml`; Prometheus
+scrapes the manager container directly over the compose network (no
+`host.docker.internal` indirection needed). Grafana is preprovisioned
+with the Prometheus datasource (UID `prometheus-local`) so the bundled
+dashboard renders without manual datasource selection.
+
+```text
+# UIs (printed by run-docker-compose.sh at the end of boot)
+Manager UI:    http://localhost:20900/ui/       (admin / admin)
+Prometheus:    http://localhost:9090            (try query: up)
+Grafana:       http://localhost:3000            (anonymous admin; no login)
+               Dashboard: "Quack-on-Demand — Operator Overview"
+```
+
+Tear down:
+
+```bash
+# Stop the full stack (keeps pgdata + Prometheus history).
+docker compose -f docker-compose.yml --profile observability down
+
+# Or wipe everything and start fresh next time.
+NUKE=1 PROFILES=observability ./scripts/run-docker-compose.sh
+```
+
+This directory's standalone `docker-compose.yml` is a secondary
+option for when the manager runs **outside** docker compose (e.g.
+inside Kubernetes reached via port-forward); see Section 2.2.
+
+### 2.2 Standalone Prometheus + Grafana (manager runs elsewhere)
+
+When the manager is **not** part of the docker-compose stack -- say
+it runs inside Kubernetes (via `helm install` against a kind cluster
+or a real cluster) and you port-forward `:20900` to the host -- bring
+up only the observability containers from this directory:
+
+```bash
+# Manager somewhere else (example: kube port-forward)
+kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900 &
+
+# Just Prometheus + Grafana, scraping the port-forwarded manager
+# via host.docker.internal:20900 (mapped through extra_hosts on Linux,
+# automatic on Docker Desktop).
 docker compose -f observability/docker-compose.yml up -d
 
-# 3. Open the UIs.
-# Prometheus:    http://localhost:9090           (try query: up)
-# Grafana:       http://localhost:3000           (anonymous admin; no login)
-#                Dashboard: "Quack-on-Demand — Operator Overview"
-```
+# Grafana http://localhost:3000  (anonymous admin)
+# Prometheus http://localhost:9090
 
-Both containers reach the host's `:20900` via `host.docker.internal`,
-which resolves automatically on Docker Desktop and is mapped through
-`extra_hosts` for Linux. Grafana is preprovisioned with the Prometheus
-datasource (UID `prometheus-local`) so the bundled dashboard renders
-without manual selection.
-
-```bash
-# Stop the stack (keeps data volumes; metrics history is preserved).
+# Tear down (keeps history)
 docker compose -f observability/docker-compose.yml down
 
-# Wipe data volumes too (fresh start).
+# Wipe data volumes too
 docker compose -f observability/docker-compose.yml down -v
 ```
+
+Grafana's preprovisioning is identical to the integrated path: same
+datasource UID, same auto-loaded dashboard. Pick whichever path
+matches where your manager lives.
 
 ## 3. Cloud push (`sink = "aws" | "azure" | "gcp"`)
 
@@ -77,15 +118,7 @@ Push cadence defaults to 60 s per backend. Override with:
 
 Set `metrics.sink = "none"` (or `QOD_METRICS_SINK=none`). No `/metrics` endpoint is mounted; no cloud push occurs; all counters, timers, and gauges registered against the manager become no-ops.
 
-## 5. CloudWatch cost note
-
-CloudWatch charges approximately $0.30 per custom metric per month. A worst-case deployment with 50 tenants × 5 pools × ~5 nodes × 3 roles can produce 5 000–10 000 active series, costing roughly **$2 000/month**. Before enabling `sink = "aws"` in production:
-
-- Drop high-cardinality labels such as `node_id` from non-essential panels.
-- Aggregate at the pool or tenant level rather than per-node where possible.
-- Consider keeping Prometheus as the sink and scraping into a managed Prometheus (Amazon Managed Service for Prometheus, Google Managed Prometheus) to avoid per-series CloudWatch costs.
-
-## 6. Common labels
+## 5. Common labels
 
 Set the following environment variables to attach static labels to every emitted series. These are useful for distinguishing environments in a shared Grafana instance (e.g. `prod-eu`, `prod-us`, `staging`):
 
@@ -101,7 +134,7 @@ export QOD_METRICS_DEPLOYMENT=prod-eu
 export QOD_METRICS_REGION=eu-west-1
 ```
 
-## 7. Grafana dashboard
+## 6. Grafana dashboard
 
 `grafana-dashboard.json` is a single-screen operator overview covering all key signals. It was validated with `python3 -m json.tool` and is ready to import.
 
