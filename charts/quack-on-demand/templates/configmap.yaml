@@ -12,6 +12,7 @@ data:
   QOD_PG_PORT:             {{ .Values.postgres.port | quote }}
   QOD_PG_USER:             {{ .Values.postgres.user | quote }}
   QOD_PG_DBNAME:           {{ .Values.postgres.dbName | quote }}
+  QOD_PG_SCHEMA:           {{ .Values.postgres.schema | quote }}
   QOD_DUCKLAKE_DATA_PATH:  {{ .Values.storage.dataPath | quote }}
 
   # ---- K8s backend ----------------------------------------------------------
@@ -29,6 +30,7 @@ data:
   # ---- Bootstrap tenant + pool ---------------------------------------------
   QOD_BOOTSTRAP_ENABLED:   {{ .Values.bootstrap.enabled | quote }}
   QOD_BOOTSTRAP_TENANT:    {{ .Values.bootstrap.tenant | quote }}
+  QOD_BOOTSTRAP_TENANTDB:  {{ .Values.bootstrap.tenantDb | quote }}
   QOD_BOOTSTRAP_POOL:      {{ .Values.bootstrap.pool | quote }}
   QOD_BOOTSTRAP_WRITEONLY: {{ .Values.bootstrap.roleDistribution.writeonly | quote }}
   QOD_BOOTSTRAP_READONLY:  {{ .Values.bootstrap.roleDistribution.readonly  | quote }}

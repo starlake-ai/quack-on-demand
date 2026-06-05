@@ -56,7 +56,7 @@ spec:
                   name: postgres
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              value: tpch
+              value: qod
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
@@ -64,7 +64,7 @@ spec:
               mountPath: /var/lib/postgresql/data
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "postgres", "-d", "tpch"]
+              command: ["pg_isready", "-U", "postgres", "-d", "qod"]
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3

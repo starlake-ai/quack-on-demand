@@ -113,18 +113,12 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   if (browsing != null) {
     return (
       <div className="card">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-          <div className="card-title" style={{ margin: 0 }}>
-            Pool &mdash; <code>{browsing.tenantDb}</code> / <code>{browsing.pool}</code>
-          </div>
-          <button onClick={() => setBrowsing(null)}>&larr; Back to pools</button>
-        </div>
         <PoolDetailBody
           tenant={tenant}
           tenantDb={browsing.tenantDb}
           pool={browsing.pool}
           onStopped={() => { setBrowsing(null); void reloadPools(); }}
-          showBack={false}
+          onBack={() => setBrowsing(null)}
         />
       </div>
     );

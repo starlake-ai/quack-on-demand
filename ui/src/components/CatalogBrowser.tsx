@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
 } from '../api/types';
+import TableSchemaCard from './TableSchemaCard';
 
 /** Schema + table browser for a single (tenant, tenantDb). Pure body
   * panel: no tenant / database selectors, no breadcrumb -- the caller
@@ -22,6 +22,10 @@ export default function CatalogBrowser({
   const [tables, setTables]   = useState<CatalogTableEntry[]>([]);
   const [filter, setFilter]   = useState<string>('');
   const [error, setError]     = useState<string | null>(null);
+  // Name of the currently-expanded table whose schema card is shown
+  // inline beneath its row. Only one card open at a time. Reset when
+  // the parent schema changes.
+  const [expandedTable, setExpandedTable] = useState<string | null>(null);
 
   useEffect(() => {
     if (!tenant || !tenantDb) { setSchemas([]); return; }
@@ -37,6 +41,7 @@ export default function CatalogBrowser({
     // Reset the filter when the user picks a different schema - a stale
     // string typed against tpch1 would silently hide every row in main.
     setFilter('');
+    setExpandedTable(null);
     api.listCatalogTables(tenant, tenantDb, schema)
       .then(setTables)
       .catch(e => setError(String(e)));
@@ -116,24 +121,47 @@ export default function CatalogBrowser({
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredTables.map(t => (
-                      <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
-                        <td>
-                          <Link to={`/catalog/${encodeURIComponent(tenant)}/${encodeURIComponent(tenantDb)}/${encodeURIComponent(schema)}/${encodeURIComponent(t.name)}`}>
-                            {t.name}
-                          </Link>
-                        </td>
-                        <td align="right">
-                          {t.rowCount < 0 ? <em style={{ color: '#888' }}>--</em> : t.rowCount.toLocaleString()}
-                        </td>
-                        <td align="right">{t.dataFileCount}</td>
-                        <td>
-                          {t.folder
-                            ? <code style={{ fontSize: '0.85em', color: '#444' }}>{t.folder}</code>
-                            : <em style={{ color: '#888' }}>--</em>}
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredTables.flatMap(t => {
+                      const isOpen = expandedTable === t.name;
+                      const row = (
+                        <tr key={t.name} style={{ borderTop: '1px solid #eee' }}>
+                          <td>
+                            <button
+                              type="button"
+                              className="user-name-toggle"
+                              aria-expanded={isOpen}
+                              title={isOpen ? 'Hide schema' : 'Show schema'}
+                              onClick={() => setExpandedTable(isOpen ? null : t.name)}
+                            >
+                              <span className="caret">{isOpen ? '▾' : '▸'}</span>
+                              <code>{t.name}</code>
+                            </button>
+                          </td>
+                          <td align="right">
+                            {t.rowCount < 0 ? <em style={{ color: '#888' }}>--</em> : t.rowCount.toLocaleString()}
+                          </td>
+                          <td align="right">{t.dataFileCount}</td>
+                          <td>
+                            {t.folder
+                              ? <code style={{ fontSize: '0.85em', color: '#444' }}>{t.folder}</code>
+                              : <em style={{ color: '#888' }}>--</em>}
+                          </td>
+                        </tr>
+                      );
+                      if (!isOpen) return [row];
+                      return [row, (
+                        <tr key={t.name + '-schema'} className="expanded-row">
+                          <td colSpan={4}>
+                            <TableSchemaCard
+                              tenant={tenant}
+                              tenantDb={tenantDb}
+                              schema={schema}
+                              table={t.name}
+                            />
+                          </td>
+                        </tr>
+                      )];
+                    })}
                   </tbody>
                 </table>
               )
