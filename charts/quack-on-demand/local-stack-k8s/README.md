@@ -1,4 +1,4 @@
-# Local test rig (kind + Helm)
+# WIP Local test rig (kind + Helm)
 
 End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) cluster. The rig is intentionally self-contained — it does not require an external Postgres or a published image.
 
