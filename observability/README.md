@@ -4,6 +4,8 @@
 
 This directory documents the observability surface of the Quack-on-Demand manager process. Metrics are collected via Micrometer and routed to exactly one sink per process. The active sink is selected by the `quack-on-demand.metrics.sink` key in `application.conf`, overridable at runtime with `QOD_METRICS_SINK`. Supported values are `prometheus`, `aws`, `azure`, `gcp`, and `none`.
 
+![Grafana Dashboard](grafana.jpg)
+
 ## 2. Prometheus pull (`sink = "prometheus"`)
 
 Prometheus is the default sink. When active, the manager exposes a standard scrape endpoint with no authentication (same policy as `/health`):
