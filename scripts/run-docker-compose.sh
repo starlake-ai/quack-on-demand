@@ -339,6 +339,23 @@ if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
   root_parent="$(dirname "$root_data_path")"
   data_path="$root_parent/$tenant_db_name"
 
+  # The manager image is JRE-only and does not ship psql, so
+  # load-tpch-dbgen.sh's `CREATE DATABASE` guard silently no-ops in the
+  # container. Pre-create the tenant-db here from the postgres container
+  # (where psql is obviously present) so the subsequent ATTACH inside
+  # duckdb does not faceplant on a missing database. Idempotent: the
+  # `\gexec` form runs CREATE DATABASE only when pg_database.datname is
+  # absent.
+  echo "ensuring tenant-db '$tenant_db_name' exists on the postgres container..."
+  docker compose -f "$COMPOSE_FILE" exec -T \
+    -e PGPASSWORD="$pg_pass" \
+    postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -tAc \
+      "SELECT format('CREATE DATABASE %I', '$tenant_db_name') \
+       WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$tenant_db_name')" \
+    | docker compose -f "$COMPOSE_FILE" exec -T \
+        -e PGPASSWORD="$pg_pass" \
+        postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
+
   echo "seeding TPC-H (db=$tenant_db_name, schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
   docker compose -f "$COMPOSE_FILE" exec \
     -e PG_HOST=postgres \
