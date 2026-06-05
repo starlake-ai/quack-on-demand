@@ -31,7 +31,22 @@ export default function Nodes() {
   const [nodeFilter, setNodeFilter] = useState<string>(searchParams.get('node') ?? '');
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
+  // Row index whose Copy button was just clicked, for the brief "Copied"
+  // feedback. Cleared on a timeout.
+  const [copied, setCopied] = useState<number | null>(null);
   const prev = useRef<Record<string, Sample>>({});
+
+  async function copySql(sql: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(idx);
+      window.setTimeout(() => setCopied(c => (c === idx ? null : c)), 1500);
+    } catch {
+      // Older browsers or non-secure contexts: clipboard API is unavailable.
+      // Surface the failure quietly; the SQL is still visible to manually copy.
+      setCopied(null);
+    }
+  }
 
   // Keep the URL and the filter dropdown in sync so deep-linked views
   // stay shareable and the back button works.
@@ -257,13 +272,23 @@ export default function Nodes() {
                       <td><StatusBadge status={h.status} /></td>
                       <td style={{ textAlign: 'right' }}>{h.durationMs} ms</td>
                       <td>
-                        <pre style={{
-                          margin: 0, fontSize: '.85em',
-                          whiteSpace: isOpen ? 'pre-wrap' : 'nowrap',
-                          overflow: isOpen ? 'visible' : 'hidden',
-                          textOverflow: 'ellipsis',
-                          maxWidth: isOpen ? 'none' : '500px',
-                        }}>{h.sql.trim()}</pre>
+                        <div className="sql-cell">
+                          <pre style={{
+                            margin: 0, fontSize: '.85em',
+                            whiteSpace: isOpen ? 'pre-wrap' : 'nowrap',
+                            overflow: isOpen ? 'visible' : 'hidden',
+                            textOverflow: 'ellipsis',
+                            maxWidth: isOpen ? 'none' : '500px',
+                          }}>{h.sql.trim()}</pre>
+                          <button
+                            type="button"
+                            className="copy-btn"
+                            title="Copy SQL to clipboard"
+                            onClick={e => { e.stopPropagation(); void copySql(h.sql, i); }}
+                          >
+                            {copied === i ? 'Copied' : 'Copy'}
+                          </button>
+                        </div>
                         {h.error && isOpen && (
                           <p className="login-err" style={{ marginTop: 4 }}>{h.error}</p>
                         )}

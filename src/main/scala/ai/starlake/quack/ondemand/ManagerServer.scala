@@ -35,7 +35,8 @@ final class ManagerServer(
     roles:           RoleHandlers,
     groups:          GroupHandlers,
     memberships:     MembershipHandlers,
-    poolPermissions: PoolPermissionHandlers
+    poolPermissions: PoolPermissionHandlers,
+    serverConfig:    ConfigHandlers
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -169,7 +170,8 @@ final class ManagerServer(
           tenantClaim   = edgeCfg.tenantClaim,
           authEnabled   = authEnabled
         )
-      )))
+      ))),
+      Endpoints.serverConfig.serverLogic(_ => serverConfig.list)
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)

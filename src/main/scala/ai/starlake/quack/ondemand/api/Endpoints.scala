@@ -55,6 +55,12 @@ object Endpoints:
   val clientConfig: PublicEndpoint[Unit, Unit, ClientConfigResponse, Any] =
     endpoint.get.in("api" / "config" / "client").out(jsonBody[ClientConfigResponse])
 
+  /** Resolved server-side `application.conf` values for the admin UI's
+    * Config page. Goes through `apiKeyGuard`, so it's admin-gated in
+    * the same way as the rest of the api namespace. */
+  val serverConfig: PublicEndpoint[Unit, Unit, ConfigListResponse, Any] =
+    endpoint.get.in("api" / "config" / "server").out(jsonBody[ConfigListResponse])
+
   val createTenant: PublicEndpoint[TenantRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
     base.post.in("tenant" / "create").in(jsonBody[TenantRequest]).out(jsonBody[TenantResponse])
 

@@ -39,6 +39,7 @@ object Main extends IOApp.Simple with LazyLogging:
   given ProductHint[AdminConfig]            = ProductHint[AdminConfig](camelMapping)
   given ProductHint[RoleDistributionConfig] = ProductHint[RoleDistributionConfig](camelMapping)
   given ProductHint[BootstrapConfig]        = ProductHint[BootstrapConfig](camelMapping)
+  given ProductHint[DefaultMetastoreConfig] = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[ManagerConfig]          = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]           = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]   = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -54,6 +55,7 @@ object Main extends IOApp.Simple with LazyLogging:
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
   given ConfigReader[RoleDistributionConfig] = deriveReader[RoleDistributionConfig]
   given ConfigReader[BootstrapConfig]        = deriveReader[BootstrapConfig]
+  given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]   = deriveReader[DatabaseAuthConfig]
@@ -85,8 +87,8 @@ object Main extends IOApp.Simple with LazyLogging:
       // Apply the Liquibase changelog first: `qodstate_user` (and the rest
       // of the control plane) must exist before we upsert the admin row.
       // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
-      LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore).run()
-      val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+      LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+      val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
       val admins = mgrCfg.admin.usernameList
       if admins.isEmpty then
         logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
@@ -111,25 +113,25 @@ object Main extends IOApp.Simple with LazyLogging:
         new LocalQuackBackend(
           mgrCfg.minPort,
           mgrCfg.maxPort,
-          mgrCfg.defaultMetastore,
+          mgrCfg.defaultMetastore.asMap,
           commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript)
         )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
         new KubernetesQuackBackend(
           k8s, mgrCfg.k8s.namespace, mgrCfg.k8s.image, mgrCfg.k8s.quackPort,
-          mgrCfg.k8s.podLabel, mgrCfg.k8s.startupTimeoutSec, mgrCfg.defaultMetastore)
+          mgrCfg.k8s.podLabel, mgrCfg.k8s.startupTimeoutSec, mgrCfg.defaultMetastore.asMap)
       case other => sys.error(s"unknown runtime: $other")
 
     val tracker  = new NodeLoadTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
-      PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+      PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // Per-tenant-db Postgres provisioning. The admin connection opens
     // against the `postgres` system DB and issues CREATE/DROP DATABASE
     // for each `qodstate_tenant_db` row the supervisor manages.
-    val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore)
-    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore, dbAdmin)
+    val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore.asMap, dbAdmin)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
@@ -174,8 +176,10 @@ object Main extends IOApp.Simple with LazyLogging:
         logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
         StatementValidator.allowAll
       else
-        val defaultDb     = mgrCfg.defaultMetastore.getOrElse("dbName", "")
-        val defaultSchema = mgrCfg.defaultMetastore.getOrElse("schemaName", "main")
+        val defaultDb     = mgrCfg.defaultMetastore.dbName
+        val defaultSchema =
+          if mgrCfg.defaultMetastore.schemaName.nonEmpty then mgrCfg.defaultMetastore.schemaName
+          else "main"
         logger.info(
           s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
         )
@@ -250,14 +254,14 @@ object Main extends IOApp.Simple with LazyLogging:
         // replacing the last path component of the global default
         // `dataPath` with the composed tenant-db name -- e.g.
         // `/Users/.../ducklake/tpch` + `tpch_tpch1` -> `/Users/.../ducklake/tpch_tpch1`.
-        val rootDataPath = mgrCfg.defaultMetastore.getOrElse("dataPath", "")
+        val rootDataPath = mgrCfg.defaultMetastore.dataPath
         val tenantDbDataPath =
           if rootDataPath.isEmpty then ""
           else
             val p      = java.nio.file.Paths.get(rootDataPath)
             val parent = p.getParent
             if parent == null then tenantDbName else parent.resolve(tenantDbName).toString
-        val tenantDbMetastore = mgrCfg.defaultMetastore
+        val tenantDbMetastore = mgrCfg.defaultMetastore.asMap
           .updated("dataPath", tenantDbDataPath)
           .updated("dbName",   tenantDbName)
 
@@ -362,18 +366,38 @@ object Main extends IOApp.Simple with LazyLogging:
       // and the in-memory RbacResolver cache stay in lockstep. The user
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
-      val userStoreForRbac = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore)
+      val userStoreForRbac = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
       val userHandlers     = new UserHandlers(sup, userStoreForRbac)
       val roleHandlers     = new RoleHandlers(sup, userHandlers)
       val groupHandlers    = new GroupHandlers(sup, userHandlers)
       val membershipHandlers = new MembershipHandlers(sup)
       val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
 
+      // Config page registry. The roots list pairs each typed config
+      // class with its HOCON prefix; the reflector pulls every
+      // @ConfigField-annotated scalar (including nested case-class
+      // fields). The live `Config` is the same one pureconfig drove
+      // `ConfigSource.default` from, so values render with env-var
+      // substitutions already applied.
+      val liveConfig    = com.typesafe.config.ConfigFactory.load()
+      val configEntries = ConfigRegistry.collect(
+        ConfigRegistry.rootsFor(
+          managerCls    = classOf[ManagerConfig],
+          flightCls     = classOf[FlightConfig],
+          authCls       = classOf[AuthenticationConfig],
+          aclCls        = classOf[AclConfig],
+          validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
+          metricsCls    = classOf[MetricsConfig]
+        )
+      )
+      val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
+
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
         authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint,
-        userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers
+        userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers,
+        serverConfigHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

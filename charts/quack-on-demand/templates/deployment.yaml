@@ -7,7 +7,7 @@ metadata:
     {{- include "qod.labels" . | nindent 4 }}
 spec:
   # Default replicas=1 — multi-manager active-active is not yet safe.
-  # See RESILIENCE.md and issue #11.
+  # See guides/RESILIENCE.md and issue #11.
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:

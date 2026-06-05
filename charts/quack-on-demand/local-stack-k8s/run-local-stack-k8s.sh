@@ -162,9 +162,14 @@ if [[ -n "$LOAD_TPCH" ]]; then
       pkill -P $SEED_S3_PID 2>/dev/null
     ' EXIT
     sleep 3
+    # Seed lands in the bootstrap tenant-db Postgres database, not the
+    # control-plane `qod`. The chart's defaults are
+    # bootstrap.tenant=tpch + bootstrap.tenantDb=tpch1, yielding the
+    # composed database name `tpch_tpch1`. Override via TPCH_DB if you
+    # also overrode the chart's bootstrap values.
     DATA_PATH="$DATA_PATH_S3" \
     PG_HOST=localhost PG_PORT="$SEED_PG_PORT" PG_USER=postgres PG_PASS=azizam \
-    DB_NAME=tpch SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$LOAD_TPCH" \
+    DB_NAME="${TPCH_DB:-tpch_tpch1}" SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$LOAD_TPCH" \
     QOD_S3_ENDPOINT="http://localhost:$SEED_S3_PORT" \
     QOD_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
     QOD_S3_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
@@ -272,8 +277,8 @@ if [[ "$NODE_COUNT" -ge 1 ]]; then
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
   echo
   echo "smoke OK - manager is up, RBAC works, K8s pod-spawn path works."
-  echo "  Quack node pods will ImagePullBackOff until you provide a real"
-  echo "  Quack image: helm upgrade ... --set quackNode.image=<your-image>"
+  echo "  Default Quack node image: starlakeai/quack-on-demand-node:latest-snapshot"
+  echo "  Override with: helm upgrade ... --set quackNode.image=<your-image>"
   echo
   echo "  port-forward UI:        kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900"
   echo "  port-forward FlightSQL: kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338"

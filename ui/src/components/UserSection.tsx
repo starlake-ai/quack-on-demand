@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { TenantResponse, UserResponse } from '../api/types';
-import EffectivePermsModal from './EffectivePermsModal';
+import EffectivePermsCard from './EffectivePermsCard';
 
 /** Users tab on the /users page. Renders the user table for the
   * selected tenant (or every user when `tenant === null`), with inline
@@ -29,7 +29,9 @@ export default function UserSection({
   const [rows, setRows]       = useState<UserResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
-  const [effectiveFor, setEffectiveFor] = useState<string | null>(null);
+  // Which user's permissions card is currently expanded under their row.
+  // Toggled by clicking the username; only one card is open at a time.
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // New-user form state. `newTenant` is the dropdown selection;
   // it defaults to the page-level filter and can be overridden when
@@ -145,17 +147,27 @@ export default function UserSection({
             {rows.flatMap(u => {
               const rowProvider = tenantProviderOf(u.tenant);
               const allowEdit = rowProvider === 'db' || u.tenant === null;
+              const isExpanded = expandedId === u.id;
               const row = (
                 <tr key={u.id}>
-                  <td><code>{u.username}</code></td>
+                  <td>
+                    <button
+                      type="button"
+                      className="user-name-toggle"
+                      aria-expanded={isExpanded}
+                      title={isExpanded ? 'Hide effective permissions' : 'Show effective permissions'}
+                      onClick={() => setExpandedId(isExpanded ? null : u.id)}
+                    >
+                      <span className="caret">{isExpanded ? '▾' : '▸'}</span>
+                      <code>{u.username}</code>
+                    </button>
+                  </td>
                   <td>{u.tenant ? <code>{u.tenant}</code> : <em>(superuser)</em>}</td>
                   <td>{u.roles.length === 0 ? <span className="subtle">-</span> : u.roles.join(', ')}</td>
                   <td>{u.groups.length === 0 ? <span className="subtle">-</span> : u.groups.join(', ')}</td>
                   <td>{u.poolGrants.length === 0 ? <span className="subtle">-</span> : u.poolGrants.join(', ')}</td>
                   <td>{u.enabled ? '✓' : '✗'}</td>
                   <td>
-                    <button onClick={() => setEffectiveFor(u.id)}>Effective…</button>
-                    {' '}
                     {allowEdit ? (
                       <button onClick={() => { setEditingId(u.id); setEditPassword(''); }}>Edit</button>
                     ) : (
@@ -169,7 +181,14 @@ export default function UserSection({
                   </td>
                 </tr>
               );
-              if (editingId !== u.id) return [row];
+              const perms = isExpanded ? [(
+                <tr key={u.id + '-perms'} className="expanded-row">
+                  <td colSpan={7}>
+                    <EffectivePermsCard userId={u.id} />
+                  </td>
+                </tr>
+              )] : [];
+              if (editingId !== u.id) return [row, ...perms];
               const edit = (
                 <tr key={u.id + '-edit'} className="edit-row">
                   <td colSpan={7}>
@@ -194,7 +213,7 @@ export default function UserSection({
                   </td>
                 </tr>
               );
-              return [row, edit];
+              return [row, ...perms, edit];
             })}
           </tbody>
         </table>
@@ -255,12 +274,6 @@ export default function UserSection({
         </form>
       )}
 
-      {effectiveFor && (
-        <EffectivePermsModal
-          userId={effectiveFor}
-          onClose={() => setEffectiveFor(null)}
-        />
-      )}
     </div>
   );
 }

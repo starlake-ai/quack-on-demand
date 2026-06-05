@@ -94,6 +94,21 @@ export interface ClientConfigResponse {
   authEnabled: boolean;
 }
 
+/** One row of the Config page. `value` is masked ("(set)" / "(unset)")
+ * when `sensitive` is true. */
+export interface ConfigEntryView {
+  path: string;
+  envVar: string;
+  description: string;
+  value: string;
+  sensitive: boolean;
+  isSet: boolean;
+}
+
+export interface ConfigListResponse {
+  entries: ConfigEntryView[];
+}
+
 export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
 
 export interface TenantRequest {

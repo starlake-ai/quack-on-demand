@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for filing a bug. Please fill in the sections below so we
         can reproduce it quickly. If the problem is operational
-        (deployment, config), the [RUNNING.md](https://github.com/starlake-ai/quack-on-demand/blob/main/RUNNING.md)
+        (deployment, config), the [RUNNING.md](https://github.com/starlake-ai/quack-on-demand/blob/main/guides/RUNNING.md)
         recovery recipes often help.
 
   - type: textarea

@@ -29,7 +29,7 @@ Quack on Demand has been installed.
 
   JDBC URL template (replace <user>/<password>):
 
-    jdbc:arrow-flight-sql://localhost:{{ .Values.service.flightsql.port }}?useEncryption={{ .Values.flightsql.tls.enabled }}{{- if .Values.flightsql.tls.enabled }}&disableCertificateVerification=true{{- end }}&user={{ .Values.bootstrap.tenant }}/{{ .Values.bootstrap.pool }}/<user>&password=<password>
+    jdbc:arrow-flight-sql://localhost:{{ .Values.service.flightsql.port }}?useEncryption={{ .Values.flightsql.tls.enabled }}{{- if .Values.flightsql.tls.enabled }}&disableCertificateVerification=true{{- end }}&user=<user>&password=<password>&tenant={{ .Values.bootstrap.tenant }}&pool={{ .Values.bootstrap.pool }}
 
 # Watch the Quack node pods the manager spawns
 
@@ -38,7 +38,7 @@ Quack on Demand has been installed.
 # Notes
 
 - Replicas default to 1: multi-manager active-active is not yet safe.
-  See RESILIENCE.md and issue #11.
+  See guides/RESILIENCE.md and issue #11.
 - The manager calls the K8s API to create / delete pods + services in
   this namespace. RBAC scope is a Role, not a ClusterRole.
 - {{- if eq .Values.metrics.sink "prometheus" }} /metrics is exposed on the rest-ui port. {{- else }} metrics sink: {{ .Values.metrics.sink }} (the /metrics endpoint is NOT exposed in cloud-push mode). {{- end }}

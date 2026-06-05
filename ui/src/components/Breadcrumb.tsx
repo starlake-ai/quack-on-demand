@@ -21,19 +21,19 @@ export default function Breadcrumb({ items }: Props) {
       aria-label="Breadcrumb"
       style={{
         marginBottom: 16,
-        color: '#555',
+        color: 'var(--text)',
         fontSize: '0.95rem',
       }}
     >
       {items.map((c, i) => {
         const isLast = i === items.length - 1;
-        const sep = i > 0 ? <span style={{ margin: '0 8px', color: '#bbb' }}>/</span> : null;
+        const sep = i > 0 ? <span style={{ margin: '0 8px', color: 'var(--text-mute)' }}>/</span> : null;
         return (
           <span key={i}>
             {sep}
             {c.to && !isLast
-              ? <Link to={c.to} style={{ color: '#1166cc', textDecoration: 'none' }}>{c.label}</Link>
-              : <strong style={{ color: '#333' }}>{c.label}</strong>}
+              ? <Link to={c.to} style={{ color: 'var(--text)', textDecoration: 'none' }}>{c.label}</Link>
+              : <strong style={{ color: 'var(--text)' }}>{c.label}</strong>}
           </span>
         );
       })}

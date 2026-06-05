@@ -1,16 +1,15 @@
 # Quack on Demand
 
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](RESILIENCE.md)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](guides/RESILIENCE.md)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Scala](https://img.shields.io/badge/scala-3.7-red.svg)](https://www.scala-lang.org/)
-[![JDK](https://img.shields.io/badge/jdk-17%2B-blue.svg)](https://adoptium.net/)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VTxrj8KU)
 
-**Multi-tenant Arrow Flight SQL gateway for DuckDB, shared DuckLake catalog, per-tenant pools, table-level ACLs, pluggable identity. Single uber-jar.**
+**Multi-tenant Arrow Flight SQL gateway for DuckDB, per-tenant DuckLake catalog, per-tenant pools, first-class RBAC graph (users · groups · roles · table permissions · pool grants), pluggable identity. Single uber-jar.**
 
-Any JDBC / ODBC / ADBC client connects to one Flight SQL edge; the gateway authenticates the user (DB / JWT / OIDC), checks table-level ACLs against the parsed SQL, classifies the statement, and routes it to a compatible node in the tenant's pool. Control-plane state lives next to DuckLake's metadata in the same Postgres database.
+Any JDBC / ODBC / ADBC client connects to one Flight SQL edge; the gateway authenticates the user (DB / JWT / OIDC), gates the connection at handshake (user-scope + pool-access), parses each statement and matches its table refs against the user's cached **EffectiveSet**, then routes the statement to a compatible node in the tenant's pool. Each tenant owns its own DuckLake catalog database; the manager's normalized `qodstate_*` control plane sits in a separate database next to them.
 
 ### Why this exists
 
@@ -18,29 +17,25 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 ### Project status
 
-**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
+**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](guides/RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
 
-![Admin console - live per-node metrics, statement history, ACL editor](assets/metrics.jpg)
+![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
 ---
 
 ## Contents
 
 - [Who is this for?](#who-is-this-for)
+- [Quick start](#quick-start)
 - [Features](#features)
 - [Architecture](#architecture)
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
 - [Configuration](#configuration)
-- [REST API](#rest-api)
-- [Admin UI](#admin-ui)
-- [ACL model](#acl-model)
-- [Tech stack](#tech-stack)
-- [Development](#development)
-- [Operational notes](#operational-notes)
+- [Access control (RBAC)](#access-control-rbac)
 - [License](#license)
 - [Community](#community)
 - [Contributing](#contributing)
+
+Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](guides/RUNNING.md) (deployment paths + operator notes) - [`API.md`](guides/API.md) (REST API reference) - [`RESILIENCE.md`](guides/RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
 
 ---
 
@@ -49,13 +44,90 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 **Use Quack on Demand if you want to:**
 
 - Expose a DuckLake / DuckDB warehouse to multiple teams or apps over a standard wire protocol (Arrow Flight SQL: works with JDBC, ODBC, ADBC, PyArrow, DBeaver, Spark, and other Flight-aware clients)
-- Authenticate users against your existing identity provider (Keycloak / Azure AD / Google / Cognito / JWT / database) and enforce table-level ACLs at query time
-- Run several tenants on shared infrastructure without giving each one a private DuckDB process to manage
+- Authenticate users against your existing identity provider (Keycloak / Azure AD / Google / Cognito / JWT / database) and enforce table-level RBAC at query time, with a per-user EffectiveSet built from role + group memberships
+- Run several tenants on shared infrastructure without giving each one a private DuckDB process to manage; each tenant owns a separate DuckLake catalog DB (`${tenant}_${tenantDb}`)
 
 **Look elsewhere if you:**
 
 - Just need a single embedded DuckDB inside one application ? use DuckDB directly
 - Need a distributed query engine over data lakes with cross-node shuffles and joins on TB-scale tables then look at Trino / Dremio / StarRocks. Quack on Demand routes each statement to a single Quack node; it doesn't fan out across them
+
+---
+
+## Quick start
+
+Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](guides/QUICKSTART.md)** for the step-by-step. The short version:
+
+```bash
+cp .env.example .env                            # tweak ports / auth / admin password
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
+```
+> **Windows users: run inside WSL2**
+>
+> ```bash
+> QOD_NATIVE_CLIENT=false LOAD_TPCH=1 ./scripts/run-docker-compose.sh
+> ```
+
+That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / loadtest `--tenant`/`--pool` flag).
+
+**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](guides/RUNNING.md) for the full native path (external Postgres, env vars, TLS).
+
+Smoke-test the FlightSQL edge with the Python load tester:
+
+```bash
+pip install adbc_driver_flightsql adbc_driver_manager
+
+# TLS-on server (compose default). --tenant/--pool default to tpch/sales
+# (matching the bootstrap), so no flags are needed for the demo path.
+python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
+
+# Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
+./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+```
+
+Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
+
+```
+Load test: 2 workers x 5 iterations (+5 warmup) against grpc+tls://localhost:31338 as admin -> tpch/sales
+...
+Queries OK:       10
+Queries failed:   0
+Latency  p50:     ~60 ms
+```
+
+`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](guides/QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
+
+**FlightSQL JDBC:**
+  `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales`
+
+**FlightSQL ODBC** (Apache Arrow Flight SQL ODBC Driver from
+  [arrow-adbc](https://arrow.apache.org/adbc/main/driver/flight_sql.html#odbc)
+  or the [Dremio ODBC connector](https://github.com/apache/arrow-adbc/tree/main/c/driver/flightsql)):
+
+  Register the driver in `/etc/odbcinst.ini` (Linux/macOS) - point at
+  the `.so` / `.dylib` from the package:
+
+  ```ini
+  [Apache Arrow Flight SQL ODBC Driver]
+  Description = Apache Arrow Flight SQL
+  Driver      = /usr/local/lib/libarrow-odbc.so
+  ```
+
+  Then either use a DSN-less connection string:
+
+  ```
+  Driver={Apache Arrow Flight SQL ODBC Driver};
+  HOST=localhost;PORT=31338;
+  UseEncryption=true;DisableCertificateVerification=true;
+  UID=admin;PWD=admin;
+  adbc.flight.sql.rpc.call_header.tenant=tpch;
+  adbc.flight.sql.rpc.call_header.pool=sales
+  ```
+
+**Browse the admin UI (optional) - 10 seconds**
+   Open http://localhost:20900/ui/ in a browser. Log in as admin / admin
+
+Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full loadtest parameter table, and the [operator's pre-prod checklist](guides/RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](guides/RUNNING.md)**. REST API reference is in **[`API.md`](guides/API.md)**.
 
 ---
 
@@ -68,19 +140,20 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
   - Postgres / any JDBC backend (BCrypt-hashed passwords, free-form SQL template)
   - External JWT (HS256 / RS256 / public-key PEM)
   - OIDC providers: Keycloak (with ROPC), Google, Azure AD, AWS Cognito
-- **Postgres-relational ACL** stored in `slkstate_acl_grant`, managed via REST, enforced per statement (SQL parser extracts table refs, the validator looks up grants for the user's principal)
+- **First-class RBAC graph** in `qodstate_role` / `qodstate_role_permission` / `qodstate_group` / `qodstate_user_*` / `qodstate_pool_permission`. Two gates run at handshake (user-scope, pool-access); per statement the SQL parser extracts table refs and matches them against the cached **EffectiveSet** pinned on the connection. Superusers (`qodstate_user.tenant IS NULL`) bypass both layers
 - **Admin REST API** with an `X-API-Key` static key OR a session token minted via `/api/auth/login`
 
 ### Data plane
 
 - **Multi-tenant pools** of Quack nodes. Each node is `READONLY`, `WRITEONLY`, or `DUAL`; the router classifies each statement and picks a compatible node
-- **Single uber-jar** deployment; control-plane state lives next to DuckLake's metadata in the same Postgres database
+- **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the manager's control-plane DB (`qod`); tenant isolation is at the Postgres-database boundary, not just at the row level
+- **Single uber-jar** deployment; the normalized `qodstate_*` control plane sits in a dedicated database alongside the per-tenant DuckLake catalogs
 
 ### Operability
 
-- **React admin console** at `/ui/` - tenant CRUD, pool CRUD, per-tenant ACL editor, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
+- **React admin console** at `http://lcoalhost:20900/ui/` - tenant CRUD (with Databases · Pools · Auth provider tabs), pool CRUD, a dedicated **/users page** (Users · Groups · Roles · Identities tabs) with a per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
 - **Observability built in** - Prometheus scrape endpoint at `/metrics`, or push to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring (one sink at a time, picked via `metrics.sink`). Ships with a Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
-- **Self-healing on restart** - when the manager comes back up, every Quack node from `slkstate_pool_state` is reconciled: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](RESILIENCE.md)
+- **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](guides/RESILIENCE.md)
 - **Every config key is overridable** via a `QOD_*` env var
 
 ---
@@ -103,7 +176,10 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
                                                        │  │  Arrow FlightSQL edge  │  │
                                                        │  │  :31338   (TLS)        │  │
                                                        │  │  • Auth (DB/JWT/OIDC)  │  │
-                                                       │  │  • ACL validator       │  │
+                                                       │  │  • Handshake gates     │  │
+                                                       │  │    (user-scope, pool)  │  │
+                                                       │  │  • Per-statement RBAC  │  │
+                                                       │  │    (EffectiveSet)      │  │
                                                        │  │  • Role-aware router   │  │
                                                        │  └────────┬───────────────┘  │
                                                        │           │                  │
@@ -123,13 +199,24 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
                                          └────────────────────────┼─────────────────────────┘
                                                                   │
                                                                   ▼
-                                                ┌────────────────────────────────┐
-                                                │   Postgres (DuckLake metadata) │
-                                                │   • ducklake_*  (catalog)      │
-                                                │   • slkstate_pool_state        │
-                                                │   • slkstate_user              │
-                                                │   • slkstate_acl_grant         │
-                                                └────────────────────────────────┘
+                                                ┌─────────────────────────────────────┐
+                                                │   Postgres                          │
+                                                │                                     │
+                                                │  Control-plane DB (`qod`):          │
+                                                │   • qodstate_tenant / _tenant_db    │
+                                                │     / _pool / _node                 │
+                                                │   • qodstate_user                   │
+                                                │   • qodstate_tenant_identity        │
+                                                │   • qodstate_role / _role_permission│
+                                                │   • qodstate_group / _user_group /  │
+                                                │     _user_role / _group_role        │
+                                                │   • qodstate_pool_permission        │
+                                                │   • slkstate_pool_state (file mode) │
+                                                │                                     │
+                                                │  Per-tenant catalog DBs             │
+                                                │  (`${tenant}_${tenantDb}`):         │
+                                                │   • __ducklake_*  (DuckLake catalog)│
+                                                └─────────────────────────────────────┘
                                                                   +
                                                           object/file storage
                                                           (S3, GCS, FS, …)
@@ -137,63 +224,10 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 **Two paths into Postgres** (not pictured to keep the diagram readable):
 
-- The **manager** owns the control plane: it writes `slkstate_pool_state` / `slkstate_user` on tenant + pool CRUD, and reads `slkstate_acl_grant` from the ACL validator on every authenticated statement.
-- Each **Quack node** owns the data plane: it reads and writes DuckLake's `ducklake_*` catalog tables directly when resolving and mutating tables.
+- The **manager** owns the control plane: it writes `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` on tenant + pool CRUD, and resolves the cached **EffectiveSet** for each authenticated session from `qodstate_user` + the membership tables + `qodstate_role_permission` / `qodstate_pool_permission` at handshake.
+- Each **Quack node** owns the data plane against its tenant-db: it reads and writes that DB's DuckLake `__ducklake_*` catalog tables directly when resolving and mutating tables.
 
-Both sets of tables live in the same database so control-plane and catalog stay transactionally coherent.
-
----
-
-## Requirements
-
-| | Version | Notes |
-|---|---|---|
-| **JDK** | 17+ | Built and shipped on Temurin 17 (Dockerfile). Arrow's `arrow-memory-unsafe` allocator needs `--add-opens=java.base/java.nio` and `java.base/sun.nio.ch` on 17+. T he assembly jar sets these via an `Add-Opens` manifest attribute so `java -jar` just works |
-| **Postgres** | 13+ | Tested with the `postgres:16-alpine` image bundled in `docker-compose.yml`. Both DuckLake's `ducklake_*` catalog tables and the `slkstate_*` control-plane tables live in the same database |
-| **DuckDB CLI** | matched to the bundled libduckdb | Each Quack node is a child `duckdb` process. The Docker image ships its own; for **native** runs you need `duckdb` on `$PATH` (see [`RUNNING.md`](RUNNING.md) for the pinned version) |
-| **Docker** | Engine 24+, Compose v2 | Compose path only |
-| **Scala / sbt** | 3.7, sbt 1.x | Source builds only not needed if you run the published jar or Docker image |
-| **OS** | Linux, macOS | Manager and nodes; the assembly jar bundles `libduckdb_java.so` for `linux_amd64`, `linux_arm64`, and `osx_universal` |
-
----
-
-## Quick start
-
-Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
-
-```bash
-cp .env.example .env                            # tweak ports / auth / admin password
-LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
-```
-
-That brings up Postgres + the manager and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`.
-
-**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
-
-Smoke-test the FlightSQL edge with the Python load tester:
-
-```bash
-pip install adbc_driver_flightsql adbc_driver_manager
-
-# TLS-on server (compose default)
-python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
-
-# Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
-./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
-```
-
-Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
-
-```
-Queries OK:       10
-Queries failed:   0
-Throughput:       ~25 qps
-Latency  p50:     ~40 ms
-```
-
-`Queries failed: 0` is the success signal. If queries fail with `UNAUTHENTICATED`, your `.env` credentials don't match what the manager seeded; if they fail with TLS errors, see the `--insecure` / `grpc://` note in [`QUICKSTART.md`](QUICKSTART.md#2-run-your-first-query--30-seconds).
-
-Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, REST API recipes, the full loadtest parameter table - lives in **[`RUNNING.md`](RUNNING.md)**.
+Two databases per tenant-db deployment (control-plane `qod` + tenant-db `${tenant}_${tenantDb}`) keeps control-plane and DuckLake catalog cleanly separated while sharing one Postgres cluster.
 
 ---
 
@@ -210,159 +244,88 @@ Every scalar in `src/main/resources/application.conf` accepts a matching `QOD_*`
 | Metastore host | `QOD_PG_HOST` | `localhost` |
 | Metastore user | `QOD_PG_USER` | `postgres` |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change this!) |
-| Metastore database | `QOD_PG_DBNAME` | `tpch` |
+| Control-plane database | `QOD_PG_DBNAME` | `qod` |
 | Static admin key | `QOD_API_KEY` | unset |
 | Admin usernames | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` |
 | Admin password | `QOD_ADMIN_PASSWORD` | `admin` |
-| Enable DB auth | `QOD_AUTH_DB_ENABLED` | `false` |
-| Enable ACL | `QOD_ACL_ENABLED` | `false` |
+| Enable DB auth | `QOD_AUTH_DB_ENABLED` | `true` |
+| Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
 
-Pluggable auth backends, ACL store paths, K8s runtime, JWT keys - see `application.conf` for the full surface.
-
----
-
-## REST API
-
-All endpoints under `/api/*` require a valid `X-API-Key` (either the static `QOD_API_KEY` or a UI session token from `/api/auth/login`). `/health` and `/api/config/client` are open; `/ui/*` is open (the React app gates itself).
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/auth/login`           | mint a session token (admin role required) |
-| `POST` | `/api/auth/logout`          | revoke the current token |
-| `GET`  | `/api/auth/whoami`          | verify session |
-| `GET`  | `/api/tenant/list`          | list tenants + effective metastore |
-| `POST` | `/api/tenant/create`        | create a tenant |
-| `POST` | `/api/tenant/setMetastore`  | patch a tenant's metastore overrides |
-| `POST` | `/api/tenant/delete`        | delete a tenant (must have no pools) |
-| `GET`  | `/api/pool/list`            | list pools with live node metrics |
-| `POST` | `/api/pool/create`          | spin up a pool |
-| `POST` | `/api/pool/scale`           | scale up/down with role redistribution |
-| `POST` | `/api/pool/stop`            | tear down |
-| `POST` | `/api/node/setMaxConcurrent`| per-node concurrency cap |
-| `POST` | `/api/node/quarantine`      | mark a node unhealthy |
-| `POST` | `/api/node/restart`         | drain + restart a node |
-| `GET`  | `/api/acl/grant/list?tenant=…` | list grants |
-| `POST` | `/api/acl/grant/create`     | grant `(principal, target, permission)` |
-| `POST` | `/api/acl/grant/upload`     | bulk insert |
-| `POST` | `/api/acl/grant/delete/:id` | revoke |
-| `GET`  | `/api/config/client`        | discovery: edge host/port/TLS (open) |
-| `GET`  | `/health`                   | liveness + pool/node counts (open) |
-| `GET`  | `/metrics`                  | Prometheus text-format scrape (open). Disabled when `metrics.sink` pushes to CloudWatch / Azure Monitor / GCP Cloud Monitoring |
+Pluggable auth backends, K8s runtime, JWT keys, per-tenant bootstrap overrides - see `application.conf` for the full surface.
 
 ---
 
-## Admin UI
+## Access control (RBAC)
 
-| Page | What it shows |
-|---|---|
-| **Login** | Username/password, admin-role gated |
-| **/ ** (Tenants) | List + create + delete tenants, effective metastore preview |
-| **/tenant/:tenant** | Tenant detail · pools · storage · **ACL grants editor** |
-| **/pool/:tenant/:pool** | Pool nodes, JDBC/ODBC/ADBC connection strings, scale/stop |
-| **/nodes** | Live cluster dashboard: per-node `inFlight`, `totalServed`, EWMA latency, role + health badges, per-tenant filter, auto-refresh every 2s |
+Quack on Demand's RBAC graph is a normalized model across nine `qodstate_*` tables. Auth gates run in two places: at FlightSQL **handshake** (does this user belong to this tenant + may they reach this pool?) and **per statement** (does the user's EffectiveSet cover every table the SQL parser pulls out?).
 
-![Live node dashboard - per-node inFlight, totalServed, EWMA latency](assets/nodes-dashboard.jpg)
+### Entities
 
----
+- **User** (`qodstate_user`): identified by `(tenant, username)`. A row with `tenant IS NULL` is a **superuser**: it can authenticate against any tenant via FlightSQL and bypasses both handshake and per-statement gates. Tenant-scoped principals carry a non-empty `tenant`.
+- **Role** (`qodstate_role`): per-tenant container for TablePermission rows. Every new tenant is auto-seeded with a built-in `admin` role plus a `*.*.* ALL` permission, all in one transaction (`PoolSupervisor.createTenant`).
+- **Group** (`qodstate_group`): per-tenant bundle of users that inherits role memberships and pool grants together.
+- **TablePermission** (`qodstate_role_permission`): `(role_id, catalog, schema, table, verb)`. `verb ∈ {SELECT, INSERT, UPDATE, DELETE, ALL}`; `*` in any of catalog/schema/table is the literal wildcard. **This is the only place table-level grants live.**
+- **PoolPermission** (`qodstate_pool_permission`): grants a user OR a group access to a `(tenant, pool?)`. `pool_id NULL` means "every pool in this tenant". Exactly one of `user_id` / `group_id` is set (DB CHECK enforced).
+- **Memberships**: `qodstate_user_role`, `qodstate_user_group`, `qodstate_group_role` are bare FK pairs (cascade on delete).
 
-## ACL model
+### Gates
 
-Grants live in `slkstate_acl_grant` with shape:
+Both gates resolve from the same **EffectiveSet** pinned to the FlightSQL session at handshake:
 
-```sql
-(tenant_id, principal, catalog_name, schema_name, table_name, permission)
+```
+EffectiveSet(user) =
+    direct roles
+  ∪ roles inherited via every group the user is in
+  ∪ table permissions attached to any role in the closure
+  ∪ pool permissions on the user OR on any of its groups
+                     (a row with pool=NULL matches every pool in tenant)
 ```
 
-- `principal` follows the `type:name` convention - `user:alice`, `group:engineers`, `role:admin`
-- Any of `catalog_name / schema_name / table_name` may be `NULL` to act as a wildcard
-- Permissions: `SELECT | INSERT | UPDATE | DELETE | ALL` (`ALL` always wins)
+- **Handshake** uses the EffectiveSet to answer "is the requested `(tenant, pool)` covered by any PoolPermission?". Superusers skip this entirely.
+- **Per statement** uses the cached EffectiveSet to answer "is every `(catalog.schema.table, verb)` extracted from the SQL covered by some TablePermission?". Same superuser bypass.
 
-When `acl.enabled=true` and `stateStorage=postgres`, `PostgresAclValidator` parses each incoming SQL statement, extracts the table references, and queries the table for matching grants. Non-SELECT statements (DDL / DML) are denied unless the principal holds a wildcard `ALL` grant.
+Per-statement enforcement only kicks in when `acl.enabled=true` (`QOD_ACL_ENABLED`). The handshake gate is always on for tenant-scoped users; turning the per-statement gate off is for trusted-tenant deployments where the pool gate is enough.
 
-**Principal expansion.** At validation time the authenticated session's `username`, `groups`, and `role` are expanded into `user:<username>`, `group:<g>` (one per group), and `role:<r>` principals; a grant matches if *any* of them does. So an OIDC user `alice` with groups `[engineers, analysts]` and role `viewer` triggers lookups for four principals at once - write your grants against whichever level of identity is stable.
+### Caveats
 
-![ACL grants editor on the tenant detail page](assets/acl-editor.jpg)
+- **Coarse DML/DDL**: the SQL `TableExtractor` only walks SELECT statements today, so `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the extractor to walk those statement shapes too.
 
-Add a grant from the UI's tenant detail page, or via curl:
+### Curl walkthrough
+
+Bootstrap login → create a role + table permission → create a user → grant pool access → attach the role:
 
 ```bash
-curl -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenantId":"acme","principal":"user:alice",
-       "catalogName":"tpch","schemaName":"main","tableName":"customer",
-       "permission":"SELECT"}'
+TOK=$(curl -sS -X POST -H 'Content-Type: application/json' \
+   -d '{"username":"admin","password":"admin"}' \
+   http://localhost:20900/api/auth/login | jq -r .token)
+
+# A read-only role on tpch1.customer for tenant `tpch`
+curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/role/create \
+   -H 'Content-Type: application/json' \
+   -d '{"tenant":"tpch","name":"customer_reader"}'
+
+curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/role/permission/grant \
+   -H 'Content-Type: application/json' \
+   -d '{"roleId":2,"catalog":"tpch_tpch1","schema":"tpch1","table":"customer","verb":"SELECT"}'
+
+# Tenant-scoped user
+curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/user/create \
+   -H 'Content-Type: application/json' \
+   -d '{"tenant":"tpch","username":"alice","password":"hunter2","role":"reader"}'
+
+# Pool access (every pool in tpch); a specific pool would use "pool":"sales"
+curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/pool/permission/grant \
+   -H 'Content-Type: application/json' \
+   -d '{"tenant":"tpch","userId":5,"pool":null}'
+
+# Attach the role
+curl -sS -H "X-API-Key: $TOK" -X POST http://localhost:20900/api/membership/user/role \
+   -H 'Content-Type: application/json' \
+   -d '{"userId":5,"roleId":2}'
+
+# Inspect the closure
+curl -sS -H "X-API-Key: $TOK" http://localhost:20900/api/user/5/effective
 ```
-
----
-
-## Tech stack
-
-- **Scala 3.7** - `enum`, given/using, derived ConfigReader
-- **Cats Effect** + **fs2** for the runtime
-- **Tapir** + **HTTP4s Ember** for the REST API
-- **Apache Arrow Flight SQL 14** + `arrow-memory-unsafe` (pinned via `-Darrow.allocation.manager.type=Unsafe`)
-- **DuckLake** for shared catalog metadata + S3/FS data storage
-- **PostgreSQL** for catalog metadata + control-plane state (`slkstate_*` tables)
-- **React 18** + **Vite** + **react-router-dom** for the SPA (no UI framework - single dark-theme CSS file)
-
----
-
-## Development
-
-```bash
-# Run the manager from sbt (forks JVM so `--add-opens` takes effect)
-sbt run
-
-# Run the test suite (574+ tests)
-sbt test
-
-# Build the uber-jar at distrib/quack-on-demand-assembly-*.jar
-sbt assembly
-
-# UI dev loop (proxies /api/* to localhost:20900)
-cd ui && npm install && npm run dev
-```
-
-Project layout:
-
-```
-src/main/scala/ai/starlake/
-├── quack/
-│   ├── Main.scala                 # IOApp + wiring
-│   ├── Config.scala               # ManagerConfig, FlightConfig, AdminConfig
-│   ├── edge/                      # FlightSQL edge + router + adapter
-│   │   ├── auth/                  # AuthenticationService + provider chain
-│   │   ├── catalog/               # DuckLakeCatalogResolver (table/view lookup)
-│   │   ├── config/                # AuthenticationConfig, AclConfig, SessionConfig, …
-│   │   └── sql/                   # ACL + statement validators
-│   ├── ondemand/                  # Pool supervisor + handlers + state
-│   │   ├── api/                   # Tapir endpoints + DTOs + handlers
-│   │   ├── runtime/               # Local + Kubernetes backends
-│   │   └── state/                 # File + Postgres state stores
-│   └── route/                     # StatementClassifier + Router + RoleMatcher
-└── acl/                           # SQL parser + ACL model + multi-tenant store
-scripts/
-├── run-jar.sh       # Boot the manager from the uber-jar
-├── stop-jar.sh        # Graceful SIGTERM → SIGKILL escalation
-├── start-quack-ducklake.sh        # Standalone single-node Quack for testing
-├── load-tpch-dbgen.sh             # Generate TPC-H (SF override via $SF) into the metastore via DuckDB's dbgen()
-└── spawn-quack-node.sh            # Called by LocalQuackBackend; do not invoke directly
-ui/
-└── src/                           # React SPA, built into src/main/resources/ui
-```
-
----
-
-## Operational notes
-
-Defaults and design choices an operator should be aware of before going to production:
-
-- **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `slkstate_user` with the configured admin at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.**
-- **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `QOD_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
-- **DML grants in ACL mode are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` are denied unless the principal holds a wildcard `ALL` grant. Per-table DML grants need the ACL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
-- **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
-- **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.
-- **Metrics, dashboards and cloud monitoring.** Manager exposes Prometheus metrics at `/metrics` by default, or pushes to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring instead (one sink at a time, picked via `metrics.sink`). See [observability/README.md](observability/README.md) for the sink selector, env vars, credential discovery chains, cardinality budget, and the Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json).
 
 ---
 
@@ -372,9 +335,8 @@ Apache 2.0.
 
 ## Community
 
-- **Questions / discussion** -> [GitHub Discussions](https://github.com/starlake-ai/quack-on-demand/discussions)
+- **Questions / discussion** -> [Discord](https://discord.gg/VTxrj8KU)
 - **Bug or feature** -> file an issue using the templates (the blank-issue path is disabled on purpose)
-- **Security report (private)** -> email `hayssam.saleh@starlake.ai`
 
 ## Contributing
 

@@ -12,7 +12,7 @@ SQL query against it.
   localhost
 - `python3` (any 3.9+; macOS / most Linux ship it)
 
-## 1. Boot the stack — 60 seconds
+## 1. Boot the stack - 60 seconds
 
 From a clone of this repo:
 
@@ -23,15 +23,21 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 This pulls `starlakeai/quack-on-demand:latest` from Docker Hub, brings up
 Postgres + the manager in the background, seeds TPC-H at scale factor 1
-(~6M lineitem rows, ~10 s on a modern laptop), and waits until `/health`
-returns OK. Expected tail:
+into the bootstrap tenant-db `tpch_tpch1` (~6M lineitem rows, ~10 s on a
+modern laptop), and waits until the manager REST is reachable. Expected
+tail:
 
 ```
-manager /health: {"status":"ok","poolsCount":1,"nodesCount":3}
-TPC-H SF=1 seed complete
+seeding TPC-H (db=tpch_tpch1, schema=tpch1, SF=1, data_path=/app/ducklake/tpch_tpch1) via docker compose exec quack ...
+…
+stack is up:
+  image:      starlakeai/quack-on-demand:latest
+  REST + UI:  http://localhost:20900/ui/
+  FlightSQL:  grpc+tls://localhost:31338  (TLS=true)
+  Postgres:   localhost:15432 (external)  /  postgres:5432 (internal)
 ```
 
-## 2. Run your first query — 30 seconds
+## 2. Run your first query - 30 seconds
 
 The repo ships a Python load tester that doubles as a one-shot client:
 
@@ -50,19 +56,31 @@ Drop both flags once you mount a CA-signed cert and set `TLS=false`.)
 Expected:
 
 ```
+Load test: 1 workers x 1 iterations (+0 warmup) against grpc+tls://localhost:31338 as admin -> tpch/sales
+Workload:  default TPC-H mix [schema=tpch1]
+
+─── Results ───
 Queries OK:       1
 Queries failed:   0
-Throughput:       ~25 qps
-Latency  p50:     ~40 ms
+Latency  p50:     ~60 ms
 ```
 
-One TPC-H query (default mix) went: ADBC FlightSQL client → TLS-off gateway on
-`:31338` → authenticated as `admin/admin` against Postgres-backed users →
-routed to a `DUAL` Quack node → DuckLake-resolved against `tpch.tpch1.*`
-parquet → Arrow result streamed back. Every layer the gateway adds was
-exercised in that one round-trip.
+The `-> tpch/sales` in the banner is the routing scope picked up from
+the loadtest's `--tenant` / `--pool` defaults (matching the bootstrap).
+Every FlightSQL client must scope by tenant + pool so the router knows
+which Quack-node pool to dispatch to - that includes the JDBC / ODBC /
+ADBC examples in §4 below, all of which thread the same `tpch` + `sales`
+into the connection.
 
-## 3. Browse the admin UI (optional) — 10 seconds
+One TPC-H query (default mix) went: ADBC FlightSQL client → TLS gateway on
+`:31338` → authenticated as `admin/admin` against `qodstate_user` (the
+admin is seeded as a superuser, `tenant IS NULL`) → routed via the
+`tenant=tpch, pool=sales` gRPC headers to the bootstrap pool's three
+Quack nodes → DuckLake-resolved against `tpch_tpch1.tpch1.*` parquet →
+Arrow result streamed back. Every layer the gateway adds was exercised
+in that one round-trip.
+
+## 3. Browse the admin UI (optional) - 10 seconds
 
 Open <http://localhost:20900/ui/> in a browser. Log in as `admin` /
 `admin`. The Tenants page shows the bootstrap tenant `tpch`; opening it
@@ -76,7 +94,7 @@ the query you just ran. The **Users** page is the RBAC console
 (users · groups · roles · identities + per-user "Effective permissions"
 drilldown).
 
-## 4. Run a custom SQL — 30 seconds
+## 4. Run a custom SQL - 30 seconds
 
 The load tester accepts an inline SQL via `-q`:
 
@@ -97,12 +115,17 @@ cert).
 
 ### JDBC
 
-Apache Arrow Flight SQL JDBC driver — `org.apache.arrow:flight-sql-jdbc-driver`
+Apache Arrow Flight SQL JDBC driver - `org.apache.arrow:flight-sql-jdbc-driver`
 on Maven Central. URL:
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales
 ```
+
+The trailing `tenant=…&pool=…` is what the FlightSQL edge uses to route
+the connection at handshake time. The JDBC driver forwards every URL
+query parameter as a gRPC header, so the same `tenant` / `pool` headers
+the loadtest sets via call-headers also reach the server here.
 
 Driver class: `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`. Works
 out of the box in DBeaver (paste the URL in the connection wizard's "JDBC
@@ -111,7 +134,7 @@ URL" field, set the Driver to "Apache Arrow Flight SQL").
 To run against the plaintext profile (`TLS=false` in `.env`):
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=false&user=admin&password=admin
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=false&user=admin&password=admin&tenant=tpch&pool=sales
 ```
 
 ### ODBC
@@ -133,13 +156,19 @@ DSN-less connection string:
 Driver={Apache Arrow Flight SQL ODBC Driver};
 HOST=localhost;PORT=31338;
 UseEncryption=true;DisableCertificateVerification=true;
-UID=admin;PWD=admin
+UID=admin;PWD=admin;
+adbc.flight.sql.rpc.call_header.tenant=tpch;
+adbc.flight.sql.rpc.call_header.pool=sales
 ```
+
+The two `adbc.flight.sql.rpc.call_header.*` entries thread the routing
+headers through the underlying ADBC driver - same role as the
+`tenant=…&pool=…` URL parameters on the JDBC side.
 
 Smoke test with `isql`:
 
 ```bash
-echo "SELECT count(*) FROM tpch1.lineitem" | isql -v "Driver=Apache Arrow Flight SQL ODBC Driver;HOST=localhost;PORT=31338;UseEncryption=true;DisableCertificateVerification=true;UID=admin;PWD=admin"
+echo "SELECT count(*) FROM tpch1.lineitem" | isql -v "Driver=Apache Arrow Flight SQL ODBC Driver;HOST=localhost;PORT=31338;UseEncryption=true;DisableCertificateVerification=true;UID=admin;PWD=admin;adbc.flight.sql.rpc.call_header.tenant=tpch;adbc.flight.sql.rpc.call_header.pool=sales"
 ```
 
 ### ADBC (Python)
@@ -150,12 +179,15 @@ Already wired by the loadtest above. For your own scripts:
 import adbc_driver_flightsql.dbapi as flight_sql
 from adbc_driver_flightsql import DatabaseOptions
 
+hdr = DatabaseOptions.RPC_CALL_HEADER_PREFIX.value
 conn = flight_sql.connect(
     uri="grpc+tls://localhost:31338",
     db_kwargs={
         "username": "admin",
         "password": "admin",
         DatabaseOptions.TLS_SKIP_VERIFY.value: "true",
+        hdr + "tenant": "tpch",     # routes to the bootstrap tenant
+        hdr + "pool":   "sales",    # ... and its sales pool
     },
 )
 cur = conn.cursor()
@@ -168,9 +200,9 @@ print(cur.fetchone())   # -> (6001215,)
 The compose file has two profiles you can toggle independently. Activate them
 via the `PROFILES` env var on `run-docker-compose.sh`:
 
-- **`observability`** — Prometheus + Grafana with a provisioned
+- **`observability`** - Prometheus + Grafana with a provisioned
   `quack-on-demand` dashboard.
-- **`seaweedfs`** — in-cluster SeaweedFS S3 store + filer UI for an
+- **`seaweedfs`** - in-cluster SeaweedFS S3 store + filer UI for an
   object-storage-backed catalog. Activates automatically when `.env`
   sets `QOD_S3_ENDPOINT=seaweedfs:8333` (uncomment lines 81-87 of
   `.env.example` for the full block).
@@ -190,14 +222,14 @@ The post-boot banner prints these too, but for reference:
 | (always) | <http://localhost:20900/ui/> | Manager admin UI (login `admin` / `admin`) |
 | (always) | `grpc+tls://localhost:31338` | FlightSQL edge (use `--insecure` to skip cert verify) |
 | (always) | `localhost:15432` | Postgres (host port; container-internal is `postgres:5432`) |
-| `observability` | <http://localhost:3000/> | Grafana — anonymous admin, `quack-on-demand` dashboard pre-loaded |
-| `observability` | <http://localhost:9090/> | Prometheus — query the `quack-on-demand` scrape target |
+| `observability` | <http://localhost:3000/> | Grafana - anonymous admin, `quack-on-demand` dashboard pre-loaded |
+| `observability` | <http://localhost:9090/> | Prometheus - query the `quack-on-demand` scrape target |
 | `seaweedfs` | <http://localhost:8888/buckets/> | Filer file browser (drill into `/buckets/ducklake/tpch/tpch1/`) |
 | `seaweedfs` | <http://localhost:9333/> | SeaweedFS master / cluster status |
 | `seaweedfs` | <http://localhost:8080/ui/> | Volume-server UI |
-| `seaweedfs` | `http://localhost:8333/` | S3 API endpoint — works with `aws s3 ls`, `s5cmd`, `mc`. Default creds: `quack` / `quackquack` |
+| `seaweedfs` | `http://localhost:8333/` | S3 API endpoint - works with `aws s3 ls`, `s5cmd`, `mc`. Default creds: `quack` / `quackquack` |
 
-## 6. Stop the stack — 10 seconds
+## 6. Stop the stack - 10 seconds
 
 ```bash
 docker compose --profile seaweedfs --profile observability down
@@ -217,15 +249,17 @@ restart, add `NUKE=1` to a fresh `./scripts/run-docker-compose.sh`.
 | `Connection refused` to `:20900` | Manager still booting (TPC-H seed takes ~10 s) | Wait and retry |
 | `[FlightSQL] no node with role READONLY or DUAL` | Quack nodes still spawning | Wait 5–10 s and retry |
 | `Cannot open file ".../lineitem/ducklake-...parquet"` | Stale catalog (Postgres has metadata, parquet dir was wiped separately) | `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` for a clean slate. The loader self-detects this and aborts loudly. |
-| `Authentication failed` | Wrong `admin` password — `.env` differs from default | Check `ADMIN_PASSWORD` in `.env` |
+| `Authentication failed` | Wrong `admin` password - `.env` differs from default | Check `ADMIN_PASSWORD` in `.env` |
 | `error reading server preface: EOF` from loadtest | Client URL is `grpc://` but `.env` has `TLS=true` | Use `grpc+tls://localhost:31338 --insecure` |
-| SeaweedFS filer `/buckets/<bucket>/` is empty after seed | `.env` doesn't wire `QOD_S3_ENDPOINT=seaweedfs:8333`, so the manager wrote parquet to the host FS instead | Uncomment the SeaweedFS block in `.env` (lines 81-87 of `.env.example`) and `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` |
+| `[FlightSQL] missing tenant scope for Basic auth: 'tenant' header required` | Client connected without routing headers (custom JDBC/ODBC/ADBC code) | Add `?tenant=tpch&pool=sales` to the JDBC URL, `adbc.flight.sql.rpc.call_header.tenant/pool` to ODBC/ADBC db_kwargs. The loadtest threads these by default. |
+| `DATA_PATH parameter "…" does not match existing data path in the catalog "s3://…"` | Previous run used the SeaweedFS profile and recorded an `s3://` path; this run is back to filesystem | `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` to wipe `./pgdata` + `./ducklake` + `./seaweedfs` and re-seed |
+| SeaweedFS filer `/buckets/<bucket>/` is empty after seed | `.env` doesn't wire `QOD_S3_ENDPOINT=seaweedfs:8333`, so the manager wrote parquet to the host FS instead | Uncomment the SeaweedFS block in `.env` (the Option A block in `.env.example`) and `NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh` |
 
 ## Next steps
 
-- **[RUNNING.md](RUNNING.md)** — every deployment path (native jar, Docker
+- **[RUNNING.md](RUNNING.md)** - every deployment path (native jar, Docker
   against an external Postgres, S3-backed storage, the kind/Helm chart, the
   loadtest parameter table)
-- **[README.md](README.md)** — architecture overview, feature list
-- **[skills/quack-on-demand/SKILL.md](skills/quack-on-demand/SKILL.md)** —
+- **[README.md](README.md)** - architecture overview, feature list
+- **[skills/quack-on-demand/SKILL.md](skills/quack-on-demand/SKILL.md)** -
   operator runbook: REST API recipes, pool/tenant/ACL CRUD, failure modes
