@@ -698,3 +698,17 @@ Once the manager is up:
   more samples.
 
 See the README for credentials, default login, and the full feature tour.
+
+---
+
+## Operational notes
+
+Defaults and design choices an operator should be aware of before going to production:
+
+- **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `qodstate_user` with the configured admin (as a superuser: `tenant IS NULL`) at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.**
+- **Every FlightSQL client scopes by tenant + pool at handshake.** Even the superuser admin must pass `tenant` + `pool` gRPC headers (JDBC URL params, ODBC `adbc.flight.sql.rpc.call_header.*`, ADBC `RPC_CALL_HEADER_PREFIX` db_kwargs, loadtest `--tenant`/`--pool`); the routing layer needs them to pick a pool. The per-statement RBAC gate has the superuser bypass, the routing handshake does not.
+- **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `QOD_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
+- **DML / DDL grants are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the SQL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
+- **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
+- **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.
+- **Metrics, dashboards and cloud monitoring.** Manager exposes Prometheus metrics at `/metrics` by default, or pushes to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring instead (one sink at a time, picked via `metrics.sink`). See [observability/README.md](observability/README.md) for the sink selector, env vars, credential discovery chains, cardinality budget, and the Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json).
