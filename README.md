@@ -5,8 +5,7 @@
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Scala](https://img.shields.io/badge/scala-3.7-red.svg)](https://www.scala-lang.org/)
-[![JDK](https://img.shields.io/badge/jdk-17%2B-blue.svg)](https://adoptium.net/)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VTxrj8KU)
 
 **Multi-tenant Arrow Flight SQL gateway for DuckDB, per-tenant DuckLake catalog, per-tenant pools, first-class RBAC graph (users · groups · roles · table permissions · pool grants), pluggable identity. Single uber-jar.**
 
@@ -298,8 +297,6 @@ All endpoints under `/api/*` require a valid `X-API-Key` (either the static `QOD
 | **/pool/:tenant/:pool** | Pool nodes, JDBC/ODBC/ADBC connection strings (with `tenant`/`pool` baked in), scale/stop |
 | **/nodes** | Live cluster dashboard: per-node `inFlight`, `totalServed`, EWMA latency, role + health badges, per-tenant filter, auto-refresh every 2s |
 
-![Live node dashboard - per-node inFlight, totalServed, EWMA latency](assets/nodes-dashboard.jpg)
-
 ---
 
 ## Access control (RBAC)
@@ -457,9 +454,8 @@ Apache 2.0.
 
 ## Community
 
-- **Questions / discussion** -> [GitHub Discussions](https://github.com/starlake-ai/quack-on-demand/discussions)
+- **Questions / discussion** -> [Discord](https://discord.gg/VTxrj8KU)
 - **Bug or feature** -> file an issue using the templates (the blank-issue path is disabled on purpose)
-- **Security report (private)** -> email `hayssam.saleh@starlake.ai`
 
 ## Contributing
 
