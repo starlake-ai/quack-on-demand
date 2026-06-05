@@ -124,6 +124,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
           tenantDb={browsing.tenantDb}
           pool={browsing.pool}
           onStopped={() => { setBrowsing(null); void reloadPools(); }}
+          showBack={false}
         />
       </div>
     );

@@ -109,6 +109,104 @@ thead th {
 tbody tr { border-top: 1px solid var(--border); }
 tbody tr:hover { background: rgba(255,255,255,.025); }
 
+/* ----- Config page ----- */
+table.config-table { table-layout: fixed; }
+table.config-table td { vertical-align: top; word-break: break-all; }
+table.config-table td:last-child { word-break: normal; color: var(--text-mute); }
+tbody tr.config-section {
+  background: var(--bg-elev);
+}
+tbody tr.config-section:hover { background: var(--bg-elev); }
+tbody tr.config-section td {
+  font-family: var(--mono);
+  font-size: .8rem;
+  color: var(--accent);
+  letter-spacing: .03em;
+  padding-top: .65rem;
+  padding-bottom: .35rem;
+  border-top: 1px solid var(--border);
+}
+code.config-value.sensitive { color: var(--text-mute); font-style: italic; }
+
+/* ----- Inline username toggle (Users table -> permissions card) ----- */
+button.user-name-toggle {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--link);
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+}
+button.user-name-toggle:hover code { text-decoration: underline; }
+button.user-name-toggle .caret {
+  color: var(--text-mute);
+  font-size: .75rem;
+  width: .9rem;
+  text-align: center;
+}
+tbody tr.expanded-row { background: rgba(255,255,255,.02); }
+tbody tr.expanded-row:hover { background: rgba(255,255,255,.02); }
+tbody tr.expanded-row > td { padding: .75rem 1rem 1rem; }
+.effective-perms-card h4 {
+  margin: .85rem 0 .25rem;
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-mute);
+}
+.effective-perms-card table { margin-bottom: .25rem; }
+
+/* ----- Inline "Copy SQL" button on the recent-statements table ----- */
+.sql-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: .5rem;
+}
+.sql-cell pre { flex: 1; min-width: 0; }
+button.copy-btn {
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  padding: .15rem .5rem;
+  font-size: .7rem;
+  font-weight: 500;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.copy-btn:hover { color: var(--text); border-color: var(--text-mute); }
+
+/* ----- Dropdown menu (used by Pool detail "Delete pool ▾") ----- */
+.dropdown-menu {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: .25rem;
+  display: flex;
+  flex-direction: column;
+}
+button.dropdown-item {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  padding: .45rem .75rem;
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+button.dropdown-item:hover { background: var(--bg-elev); }
+button.dropdown-item.danger { color: var(--bad); }
+button.dropdown-item.danger:hover { background: rgba(248,113,113,.1); }
+
 /* ----- Forms ----- */
 label { display: block; margin-bottom: .75rem; color: var(--text-soft); }
 input, select {
@@ -146,6 +244,17 @@ select {
 /* Textareas keep auto height. */
 textarea { height: auto; box-sizing: border-box; }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Paint the native up/down spinner button surface with the same orange
+   the Scale (primary) button uses. CSS filter recipes for recoloring
+   the inner arrow glyph are unreliable across browsers; setting the
+   button's `background` does land everywhere it matters. Firefox honors
+   `accent-color`, set below. */
+input[type="number"] { accent-color: var(--accent); }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  background: var(--accent);
+  opacity: 1;
+}
 button {
   background: var(--accent);
   color: var(--accent-fg);
