@@ -8,7 +8,7 @@ for new contributors and operational for adopters.
 
 `quack-on-demand` is a multi-tenant FlightSQL gateway in front of DuckDB
 Quack + DuckLake. The [README](README.md) is the elevator pitch;
-[RUNNING.md](RUNNING.md) is the deployment guide. Issues labelled
+.[RUNNING.md](guides/RUNNING.md) is the deployment guide. Issues labelled
 `roadmap` are tracked work; `good first issue` is what to start with if
 you want a small, well-scoped task.
 
@@ -82,7 +82,7 @@ done on the issue itself (close it with `Fixes #N` from your PR).
 - The change is justified in the PR description, not just in the diff.
 - Public surface changes (REST, FlightSQL, `qodstate_*` schema) come
   with migration notes; backward-compat is a goal until 1.0.
-- Documentation (README, RUNNING.md, scripts' header comments) is
+- Documentation (README, guides/RUNNING.md, scripts' header comments) is
   updated when behaviour changes.
 - No comments restating what the code obviously does; comments only
   for the *why* (constraints, surprising decisions, workarounds).

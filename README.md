@@ -1,6 +1,6 @@
 # Quack on Demand
 
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](RESILIENCE.md)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](guides/RESILIENCE.md)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
@@ -17,7 +17,7 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 ### Project status
 
-**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
+**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](guides/RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
@@ -35,7 +35,7 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 - [Community](#community)
 - [Contributing](#contributing)
 
-Companion files: [`QUICKSTART.md`](QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](RUNNING.md) (deployment paths + operator notes) - [`API.md`](API.md) (REST API reference) - [`RESILIENCE.md`](RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
+Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](guides/RUNNING.md) (deployment paths + operator notes) - [`API.md`](guides/API.md) (REST API reference) - [`RESILIENCE.md`](guides/RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
 
 ---
 
@@ -56,7 +56,7 @@ Companion files: [`QUICKSTART.md`](QUICKSTART.md) (zero-to-first-query) - [`RUNN
 
 ## Quick start
 
-Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
+Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](guides/QUICKSTART.md)** for the step-by-step. The short version:
 
 ```bash
 cp .env.example .env                            # tweak ports / auth / admin password
@@ -65,7 +65,7 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-dema
 
 That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / loadtest `--tenant`/`--pool` flag).
 
-**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
+**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](guides/RUNNING.md) for the full native path (external Postgres, env vars, TLS).
 
 Smoke-test the FlightSQL edge with the Python load tester:
 
@@ -90,7 +90,7 @@ Queries failed:   0
 Latency  p50:     ~60 ms
 ```
 
-`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
+`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](guides/QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
 
 **FlightSQL JDBC:**
   `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales`
@@ -122,7 +122,7 @@ Latency  p50:     ~60 ms
 **Browse the admin UI (optional) - 10 seconds**
    Open http://localhost:20900/ui/ in a browser. Log in as admin / admin
 
-Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full loadtest parameter table, and the [operator's pre-prod checklist](RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](RUNNING.md)**. REST API reference is in **[`API.md`](API.md)**.
+Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full loadtest parameter table, and the [operator's pre-prod checklist](guides/RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](guides/RUNNING.md)**. REST API reference is in **[`API.md`](guides/API.md)**.
 
 ---
 
@@ -148,7 +148,7 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 - **React admin console** at `http://lcoalhost:20900/ui/` - tenant CRUD (with Databases · Pools · Auth provider tabs), pool CRUD, a dedicated **/users page** (Users · Groups · Roles · Identities tabs) with a per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
 - **Observability built in** - Prometheus scrape endpoint at `/metrics`, or push to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring (one sink at a time, picked via `metrics.sink`). Ships with a Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
-- **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](RESILIENCE.md)
+- **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](guides/RESILIENCE.md)
 - **Every config key is overridable** via a `QOD_*` env var
 
 ---
