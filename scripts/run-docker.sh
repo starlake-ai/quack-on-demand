@@ -57,7 +57,7 @@
 # DuckLake bakes the absolute DATA_PATH into the Postgres metadata -
 # inside the container that path is /app/ducklake/$PG_DBNAME; natively
 # it is $PWD/ducklake/$PG_DBNAME on the host. Use a different PG_DBNAME
-# per mode, or wipe ducklake/<db>/ between switches. See RUNNING.md for
+# per mode, or wipe ducklake/<db>/ between switches. See guides/RUNNING.md for
 # the recovery recipes.
 #
 # Usage:

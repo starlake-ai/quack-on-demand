@@ -17,7 +17,7 @@
 # the JVM starts.
 #
 # All quack-on-demand settings come from QOD_* / PROXY_* env vars
-# (see RUNNING.md Path 1 for the full list). Sensible defaults:
+# (see guides/RUNNING.md Path 1 for the full list). Sensible defaults:
 #   - REST + UI on :20900, FlightSQL edge on :31338 (TLS on)
 #   - Postgres expected at $QOD_PG_HOST:5432 (default localhost)
 #
