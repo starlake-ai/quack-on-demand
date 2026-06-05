@@ -36,7 +36,6 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 - [Access control (RBAC)](#access-control-rbac)
 - [Tech stack](#tech-stack)
 - [Development](#development)
-- [Operational notes](#operational-notes)
 - [License](#license)
 - [Community](#community)
 - [Contributing](#contributing)
@@ -55,6 +54,78 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 - Just need a single embedded DuckDB inside one application ? use DuckDB directly
 - Need a distributed query engine over data lakes with cross-node shuffles and joins on TB-scale tables then look at Trino / Dremio / StarRocks. Quack on Demand routes each statement to a single Quack node; it doesn't fan out across them
+
+---
+
+## Quick start
+
+Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
+
+```bash
+cp .env.example .env                            # tweak ports / auth / admin password
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
+```
+
+That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / loadtest `--tenant`/`--pool` flag).
+
+**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
+
+Smoke-test the FlightSQL edge with the Python load tester:
+
+```bash
+pip install adbc_driver_flightsql adbc_driver_manager
+
+# TLS-on server (compose default). --tenant/--pool default to tpch/sales
+# (matching the bootstrap), so no flags are needed for the demo path.
+python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
+
+# Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
+./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+```
+
+Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
+
+```
+Load test: 2 workers x 5 iterations (+5 warmup) against grpc+tls://localhost:31338 as admin -> tpch/sales
+...
+Queries OK:       10
+Queries failed:   0
+Latency  p50:     ~60 ms
+```
+
+`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
+
+**FlightSQL JDBC:**
+  `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales`
+
+**FlightSQL ODBC** (Apache Arrow Flight SQL ODBC Driver from
+  [arrow-adbc](https://arrow.apache.org/adbc/main/driver/flight_sql.html#odbc)
+  or the [Dremio ODBC connector](https://github.com/apache/arrow-adbc/tree/main/c/driver/flightsql)):
+
+  Register the driver in `/etc/odbcinst.ini` (Linux/macOS) - point at
+  the `.so` / `.dylib` from the package:
+
+  ```ini
+  [Apache Arrow Flight SQL ODBC Driver]
+  Description = Apache Arrow Flight SQL
+  Driver      = /usr/local/lib/libarrow-odbc.so
+  ```
+
+  Then either use a DSN-less connection string:
+
+  ```
+  Driver={Apache Arrow Flight SQL ODBC Driver};
+  HOST=localhost;PORT=31338;
+  UseEncryption=true;DisableCertificateVerification=true;
+  UID=admin;PWD=admin;
+  adbc.flight.sql.rpc.call_header.tenant=tpch;
+  adbc.flight.sql.rpc.call_header.pool=sales
+  ```
+
+**Browse the admin UI (optional) - 10 seconds**
+   Open http://localhost:20900/ui/ in a browser. Log in as admin / admin
+
+Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, REST API recipes, the full loadtest parameter table, and the [operator's pre-prod checklist](RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](RUNNING.md)**.
 
 ---
 
@@ -171,47 +242,6 @@ Two databases per tenant-db deployment (control-plane `qod` + tenant-db `${tenan
 
 ---
 
-## Quick start
-
-Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](QUICKSTART.md)** for the step-by-step. The short version:
-
-```bash
-cp .env.example .env                            # tweak ports / auth / admin password
-LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
-```
-
-That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / loadtest `--tenant`/`--pool` flag).
-
-**Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](RUNNING.md) for the full native path (external Postgres, env vars, TLS).
-
-Smoke-test the FlightSQL edge with the Python load tester:
-
-```bash
-pip install adbc_driver_flightsql adbc_driver_manager
-
-# TLS-on server (compose default). --tenant/--pool default to tpch/sales
-# (matching the bootstrap), so no flags are needed for the demo path.
-python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
-
-# Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
-./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
-```
-
-Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
-
-```
-Load test: 2 workers x 5 iterations (+5 warmup) against grpc+tls://localhost:31338 as admin -> tpch/sales
-...
-Queries OK:       10
-Queries failed:   0
-Latency  p50:     ~60 ms
-```
-
-`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
-
-Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, REST API recipes, the full loadtest parameter table - lives in **[`RUNNING.md`](RUNNING.md)**.
-
----
 
 ## Configuration
 
@@ -431,20 +461,6 @@ scripts/
 ui/
 └── src/                           # React SPA, built into src/main/resources/ui
 ```
-
----
-
-## Operational notes
-
-Defaults and design choices an operator should be aware of before going to production:
-
-- **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `qodstate_user` with the configured admin (as a superuser: `tenant IS NULL`) at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.**
-- **Every FlightSQL client scopes by tenant + pool at handshake.** Even the superuser admin must pass `tenant` + `pool` gRPC headers (JDBC URL params, ODBC `adbc.flight.sql.rpc.call_header.*`, ADBC `RPC_CALL_HEADER_PREFIX` db_kwargs, loadtest `--tenant`/`--pool`); the routing layer needs them to pick a pool. The per-statement RBAC gate has the superuser bypass, the routing handshake does not.
-- **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `QOD_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
-- **DML / DDL grants are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the SQL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
-- **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.
-- **Edge session caching trades latency for revocation lag.** Auth re-validation happens at the TTL boundary (`sessionTtlSec`, default 1h), not on every call. A revoked OIDC token still works for up to one TTL window - shrink the TTL or restart the manager for immediate effect.
-- **Metrics, dashboards and cloud monitoring.** Manager exposes Prometheus metrics at `/metrics` by default, or pushes to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring instead (one sink at a time, picked via `metrics.sink`). See [observability/README.md](observability/README.md) for the sink selector, env vars, credential discovery chains, cardinality budget, and the Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json).
 
 ---
 
