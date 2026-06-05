@@ -14,6 +14,21 @@ import scala.collection.concurrent.TrieMap
 
 class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
+  "PoolSupervisor.nodeId" should "replace underscores in tenant-db with hyphens (RFC 1123)" in {
+    // tenant-db is the composed `${tenant}_${tenantDb}` Postgres name, which
+    // legitimately carries an underscore. K8s pod + service names cannot,
+    // so the node-id surface must hyphenize it.
+    val k = PoolKey("tpch", "tpch_tpch1", "sales")
+    val id = PoolSupervisor.nodeId(k, 1)
+    id shouldBe "quack-tpch-tpch-tpch1-sales-1"
+    id should fullyMatch regex "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+  }
+
+  it should "leave already-hyphenated tenant-db names alone" in {
+    val k = PoolKey("acme", "acme-default", "sales")
+    PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
+  }
+
   private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
   private val ms           = Map("pgHost" -> "localhost")
 

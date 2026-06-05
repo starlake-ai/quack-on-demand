@@ -393,7 +393,7 @@ final class PoolSupervisor(
           poolIdByKey.put(key, poolEntity.id)
         } *> {
           val specs = dist.asRoleList.zipWithIndex.map { case (role, i) =>
-            NodeSpec(key, s"quack-${key.tenant}-${key.tenantDb}-${key.pool}-${i + 1}", role,
+            NodeSpec(key, PoolSupervisor.nodeId(key, i + 1), role,
               merged, td.objectStore, maxConcurrent = maxConcurrentPerNode)
           }
           specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
@@ -448,7 +448,7 @@ final class PoolSupervisor(
           val roles = newDist.asRoleList.drop(state.size).take(toAdd)
           val specs = roles.zipWithIndex.map { case (role, i) =>
             NodeSpec(key,
-              s"quack-${key.tenant}-${key.tenantDb}-${key.pool}-${state.size + i + 1}",
+              PoolSupervisor.nodeId(key, state.size + i + 1),
               role, state.metastore, state.s3, maxConcurrent = state.maxConcurrentPerNode)
           }
           specs.foldLeft(IO.pure(state.nodes)) { (acc, spec) =>
@@ -907,3 +907,15 @@ final class PoolSupervisor(
 
 object PoolSupervisor:
   val AdminRoleName: String = "admin"
+
+  /** Compose a node id that is safe as a Kubernetes pod + service name.
+    *
+    * `key.tenantDb` is the normalized composed Postgres database name
+    * `${tenant}_${tenantDb}` and carries an underscore as separator,
+    * which is valid in Postgres identifiers but illegal in pod names
+    * (RFC 1123 subdomain: lowercase alphanumeric + `-` + `.` only).
+    * The Postgres name stays unchanged; this helper only sanitizes for
+    * the node-id / pod-name surface. */
+  def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
+    val safeDb = key.tenantDb.replace('_', '-')
+    s"quack-${key.tenant}-$safeDb-${key.pool}-$index"
