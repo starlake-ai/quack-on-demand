@@ -56,7 +56,9 @@ Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) -
 
 ## Quick start
 
-Zero to first query in under 5 minutes: see **[`QUICKSTART.md`](guides/QUICKSTART.md)** for the step-by-step. The short version:
+Zero to first query in under 5 minutes ? Clone this repo first then see **[`QUICKSTART.md`](guides/QUICKSTART.md)** for the step-by-step. 
+
+The short version:
 
 ```bash
 cp .env.example .env                            # tweak ports / auth / admin password
