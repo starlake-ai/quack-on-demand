@@ -5,7 +5,7 @@
 # Reference for every knob the manager honors. Anything under `env:` is passed
 # through to the manager pod verbatim as QOD_* / PROXY_* env vars and
 # overrides the corresponding key in application.conf. See the project's
-# RUNNING.md for the full env-var table.
+# guides/RUNNING.md for the full env-var table.
 
 # --- Image ------------------------------------------------------------------
 image:
@@ -15,7 +15,7 @@ image:
 imagePullSecrets: []
 
 # --- Replicas ---------------------------------------------------------------
-# Multi-manager active-active is not yet safe (see RESILIENCE.md and #11).
+# Multi-manager active-active is not yet safe (see guides/RESILIENCE.md and #11).
 # Keep replicas=1 until Postgres advisory-lock leader election lands.
 replicaCount: 1
 
@@ -61,7 +61,7 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 priorityClassName: ""
-terminationGracePeriodSeconds: 60   # gives in-flight FlightSQL statements time to finish (see RESILIENCE.md)
+terminationGracePeriodSeconds: 60   # gives in-flight FlightSQL statements time to finish (see guides/RESILIENCE.md)
 
 # --- Services (REST/UI + FlightSQL) -----------------------------------------
 service:
