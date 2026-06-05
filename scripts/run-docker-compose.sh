@@ -315,23 +315,37 @@ if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
   }
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
-  pg_dbname="$(read_env PG_DBNAME tpch)"
   tpch_schema="$(read_env TPCH_SCHEMA tpch1)"
 
-  # Honor QOD_DUCKLAKE_DATA_PATH when the user has switched to S3
-  # storage. Compose passes that var into the quack service unchanged, so
-  # the seeder writes parquet to the exact same prefix the manager will
-  # later read from. Falls back to the bind-mount path /app/ducklake/<db>
-  # for the default filesystem deployment.
-  data_path="$(read_env QOD_DUCKLAKE_DATA_PATH "/app/ducklake/$pg_dbname")"
+  # After the storage-refactor (commits 0cd1541 / aa4329b / 616fdd5),
+  # PG_DBNAME is the CONTROL-PLANE database (default `qod`); the
+  # tenant-db that holds the DuckLake catalog + parquet metadata is a
+  # separate Postgres DB the manager provisions, named
+  # `${tenant}_${tenantDb}` (default `tpch_tpch1`). Compose this name
+  # here from the same bootstrap defaults `application.conf` uses, with
+  # `QOD_BOOTSTRAP_TENANT` / `QOD_BOOTSTRAP_TENANTDB` overrides for
+  # users who customized the bootstrap.
+  bootstrap_tenant="$(read_env QOD_BOOTSTRAP_TENANT   tpch)"
+  bootstrap_tdb="$(read_env QOD_BOOTSTRAP_TENANTDB tpch1)"
+  tenant_db_name="${bootstrap_tenant}_${bootstrap_tdb}"
 
-  echo "seeding TPC-H (schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
+  # Honor QOD_DUCKLAKE_DATA_PATH when the user has switched to S3
+  # storage. Compose passes that var into the quack service unchanged.
+  # The manager derives per-tenant-db paths by replacing the last
+  # segment of the global default with the tenant-db name (mirrors
+  # Main.scala's tenantDbDataPath). Do the same here so the loader
+  # writes parquet to the exact same prefix the manager will read from.
+  root_data_path="$(read_env QOD_DUCKLAKE_DATA_PATH "/app/ducklake/tpch")"
+  root_parent="$(dirname "$root_data_path")"
+  data_path="$root_parent/$tenant_db_name"
+
+  echo "seeding TPC-H (db=$tenant_db_name, schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
   docker compose -f "$COMPOSE_FILE" exec \
     -e PG_HOST=postgres \
     -e PG_PORT=5432 \
     -e PG_USER="$pg_user" \
     -e PG_PASS="$pg_pass" \
-    -e DB_NAME="$pg_dbname" \
+    -e DB_NAME="$tenant_db_name" \
     -e SCHEMA_NAME="$tpch_schema" \
     -e DATA_PATH="$data_path" \
     -e SF="$tpch_sf" \
