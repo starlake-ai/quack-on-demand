@@ -17,6 +17,7 @@ import type {
   TenantDbListResponse,
   TenantDbOpRequest,
   ClientConfigResponse,
+  ConfigListResponse,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -110,6 +111,7 @@ export const api = {
   // Health + client config
   health:        () => fetch('/health').then(r => r.json() as Promise<HealthResponse>),
   clientConfig:  () => get<ClientConfigResponse>('/config/client'),
+  serverConfig:  () => get<ConfigListResponse>('/config/server'),
 
   // Pools + nodes
   listPools:   () => get<{ pools: PoolResponse[] }>('/pool/list'),

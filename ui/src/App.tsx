@@ -11,6 +11,7 @@ import Nodes from './pages/Nodes';
 import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
 import Users from './pages/Users';
+import Config from './pages/Config';
 
 function Shell() {
   const { username, role, logout, authEnabled } = useAuth();
@@ -21,6 +22,9 @@ function Shell() {
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
+        {role === 'admin' && (
+          <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
+        )}
         <span className="spacer" />
         {authEnabled ? (
           <>
@@ -48,6 +52,7 @@ function Shell() {
           <Route path="/users"                                     element={<Users />} />
           <Route path="/catalog"                                   element={<Catalog />} />
           <Route path="/catalog/:tenant/:tenantDb/:schema/:table"  element={<CatalogTableDetail />} />
+          <Route path="/config"                                    element={<Config />} />
         </Routes>
       </main>
     </>

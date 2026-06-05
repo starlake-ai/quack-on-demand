@@ -8,7 +8,7 @@ body:
     attributes:
       label: "Where"
       description: "File path, section heading, or URL of the affected doc."
-      placeholder: "RUNNING.md - Path 3 / Seed with TPC-H and Run"
+      placeholder: "guides/RUNNING.md - Path 3 / Seed with TPC-H and Run"
     validations:
       required: true
 
