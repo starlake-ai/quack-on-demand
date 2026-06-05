@@ -162,66 +162,67 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 ## Architecture
 
-```
-┌─────────────────────┐
-│  JDBC/ADBC client   │       Bearer or Basic auth
-│  (DBeaver, Spark,   │  ────────────────────────────►
-│   custom apps)      │                                ┌──────────────────────────────┐
-└─────────────────────┘                                │   quack-on-demand manager    │
-                                                       │                              │
-┌─────────────────────┐    HTTPS (admin console)       │  ┌────────────────────────┐  │
-│       Browser       │  ────────────────────────────► │  │  Tapir REST + React UI │  │
-│   /ui/* admin page  │                                │  │   :20900               │  │
-└─────────────────────┘                                │  └────────────────────────┘  │
-                                                       │                              │
-                                                       │  ┌────────────────────────┐  │
-                                                       │  │  Arrow FlightSQL edge  │  │
-                                                       │  │  :31338   (TLS)        │  │
-                                                       │  │  • Auth (DB/JWT/OIDC)  │  │
-                                                       │  │  • Handshake gates     │  │
-                                                       │  │    (user-scope, pool)  │  │
-                                                       │  │  • Per-statement RBAC  │  │
-                                                       │  │    (EffectiveSet)      │  │
-                                                       │  │  • Role-aware router   │  │
-                                                       │  └────────┬───────────────┘  │
-                                                       │           │                  │
-                                                       │           ▼                  │
-                                                       │   spawn-quack-node.sh        │
-                                                       │           │                  │
-                                                       └───────────┼──────────────────┘
-                                                                   │
-                                          ┌────────────────────────┼─────────────────────────┐
-                                          ▼                        ▼                         ▼
-                                  ┌──────────────┐         ┌──────────────┐          ┌──────────────┐
-                                  │  Quack node  │         │  Quack node  │          │  Quack node  │
-                                  │  WRITEONLY   │         │  READONLY    │          │   DUAL       │
-                                  │  :21900      │         │  :21901      │          │  :21902      │
-                                  └──────┬───────┘         └──────┬───────┘          └──────┬───────┘
-                                         │                        │                         │
-                                         └────────────────────────┼─────────────────────────┘
-                                                                  │
-                                                                  ▼
-                                                ┌─────────────────────────────────────┐
-                                                │   Postgres                          │
-                                                │                                     │
-                                                │  Control-plane DB (`qod`):          │
-                                                │   • qodstate_tenant / _tenant_db    │
-                                                │     / _pool / _node                 │
-                                                │   • qodstate_user                   │
-                                                │   • qodstate_tenant_identity        │
-                                                │   • qodstate_role / _role_permission│
-                                                │   • qodstate_group / _user_group /  │
-                                                │     _user_role / _group_role        │
-                                                │   • qodstate_pool_permission        │
-                                                │   • slkstate_pool_state (file mode) │
-                                                │                                     │
-                                                │  Per-tenant catalog DBs             │
-                                                │  (`${tenant}_${tenantDb}`):         │
-                                                │   • __ducklake_*  (DuckLake catalog)│
-                                                └─────────────────────────────────────┘
-                                                                  +
-                                                          object/file storage
-                                                          (S3, GCS, FS, …)
+```mermaid
+
+
+flowchart TD
+    C1["JDBC / ADBC client"]
+    C2["Browser · admin UI"]
+
+    EDGE["FlightEdgeServer · :31338 TLS<br/>Arrow FlightSQL"]
+    REST["ManagerServer REST · :20900<br/>Tapir + http4s Ember · Prometheus /metrics"]
+
+    C1 --> EDGE
+    C2 --> REST
+
+    %% --- edge data-plane pipeline (native only) ---
+    AUTH["AuthenticationService<br/>Database · JWT · OIDC · ROPC<br/>GoogleGroupsLookup · RoleExtractor"]
+    FSR["FlightSqlRouter + FlightProducerImpl<br/>SessionRegistry"]
+    ACL["ACL check · PostgresAclValidator<br/>acl.parser: SqlParser · TableExtractor"]
+    ROUTE["StatementClassifier → RoleMatcher → Router<br/>NodeLoadTracker · read / write / dual"]
+    WIRE["QuackHttpAdapter → QuackHttpClient<br/>QuackProtocol (JNI) · queryNative<br/>application/vnd.duckdb"]
+
+    EDGE --> AUTH --> FSR --> ACL --> ROUTE --> WIRE
+
+    %% --- manager control plane ---
+    API["api handlers · Tapir Endpoints<br/>tenant · pool · node · user · role · group<br/>catalog · config · session · history · rbac"]
+    SUP["PoolSupervisor<br/>HealthProbe · drain · restart"]
+    BK["QuackBackend · selected by runtimeType<br/>LocalQuackBackend | KubernetesQuackBackend"]
+
+    REST --> API --> SUP --> BK
+
+    %% --- node pool ---
+    subgraph POOL["Quack node pool · per tenant — DuckDB + quack_serve · /quack"]
+        direction LR
+        WO["WRITEONLY<br/>:21900 / pod"]
+        RO["READONLY<br/>:21901 / pod"]
+        DU["DUAL<br/>:21902 / pod"]
+    end
+
+    WIRE -->|"vnd.duckdb wire"| POOL
+    BK -->|"spawn · scale · quarantine"| POOL
+
+    %% --- persistence ---
+    PG[("PostgreSQL<br/>control plane: qodstate_* / slkstate_*<br/>Liquibase · RBAC<br/>per-tenant DuckLake catalogs")]
+    OBJ[("Object storage<br/>S3 · GCS · local FS")]
+
+    API -.->|control-plane state| PG
+    SUP -.->|pool / node state| PG
+    POOL -->|catalog| PG
+    POOL -->|data read/write| OBJ
+
+    %% --- observability ---
+    MET["MetricsRegistry · StatementInstruments"]
+    SINK[("Metrics sink<br/>Prometheus · CloudWatch · Azure · GCP")]
+    EDGE -.-> MET
+    SUP -.-> MET
+    MET --> SINK
+
+    classDef core fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#92400e;
+    classDef store fill:#eef2ff,stroke:#c7d2fe,color:#1e3a8a;
+    class EDGE,WIRE core;
+    class PG,OBJ,SINK store;
+    
 ```
 
 **Two paths into Postgres** (not pictured to keep the diagram readable):
