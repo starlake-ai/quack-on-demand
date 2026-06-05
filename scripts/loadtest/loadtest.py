@@ -166,6 +166,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--schema",
                    default=os.environ.get("LT_SCHEMA", "tpch1"),
                    help="schema to prefix the default TPC-H mix with (ignored with -q)")
+    p.add_argument("--tenant",
+                   default=os.environ.get("LT_TENANT", "tpch"),
+                   help="tenant gRPC header for FlightSQL routing (defaults to "
+                        "the bootstrap tenant); empty string skips the header")
+    p.add_argument("--pool",
+                   default=os.environ.get("LT_POOL", "sales"),
+                   help="pool gRPC header for FlightSQL routing (defaults to "
+                        "the bootstrap pool); empty string skips the header")
     p.add_argument("--insecure", action="store_true",
                    default=os.environ.get("LT_INSECURE", "true").lower() == "true",
                    help="skip TLS certificate verification (dev only)")
@@ -191,6 +199,15 @@ def connect(args: argparse.Namespace):
     # ADBC's option for "trust any cert" is the tls_skip_verify db_kwarg.
     if args.insecure and args.url.startswith("grpc+tls"):
         db_kwargs[DatabaseOptions.TLS_SKIP_VERIFY.value] = "true"
+    # FlightSQL routing: the edge's TenantSelector requires `tenant` + `pool`
+    # gRPC headers on the Basic-auth path (superusers included), so the
+    # router can pick the right (tenant, pool) of Quack nodes. Translate
+    # into ADBC's per-RPC call-header db_kwarg.
+    hdr = DatabaseOptions.RPC_CALL_HEADER_PREFIX.value
+    if args.tenant:
+        db_kwargs[hdr + "tenant"] = args.tenant
+    if args.pool:
+        db_kwargs[hdr + "pool"] = args.pool
     # Strip the placeholder None key (set above for clarity)
     db_kwargs = {k: v for k, v in db_kwargs.items() if v is not None}
 
@@ -266,9 +283,10 @@ def main() -> int:
     queries = [args.query] if args.query else default_queries(args.schema)
     mix_label = "custom -q" if args.query else f"default TPC-H mix [schema={args.schema}]"
 
+    scope = "/".join(p for p in (args.tenant, args.pool) if p) or "<no tenant/pool headers>"
     print(
         f"Load test: {args.workers} workers x {args.iterations} iterations "
-        f"(+{args.warmup} warmup) against {args.url} as {args.user}"
+        f"(+{args.warmup} warmup) against {args.url} as {args.user} -> {scope}"
     )
     print(f"Workload:  {mix_label}")
 
