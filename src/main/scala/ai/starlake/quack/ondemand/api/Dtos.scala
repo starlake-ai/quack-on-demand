@@ -71,6 +71,21 @@ final case class ClientConfigResponse(
     authEnabled: Boolean = true
 )
 
+/** One row of the admin UI Config page: a single scalar from
+  * `application.conf` with its env-var override and a short
+  * description. `value` is masked (`"(set)"` / `"(unset)"`) when
+  * `sensitive` is true. */
+final case class ConfigEntryView(
+    path: String,
+    envVar: String,
+    description: String,
+    value: String,
+    sensitive: Boolean,
+    isSet: Boolean
+)
+
+final case class ConfigListResponse(entries: List[ConfigEntryView])
+
 final case class SetRoleRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, role: String)
 final case class SetMaxConcurrentRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, max: Int)
 final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
@@ -463,6 +478,8 @@ object Dtos:
   )
   given Codec[SetPoolDisabledRequest]   = deriveCodec
   given Codec[ClientConfigResponse] = deriveCodec
+  given Codec[ConfigEntryView]      = deriveCodec
+  given Codec[ConfigListResponse]   = deriveCodec
 
   given Codec[TenantDbRequest]      = deriveCodec
   given Codec[TenantDbResponse]     = deriveCodec
