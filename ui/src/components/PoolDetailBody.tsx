@@ -14,16 +14,18 @@ export default function PoolDetailBody({
   tenantDb,
   pool,
   onStopped,
-  showBack = true,
+  onBack,
 }: {
   tenant:    string;
   tenantDb:  string;
   pool:      string;
   onStopped: () => void;
-  /** Render the "Back to pools" link in the header. Defaults true for the
-    * standalone /pool/... route; pass false when embedded under a parent
-    * that already provides its own back affordance (e.g. PoolSection). */
-  showBack?: boolean;
+  /** Custom Back-button handler. When provided, the header renders a
+    * "Back to pools" button that calls this (used by PoolSection to
+    * collapse the inline view). When omitted, the header falls back to
+    * a `<Link>` back to the tenant page (used by the standalone
+    * `/pool/...` route). */
+  onBack?:   () => void;
 }) {
   const [data, setData] = useState<PoolResponse | null>(null);
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
@@ -303,11 +305,13 @@ export default function PoolDetailBody({
               </>
             )}
           </div>
-          {showBack && (
-            <Link to={`/tenant/${encodeURIComponent(data.tenant)}`}>
-              <button type="button" className="secondary">← Back to pools</button>
-            </Link>
-          )}
+          {onBack
+            ? <button type="button" onClick={onBack}>← Back to pools</button>
+            : (
+              <Link to={`/tenant/${encodeURIComponent(data.tenant)}`}>
+                <button type="button">← Back to pools</button>
+              </Link>
+            )}
         </div>
       </header>
 

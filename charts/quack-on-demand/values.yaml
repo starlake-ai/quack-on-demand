@@ -118,13 +118,18 @@ pdb:
 
 # --- Postgres (external) -----------------------------------------------------
 # The manager and the spawned Quack nodes all talk to this Postgres for the
-# DuckLake metadata + slkstate_* control-plane tables. Production deploys
+# DuckLake catalog + qodstate_* control-plane tables. Production deploys
 # should point at a managed Postgres (RDS / Cloud SQL / AlloyDB / Azure DB).
 postgres:
   host: ""                 # REQUIRED — e.g. "rds.example.com" or "postgres.svc"
   port: 5432
   user: postgres
-  dbName: tpch
+  # Control-plane database name. Holds the qodstate_* tables. Per-tenant
+  # DuckLake catalog databases (`${tenant}_${tenantDb}`, e.g. `tpch_tpch1`)
+  # live next to it on the same Postgres server.
+  dbName: qod
+  # Postgres schema for the control-plane tables. Maps to QOD_PG_SCHEMA.
+  schema: main
   # Pick exactly ONE secret strategy:
   #   1. inline password (dev / kind only — discouraged for prod)
   #   2. existing secret reference (recommended)
@@ -194,7 +199,7 @@ s3:
   existingSecretSecretKeyKey: s3SecretKey
 
 # --- Admin credentials -------------------------------------------------------
-# Initial admin user(s) seeded into slkstate_user on every boot. Re-applied
+# Initial admin user(s) seeded into qodstate_user on every boot. Re-applied
 # on every restart so changing the password and re-deploying rotates.
 # `username` accepts a comma-separated list: every entry gets the same
 # password + admin role. Default seeds BOTH the project's documented
@@ -237,7 +242,11 @@ metrics:
 # Idempotent at startup. Disable when tenants are managed externally.
 bootstrap:
   enabled: true
-  tenant: acme
+  tenant: tpch
+  # Suffix appended to `tenant` to form the per-tenant DuckLake catalog
+  # database. With the defaults below the chart provisions a Postgres
+  # database named `tpch_tpch1` next to the control-plane `qod`.
+  tenantDb: tpch1
   pool: sales
   roleDistribution:
     writeonly: 1

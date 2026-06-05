@@ -8,7 +8,8 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 - `kubectl`
 - `helm` 3.12+
 - `docker`
-- ~8 GB free RAM (the manager image + Postgres + kind nodes)
+- `duckdb` CLI on `$PATH` (only required when seeding via `LOAD_TPCH`; otherwise skip)
+- ~8 GB free RAM (the manager image + Quack node image + Postgres + SeaweedFS + kind nodes)
 
 ## One command
 
@@ -19,10 +20,10 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 This:
 
 1. Creates a kind cluster named `qod-test` (reused if it already exists).
-2. Builds the manager image (`quack-on-demand:local`) from the current source tree.
-3. Loads the image into the kind cluster.
-4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)): single Pod + Service, ephemeral `emptyDir`. **Not production-grade** — that's the point. The chart itself expects an external Postgres; this manifest exists only to satisfy the smoke.
-5. `helm install`s the chart pointing at that Postgres + the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
+2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
+3. Loads both images into the kind cluster.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)) and SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
+5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
 6. Waits for the manager pod to be `Ready` and `/health` to return OK.
 7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
 
@@ -62,7 +63,7 @@ kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
 
 # Port-forward FlightSQL (gRPC+TLS on :31338, manager-issued self-signed cert)
 kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
-# JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=acme/sales/<user>&password=<password>
+# JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales
 
 # Watch the quack node pods the manager spawns
 kubectl -n qod get pods -l managed-by=quack-on-demand -w

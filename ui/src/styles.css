@@ -244,16 +244,26 @@ select {
 /* Textareas keep auto height. */
 textarea { height: auto; box-sizing: border-box; }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-/* Paint the native up/down spinner button surface with the same orange
-   the Scale (primary) button uses. CSS filter recipes for recoloring
-   the inner arrow glyph are unreliable across browsers; setting the
-   button's `background` does land everywhere it matters. Firefox honors
-   `accent-color`, set below. */
-input[type="number"] { accent-color: var(--accent); }
+/* Native number-input spinner arrows: the browser draws them in its
+   own dark grey, and CSS filter recipes drift across versions, so we
+   hide the native spinner entirely and paint two orange chevrons
+   (rgb(245,158,11), matching --accent) via background-image on the
+   input itself. Keyboard up/down still increments the value; click
+   on the chevrons does not (acceptable for our admin forms). */
+input[type="number"] {
+  -moz-appearance: textfield;
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='rgb(245,158,11)' d='M6 0L0 8h12z'/></svg>"),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='rgb(245,158,11)' d='M6 8L0 0h12z'/></svg>");
+  background-repeat: no-repeat, no-repeat;
+  background-position: right .55rem top .35rem, right .55rem bottom .35rem;
+  background-size: 9px 6px, 9px 6px;
+  padding-right: 1.6rem;
+}
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
-  background: var(--accent);
-  opacity: 1;
+  -webkit-appearance: none;
+  margin: 0;
 }
 button {
   background: var(--accent);

@@ -62,7 +62,7 @@ export default function TenantDetail() {
         <div className="row" style={{ gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
           <button className="danger" onClick={handleDelete}>Delete tenant</button>
           <Link to="/tenants">
-            <button type="button" className="secondary">← Back to tenants</button>
+            <button type="button">← Back to tenants</button>
           </Link>
         </div>
       </div>
