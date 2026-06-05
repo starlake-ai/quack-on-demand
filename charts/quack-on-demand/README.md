@@ -1,4 +1,4 @@
-# quack-on-demand Helm chart
+# WIP quack-on-demand Helm chart
 
 Deploys the [quack-on-demand](https://github.com/starlake-ai/quack-on-demand) manager onto Kubernetes. The manager serves the admin REST/UI on `:20900` and the FlightSQL edge on `:31338`, and supervises Quack node pods in the same namespace via its built-in `KubernetesQuackBackend`.
 
