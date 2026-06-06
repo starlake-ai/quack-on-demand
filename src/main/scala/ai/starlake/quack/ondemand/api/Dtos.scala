@@ -86,6 +86,15 @@ final case class ConfigEntryView(
 
 final case class ConfigListResponse(entries: List[ConfigEntryView])
 
+final case class ManifestImportSummary(
+    tenants:   Int,
+    tenantDbs: Int,
+    pools:     Int,
+    roles:     Int,
+    groups:    Int,
+    users:     Int
+)
+
 final case class SetRoleRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, role: String)
 final case class SetMaxConcurrentRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, max: Int)
 final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
@@ -480,6 +489,7 @@ object Dtos:
   given Codec[ClientConfigResponse] = deriveCodec
   given Codec[ConfigEntryView]      = deriveCodec
   given Codec[ConfigListResponse]   = deriveCodec
+  given Codec[ManifestImportSummary] = deriveCodec
 
   given Codec[TenantDbRequest]      = deriveCodec
   given Codec[TenantDbResponse]     = deriveCodec
