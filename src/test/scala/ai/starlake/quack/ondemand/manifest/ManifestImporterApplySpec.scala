@@ -1,0 +1,89 @@
+// src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestImporterApplySpec.scala
+package ai.starlake.quack.ondemand.manifest
+
+import ai.starlake.quack.model.{Tenant, TenantDb}
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import at.favre.lib.crypto.bcrypt.BCrypt
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+
+import java.time.Instant
+
+class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
+
+  private def base = ConfigManifest(
+    apiVersion   = ConfigManifest.ApiVersion,
+    kind         = ConfigManifest.Kind,
+    exportedAt   = Instant.EPOCH,
+    exportedFrom = ExportedFrom("0.2.0", "test")
+  )
+
+  /** Seed an admin superuser with a known bcrypt-hashed password so the
+    * snapshot fallback path has something to read. */
+  private def storeWithAdmin: InMemoryControlPlaneStore =
+    val s   = new InMemoryControlPlaneStore()
+    val pre = BCrypt.withDefaults().hashToString(12, "old-secret".toCharArray)
+    s.upsertUserWithHash(tenant = None, username = "admin", passwordHash = pre, role = "admin")
+    s
+
+  "ManifestImporter.apply" should "bcrypt plaintext passwords" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(users = List(ManifestUser(tenant   = None, username = "admin",
+                                                 password = Some("hunter2"), role = "admin")))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    val stored = s.getPasswordHash(None, "admin").get
+    BCrypt.verifyer().verify("hunter2".toCharArray, stored).verified shouldBe true
+  }
+
+  it should "preserve an already-bcrypt password verbatim" in {
+    val s   = new InMemoryControlPlaneStore()
+    val pre = BCrypt.withDefaults().hashToString(12, "hunter2".toCharArray)
+    val m   = base.copy(users = List(ManifestUser(tenant   = None, username = "admin",
+                                                   password = Some(pre), role = "admin")))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.getPasswordHash(None, "admin").get shouldBe pre
+  }
+
+  it should "reuse the existing password hash when the user has no password field" in {
+    val s   = storeWithAdmin
+    val pre = s.getPasswordHash(None, "admin").get
+    val m   = base.copy(users = List(ManifestUser(tenant   = None, username = "admin",
+                                                   password = None, role = "admin")))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.getPasswordHash(None, "admin").get shouldBe pre
+  }
+
+  it should "reject a new user without a password field and no prior credential" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(users = List(ManifestUser(tenant   = None, username = "newbie",
+                                                 password = None, role = "user")))
+    val err = ManifestImporter.apply(m, s).left.toOption.get
+    err.exists(_.contains("newbie")) shouldBe true
+  }
+
+  it should "leave tenants absent from the YAML untouched" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "t-untouched", name = "untouched", displayName = "untouched"))
+    ManifestImporter.apply(base, s) shouldBe Right(())
+    s.listTenants().map(_.displayName) should contain ("untouched")
+  }
+
+  it should "drop tenant-db registry rows under a tenant with tenantDbs: [] but never call dropDatabase" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "t-tpch", name = "tpch", displayName = "tpch"))
+    s.upsertTenantDb(TenantDb(
+      id        = "td-1",
+      tenantId  = "t-tpch",
+      name      = "tpch_tpch1",
+      metastore = Map.empty,
+      dataPath  = "/tmp/data"
+    ))
+
+    val m = base.copy(tenants = List(ManifestTenant(name = "tpch", tenantDbs = Nil)))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+
+    // Registry row gone. (We never call `dbAdmin.dropDatabase` -- the importer
+    // has no DbAdmin handle at all, so there is nothing to assert beyond the
+    // registry deletion.)
+    s.listTenantDbs("t-tpch") shouldBe empty
+  }

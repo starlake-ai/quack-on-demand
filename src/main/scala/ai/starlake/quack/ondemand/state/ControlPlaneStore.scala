@@ -53,6 +53,28 @@ trait ControlPlaneStore:
   /** Upsert a `qodstate_user` row WITHOUT touching the password hash.
     * Use [[UserStore.upsertUser]] to create or rotate a password. */
   def upsertUserIdentity(u: RbacUser): Unit
+
+  /** Read the bcrypt password hash for a user identified by
+    * `(tenant, username)`. Returns `None` when the user does not exist.
+    * Used by [[ai.starlake.quack.ondemand.manifest.ManifestImporter]] to
+    * snapshot existing credentials before a per-user replace so that
+    * users with no `password:` field in the YAML can be carried forward
+    * without rotating the hash. */
+  def getPasswordHash(tenant: Option[String], username: String): Option[String]
+
+  /** Upsert a user row carrying its bcrypt hash verbatim. Returns the
+    * user id (newly generated for inserts, existing for updates).
+    * Unlike [[upsertUserIdentity]] this writes the `password_hash`
+    * column. The hash is stored as-is -- the caller is responsible for
+    * bcrypt-ing the plaintext (see
+    * [[ai.starlake.quack.ondemand.manifest.BcryptUtils.toHash]]). */
+  def upsertUserWithHash(
+      tenant:       Option[String],
+      username:     String,
+      passwordHash: String,
+      role:         String
+  ): String
+
   def getUserById(id: String): Option[RbacUser]
   def findUser(tenant: Option[String], username: String): Option[RbacUser]
   /** `None` lists every user, `Some(t)` returns the principals scoped to

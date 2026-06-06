@@ -73,7 +73,8 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     nodeIndex.remove(nodeId)
 
   // ---------------- RBAC: users ----------------
-  private val users = TrieMap.empty[String, RbacUser]
+  private val users         = TrieMap.empty[String, RbacUser]
+  private val passwordHashes = TrieMap.empty[String, String]
   def upsertUserIdentity(u: RbacUser): Unit =
     val existing = users.get(u.id)
     val now = Instant.now()
@@ -81,6 +82,30 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       createdAt = u.createdAt.orElse(existing.flatMap(_.createdAt)).orElse(Some(now)),
       updatedAt = Some(now)
     ))
+
+  def getPasswordHash(tenant: Option[String], username: String): Option[String] =
+    findUser(tenant, username).flatMap(u => passwordHashes.get(u.id))
+
+  def upsertUserWithHash(
+      tenant:       Option[String],
+      username:     String,
+      passwordHash: String,
+      role:         String
+  ): String =
+    val now = Instant.now()
+    val (id, createdAt) = findUser(tenant, username) match
+      case Some(u) => (u.id, u.createdAt.getOrElse(now))
+      case None    => (s"u-${java.util.UUID.randomUUID().toString.take(8)}", now)
+    users.put(id, RbacUser(
+      id        = id,
+      tenant    = tenant,
+      username  = username,
+      role      = role,
+      createdAt = Some(createdAt),
+      updatedAt = Some(now)
+    ))
+    passwordHashes.put(id, passwordHash)
+    id
   def getUserById(id: String): Option[RbacUser] = users.get(id)
   def findUser(tenant: Option[String], username: String): Option[RbacUser] =
     users.values.find(u => u.tenant == tenant && u.username == username)
@@ -97,6 +122,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       .headOption
   def deleteUser(id: String): Unit =
     users.remove(id)
+    passwordHashes.remove(id)
     userGroups.filterInPlace((u, _) => u != id)
     userRoles .filterInPlace((u, _) => u != id)
     poolPermissions.values.filter(_.userId.contains(id)).foreach(p => poolPermissions.remove(p.id))
