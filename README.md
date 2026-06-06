@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/public/svg/lockupA-dark.svg">
+    <img src="assets/public/svg/lockupA-light.svg" alt="Quack on Demand" width="320" />
+  </picture>
+</p>
+
 # Quack on Demand
 
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](guides/RESILIENCE.md)
@@ -17,7 +24,7 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 ### Project status
 
-**Alpha (`0.1.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](guides/RESILIENCE.md) is the honest failure-and-recovery matrix; [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's planned next. APIs and config keys may change between `0.x` releases.
+**Alpha (`0.2.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](guides/RESILIENCE.md) is the honest failure-and-recovery matrix; planned work is tracked on the GitHub issues board. APIs and config keys may change between `0.x` releases.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
