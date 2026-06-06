@@ -1,0 +1,208 @@
+#
+# Static landing page served by an nginx:alpine pod. The Traefik ingress
+# in ingress.yaml routes `/` here; everything else (manager UI / REST /
+# metrics, Grafana, Prometheus, Keycloak) keeps its own prefix and gets
+# linked from the page.
+#
+# The index.html lives in a ConfigMap so editing this file in the repo +
+# re-running run-local-stack-k8s.sh refreshes the page (nginx re-reads
+# the file on each request -- no pod bounce needed).
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qod-landing
+data:
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width,initial-scale=1"/>
+      <title>Quack on Demand · local k8s smoke rig</title>
+      <style>
+        :root { color-scheme: light; }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          padding: 48px 24px;
+          font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          background: #f7fafc;
+          color: #1a202c;
+        }
+        .wrap { max-width: 760px; margin: 0 auto; }
+        header { text-align: center; margin-bottom: 32px; }
+        header h1 { margin: 0 0 4px; font-size: 26px; font-weight: 700; }
+        header p  { margin: 0; color: #4a5568; font-size: 14px; }
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+          gap: 16px;
+        }
+        a.card {
+          display: block;
+          padding: 18px 20px;
+          background: #ffffff;
+          border-radius: 10px;
+          border: 1px solid #e2e8f0;
+          text-decoration: none;
+          color: inherit;
+          transition: transform 80ms ease, box-shadow 80ms ease, border-color 80ms ease;
+        }
+        a.card:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 6px 18px rgba(45, 55, 72, 0.08);
+          border-color: #cbd5e0;
+        }
+        .row { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+        .badge {
+          width: 36px; height: 36px;
+          border-radius: 8px;
+          display: flex; align-items: center; justify-content: center;
+          font-weight: 700; color: #ffffff;
+          font-size: 16px;
+          flex-shrink: 0;
+        }
+        .badge.manager   { background: #dd6b20; }
+        .badge.grafana   { background: #f46800; }
+        .badge.prom      { background: #e6522c; }
+        .badge.keycloak  { background: #4d4d4d; }
+        h2 { margin: 0; font-size: 17px; }
+        .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                font-size: 12px; color: #4a5568; }
+        p.desc { margin: 6px 0 0; color: #4a5568; font-size: 13px; line-height: 1.45; }
+        .creds {
+          display: inline-block;
+          margin-top: 8px;
+          padding: 2px 8px;
+          border-radius: 4px;
+          background: #edf2f7;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 11px;
+          color: #2d3748;
+        }
+        footer {
+          margin-top: 32px;
+          text-align: center;
+          font-size: 12px;
+          color: #718096;
+        }
+        footer code {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: #2d3748;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <header>
+          <h1>Quack on Demand</h1>
+          <p>local k8s smoke rig · everything HTTP behind Traefik on :20900</p>
+        </header>
+
+        <div class="grid">
+          <a class="card" href="/ui/" target="qod-admin">
+            <div class="row">
+              <div class="badge manager">M</div>
+              <div>
+                <h2>Admin UI · REST</h2>
+                <div class="path">/ui/  ·  /api/*</div>
+              </div>
+            </div>
+            <p class="desc">Tenant / pool / RBAC management, live node dashboard, statement history.</p>
+            <span class="creds">admin / admin</span>
+          </a>
+
+          <a class="card" href="/grafana/" target="qod-grafana">
+            <div class="row">
+              <div class="badge grafana">G</div>
+              <div>
+                <h2>Grafana</h2>
+                <div class="path">/grafana/</div>
+              </div>
+            </div>
+            <p class="desc">Pre-provisioned "Quack on Demand" dashboard, Prometheus datasource wired in.</p>
+            <span class="creds">anonymous Admin · no login</span>
+          </a>
+
+          <a class="card" href="/prometheus/" target="qod-prometheus">
+            <div class="row">
+              <div class="badge prom">P</div>
+              <div>
+                <h2>Prometheus</h2>
+                <div class="path">/prometheus/</div>
+              </div>
+            </div>
+            <p class="desc">Scrapes the manager's <code>/metrics</code> every 5 s. 7-day retention, emptyDir.</p>
+          </a>
+
+          <a class="card" href="/auth/" target="qod-keycloak">
+            <div class="row">
+              <div class="badge keycloak">K</div>
+              <div>
+                <h2>Keycloak</h2>
+                <div class="path">/auth/  ·  realm qod</div>
+              </div>
+            </div>
+            <p class="desc">OIDC bearer issuer (ROPC). Master-realm admin opens the console; users <code>admin</code> + <code>reader</code> live in the <code>qod</code> realm.</p>
+            <span class="creds">admin / admin</span>
+          </a>
+        </div>
+
+        <footer>
+          FlightSQL stays on a dedicated port-forward:
+          <code>kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338</code>
+        </footer>
+      </div>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qod-landing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qod-landing
+  template:
+    metadata:
+      labels:
+        app: qod-landing
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - mountPath: /usr/share/nginx/html/index.html
+              name: html
+              subPath: index.html
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 10
+      volumes:
+        - name: html
+          configMap:
+            name: qod-landing
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qod-landing
+spec:
+  selector:
+    app: qod-landing
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

@@ -54,6 +54,12 @@ spec:
             - --storage.tsdb.path=/prometheus
             - --storage.tsdb.retention.time=7d
             - --web.enable-lifecycle
+            # Sub-path operation behind Traefik. --web.route-prefix
+            # makes Prometheus expect /prometheus on incoming requests;
+            # --web.external-url makes its internal links resolve
+            # against the host-visible URL.
+            - --web.external-url=http://localhost:20900/prometheus/
+            - --web.route-prefix=/prometheus/
           ports:
             - containerPort: 9090
               name: http
@@ -65,7 +71,7 @@ spec:
               name: data
           readinessProbe:
             httpGet:
-              path: /-/ready
+              path: /prometheus/-/ready
               port: 9090
             initialDelaySeconds: 3
             periodSeconds: 3

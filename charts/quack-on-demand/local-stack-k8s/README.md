@@ -17,15 +17,26 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
+> **Already have a `qod-test` cluster from a previous run?** The rig now
+> uses kind's `extraPortMappings` to forward host `:20900` to the
+> Traefik ingress. Older clusters lack that mapping; the script will
+> tell you to recreate:
+>
+> ```bash
+> kind delete cluster --name qod-test
+> ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+> ```
+
 This:
 
 1. Creates a kind cluster named `qod-test` (reused if it already exists).
 2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
 3. Loads both images into the kind cluster.
-4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)) and Grafana ([`grafana.yaml`](grafana.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard.json`](../../../observability/grafana-dashboard.json) so the repo file stays authoritative. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard.json`](../../../observability/grafana-dashboard.json) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
 5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
-6. Waits for the manager pod to be `Ready` and `/health` to return OK.
-7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
+6. `helm install`s Traefik v3 as a single-replica DaemonSet on the control-plane node, then applies [`ingress.yaml`](ingress.yaml) — one `Ingress` that routes `/grafana`, `/prometheus`, `/auth` and `/` (catch-all → manager) to the right Services. Combined with the kind `extraPortMappings` from [`kind-config.yaml`](kind-config.yaml) (host `:20900` → container `:80`), every HTTP UI in the rig becomes reachable at a single `http://localhost:20900/...` URL.
+7. Waits for the manager pod to be `Ready` and `/health` to return OK.
+8. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
 
 ## Architecture
 
@@ -33,20 +44,26 @@ This:
 
 ```mermaid
 flowchart LR
-    host["Host"]
+    host["Host<br/>:20900 + :31338"]
+    traefik["Traefik<br/>(ingress)"]
     manager["Manager"]
     nodes["Quack nodes"]
     pg["Postgres"]
     sw["SeaweedFS"]
     obs["Prometheus<br/>+ Grafana"]
+    kc["Keycloak<br/>(OIDC)"]
 
-    host    --> manager
+    host    -- "HTTP /…"     --> traefik
+    host    -- "FlightSQL"    --> manager
+    traefik --> manager
+    traefik --> obs
+    traefik --> kc
     manager --> nodes
     manager --> pg
     nodes   --> pg
     nodes   --> sw
     obs     --> manager
-    host    --> obs
+    manager --> kc
 ```
 
 ### In detail
@@ -74,17 +91,23 @@ flowchart TB
 
         pg["Pod: postgres<br/>(single replica, emptyDir)<br/>databases: qod (control plane)<br/>· tpch_tpch1 (DuckLake catalog)"]
         sw["Pod: seaweedfs<br/>(single replica, emptyDir)<br/>S3 API :8333 · bucket qod-ducklake"]
-        prom["Pod: prometheus<br/>(emptyDir, 7d retention)<br/>scrapes manager :20900/metrics"]
-        graf["Pod: grafana<br/>(emptyDir, anonymous Admin)<br/>UI :3000 · provisioned dashboard"]
+        prom["Pod: prometheus<br/>(emptyDir, 7d retention)<br/>scrapes manager :20900/metrics<br/>--web.route-prefix=/prometheus/"]
+        graf["Pod: grafana<br/>(emptyDir, anonymous Admin)<br/>UI :3000 · provisioned dashboard<br/>GF_SERVER_SERVE_FROM_SUB_PATH=true"]
+        kc["Pod: keycloak<br/>(start-dev, emptyDir)<br/>:8080 · realm qod · admin/admin · reader/reader<br/>KC_HTTP_RELATIVE_PATH=/auth"]
+        ingress["Pod: traefik<br/>(DaemonSet, ingress-ready node)<br/>hostPort :80 ← kind extraPortMappings ← host :20900"]
 
         kapi["Kubernetes API"]
     end
 
-    %% Client / operator traffic via short-lived port-forwards
+    %% Client / operator traffic
+    browser   -- "http://localhost:20900/{ui,grafana,prometheus,auth}/" --> ingress
     client    -- "kubectl port-forward&nbsp;svc/qod-quack-on-demand-flightsql 31338" --> manager
-    browser   -- "kubectl port-forward&nbsp;svc/qod-quack-on-demand 20900"          --> manager
-    loadtpch  -- "kubectl port-forward&nbsp;svc/postgres 15432"                     --> pg
-    loadtpch  -- "kubectl port-forward&nbsp;svc/seaweedfs 18333"                    --> sw
+
+    %% Ingress fan-out
+    ingress -- "/ + /api + /ui" --> manager
+    ingress -- "/grafana"       --> graf
+    ingress -- "/prometheus"    --> prom
+    ingress -- "/auth"          --> kc
 
     %% Config + secret injection
     cfg -. envFrom .-> manager
@@ -107,6 +130,10 @@ flowchart TB
     %% Observability
     prom -- "GET /metrics every 5s" --> manager
     graf -- "PromQL" --> prom
+
+    %% OIDC
+    manager -- "ROPC + JWKS" --> kc
+    browser -- "admin console" --> kc
 ```
 
 The pieces, one per row of the diagram:
@@ -144,24 +171,31 @@ The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services 
 
 ## Verify by hand
 
-After the script reports `smoke OK` (the script prints the exact port-forward commands at the end). The full names that Helm renders for the default release/chart combo are:
+Every HTTP UI is reachable on host `:20900` via the Traefik ingress — no per-service port-forward needed. Only FlightSQL keeps its own port-forward because gRPC ingress is its own can of worms (the manager's self-signed TLS is terminated directly by the FlightSQL edge):
 
 ```bash
-# Port-forward the admin UI (REST + UI on :20900)
-kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
-# Open http://localhost:20900/ui/  (login admin / admin)
+# Landing page with links to every UI (nginx-served, ConfigMap-mounted)
+open http://localhost:20900/
 
-# Port-forward FlightSQL (gRPC+TLS on :31338, manager-issued self-signed cert)
+# Admin UI / REST
+open http://localhost:20900/ui/                           # login admin / admin
+curl -s -u admin:admin http://localhost:20900/api/tenants
+
+# Grafana -- /grafana prefix, anonymous Admin, dashboard pre-loaded
+open http://localhost:20900/grafana/
+
+# Prometheus -- /prometheus prefix
+open http://localhost:20900/prometheus/
+
+# Keycloak admin console -- /auth prefix, master-realm admin: admin / admin
+open http://localhost:20900/auth/   # realm 'qod' -> Users -> admin / reader
+
+# FlightSQL (gRPC + TLS, separate port-forward)
 kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
 # JDBC: jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales
 
 # Watch the quack node pods the manager spawns
 kubectl -n qod get pods -l managed-by=quack-on-demand -w
-
-# Observability (Grafana opens anonymously as Admin, dashboard pre-loaded)
-kubectl -n qod port-forward svc/prometheus 9090:9090
-kubectl -n qod port-forward svc/grafana    3000:3000
-# Open http://localhost:3000/ -> Dashboards -> "Quack on Demand"
 ```
 
 Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod`) unless the release name already contains it. So services land at `qod-quack-on-demand`, not `qod`. The script's tail message resolves this from the cluster so its copy-paste lines always match what's actually there.
@@ -210,13 +244,37 @@ print(cur.fetchall())
 
 **REST API + admin UI:**
 
+No port-forward needed — the rig's Traefik ingress sits on host `:20900` and the catch-all rule routes `/` → manager.
+
 ```bash
-kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
 # Open http://localhost:20900/ui/  (login admin / admin)
 curl -s -u admin:admin http://localhost:20900/api/tenants
 ```
 
 The `tenant` / `pool` headers are mandatory on FlightSQL — the edge's tenant selector rejects sessions that don't carry them. Defaults shipped by the chart are `tpch` / `sales`; if you changed `bootstrap.tenant` / `bootstrap.pool`, match those.
+
+**Bearer token from Keycloak (OIDC ROPC):**
+
+The rig provisions a `qod` realm with the `qod-flightsql` client (ROPC enabled, secret `qod-flightsql-secret`) and two users — `admin/admin` (mirrors the bootstrap superuser) and `reader/reader` (demo non-superuser). Every issued token carries a hardcoded `tenant: tpch` claim so the FlightSQL edge picks up the tenant without a client-side header.
+
+Mint a token from the host — Keycloak hangs off the same `:20900` ingress under `/auth/`:
+
+```bash
+TOKEN=$(curl -s -X POST \
+  http://localhost:20900/auth/realms/qod/protocol/openid-connect/token \
+  -d grant_type=password \
+  -d client_id=qod-flightsql \
+  -d client_secret=qod-flightsql-secret \
+  -d username=admin -d password=admin \
+  | jq -r .access_token)
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:20900/api/tenants
+```
+
+For FlightSQL, the manager's `AuthenticationService` chain accepts the same bearer (the Keycloak provider runs alongside Basic auth, so `admin/admin` over Basic still works for clients that don't speak OIDC).
+
+Swap `username=admin password=admin` for `reader/reader` to exercise the non-superuser path — `reader` lands in `qodstate_user` on first auth and starts with zero RBAC grants, so SELECTs return `permission denied` until you grant a role via the admin UI or `/api/rbac/*`.
 
 ## Run a load test
 

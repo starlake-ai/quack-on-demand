@@ -1,0 +1,71 @@
+{
+  "realm": "qod",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 3600,
+  "clients": [
+    {
+      "clientId": "qod-flightsql",
+      "name": "Quack on Demand FlightSQL edge",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "qod-flightsql-secret",
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "access.token.lifespan": "3600"
+      },
+      "protocolMappers": [
+        {
+          "name": "tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name":       "tenant",
+            "claim.value":      "tpch",
+            "jsonType.label":   "String",
+            "id.token.claim":   "true",
+            "access.token.claim":"true",
+            "userinfo.token.claim":"true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin@localhost.local",
+      "firstName": "Quack",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "admin", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-qod"]
+    },
+    {
+      "username": "reader",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "reader@localhost.local",
+      "firstName": "Quack",
+      "lastName": "Reader",
+      "credentials": [
+        { "type": "password", "value": "reader", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-qod"]
+    }
+  ]
+}

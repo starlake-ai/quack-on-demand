@@ -1,0 +1,92 @@
+#
+# Path-prefix routing for every HTTP service in the smoke rig, so the
+# whole stack lives under a single host port (http://localhost:20900/).
+# Traefik installed by run-local-stack-k8s.sh listens on the cluster's
+# control-plane node port 80, kind's extraPortMappings forwards host
+# :20900 -> container :80, and these rules then fan out.
+#
+# Path ordering matches longest-prefix wins -- nginx-style. Manager is
+# the catch-all `/` so the existing /ui, /api/*, /metrics paths keep
+# working unchanged. Each sub-path target is configured server-side to
+# expect its own prefix (see grafana.yaml, prometheus.yaml,
+# keycloak.yaml) -- no Traefik StripPrefix middleware needed.
+#
+# `pathType: Prefix` rather than ImplementationSpecific because Traefik
+# v3 implements the Kubernetes Ingress spec faithfully and Prefix is
+# the portable / readable option.
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: qod-local
+  annotations:
+    # Traefik v3 reads this to know which entrypoint to attach the
+    # router to. `web` is the plain HTTP entrypoint (port 80 in the
+    # pod, mapped from host :20900). websecure would require the
+    # smoke rig to terminate TLS, which is overkill here.
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - http:
+        paths:
+          # Sub-pathed services first; longest-prefix wins, so the
+          # explicit manager paths (/ui, /api, /metrics, /health) take
+          # priority over the `/` catch-all that routes to the static
+          # landing page.
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+          - path: /prometheus
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  number: 9090
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /ui
+            pathType: Prefix
+            backend:
+              service:
+                name: qod-quack-on-demand
+                port:
+                  number: 20900
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: qod-quack-on-demand
+                port:
+                  number: 20900
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: qod-quack-on-demand
+                port:
+                  number: 20900
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: qod-quack-on-demand
+                port:
+                  number: 20900
+          # Catch-all -> static landing page with links to every UI.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: qod-landing
+                port:
+                  number: 80

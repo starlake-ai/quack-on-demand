@@ -31,3 +31,17 @@ s3:
   useSsl:    false
   accessKey: quack
   secretKey: quackquack
+
+# Layer Keycloak (the kind-internal one provisioned by keycloak.yaml) into
+# the AuthenticationService chain. Basic admin/admin still works -- this
+# just adds the ROPC path so bearer-token clients can authenticate too.
+auth:
+  keycloak:
+    enabled:      true
+    # KC_HTTP_RELATIVE_PATH=/auth in keycloak.yaml means every URL the
+    # manager composes (`${baseUrl}/realms/${realm}/...`) needs the
+    # /auth path baked into the base.
+    baseUrl:      http://keycloak:8080/auth
+    realm:        qod
+    clientId:     qod-flightsql
+    clientSecret: qod-flightsql-secret

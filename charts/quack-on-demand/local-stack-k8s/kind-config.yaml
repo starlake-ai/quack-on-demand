@@ -1,0 +1,33 @@
+#
+# Kind cluster config for the local-stack-k8s smoke rig. Two changes vs.
+# kind's defaults:
+#
+#   * Label the control-plane node `ingress-ready=true` so Traefik's
+#     nodeSelector + control-plane toleration land its DaemonSet pod
+#     here.
+#   * Forward host :20900 -> control-plane container :80, so the
+#     Traefik web entrypoint becomes the single host-visible port for
+#     every HTTP service in the rig (manager REST/UI, Grafana,
+#     Prometheus, Keycloak admin console). FlightSQL stays on a
+#     separate `kubectl port-forward svc/...-flightsql 31338` because
+#     it's gRPC over its own TLS chain.
+#
+# If you reuse a kind cluster created before this file existed, the
+# port mapping is missing -- the smoke script detects this and asks
+# you to `kind delete cluster --name qod-test` so it can be recreated
+# with the mapping.
+#
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 20900
+        protocol: TCP
