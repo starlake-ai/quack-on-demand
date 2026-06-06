@@ -109,6 +109,15 @@ export interface ConfigListResponse {
   entries: ConfigEntryView[];
 }
 
+export interface ManifestImportSummary {
+  tenants:   number;
+  tenantDbs: number;
+  pools:     number;
+  roles:     number;
+  groups:    number;
+  users:     number;
+}
+
 export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
 
 export interface TenantRequest {
