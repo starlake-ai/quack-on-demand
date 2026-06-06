@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import cats.effect.IO
@@ -11,6 +12,7 @@ import java.time.Instant
 
 final class ManifestHandlers(
     store:          ControlPlaneStore,
+    supervisor:     PoolSupervisor,
     managerVersion: String,
     hostname:       String
 ):
@@ -31,6 +33,11 @@ final class ManifestHandlers(
             case Left(errs) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; ")))
             case Right(_) =>
+              // Reload the supervisor's in-memory caches (tenants, tenant-dbs,
+              // pools, RBAC effective sets) from the freshly-written store
+              // snapshot. Without this the REST/UI keeps serving the old
+              // view until the manager is restarted.
+              supervisor.restore()
               Right(ManifestImportSummary(
                 tenants   = m.tenants.size,
                 tenantDbs = m.tenants.map(_.tenantDbs.size).sum,

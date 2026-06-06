@@ -411,6 +411,7 @@ object Main extends IOApp with LazyLogging:
 
       val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
         store          = store,
+        supervisor     = sup,
         managerVersion = "dev",
         hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown")
       )
