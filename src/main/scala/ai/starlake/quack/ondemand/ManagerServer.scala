@@ -36,7 +36,8 @@ final class ManagerServer(
     groups:          GroupHandlers,
     memberships:     MembershipHandlers,
     poolPermissions: PoolPermissionHandlers,
-    serverConfig:    ConfigHandlers
+    serverConfig:    ConfigHandlers,
+    manifest:        ManifestHandlers
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -171,7 +172,9 @@ final class ManagerServer(
           authEnabled   = authEnabled
         )
       ))),
-      Endpoints.serverConfig.serverLogic(_ => serverConfig.list)
+      Endpoints.serverConfig.serverLogic(_ => serverConfig.list),
+      Endpoints.manifestExport.serverLogic(_ => manifest.exportYaml),
+      Endpoints.manifestImport.serverLogic(body => manifest.importYaml(body))
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
