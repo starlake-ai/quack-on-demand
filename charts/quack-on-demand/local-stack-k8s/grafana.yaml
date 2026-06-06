@@ -1,0 +1,136 @@
+#
+# Single-pod Grafana for the kind smoke rig. Anonymous Admin so the
+# login form never appears; everything is read-only via provisioning.
+#
+# Three ConfigMaps make this self-contained on `kubectl apply`:
+#   - grafana-datasources : provisions the Prometheus datasource so
+#                           the dashboard's ${datasource} variable
+#                           resolves on first open.
+#   - grafana-dashboards  : provisioner that points Grafana at
+#                           /var/lib/grafana/dashboards.
+#   - grafana-dashboard-qod : holds the dashboard JSON itself. The
+#                           run-local-stack-k8s.sh script (re)creates
+#                           this CM from observability/grafana-dashboard.json
+#                           so the repo file stays the single source
+#                           of truth -- this YAML only ships an empty
+#                           stub so `kubectl apply -f grafana.yaml`
+#                           on a fresh cluster still works.
+#
+# Not production-grade: emptyDir under /var/lib/grafana, single
+# replica, anonymous Admin, no TLS.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+data:
+  prometheus.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus-local
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+data:
+  qod.yaml: |
+    apiVersion: 1
+    providers:
+      - name: quack-on-demand
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+# Stub so the Deployment's volume mount resolves on a fresh cluster.
+# The smoke script overwrites this with the real dashboard JSON via
+# `kubectl create configmap --from-file=... --dry-run | kubectl apply`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-qod
+data:
+  quack-on-demand.json: |
+    {"title":"pending","panels":[],"schemaVersion":38,"version":0}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.4.5
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Admin
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            - name: GF_USERS_DEFAULT_THEME
+              value: light
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - mountPath: /etc/grafana/provisioning/datasources
+              name: datasources
+              readOnly: true
+            - mountPath: /etc/grafana/provisioning/dashboards
+              name: dashboards-provider
+              readOnly: true
+            - mountPath: /var/lib/grafana/dashboards
+              name: dashboards-json
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 30
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards
+        - name: dashboards-json
+          configMap:
+            name: grafana-dashboard-qod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
