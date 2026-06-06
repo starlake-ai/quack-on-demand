@@ -100,14 +100,41 @@ final class LocalQuackBackend(
   def discoverExisting(): IO[List[RunningNode]] = IO.pure(List.empty)
   // Local-mode recovery is driven by StateStore, not by scanning the OS.
 
+  /** Graceful teardown of every tracked child process. Called from the
+    * JVM shutdown hook in `Main` so SIGTERM-on-the-manager translates
+    * into a clean drain instead of orphan node processes hanging around.
+    *
+    * Pattern (per-process): SIGTERM via `destroy()`, wait up to
+    * [[LocalQuackBackend.ShutdownGracePerProcessSec]] seconds for the
+    * child to exit; SIGKILL via `destroyForcibly()` if it does not.
+    * Same idiom `stop(nodeId)` uses for an individual node.
+    *
+    * Idempotent + safe to call multiple times (the second call sees an
+    * empty `processes` map). Also clears adopt-tracking maps so a
+    * restart inside the same JVM (e.g. tests) does not see stale state.
+    */
   def cleanup(): IO[Unit] = IO.blocking {
-    processes.values.foreach(_.destroyForcibly())
+    val procs = processes.toList
+    // First pass: SIGTERM everyone in parallel.
+    procs.foreach { case (_, p) => p.destroy() }
+    // Second pass: bounded wait, then SIGKILL stragglers.
+    procs.foreach { case (_, p) =>
+      if !p.waitFor(LocalQuackBackend.ShutdownGracePerProcessSec,
+                    java.util.concurrent.TimeUnit.SECONDS) then
+        p.destroyForcibly()
+    }
     processes.clear()
     tokens.clear()
     nodePorts.clear()
+    adoptedPids.clear()
   }
 
 object LocalQuackBackend:
+
+  /** Per-process grace seconds inside `cleanup()` between SIGTERM and
+    * the SIGKILL fallback. 5 s matches the per-node grace used by
+    * `stop(nodeId)`. */
+  val ShutdownGracePerProcessSec: Long = 5L
 
   /** Path to the spawn script the default `commandFor` invokes. Production
     * code passes `mgrCfg.spawnScript` (HOCON `quack-on-demand.spawnScript`,

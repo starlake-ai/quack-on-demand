@@ -66,6 +66,11 @@ services:
     image: starlakeai/quack-on-demand:${QOD_VERSION:-latest}
     container_name: quack-on-demand
     restart: unless-stopped
+    # The manager registers a JVM shutdown hook that drains in-flight
+    # FlightSQL statements (`quack-on-demand.drainTimeoutSec`, default
+    # 60s) before SIGTERMing the child Quack node processes. 75s gives
+    # the drain a comfortable margin before Docker escalates to SIGKILL.
+    stop_grace_period: 75s
     depends_on:
       postgres:
         condition: service_healthy
