@@ -54,11 +54,34 @@ CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$CHART_DIR/../.." && pwd)"
 
 # ---- 1. kind cluster ------------------------------------------------------
+#
+# kind-config.yaml maps host :20900 -> control-plane container :80 so
+# the Traefik ingress installed in step 3 becomes the single host-visible
+# port for every HTTP service in the rig. A cluster created before this
+# file existed won't have the mapping; detect that by inspecting docker
+# port bindings on the control-plane container and ask the user to
+# recreate.
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
-  echo "[1/5] reusing kind cluster '${KIND_CLUSTER}'"
+  control_plane_node="${KIND_CLUSTER}-control-plane"
+  if docker port "$control_plane_node" 80/tcp 2>/dev/null | grep -q ":20900$"; then
+    echo "[1/5] reusing kind cluster '${KIND_CLUSTER}' (host :20900 mapping present)"
+  else
+    cat <<EOM >&2
+[1/5] ERROR: kind cluster '${KIND_CLUSTER}' exists but is missing the
+      host :20900 -> container :80 port mapping needed by the Traefik
+      ingress. Recreate it:
+
+        kind delete cluster --name ${KIND_CLUSTER}
+        $0
+
+      (Postgres + SeaweedFS data is ephemeral emptyDir, so this only
+      costs you the previous TPC-H seed.)
+EOM
+    exit 1
+  fi
 else
-  echo "[1/5] creating kind cluster '${KIND_CLUSTER}'..."
-  kind create cluster --name "${KIND_CLUSTER}"
+  echo "[1/5] creating kind cluster '${KIND_CLUSTER}' with kind-config.yaml..."
+  kind create cluster --name "${KIND_CLUSTER}" --config "$SCRIPT_DIR/kind-config.yaml"
 fi
 kubectl config use-context "kind-${KIND_CLUSTER}" >/dev/null
 
@@ -103,12 +126,31 @@ if [[ "$NUKE" == "1" ]]; then
   echo "[3/5] NUKE=1: deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
 fi
-echo "[3/5] applying Postgres + SeaweedFS + Prometheus + Grafana in '$NAMESPACE'..."
+echo "[3/5] applying Postgres + SeaweedFS + Prometheus + Grafana + Keycloak in '$NAMESPACE'..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/local-postgres.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/seaweedfs.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/prometheus.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/grafana.yaml"
+
+# Realm import ConfigMap is built from the on-disk JSON so the realm
+# stays editable in-repo as a normal file. Upsert via the standard
+# `create --dry-run=client | apply` trick.
+KEYCLOAK_REALM_JSON="$SCRIPT_DIR/keycloak-realm-qod.json"
+if [[ -f "$KEYCLOAK_REALM_JSON" ]]; then
+  kubectl -n "$NAMESPACE" create configmap keycloak-realm-import \
+    --from-file="qod-realm.json=$KEYCLOAK_REALM_JSON" \
+    --dry-run=client -o yaml \
+    | kubectl -n "$NAMESPACE" apply -f -
+else
+  echo "  WARN: '$KEYCLOAK_REALM_JSON' missing; Keycloak will boot without the qod realm." >&2
+fi
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/keycloak.yaml"
+
+# Static landing page at `/` -- the ingress in step 4b routes the root
+# to this nginx pod, so opening http://localhost:20900/ shows links to
+# every UI in the rig instead of the manager's bare /ui redirect.
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/landing.yaml"
 
 # Replace the dashboard stub ConfigMap with the real JSON from the repo.
 # `kubectl create --dry-run | kubectl apply` is the only kubectl-native
@@ -132,6 +174,10 @@ kubectl -n "$NAMESPACE" rollout status deploy/postgres   --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/seaweedfs  --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/prometheus --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/grafana    --timeout=120s
+# Keycloak cold-starts slowly (--import-realm parses the JSON before the
+# realm endpoint goes ready), give it more headroom than the others.
+kubectl -n "$NAMESPACE" rollout status deploy/keycloak    --timeout=240s
+kubectl -n "$NAMESPACE" rollout status deploy/qod-landing --timeout=60s
 
 # ---- 4. helm install -----------------------------------------------------
 echo "[4/5] helm install $RELEASE..."
@@ -139,6 +185,41 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   -f "$SCRIPT_DIR/values-local-stack.yaml" \
   --wait --timeout=300s
+
+# ---- 4b. Traefik ingress -------------------------------------------------
+#
+# Single host port (kind extraPortMappings host :20900 -> control-plane
+# container :80) fronts every HTTP service in the rig. Traefik runs as a
+# DaemonSet on the ingress-ready=true node (the control-plane), binds the
+# container :80 via hostPort, and the Ingress in ingress.yaml fans out
+# /grafana, /prometheus, /auth, and / to the right Services.
+#
+# `helm upgrade --install` is idempotent; the values are inline because
+# the rig only needs a handful of overrides and a separate yaml would be
+# more boilerplate than payload.
+echo "[4/5] installing Traefik v3 + applying ingress.yaml..."
+helm upgrade --install traefik traefik \
+  --repo https://traefik.github.io/charts \
+  --namespace "$NAMESPACE" \
+  --version "~33.0.0" \
+  --set "providers.kubernetesIngress.enabled=true" \
+  --set "providers.kubernetesCRD.enabled=true" \
+  --set "ingressClass.enabled=true" \
+  --set "ingressClass.isDefaultClass=true" \
+  --set "service.enabled=false" \
+  --set "deployment.kind=DaemonSet" \
+  --set "ports.web.hostPort=80" \
+  --set "ports.websecure.hostPort=443" \
+  --set-string "nodeSelector.ingress-ready=true" \
+  --set-string "tolerations[0].key=node-role.kubernetes.io/control-plane" \
+  --set-string "tolerations[0].operator=Exists" \
+  --set-string "tolerations[0].effect=NoSchedule" \
+  --set-string "tolerations[1].key=node-role.kubernetes.io/master" \
+  --set-string "tolerations[1].operator=Exists" \
+  --set-string "tolerations[1].effect=NoSchedule" \
+  --wait --timeout=180s
+
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/ingress.yaml"
 
 # ---- 5. optional TPC-H seed ---------------------------------------------
 #
@@ -183,13 +264,18 @@ FS_SVC=$(kubectl -n "$NAMESPACE" get svc \
 
 cat <<EOM
 
-manager Ready. To connect:
-  kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900
-  kubectl -n $NAMESPACE port-forward svc/$FS_SVC   31338:31338
+manager Ready. Open the landing page for links to every UI:
 
-observability (anonymous Admin Grafana, no login):
-  kubectl -n $NAMESPACE port-forward svc/prometheus 9090:9090
-  kubectl -n $NAMESPACE port-forward svc/grafana    3000:3000
+  http://localhost:20900/
+
+Direct links (all behind the same Traefik ingress):
+  admin UI / REST       http://localhost:20900/ui/        (admin / admin)
+  Grafana               http://localhost:20900/grafana/   (anonymous Admin)
+  Prometheus            http://localhost:20900/prometheus/
+  Keycloak admin        http://localhost:20900/auth/      (admin / admin · realm 'qod')
+
+FlightSQL is gRPC+TLS and stays on a dedicated port-forward:
+  kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338
 
 watch Quack node pods:
   kubectl -n $NAMESPACE get pods -l managed-by=quack-on-demand -w

@@ -81,6 +81,15 @@ That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch
 
 **Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](guides/RUNNING.md) for the full native path (external Postgres, env vars, TLS).
 
+**Want to smoke-test the Helm chart on a local kind cluster?**
+[`charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh`](charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh) creates / reuses a kind cluster, applies in-cluster Postgres + SeaweedFS (S3) + Prometheus + Grafana, helm-installs the chart (TLS-on FlightSQL, manager-issued self-signed cert), and optionally seeds TPC-H inside the manager pod -- no host duckdb dependency.
+
+```bash
+LOAD_TPCH=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+```
+
+The rig bundles Grafana pre-provisioned with the [observability/grafana-dashboard.json](observability/grafana-dashboard.json) dashboard against an in-cluster Prometheus that scrapes the manager's `/metrics` every 5s, so you can watch latencies and node load while a load test runs. See [`charts/quack-on-demand/local-stack-k8s/README.md`](charts/quack-on-demand/local-stack-k8s/README.md) for the connect-from-a-client recipes (JDBC / ADBC / REST), the load-test walkthrough, and the env-knob reference.
+
 Smoke-test the FlightSQL edge with the Python load tester:
 
 ```bash
@@ -169,9 +178,28 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 ## Architecture
 
+### At a glance
+
 ```mermaid
+flowchart TD
+    client["Client<br/>(JDBC · ADBC · curl · browser)"]
+    manager["Manager<br/>FlightSQL edge · REST · UI"]
+    nodes["Quack node pool<br/>DuckDB · per-tenant"]
+    pg["Postgres<br/>control plane · DuckLake catalog"]
+    obj["Object storage<br/>S3 · GCS · local FS"]
 
+    client  --> manager
+    manager --> nodes
+    manager --> pg
+    nodes   --> pg
+    nodes   --> obj
+```
 
+One Manager process fronts every client (FlightSQL on `:31338`, REST + admin UI on `:20900`) and routes each statement to a single Quack node it spawned for the matching tenant + pool. Control-plane state and per-tenant DuckLake catalogs live in Postgres; parquet data lives in object storage. See the detailed diagram below for the auth / ACL / routing pipeline.
+
+### In detail
+
+```mermaid
 flowchart TD
     C1["JDBC / ADBC client"]
     C2["Browser · admin UI"]

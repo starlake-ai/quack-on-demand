@@ -232,6 +232,23 @@ flightsql:
     certKey: server-cert.pem
     keyKey: server-key.pem
 
+# --- OIDC auth providers ----------------------------------------------------
+# Off by default; turn on to layer a Keycloak (or other OIDC) provider into
+# the AuthenticationService chain alongside the built-in Basic / DB auth.
+# Both authenticate the same FlightSQL session; the manager picks the first
+# one that accepts the credentials presented.
+auth:
+  keycloak:
+    enabled: false
+    baseUrl:  "http://keycloak:8080"
+    realm:    "qod"
+    clientId: "qod-flightsql"
+    # Inline secret for dev/kind. Prefer existingSecret for production so the
+    # value never lands in the ConfigMap.
+    clientSecret: ""
+    existingSecret: ""
+    existingSecretKey: keycloakClientSecret
+
 # --- Metrics sink -----------------------------------------------------------
 # One of: "prometheus" | "aws" | "azure" | "gcp" | "none". Defaults to
 # "prometheus" so /metrics is exposed on the REST service.

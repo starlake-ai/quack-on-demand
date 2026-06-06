@@ -42,6 +42,22 @@ data:
   # ---- Metrics sink ---------------------------------------------------------
   QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}
 
+  {{- if .Values.auth.keycloak.enabled }}
+  # ---- Keycloak OIDC bearer provider --------------------------------------
+  # Manager treats keycloak as the AuthenticationService chain entry; ROPC
+  # (resource-owner password credentials) lets FlightSQL clients exchange
+  # admin/admin for a bearer at the edge. CLIENT_SECRET is mounted from a
+  # Secret (see deployment.yaml) when set; the inline default below covers
+  # the local kind rig.
+  QOD_AUTH_KEYCLOAK_ENABLED:   {{ .Values.auth.keycloak.enabled   | quote }}
+  QOD_AUTH_KEYCLOAK_BASE_URL:  {{ .Values.auth.keycloak.baseUrl   | quote }}
+  QOD_AUTH_KEYCLOAK_REALM:     {{ .Values.auth.keycloak.realm     | quote }}
+  QOD_AUTH_KEYCLOAK_CLIENT_ID: {{ .Values.auth.keycloak.clientId  | quote }}
+  {{- if and .Values.auth.keycloak.clientSecret (not .Values.auth.keycloak.existingSecret) }}
+  QOD_AUTH_KEYCLOAK_CLIENT_SECRET: {{ .Values.auth.keycloak.clientSecret | quote }}
+  {{- end }}
+  {{- end }}
+
   {{- if eq (include "qod.s3Enabled" .) "true" }}
   # ---- Object store (S3 / SeaweedFS / MinIO / R2) --------------------------
   # storage.dataPath is an s3:// URL. These vars land on the manager pod's

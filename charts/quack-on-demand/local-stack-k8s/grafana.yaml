@@ -31,7 +31,10 @@ data:
         uid: prometheus-local
         type: prometheus
         access: proxy
-        url: http://prometheus:9090
+        # Prometheus runs with --web.route-prefix=/prometheus/ for the
+        # Traefik ingress, so the in-cluster datasource needs the same
+        # prefix -- otherwise every query 404s on /api/v1/query.
+        url: http://prometheus:9090/prometheus
         isDefault: true
         editable: false
 ---
@@ -91,6 +94,14 @@ spec:
               value: "true"
             - name: GF_USERS_DEFAULT_THEME
               value: light
+            # Sub-path operation behind the rig's Traefik ingress.
+            # serve_from_sub_path rewrites internal links; root_url is
+            # the public URL the browser will hit (kind extraPortMappings
+            # forward host :20900 -> ingress container :80).
+            - name: GF_SERVER_ROOT_URL
+              value: "http://localhost:20900/grafana/"
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
           ports:
             - containerPort: 3000
               name: http
