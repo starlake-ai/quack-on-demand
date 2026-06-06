@@ -63,3 +63,33 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       out should include ("pgUser=default-user")    // default fills gap
       out should include ("dbName=specdb")           // spec-only key
     finally backend.stop("node-env").unsafeRunSync()
+
+  // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
+  // must SIGTERM every tracked child, wait for them to exit (falling
+  // back to SIGKILL on stragglers), then clear its registry maps so a
+  // second cleanup() is a no-op.
+  it should "cleanup(): graceful SIGTERM every tracked child then clear maps" in:
+    val backend = new LocalQuackBackend(23060, 23069,
+      // sleep 30 reacts cleanly to SIGTERM (the shell exits 143
+      // immediately), so the cleanup wait should never need the
+      // 5 s SIGKILL fallback.
+      commandFor = (_, _, _) => List("sh", "-c", "sleep 30"))
+    val a = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-a", Role.Dual, Map.empty, Map.empty)
+    val b = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-b", Role.Dual, Map.empty, Map.empty)
+    backend.start(a).unsafeRunSync()
+    backend.start(b).unsafeRunSync()
+    backend.isAlive("node-cu-a") shouldBe true
+    backend.isAlive("node-cu-b") shouldBe true
+
+    val t0 = System.currentTimeMillis()
+    backend.cleanup().unsafeRunSync()
+    val elapsedMs = System.currentTimeMillis() - t0
+
+    // Children honour SIGTERM, so we should NOT need the 5 s fallback
+    // per process. 8 s leaves headroom for slow CI.
+    elapsedMs should be < 8000L
+    backend.isAlive("node-cu-a") shouldBe false
+    backend.isAlive("node-cu-b") shouldBe false
+
+    // Idempotent: a second cleanup is a no-op against an empty map.
+    backend.cleanup().unsafeRunSync()

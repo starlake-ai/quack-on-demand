@@ -21,6 +21,7 @@ import ai.starlake.quack.ondemand.state.{
   PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
 }
 import cats.effect.{ExitCode, IO, IOApp}
+import cats.effect.unsafe.implicits.global
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
 import pureconfig.generic.ProductHint
@@ -438,9 +439,59 @@ object Main extends IOApp with LazyLogging:
         edgeIO.attempt.flatMap {
           case Right(edge) =>
             logger.info("edge FlightSQL started")
+            // Belt-and-braces JVM shutdown hook: when the JVM is told
+            // to exit (SIGTERM in containers; user Ctrl-C at the
+            // terminal) we want every spawned child Quack node killed
+            // before we let the process die, even if cats-effect's own
+            // cancellation finalizer below has not had time to run.
+            // `cleanup()` is idempotent so running it from both places
+            // is safe.
+            val shutdownHook = new Thread(
+              { () =>
+                try edge.stop()
+                catch case _: Throwable => ()
+                try backend.cleanup().unsafeRunSync()
+                catch case _: Throwable => ()
+              },
+              "qod-shutdown-hook"
+            )
+            Runtime.getRuntime.addShutdownHook(shutdownHook)
+
+            // Graceful drain on cancellation: stop accepting new
+            // FlightSQL sessions, poll the load tracker until no node
+            // reports in-flight work (or `drainTimeoutSec` elapses),
+            // then SIGTERM child Quack nodes via `backend.cleanup()`.
+            def waitForDrain: IO[Unit] =
+              val deadlineNs =
+                System.nanoTime() +
+                  scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
+              def tick: IO[Unit] = IO.delay {
+                tracker.snapshotAll.values.map(_.inFlight).sum
+              }.flatMap { inflight =>
+                if inflight <= 0 then IO.unit
+                else if System.nanoTime() >= deadlineNs then
+                  IO.delay(logger.warn(
+                    s"graceful shutdown: $inflight statement(s) still in-flight " +
+                    s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
+                  ))
+                else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
+              }
+              tick
+
+            val gracefulShutdown: IO[Unit] =
+              IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
+              IO.delay(edge.stop()) *>
+              IO.delay(logger.info(
+                s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
+              )) *>
+              waitForDrain *>
+              IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
+              backend.cleanup() *>
+              IO.delay(logger.info("graceful shutdown: complete"))
+
             healthProbe.
               start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
-              IO.never[Unit].guarantee(fiber.cancel *> IO.delay(edge.stop()))
+              IO.never[Unit].guarantee(fiber.cancel *> gracefulShutdown)
             }
           case Left(t) =>
             logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
