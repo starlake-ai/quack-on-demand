@@ -27,6 +27,68 @@ This:
 6. Waits for the manager pod to be `Ready` and `/health` to return OK.
 7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
 
+## Architecture
+
+What the script ends up creating, end-to-end. Everything runs in the single `qod` namespace of the `qod-test` kind cluster; the host only opens short-lived port-forwards.
+
+```mermaid
+flowchart TB
+    subgraph host["Host machine"]
+        client["FlightSQL client<br/>(JDBC / ODBC / ADBC)"]
+        browser["Browser<br/>(admin UI)"]
+        loadtpch["scripts/load-tpch-dbgen.sh<br/>(host duckdb, only when LOAD_TPCH=N)"]
+    end
+
+    subgraph kind["kind cluster &quot;qod-test&quot; · namespace qod"]
+        direction TB
+
+        subgraph manager_block["Manager"]
+            manager["Pod: qod-quack-on-demand<br/>REST :20900 · FlightSQL :31338<br/>(image: starlakeai/quack-on-demand:local)"]
+            cfg["ConfigMap<br/>QOD_* / PROXY_* env"]
+            sec["Secrets<br/>postgres / admin / [apiKey] / [s3]"]
+        end
+
+        nodes["Quack node pods<br/>quack-tpch-tpch1-sales-{1,2,3}<br/>(image: starlakeai/quack-on-demand-node:local)<br/>HTTP :8080 → quack_serve"]
+
+        pg["Pod: postgres<br/>(single replica, emptyDir)<br/>databases: qod (control plane)<br/>· tpch_tpch1 (DuckLake catalog)"]
+        sw["Pod: seaweedfs<br/>(single replica, emptyDir)<br/>S3 API :8333 · bucket qod-ducklake"]
+
+        kapi["Kubernetes API"]
+    end
+
+    %% Client / operator traffic via short-lived port-forwards
+    client    -- "kubectl port-forward&nbsp;svc/qod-quack-on-demand-flightsql 31338" --> manager
+    browser   -- "kubectl port-forward&nbsp;svc/qod-quack-on-demand 20900"          --> manager
+    loadtpch  -- "kubectl port-forward&nbsp;svc/postgres 15432"                     --> pg
+    loadtpch  -- "kubectl port-forward&nbsp;svc/seaweedfs 18333"                    --> sw
+
+    %% Config + secret injection
+    cfg -. envFrom .-> manager
+    sec -. envFrom .-> manager
+
+    %% Manager - K8s control plane
+    manager  -- "create / delete Pods + Services (Role-scoped)" --> kapi
+    kapi -.-> nodes
+
+    %% Manager - control plane DB
+    manager -- "qodstate_* (tenants / pools / users / RBAC)" --> pg
+
+    %% Statement routing
+    manager -- "HTTP /quack to selected node" --> nodes
+
+    %% Node - data plane
+    nodes -- "DuckLake __ducklake_* (per-tenant-db catalog)" --> pg
+    nodes -- "parquet (s3://qod-ducklake/qod-test/...)"      --> sw
+```
+
+The pieces, one per row of the diagram:
+
+- **Host port-forwards** are the only way anything outside the cluster talks to the stack. `run-local-stack-k8s.sh` prints the exact commands at the end.
+- **Postgres** holds both the manager's `qodstate_*` control plane and each tenant-db's `__ducklake_*` catalog tables. They live in separate Postgres databases (`qod` vs. `${tenant}_${tenantDb}`) so the control plane never collides with DuckLake metadata.
+- **SeaweedFS** speaks the S3 API and stores the parquet that DuckLake's catalog references. The chart wires `storage.dataPath=s3://qod-ducklake/qod-test`; both the manager and every Quack node use the same URL.
+- **Manager** talks to the K8s API via a `Role` (not a `ClusterRole`) scoped to its own namespace, so it can spawn / delete Pods + Services for Quack nodes without touching anything else in the cluster.
+- **Quack node pods** are spawned by the manager (not by Helm). They listen on `:8080`, attach the per-tenant-db DuckLake catalog to their local DuckDB, and serve the manager's per-statement `/quack` HTTP requests.
+
 ## Env knobs
 
 | Var | Default | Purpose |
