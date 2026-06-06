@@ -1,290 +1,170 @@
 #!/usr/bin/env bash
 #
-# End-to-end smoke for the chart on a local kind cluster.
+# End-to-end smoke for the quack-on-demand Helm chart on a local kind
+# cluster. Steps:
 #
-# Steps:
-#   1. Create a kind cluster (named `qod-test` by default; reused if exists).
-#   2. Build the manager + Quack node images from the current source tree.
-#   3. Load both images into the kind cluster.
-#   4. Apply a minimal in-cluster Postgres + SeaweedFS (one pod each).
-#   5. helm install the chart pointing at Postgres + SeaweedFS + the local image.
-#   6. Wait for the manager pod to be Ready and /health to return OK.
-#   7. Verify the manager spawned the bootstrap Quack node pods.
-#
-# DuckLake DATA_PATH is an `s3://` URL backed by SeaweedFS. The manager-side
-# TPC-H loader (SF=N) writes parquet there via a port-forward; the Quack
-# node pods read at the same s3:// URL through the in-cluster Service. Same
-# QOD_S3_* env contract as docker-compose.
+#   1. Create / reuse the kind cluster.
+#   2. Acquire images (BUILD=0 pulls + retags from Docker Hub; BUILD=1
+#      docker-builds from the source tree). Load both into the cluster
+#      via `docker save | ctr import` (single-platform, no kind /
+#      multi-arch quirks).
+#   3. Apply the in-cluster Postgres + SeaweedFS.
+#   4. Helm-install the chart from `values-local-stack.yaml`.
+#   5. Optional TPC-H seed via `kubectl exec` into the manager pod
+#      (uses the bundled `/app/scripts/load-tpch-dbgen.sh`; no host
+#      duckdb dependency, no port-forward dance).
+#   6. Print port-forward commands + tear-down hint.
 #
 # Env:
-#   KIND_CLUSTER   kind cluster name              (default qod-test)
-#   IMAGE          local image ref                (default quack-on-demand:local)
-#   NAMESPACE      install namespace              (default qod)
-#   RELEASE        helm release name              (default qod)
-#   BUILD          "1" to docker build the manager + node images from this
-#                  tree. "0" (default) to reuse the local `:local`-tagged
-#                  images; if they're missing, the script pulls
-#                  `:latest-snapshot` from Docker Hub
-#                  (starlakeai/quack-on-demand{,-node}) and retags them
-#                  locally so the rest of the flow is unchanged.
-#                  Same convention as scripts/run-jar.sh.          (default 0)
-#   NUKE           "1" to delete the namespace before reinstalling (wipes
-#                  Postgres ephemeral data, the helm release, and any
-#                  orphan quack node pods).                       (default 0)
-#   LOAD_TPCH      TPC-H seed: unset = skip; positive integer = scale
-#                  factor (LOAD_TPCH=1 ≈ 6M lineitem rows, LOAD_TPCH=10
-#                  ≈ 60M). Seeds into the in-cluster Postgres before the
-#                  manager boots; mirrors LOAD_TPCH in run-jar.sh and
-#                  run-docker-compose.sh. Requires `duckdb` CLI on the
-#                  host.                                          (default unset)
+#   KIND_CLUSTER     kind cluster name              (default qod-test)
+#   IMAGE            manager image ref              (default quack-on-demand:local)
+#   NODE_IMAGE       Quack node image ref           (default starlakeai/quack-on-demand-node:local)
+#   NAMESPACE        install namespace              (default qod)
+#   RELEASE          helm release name              (default qod)
+#   BUILD            "1" rebuilds the manager + node images from
+#                    $REPO_DIR before loading. "0" reuses local
+#                    `:local`-tagged images, pulling `:latest-snapshot`
+#                    from Docker Hub and retagging when missing.
+#                                                   (default 0)
+#   NUKE             "1" deletes the namespace before reinstalling.
+#                                                   (default 0)
+#   LOAD_TPCH        scale factor (positive integer) for TPC-H seed.
+#                    Unset = skip. Runs inside the manager pod, no
+#                    host duckdb required.
 #
-# Requires: kind, kubectl, helm, docker. LOAD_TPCH requires duckdb on the host.
+# Requires: kind, kubectl, helm, docker.
 
 set -euo pipefail
 
 KIND_CLUSTER="${KIND_CLUSTER:-qod-test}"
 IMAGE="${IMAGE:-quack-on-demand:local}"
+NODE_IMAGE="${NODE_IMAGE:-starlakeai/quack-on-demand-node:local}"
 NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
 LOAD_TPCH="${LOAD_TPCH:-}"
-if [[ -n "$LOAD_TPCH" ]]; then
-  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
-    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
-    exit 1
-  fi
-fi
+MGR_HUB_IMAGE="${MGR_HUB_IMAGE:-starlakeai/quack-on-demand:latest-snapshot}"
+NODE_HUB_IMAGE="${NODE_HUB_IMAGE:-starlakeai/quack-on-demand-node:latest-snapshot}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_DIR="$(cd "$CHART_DIR/../.." && pwd)"
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: $1 not on PATH" >&2; exit 1; }; }
-need kind
-need kubectl
-need helm
-[[ "$BUILD" == "1" ]] && need docker
-
-# 1. kind cluster
+# ---- 1. kind cluster ------------------------------------------------------
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
-  echo "[1/7] kind cluster '$KIND_CLUSTER' already exists, reusing"
+  echo "[1/5] reusing kind cluster '${KIND_CLUSTER}'"
 else
-  echo "[1/7] creating kind cluster '$KIND_CLUSTER'..."
-  kind create cluster --name "$KIND_CLUSTER"
+  echo "[1/5] creating kind cluster '${KIND_CLUSTER}'..."
+  kind create cluster --name "${KIND_CLUSTER}"
 fi
 kubectl config use-context "kind-${KIND_CLUSTER}" >/dev/null
 
-# 2. build (or fetch) the manager + node images.
-NODE_IMAGE="${NODE_IMAGE:-starlakeai/quack-on-demand-node:local}"
-# Docker Hub fallbacks used by BUILD=0 when no local image is present.
-MGR_HUB_IMAGE="${MGR_HUB_IMAGE:-starlakeai/quack-on-demand:latest-snapshot}"
-NODE_HUB_IMAGE="${NODE_HUB_IMAGE:-starlakeai/quack-on-demand-node:latest-snapshot}"
-
-# Pull $2 from Docker Hub and retag to $1 if $1 isn't already present
-# locally. Lets BUILD=0 work on a fresh machine that has never built
-# the manager — falls back to the published snapshot images. The retag
-# keeps the rest of this script (kind load, helm install) using the
-# stable `:local` refs.
+# ---- 2. acquire + load images --------------------------------------------
+#
+# `kind load docker-image` calls `ctr import --all-platforms` inside the
+# node, which fails on multi-arch manifest lists when only the host
+# platform's layers were actually pulled (the Apple Silicon case). Pipe
+# `docker save` straight into `ctr import` (no `--all-platforms`) so the
+# import only sees the platform that's actually in the host's docker.
 ensure_local_image() {
   local local_ref="$1" hub_ref="$2"
   if docker image inspect "$local_ref" >/dev/null 2>&1; then
-    echo "  found local image '$local_ref'"
+    echo "  found '$local_ref'"
     return 0
   fi
-  echo "  '$local_ref' missing locally; pulling '$hub_ref' from Docker Hub..."
+  echo "  pulling '$hub_ref' and tagging as '$local_ref'..."
   docker pull "$hub_ref"
   docker tag  "$hub_ref" "$local_ref"
 }
 
-if [[ "$BUILD" == "0" ]]; then
-  echo "[2/7] BUILD=0, reusing local images (falling back to Docker Hub if missing)..."
+if [[ "$BUILD" == "1" ]]; then
+  echo "[2/5] BUILD=1: docker build manager + Quack node from $REPO_DIR..."
+  ( cd "$REPO_DIR" && docker build -t "$IMAGE"      . )
+  ( cd "$REPO_DIR" && docker build -t "$NODE_IMAGE" -f docker/quack-node/Dockerfile . )
+else
+  echo "[2/5] BUILD=0: ensuring local images (pull from Docker Hub if missing)..."
   ensure_local_image "$IMAGE"      "$MGR_HUB_IMAGE"
   ensure_local_image "$NODE_IMAGE" "$NODE_HUB_IMAGE"
-else
-  echo "[2/7] docker build -t $IMAGE (manager) and -t $NODE_IMAGE (quack node)..."
-  ( cd "$REPO_DIR" && docker build -t "$IMAGE" . )
-  ( cd "$REPO_DIR" && docker build -t "$NODE_IMAGE" -f docker/quack-node/Dockerfile . )
 fi
 
-# 3. load both images into kind.
-echo "[3/7] loading images into kind cluster..."
-kind load docker-image "$IMAGE" "$NODE_IMAGE" --name "$KIND_CLUSTER"
+control_plane_node="${KIND_CLUSTER}-control-plane"
+echo "  loading into kind (docker save | ctr import)..."
+for img in "$IMAGE" "$NODE_IMAGE"; do
+  echo "    $img"
+  docker image save "$img" \
+    | docker exec -i "$control_plane_node" ctr -n k8s.io images import - >/dev/null
+done
 
-# 4. namespace + Postgres
-# NUKE=1: wipe the whole namespace first so Postgres's emptyDir,
-# spawned quack node pods, the helm release secret, and the manager
-# Deployment all go together. Idempotent: missing namespace is fine.
+# ---- 3. in-cluster Postgres + SeaweedFS ----------------------------------
 if [[ "$NUKE" == "1" ]]; then
-  echo "[4/7] NUKE=1: deleting namespace '$NAMESPACE' to wipe all state..."
+  echo "[3/5] NUKE=1: deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
 fi
-echo "[4/7] applying in-cluster Postgres + SeaweedFS..."
+echo "[3/5] applying Postgres + SeaweedFS in '$NAMESPACE'..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/local-postgres.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/seaweedfs.yaml"
 kubectl -n "$NAMESPACE" rollout status deploy/postgres  --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/seaweedfs --timeout=120s
 
-# S3 settings that both the seed (run on the host via port-forward) and the
-# chart install (and from there, every spawned node pod) must agree on.
-# Match the defaults baked into charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
-S3_BUCKET="${S3_BUCKET:-qod-ducklake}"
-S3_PREFIX="${S3_PREFIX:-qod-test}"
-S3_ACCESS_KEY="${S3_ACCESS_KEY:-quack}"
-S3_SECRET_KEY="${S3_SECRET_KEY:-quackquack}"
-DATA_PATH_S3="s3://${S3_BUCKET}/${S3_PREFIX}"
+# ---- 4. helm install -----------------------------------------------------
+echo "[4/5] helm install $RELEASE..."
+helm upgrade --install "$RELEASE" "$CHART_DIR" \
+  --namespace "$NAMESPACE" \
+  -f "$SCRIPT_DIR/values-local-stack.yaml" \
+  --wait --timeout=300s
 
-# 4b. optional TPC-H seed (mirrors LOAD_TPCH in scripts/run-jar.sh and
-# scripts/run-docker-compose.sh). LOAD_TPCH's value is the scale factor.
-# The DuckLake catalog goes into the in-cluster Postgres; parquet files
-# land in SeaweedFS so the Quack node pods can read them at the same s3://
-# URL the manager records. Both Postgres and SeaweedFS are reached via
-# short-lived port-forwards from the host.
+# ---- 5. optional TPC-H seed ---------------------------------------------
+#
+# Runs inside the manager pod via the bundled /app/scripts/load-tpch-dbgen.sh.
+# The pod has cluster DNS so it reaches `postgres` + `seaweedfs` directly;
+# no host duckdb, no port-forward orchestration.
 if [[ -n "$LOAD_TPCH" ]]; then
-  if ! command -v duckdb >/dev/null 2>&1; then
-    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but duckdb CLI not on PATH; skipping seed." >&2
+  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
+    echo "[5/5] WARN: LOAD_TPCH='$LOAD_TPCH' is not a positive integer; skipping seed." >&2
   else
-    echo "[4b/7] seeding TPC-H SF=$LOAD_TPCH into Postgres catalog + SeaweedFS parquet..."
-    SEED_PG_PORT=15432
-    SEED_S3_PORT=18333
-    pkill -f "port-forward.*postgres.*$SEED_PG_PORT:5432"   2>/dev/null || true
-    pkill -f "port-forward.*seaweedfs.*$SEED_S3_PORT:8333"  2>/dev/null || true
-    kubectl -n "$NAMESPACE" port-forward svc/postgres   "$SEED_PG_PORT:5432" \
-      > /tmp/qod-seed-pg-pf.log 2>&1 &
-    SEED_PG_PID=$!
-    kubectl -n "$NAMESPACE" port-forward svc/seaweedfs  "$SEED_S3_PORT:8333" \
-      > /tmp/qod-seed-s3-pf.log 2>&1 &
-    SEED_S3_PID=$!
-    trap '
-      kill $SEED_PG_PID $SEED_S3_PID 2>/dev/null;
-      pkill -P $SEED_PG_PID 2>/dev/null;
-      pkill -P $SEED_S3_PID 2>/dev/null
-    ' EXIT
-    sleep 3
-    # Seed lands in the bootstrap tenant-db Postgres database, not the
-    # control-plane `qod`. The chart's defaults are
-    # bootstrap.tenant=tpch + bootstrap.tenantDb=tpch1, yielding the
-    # composed database name `tpch_tpch1`. Override via TPCH_DB if you
-    # also overrode the chart's bootstrap values.
-    DATA_PATH="$DATA_PATH_S3" \
-    PG_HOST=localhost PG_PORT="$SEED_PG_PORT" PG_USER=postgres PG_PASS=azizam \
-    DB_NAME="${TPCH_DB:-tpch_tpch1}" SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" SF="$LOAD_TPCH" \
-    QOD_S3_ENDPOINT="http://localhost:$SEED_S3_PORT" \
-    QOD_S3_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
-    QOD_S3_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
-    QOD_S3_REGION=us-east-1 \
-    QOD_S3_URL_STYLE=path \
-    QOD_S3_USE_SSL=false \
-      "$REPO_DIR/scripts/load-tpch-dbgen.sh"
-    kill $SEED_PG_PID $SEED_S3_PID 2>/dev/null || true
-    trap - EXIT
-    echo "TPC-H SF=$LOAD_TPCH seed complete (catalog -> Postgres, parquet -> SeaweedFS)."
+    echo "[5/5] seeding TPC-H SF=$LOAD_TPCH inside the manager pod..."
+    MGR_DEPLOY=$(kubectl -n "$NAMESPACE" get deploy \
+      -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
+      -o jsonpath='{.items[0].metadata.name}')
+    # DATA_PATH must point at the per-tenant-db prefix the manager
+    # registered with DuckLake -- NOT the root `qod-test`. Manager derives
+    # it as `parent(rootDataPath)/${tenant}_${tenantDb}`; mirror that here.
+    TENANT_DB_NAME="${TPCH_DB:-tpch_tpch1}"
+    SEED_DATA_PATH="s3://qod-ducklake/$TENANT_DB_NAME"
+    kubectl -n "$NAMESPACE" exec "deploy/$MGR_DEPLOY" -- \
+      env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
+          DB_NAME="$TENANT_DB_NAME" SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" \
+          SF="$LOAD_TPCH" \
+          DATA_PATH="$SEED_DATA_PATH" \
+          QOD_S3_ENDPOINT="http://seaweedfs:8333" \
+          QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
+          QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
+      /app/scripts/load-tpch-dbgen.sh
   fi
 fi
 
-# 4c. clean orphan Quack node pods. If a previous bootstrap got
-# part-way (e.g. quack node image was bad and ImagePullBackOff prevented
-# Ready), the manager rolled back the pool record in Postgres but the
-# K8s pod object stuck around. The next bootstrap then fails with 409
-# Conflict on pod create. Wipe any orphans before reinstalling. Idempotent.
-ORPHANS=$(kubectl -n "$NAMESPACE" get pods -l managed-by=quack-on-demand \
-  -o name 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$ORPHANS" -gt 0 ]]; then
-  echo "[4c/7] cleaning $ORPHANS orphan quack node pod(s) from a prior run..."
-  kubectl -n "$NAMESPACE" delete pods,services -l managed-by=quack-on-demand --grace-period=0 --force 2>&1 | tail -5 || true
-fi
-
-# 5. helm install
-echo "[5/7] helm install $RELEASE..."
-helm upgrade --install "$RELEASE" "$CHART_DIR" \
-  --namespace "$NAMESPACE" \
-  --set "image.repository=$(echo "$IMAGE" | cut -d: -f1)" \
-  --set "image.tag=$(echo "$IMAGE" | cut -d: -f2)" \
-  --set image.pullPolicy=Never \
-  --set postgres.host=postgres \
-  --set postgres.existingSecret=postgres \
-  --set postgres.existingSecretKey=POSTGRES_PASSWORD \
-  --set admin.password=admin \
-  --set flightsql.tls.enabled=true \
-  --set "quackNode.image=$NODE_IMAGE" \
-  --set "storage.dataPath=$DATA_PATH_S3" \
-  --set "s3.endpoint=http://seaweedfs:8333" \
-  --set "s3.accessKey=$S3_ACCESS_KEY" \
-  --set "s3.secretKey=$S3_SECRET_KEY" \
-  --set s3.region=us-east-1 \
-  --set s3.urlStyle=path \
-  --set s3.useSsl=false \
-  --wait --timeout=300s
-
-# 6. /health
-# Always go via port-forward + local curl. The manager image is JRE-only
-# (no curl/wget), so an in-pod probe needs an extra package install which
-# isn't worth the complexity. The trap guarantees the port-forward dies
-# even if curl below fails under `set -e`.
-echo "[6/7] verifying /health..."
-kubectl -n "$NAMESPACE" wait --for=condition=Ready \
-  pod -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
-  --timeout=180s
+# ---- summary -------------------------------------------------------------
+# Helm prepends the chart name to the release name unless the release
+# name already contains it; resolve from the cluster so the printed
+# commands always match what is actually there.
 REST_SVC=$(kubectl -n "$NAMESPACE" get svc \
   -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
-  -o jsonpath='{.items[0].metadata.name}')
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+FS_SVC=$(kubectl -n "$NAMESPACE" get svc \
+  -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=flightsql" \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
-# Best-effort: kill any prior port-forward holding the port from a
-# previous run of this script.
-pkill -f "port-forward.*${REST_SVC}.*20900:20900" 2>/dev/null || true
-sleep 1
+cat <<EOM
 
-kubectl -n "$NAMESPACE" port-forward "svc/$REST_SVC" 20900:20900 \
-  > /tmp/qod-smoke-pf.log 2>&1 &
-PF_PID=$!
-# Clean up the forwarder on any exit path (success, set -e, ctrl-C).
-trap 'kill $PF_PID 2>/dev/null; pkill -P $PF_PID 2>/dev/null; wait $PF_PID 2>/dev/null' EXIT
-sleep 4
-HEALTH=$(curl -fsS http://localhost:20900/health 2>/dev/null || true)
-echo "manager /health: $HEALTH"
-echo "$HEALTH" | grep -q '"status":"ok"' || {
-  echo "ERROR: /health did not report OK"
-  echo "--- manager logs (last 40 lines) ---"
-  MANAGER_POD=$(kubectl -n "$NAMESPACE" get pod \
-    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
-    -o jsonpath='{.items[0].metadata.name}')
-  kubectl -n "$NAMESPACE" logs "$MANAGER_POD" --tail=40
-  exit 1
-}
+manager Ready. To connect:
+  kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900
+  kubectl -n $NAMESPACE port-forward svc/$FS_SVC   31338:31338
 
-# 7. quack node pods — proves the manager's K8s RBAC + the pod-spawn path
-# work end-to-end. The pods themselves will only become Ready when the
-# Quack node image (`quackNode.image`, default `starlakeai/quack:latest`)
-# is loadable by the cluster — out of scope for this smoke since that
-# image is operator-supplied.
-echo "[7/7] checking the manager spawned its bootstrap quack node pods..."
-sleep 5
-NODE_COUNT=$(kubectl -n "$NAMESPACE" get pods -l managed-by=quack-on-demand \
-  --no-headers 2>/dev/null | wc -l | tr -d ' ')
-echo "quack node pods spawned: $NODE_COUNT"
-kubectl -n "$NAMESPACE" get pods -l managed-by=quack-on-demand 2>/dev/null || true
+watch Quack node pods:
+  kubectl -n $NAMESPACE get pods -l managed-by=quack-on-demand -w
 
-if [[ "$NODE_COUNT" -ge 1 ]]; then
-  # Helm prepends the chart name to the release name (per qod.fullname helper)
-  # unless the release name already contains the chart name. Resolve the
-  # real service name from the cluster so these copy-paste commands work.
-  REST_SVC=$(kubectl -n "$NAMESPACE" get svc \
-    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  FS_SVC=$(kubectl -n "$NAMESPACE" get svc \
-    -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=flightsql" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  echo
-  echo "smoke OK - manager is up, RBAC works, K8s pod-spawn path works."
-  echo "  Default Quack node image: starlakeai/quack-on-demand-node:latest-snapshot"
-  echo "  Override with: helm upgrade ... --set quackNode.image=<your-image>"
-  echo
-  echo "  port-forward UI:        kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900"
-  echo "  port-forward FlightSQL: kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338"
-  echo "  tear down:              kind delete cluster --name $KIND_CLUSTER"
-else
-  echo
-  echo "WARN: no quack node pods detected; bootstrap may still be in flight."
-  echo "  kubectl -n $NAMESPACE get pods -l managed-by=quack-on-demand"
-fi
+tear down:
+  kind delete cluster --name $KIND_CLUSTER
+EOM

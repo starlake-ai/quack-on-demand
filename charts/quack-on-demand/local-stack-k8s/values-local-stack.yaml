@@ -1,0 +1,33 @@
+# Helm values for the kind-based local stack rig.
+# Used by `run-local-stack-k8s.sh`; not intended for production deploys.
+
+image:
+  repository: quack-on-demand
+  tag:        local
+  pullPolicy: Never
+
+postgres:
+  host:              postgres
+  existingSecret:    postgres
+  existingSecretKey: POSTGRES_PASSWORD
+
+admin:
+  password: admin
+
+flightsql:
+  tls:
+    enabled: true
+
+quackNode:
+  image: starlakeai/quack-on-demand-node:local
+
+storage:
+  dataPath: s3://qod-ducklake/qod-test
+
+s3:
+  endpoint:  http://seaweedfs:8333
+  region:    us-east-1
+  urlStyle:  path
+  useSsl:    false
+  accessKey: quack
+  secretKey: quackquack

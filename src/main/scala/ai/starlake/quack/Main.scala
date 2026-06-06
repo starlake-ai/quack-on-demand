@@ -272,9 +272,23 @@ object Main extends IOApp with LazyLogging:
         // replacing the last path component of the global default
         // `dataPath` with the composed tenant-db name -- e.g.
         // `/Users/.../ducklake/tpch` + `tpch_tpch1` -> `/Users/.../ducklake/tpch_tpch1`.
+        //
+        // Object-store URIs (s3:// / gs:// / az:// / abfss:// / ...) must
+        // be handled string-wise: `java.nio.file.Paths.get("s3://...")`
+        // collapses the `//` after the scheme into a single `/`, which
+        // DuckLake then refuses on the next ATTACH because the recorded
+        // catalog path no longer matches the operator-supplied URI.
         val rootDataPath = mgrCfg.defaultMetastore.dataPath
         val tenantDbDataPath =
           if rootDataPath.isEmpty then ""
+          else if rootDataPath.matches("^[a-z][a-z0-9+.\\-]*://.*") then
+            // Strip the trailing path component, replace with tenant-db name.
+            val trimmed = rootDataPath.stripSuffix("/")
+            val slash   = trimmed.lastIndexOf('/')
+            // `slash` always lands in or past the `://`; never less than the
+            // scheme separator index, so the substring is safe.
+            if slash < 0 then s"$trimmed/$tenantDbName"
+            else s"${trimmed.substring(0, slash)}/$tenantDbName"
           else
             val p      = java.nio.file.Paths.get(rootDataPath)
             val parent = p.getParent
