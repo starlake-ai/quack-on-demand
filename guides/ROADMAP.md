@@ -38,7 +38,7 @@ Gaps that will hit any non-trivial deployment.
 - ⬜ **Graceful JVM shutdown hook** - drain FlightSQL sessions, SIGTERM child Quack nodes; today the JVM sits idle through SIGTERM grace.
 - ⬜ **Node-init race on `ducklake_metadata`** - three nodes booting in parallel race the `CREATE TABLE`; serialize or wrap with `IF NOT EXISTS` + retry.
 - 🟢 **Prometheus `/metrics` endpoint** - per-tenant QPS / latency / pool occupancy / node health, scrape endpoint on `:20900/metrics`; also supports `aws` / `azure` / `gcp` push sinks. See `observability/README.md`.
-- 🟡 **Backup / restore playbook** - config-plane shipped via YAML manifest (`/api/manifest/{export,import}`, UI buttons, CLI). Data-plane (`pgdata` + `ducklake/`) playbook + CI smoke still pending.
+- 🟢 **Backup / restore (control plane)** - YAML manifest at `/api/manifest/{export,import}` (REST + UI button + CLI subcommand) captures every tenant, tenant-db, pool, user, role, group, permission, and pool grant; passwords are preserved across a re-import via a pre-truncate hash snapshot. Data-plane parquet relies on the object store's own versioning (S3 / GCS / Azure Blob), so it is the operator's responsibility.
 
 ## 0.3 - Ecosystem & adoption
 
@@ -69,7 +69,7 @@ What we commit to long-term.
 
 What makes `quack-on-demand` distinctive vs. plain DuckDB-as-a-service.
 
-- 🟡 **DuckLake catalog UI** - catalog browse + click-to-expand table schema cards shipped. Snapshots / time-travel browser, schema-evolution diff, and compaction scheduler still pending.
+- 🟢 **DuckLake catalog browse** - catalog browser + click-to-expand table-schema cards. Snapshots / time-travel / schema-evolution diff / compaction scheduler tracked separately as #29.
 - ⬜ **Statement-level federation** - push down to external Postgres / S3 / Iceberg via DuckDB extensions, gated by the same ACL.
 - ⬜ **Tenant data residency** - per-tenant `DATA_PATH` (bucket per tenant, region-pinned).
 - ⬜ **Audit log sink** - every statement + principal + ACL decision streamed to S3 / Kafka / etc.
