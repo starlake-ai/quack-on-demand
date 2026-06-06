@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../api/client';
-import type { ConfigEntryView } from '../api/types';
+import { api, ApiError } from '../api/client';
+import type { ConfigEntryView, ManifestImportSummary } from '../api/types';
 
 /** Returns everything before the last `.` in a HOCON path - the natural
  * section grouping for rows ordered by path. */
@@ -17,6 +17,46 @@ export default function Config() {
   const [filter,  setFilter]  = useState<string>('');
   const [err,     setErr]     = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+
+  const [importResult, setImportResult] = useState<ManifestImportSummary | null>(null);
+  const [importError,  setImportError]  = useState<string | null>(null);
+
+  async function onExportClick() {
+    try {
+      const yaml = await api.exportManifest();
+      const blob = new Blob([yaml], { type: 'application/yaml' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = `qod-manifest-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.yaml`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setImportError(String(e));
+    }
+  }
+
+  async function onUploadChange(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    if (!window.confirm(
+      `Apply ${file.name} against this manager?\n\n` +
+      `This upserts every resource in the file. Resources not in the file are left alone.`)) {
+      ev.target.value = '';
+      return;
+    }
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const yaml = await file.text();
+      const summary = await api.importManifest(yaml);
+      setImportResult(summary);
+    } catch (e) {
+      setImportError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      ev.target.value = '';
+    }
+  }
 
   useEffect(() => {
     api.serverConfig()
@@ -76,6 +116,37 @@ export default function Config() {
               )}
             </tbody>
           </table>
+        )}
+      </div>
+      <div className="card" style={{ marginTop: '1rem' }}>
+        <h2 style={{ marginTop: 0 }}>Manifest</h2>
+        <p style={{ color: 'var(--text-mute)', maxWidth: 880 }}>
+          Export the manager's control-plane state (tenants, pools, users, roles, groups,
+          pool grants) to a YAML file, or upload one to apply against this manager.
+          User passwords are never included in the export; existing hashes are preserved
+          on re-import.
+        </p>
+
+        <div className="row" style={{ gap: '.75rem', flexWrap: 'wrap' }}>
+          <button onClick={onExportClick}>Download YAML</button>
+          <label className="secondary" style={{ display: 'inline-block', cursor: 'pointer',
+                                                 padding: '.55rem 1.1rem', borderRadius: 6,
+                                                 border: '1px solid var(--border)' }}>
+            Upload YAML…
+            <input type="file" accept=".yaml,.yml,application/yaml" hidden
+                   onChange={onUploadChange} />
+          </label>
+        </div>
+
+        {importResult && (
+          <p style={{ marginTop: '1rem', color: 'var(--good)' }}>
+            Imported: {importResult.tenants} tenants, {importResult.tenantDbs} tenant-dbs,
+            {' '}{importResult.pools} pools, {importResult.roles} roles,
+            {' '}{importResult.groups} groups, {importResult.users} users.
+          </p>
+        )}
+        {importError && (
+          <p style={{ marginTop: '1rem', color: 'var(--bad)' }}>{importError}</p>
         )}
       </div>
     </>
