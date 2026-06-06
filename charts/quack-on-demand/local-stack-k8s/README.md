@@ -166,6 +166,93 @@ kubectl -n qod port-forward svc/grafana    3000:3000
 
 Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod`) unless the release name already contains it. So services land at `qod-quack-on-demand`, not `qod`. The script's tail message resolves this from the cluster so its copy-paste lines always match what's actually there.
 
+## Connect from a client
+
+Hold a port-forward open in another terminal while you connect:
+
+```bash
+kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
+```
+
+Then pick a client.
+
+**JDBC (Arrow Flight SQL driver, e.g. DBeaver / DataGrip / your JVM app):**
+
+```
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true
+  &disableCertificateVerification=true
+  &user=admin&password=admin
+  &tenant=tpch&pool=sales
+```
+
+(All on one line. `disableCertificateVerification=true` is required because the smoke rig uses the manager's self-signed cert — see Known limitations.)
+
+**Python (ADBC FlightSQL driver):**
+
+```python
+import adbc_driver_flightsql.dbapi as flight_sql
+conn = flight_sql.connect(
+    "grpc+tls://localhost:31338",
+    db_kwargs={
+        "username":                                            "admin",
+        "password":                                            "admin",
+        "adbc.flight.sql.client_option.tls_skip_verify":       "true",
+        "adbc.flight.sql.rpc.call_header.tenant":              "tpch",
+        "adbc.flight.sql.rpc.call_header.pool":                "sales",
+    },
+)
+cur = conn.cursor()
+cur.execute("SELECT count(*) FROM tpch1.lineitem")
+print(cur.fetchall())
+```
+
+`pip install adbc_driver_flightsql adbc_driver_manager pyarrow` if you haven't already.
+
+**REST API + admin UI:**
+
+```bash
+kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900
+# Open http://localhost:20900/ui/  (login admin / admin)
+curl -s -u admin:admin http://localhost:20900/api/tenants
+```
+
+The `tenant` / `pool` headers are mandatory on FlightSQL — the edge's tenant selector rejects sessions that don't carry them. Defaults shipped by the chart are `tpch` / `sales`; if you changed `bootstrap.tenant` / `bootstrap.pool`, match those.
+
+## Run a load test
+
+[`scripts/loadtest/loadtest.py`](../../../scripts/loadtest/loadtest.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
+
+```bash
+# In one terminal:
+kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
+
+# In another -- defaults (8 workers x 100 iterations, TPC-H mix on schema tpch1):
+./scripts/loadtest/loadtest.py
+
+# Heavier mix:
+./scripts/loadtest/loadtest.py --workers 24 --iterations 50 --warmup 5
+
+# Single query, no warmup, count-only:
+LT_QUERY='SELECT count(*) FROM tpch1.lineitem' \
+  ./scripts/loadtest/loadtest.py --iterations 200 --warmup 0
+```
+
+Defaults the script picks up via env vars (override on the CLI as shown):
+
+| Var | Default | What it sets |
+|---|---|---|
+| `LT_URL` | `grpc+tls://localhost:31338` | ADBC FlightSQL URL |
+| `LT_USER` / `LT_PASSWORD` | `admin` / `admin` | basic auth |
+| `LT_WORKERS` | `8` | concurrent threads |
+| `LT_ITERATIONS` | `100` | queries per worker |
+| `LT_WARMUP` | `5` | throwaway iterations per worker before stats start |
+| `LT_QUERY` | unset | single SQL to repeat instead of the TPC-H mix |
+| `LT_SCHEMA` | `tpch1` | schema prefix on the default mix |
+| `LT_TENANT` / `LT_POOL` | `tpch` / `sales` | FlightSQL routing headers |
+| `LT_INSECURE` | `true` | skip TLS cert verification (required against the kind rig's self-signed cert) |
+
+The script auto-`pip install`s `adbc_driver_flightsql adbc_driver_manager pyarrow` on first run if they're missing. Output is a per-percentile latency table (p50 / p90 / p99 / max) plus throughput and error count; eyeball Grafana's "Quack on Demand" dashboard at `http://localhost:3000/` in parallel to see manager-side counters move.
+
 ## Tear down
 
 ```bash
@@ -176,4 +263,4 @@ Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod
 
 - Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state — that's a feature for a smoke rig.
 - By default (`BUILD=0`) the script reuses the local `:local`-tagged images, pulling `:latest-snapshot` from Docker Hub if they're absent. Set `BUILD=1` to rebuild from the local Dockerfile (cached layers make reruns fast once JDK + sbt deps are cached).
-- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `--insecure` for `loadtest.py`). Production deploys should mount a CA-signed cert via `flightsql.tls.existingSecret`.
+- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `LT_INSECURE=true` for `loadtest.py`). Production deploys should mount a CA-signed cert via the chart's `flightsql.tls.existingSecret` value (which sets the manager's `PROXY_TLS_CERT_CHAIN` / `PROXY_TLS_PRIVATE_KEY` env vars to the mounted chain + key paths).
