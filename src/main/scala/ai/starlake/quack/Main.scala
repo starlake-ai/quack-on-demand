@@ -392,12 +392,18 @@ object Main extends IOApp.Simple with LazyLogging:
       )
       val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
 
+      val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
+        store          = store,
+        managerVersion = "dev",
+        hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown")
+      )
+
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
         authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint,
         userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers,
-        serverConfigHandlers
+        serverConfigHandlers, manifestHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own
