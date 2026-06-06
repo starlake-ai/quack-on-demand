@@ -61,6 +61,16 @@ object Endpoints:
   val serverConfig: PublicEndpoint[Unit, Unit, ConfigListResponse, Any] =
     endpoint.get.in("api" / "config" / "server").out(jsonBody[ConfigListResponse])
 
+  val manifestExport: PublicEndpoint[Unit, (sttp.model.StatusCode, ErrorResponse), String, Any] =
+    base.get.in("manifest" / "export")
+        .out(stringBody)
+        .out(header("Content-Type", "application/yaml"))
+
+  val manifestImport: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), ManifestImportSummary, Any] =
+    base.post.in("manifest" / "import")
+        .in(stringBody)
+        .out(jsonBody[ManifestImportSummary])
+
   val createTenant: PublicEndpoint[TenantRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
     base.post.in("tenant" / "create").in(jsonBody[TenantRequest]).out(jsonBody[TenantResponse])
 
