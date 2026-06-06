@@ -36,7 +36,7 @@ Gaps that will hit any non-trivial deployment.
 
 - ⬜ **DML ACL granularity** - extend `TableExtractor` so per-table grants apply to INSERT / UPDATE / DELETE, not just SELECT.
 - ⬜ **Graceful JVM shutdown hook** - drain FlightSQL sessions, SIGTERM child Quack nodes; today the JVM sits idle through SIGTERM grace.
-- ⬜ **Node-init race on `ducklake_metadata`** - three nodes booting in parallel race the `CREATE TABLE`; serialize or wrap with `IF NOT EXISTS` + retry.
+- 🟢 **Node-init race on `ducklake_metadata`** - wrapped DuckLake ATTACH in a per-dbname `pg_advisory_lock` so concurrent first-attach calls serialize. Applied in `spawn-quack-node.sh` (K8s pod path) and `DuckLakeInitializer.scala` (manager-side pre-init); regression in `DuckLakeInitializerRaceSpec`.
 - 🟢 **Prometheus `/metrics` endpoint** - per-tenant QPS / latency / pool occupancy / node health, scrape endpoint on `:20900/metrics`; also supports `aws` / `azure` / `gcp` push sinks. See `observability/README.md`.
 - 🟢 **Backup / restore (control plane)** - YAML manifest at `/api/manifest/{export,import}` (REST + UI button + CLI subcommand) captures every tenant, tenant-db, pool, user, role, group, permission, and pool grant; passwords are preserved across a re-import via a pre-truncate hash snapshot. Data-plane parquet relies on the object store's own versioning (S3 / GCS / Azure Blob), so it is the operator's responsibility.
 
