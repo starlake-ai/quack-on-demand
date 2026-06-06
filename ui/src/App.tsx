@@ -18,7 +18,10 @@ function Shell() {
   return (
     <>
       <nav className="app-nav">
-        <span className="brand">🦆 Quack on Demand</span>
+        <span className="brand">
+          <img src="/ui/mark-dark.svg" alt="" className="brand-mark" />
+          Quack on Demand
+        </span>
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>

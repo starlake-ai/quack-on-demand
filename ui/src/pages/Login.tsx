@@ -27,7 +27,7 @@ export default function Login() {
     <div className="login-shell">
       <form className="login-card" onSubmit={submit}>
         <div className="login-brand">
-          <div className="login-logo">🦆</div>
+          <img src="/ui/mark-dark.svg" alt="" className="login-logo" />
           <h1>Quack on Demand</h1>
           <p className="login-sub">Admin console</p>
         </div>

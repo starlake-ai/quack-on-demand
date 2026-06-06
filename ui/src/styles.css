@@ -51,7 +51,12 @@ em { color: var(--text-mute); font-style: normal; }
   font-weight: 600;
   letter-spacing: .02em;
   color: var(--accent);
-  display: flex; align-items: center; gap: .4rem;
+  display: flex; align-items: center; gap: .5rem;
+}
+.app-nav .brand-mark {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 .app-nav a { color: var(--text-soft); padding: .25rem .6rem; border-radius: 6px; }
 .app-nav a.active, .app-nav a:hover { background: var(--bg-card); color: var(--text); text-decoration: none; }
@@ -345,7 +350,7 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
   box-shadow: var(--shadow);
 }
 .login-brand { text-align: center; margin-bottom: 1.25rem; }
-.login-logo  { font-size: 3rem; line-height: 1; }
+.login-logo  { width: 72px; height: 72px; display: block; margin: 0 auto; }
 .login-brand h1 { font-size: 1.35rem; margin: .35rem 0 0; }
 .login-sub   { color: var(--text-mute); margin: 0; }
 .login-err {
