@@ -145,6 +145,16 @@ if [[ -n "$PROXY_URL" ]]; then
 fi
 
 # Feed init SQL
+#
+# Race protection. DuckLake's first ATTACH against a fresh tenant-db
+# Postgres runs CREATE TABLE __ducklake_metadata + sibling tables.
+# Concurrent first-time ATTACHes (e.g. K8s spawning N pool pods in
+# parallel) race on Postgres's pg_type uniqueness. Wrap the ATTACH
+# in a per-dbname pg_advisory_lock taken via the `postgres` extension
+# on the SAME tenant-db connection so first-time ATTACHes serialize
+# across concurrent spawns. Subsequent ATTACHes hit existing tables
+# and are no-ops; the lock turns the no-op into a properly-serialized
+# no-op. See guides/ROADMAP.md and issue #3.
 cat >&9 <<SQL
 $PROXY_SQL
 INSTALL ducklake; LOAD ducklake;
@@ -152,8 +162,14 @@ INSTALL postgres; LOAD postgres;
 INSTALL quack;    LOAD quack;
 $STORAGE_SQL
 
+ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);
+SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');
+
 ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS $dbName
   (DATA_PATH '$dataPath');
+
+SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');
+DETACH qod_init_pg;
 
 USE $dbName;
 CREATE SCHEMA IF NOT EXISTS $schemaName;
