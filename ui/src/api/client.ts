@@ -18,6 +18,7 @@ import type {
   TenantDbOpRequest,
   ClientConfigResponse,
   ConfigListResponse,
+  ManifestImportSummary,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -112,6 +113,19 @@ export const api = {
   health:        () => fetch('/health').then(r => r.json() as Promise<HealthResponse>),
   clientConfig:  () => get<ClientConfigResponse>('/config/client'),
   serverConfig:  () => get<ConfigListResponse>('/config/server'),
+  exportManifest: async (): Promise<string> => {
+    const r = await fetch(`${BASE}/manifest/export`, { headers: authHeaders() });
+    if (!r.ok) throw new ApiError(r.status, await r.text());
+    return await r.text();
+  },
+  importManifest: async (yaml: string): Promise<ManifestImportSummary> => {
+    const r = await fetch(`${BASE}/manifest/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/yaml', ...authHeaders() },
+      body: yaml,
+    });
+    return handle<ManifestImportSummary>(r);
+  },
 
   // Pools + nodes
   listPools:   () => get<{ pools: PoolResponse[] }>('/pool/list'),
