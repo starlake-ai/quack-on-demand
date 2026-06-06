@@ -20,7 +20,7 @@ import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
   PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
 }
-import cats.effect.{IO, IOApp}
+import cats.effect.{ExitCode, IO, IOApp}
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
 import pureconfig.generic.ProductHint
@@ -28,7 +28,7 @@ import pureconfig.generic.semiauto.deriveReader
 
 import java.nio.file.Path
 
-object Main extends IOApp.Simple with LazyLogging:
+object Main extends IOApp with LazyLogging:
 
   // Match the camelCase keys used in application.conf rather than pureconfig's
   // default kebab-case mapping. Affects our own ManagerConfig / FlightConfig
@@ -68,7 +68,24 @@ object Main extends IOApp.Simple with LazyLogging:
   given ConfigReader[AuthenticationConfig] = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 
-  def run: IO[Unit] =
+  def run(args: List[String]): IO[ExitCode] =
+    args match
+      case "manifest" :: "export" :: Nil =>
+        IO.blocking {
+          val mgrCfg = ConfigSource.default.at("quack-on-demand").loadOrThrow[ManagerConfig]
+          val store  = PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+          ai.starlake.quack.cli.ManifestCli.exportTo(store, System.out)
+        }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
+      case "manifest" :: "import" :: Nil =>
+        IO.blocking {
+          val mgrCfg = ConfigSource.default.at("quack-on-demand").loadOrThrow[ManagerConfig]
+          val store  = PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+          ai.starlake.quack.cli.ManifestCli.importFrom(store, System.in)
+        }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
+      case _ =>
+        normalManagerRun
+
+  private def normalManagerRun: IO[ExitCode] =
     val source  = ConfigSource.default
     val mgrCfg  = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
     val edgeCfg = source.at("quack-flightsql").loadOrThrow[FlightConfig]
@@ -430,12 +447,12 @@ object Main extends IOApp.Simple with LazyLogging:
         }
       }
 
-    val program: IO[Unit] =
+    val program: IO[ExitCode] =
       MetricsRegistry.resource(metricsCfg).use { metricsReg =>
         val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
         val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
         val stmtInstruments = new StatementInstruments(metricsReg.composite)
         IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
-      }
+      }.as(ExitCode.Success)
 
     program
