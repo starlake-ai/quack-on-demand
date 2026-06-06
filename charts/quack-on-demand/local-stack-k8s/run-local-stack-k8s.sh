@@ -8,7 +8,9 @@
 #      docker-builds from the source tree). Load both into the cluster
 #      via `docker save | ctr import` (single-platform, no kind /
 #      multi-arch quirks).
-#   3. Apply the in-cluster Postgres + SeaweedFS.
+#   3. Apply the in-cluster Postgres + SeaweedFS + Prometheus + Grafana.
+#      The dashboard ConfigMap is rebuilt from observability/grafana-dashboard.json
+#      so the repo file stays the single source of truth.
 #   4. Helm-install the chart from `values-local-stack.yaml`.
 #   5. Optional TPC-H seed via `kubectl exec` into the manager pod
 #      (uses the bundled `/app/scripts/load-tpch-dbgen.sh`; no host
@@ -101,12 +103,35 @@ if [[ "$NUKE" == "1" ]]; then
   echo "[3/5] NUKE=1: deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
 fi
-echo "[3/5] applying Postgres + SeaweedFS in '$NAMESPACE'..."
+echo "[3/5] applying Postgres + SeaweedFS + Prometheus + Grafana in '$NAMESPACE'..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/local-postgres.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/seaweedfs.yaml"
-kubectl -n "$NAMESPACE" rollout status deploy/postgres  --timeout=120s
-kubectl -n "$NAMESPACE" rollout status deploy/seaweedfs --timeout=120s
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/prometheus.yaml"
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/grafana.yaml"
+
+# Replace the dashboard stub ConfigMap with the real JSON from the repo.
+# `kubectl create --dry-run | kubectl apply` is the only kubectl-native
+# way to upsert a CM from a single file without losing the rest of the
+# CM if it grows additional keys later.
+DASHBOARD_JSON="$REPO_DIR/observability/grafana-dashboard.json"
+if [[ -f "$DASHBOARD_JSON" ]]; then
+  kubectl -n "$NAMESPACE" create configmap grafana-dashboard-qod \
+    --from-file="quack-on-demand.json=$DASHBOARD_JSON" \
+    --dry-run=client -o yaml \
+    | kubectl -n "$NAMESPACE" apply -f -
+  # Bounce Grafana so the new CM is mounted. The file-based provisioner
+  # also re-reads every 10s once mounted, but the restart removes the
+  # 10-second uncertainty window for the first boot.
+  kubectl -n "$NAMESPACE" rollout restart deploy/grafana >/dev/null
+else
+  echo "  WARN: '$DASHBOARD_JSON' missing; Grafana will boot with the stub dashboard." >&2
+fi
+
+kubectl -n "$NAMESPACE" rollout status deploy/postgres   --timeout=120s
+kubectl -n "$NAMESPACE" rollout status deploy/seaweedfs  --timeout=120s
+kubectl -n "$NAMESPACE" rollout status deploy/prometheus --timeout=120s
+kubectl -n "$NAMESPACE" rollout status deploy/grafana    --timeout=120s
 
 # ---- 4. helm install -----------------------------------------------------
 echo "[4/5] helm install $RELEASE..."
@@ -161,6 +186,10 @@ cat <<EOM
 manager Ready. To connect:
   kubectl -n $NAMESPACE port-forward svc/$REST_SVC 20900:20900
   kubectl -n $NAMESPACE port-forward svc/$FS_SVC   31338:31338
+
+observability (anonymous Admin Grafana, no login):
+  kubectl -n $NAMESPACE port-forward svc/prometheus 9090:9090
+  kubectl -n $NAMESPACE port-forward svc/grafana    3000:3000
 
 watch Quack node pods:
   kubectl -n $NAMESPACE get pods -l managed-by=quack-on-demand -w

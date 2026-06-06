@@ -22,12 +22,34 @@ This:
 1. Creates a kind cluster named `qod-test` (reused if it already exists).
 2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
 3. Loads both images into the kind cluster.
-4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)) and SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)) and Grafana ([`grafana.yaml`](grafana.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard.json`](../../../observability/grafana-dashboard.json) so the repo file stays authoritative. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
 5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
 6. Waits for the manager pod to be `Ready` and `/health` to return OK.
 7. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
 
 ## Architecture
+
+### At a glance
+
+```mermaid
+flowchart LR
+    host["Host"]
+    manager["Manager"]
+    nodes["Quack nodes"]
+    pg["Postgres"]
+    sw["SeaweedFS"]
+    obs["Prometheus<br/>+ Grafana"]
+
+    host    --> manager
+    manager --> nodes
+    manager --> pg
+    nodes   --> pg
+    nodes   --> sw
+    obs     --> manager
+    host    --> obs
+```
+
+### In detail
 
 What the script ends up creating, end-to-end. Everything runs in the single `qod` namespace of the `qod-test` kind cluster; the host only opens short-lived port-forwards.
 
@@ -52,6 +74,8 @@ flowchart TB
 
         pg["Pod: postgres<br/>(single replica, emptyDir)<br/>databases: qod (control plane)<br/>· tpch_tpch1 (DuckLake catalog)"]
         sw["Pod: seaweedfs<br/>(single replica, emptyDir)<br/>S3 API :8333 · bucket qod-ducklake"]
+        prom["Pod: prometheus<br/>(emptyDir, 7d retention)<br/>scrapes manager :20900/metrics"]
+        graf["Pod: grafana<br/>(emptyDir, anonymous Admin)<br/>UI :3000 · provisioned dashboard"]
 
         kapi["Kubernetes API"]
     end
@@ -79,6 +103,10 @@ flowchart TB
     %% Node - data plane
     nodes -- "DuckLake __ducklake_* (per-tenant-db catalog)" --> pg
     nodes -- "parquet (s3://qod-ducklake/qod-test/...)"      --> sw
+
+    %% Observability
+    prom -- "GET /metrics every 5s" --> manager
+    graf -- "PromQL" --> prom
 ```
 
 The pieces, one per row of the diagram:
@@ -129,6 +157,11 @@ kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
 
 # Watch the quack node pods the manager spawns
 kubectl -n qod get pods -l managed-by=quack-on-demand -w
+
+# Observability (Grafana opens anonymously as Admin, dashboard pre-loaded)
+kubectl -n qod port-forward svc/prometheus 9090:9090
+kubectl -n qod port-forward svc/grafana    3000:3000
+# Open http://localhost:3000/ -> Dashboards -> "Quack on Demand"
 ```
 
 Note: Helm prepends the chart name (`quack-on-demand`) to the release name (`qod`) unless the release name already contains it. So services land at `qod-quack-on-demand`, not `qod`. The script's tail message resolves this from the cluster so its copy-paste lines always match what's actually there.

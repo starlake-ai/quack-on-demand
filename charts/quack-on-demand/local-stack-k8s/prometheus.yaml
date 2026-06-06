@@ -1,0 +1,91 @@
+#
+# Single-pod Prometheus for the kind smoke rig. Scrapes the manager's
+# Tapir `/metrics` endpoint (Micrometer-backed Prometheus exposition,
+# served on the REST port :20900). Target is the in-cluster Service
+# rendered by helm for the default release `qod` -- if you override
+# RELEASE in run-local-stack-k8s.sh, the target name changes
+# accordingly and Prometheus will start failing scrapes until the
+# ConfigMap is patched.
+#
+# Not production-grade:
+#   - emptyDir under /prometheus (TSDB evaporates with the pod)
+#   - single replica
+#   - 7-day retention regardless of disk pressure
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+      external_labels:
+        deployment: kind
+        region: dev
+    scrape_configs:
+      - job_name: quack-on-demand
+        static_configs:
+          - targets: ['qod-quack-on-demand:20900']
+            labels:
+              instance: manager
+        metrics_path: /metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.55.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - mountPath: /etc/prometheus
+              name: config
+              readOnly: true
+            - mountPath: /prometheus
+              name: data
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
