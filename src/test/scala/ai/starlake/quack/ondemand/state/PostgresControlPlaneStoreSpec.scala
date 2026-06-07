@@ -100,6 +100,41 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listTenantDbs("tenant-1") shouldBe List(tenantDb)
   }
 
+  it should "round-trip kind, defaultDatabase, defaultSchema for a memory tenant-db" in withStore { store =>
+    val td = TenantDb(
+      id              = "td-mem",
+      tenantId        = "tenant-1",
+      name            = "memorydb",
+      kind            = TenantDbKind.InMemory,
+      metastore       = Map.empty,
+      dataPath        = "",
+      defaultDatabase = Some("fedpg"),
+      defaultSchema   = Some("public")
+    )
+    store.upsertTenant(Tenant(id = "tenant-1", name = "t1"))
+    store.upsertTenantDb(td)
+    val read = store.listTenantDbs("tenant-1").find(_.id == "td-mem").get
+    read.kind            shouldBe TenantDbKind.InMemory
+    read.defaultDatabase shouldBe Some("fedpg")
+    read.defaultSchema   shouldBe Some("public")
+  }
+
+  it should "round-trip kind=DuckDbFile" in withStore { store =>
+    val td = TenantDb(
+      id        = "td-file",
+      tenantId  = "tenant-1",
+      name      = "filedb",
+      kind      = TenantDbKind.DuckDbFile,
+      metastore = Map("dbName" -> "mydata", "schemaName" -> "main"),
+      dataPath  = "/tmp/file.duckdb"
+    )
+    store.upsertTenant(Tenant(id = "tenant-1", name = "t1"))
+    store.upsertTenantDb(td)
+    val read = store.listTenantDbs("tenant-1").find(_.id == "td-file").get
+    read.kind shouldBe TenantDbKind.DuckDbFile
+    read.metastore("dbName") shouldBe "mydata"
+  }
+
   it should "round-trip a pool" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)
