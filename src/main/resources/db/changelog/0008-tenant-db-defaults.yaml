@@ -1,0 +1,41 @@
+# Add tenant-db kind + default-catalog overrides.
+# Pre-release: kind is NOT NULL with no default; any dev row predating this
+# changeset must be backfilled manually (UPDATE qodstate_tenant_db SET
+# kind='ducklake' WHERE kind IS NULL).
+databaseChangeLog:
+
+  - changeSet:
+      id: 0008-tenant-db-kind
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: kind
+                  type: VARCHAR(32)
+                  constraints:
+                    nullable: false
+        - sql:
+            sql: >-
+              ALTER TABLE qodstate_tenant_db
+              ADD CONSTRAINT qodstate_tenant_db_kind_check
+              CHECK (kind IN ('ducklake', 'duckdb-file', 'memory'))
+
+  - changeSet:
+      id: 0008-tenant-db-default-overrides
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: default_database
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: true
+              - column:
+                  name: default_schema
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: true
