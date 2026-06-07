@@ -17,3 +17,5 @@ databaseChangeLog:
       file: db/changelog/0005-pool-disabled.yaml
   - include:
       file: db/changelog/0006-rbac.yaml
+  - include:
+      file: db/changelog/0008-tenant-db-defaults.yaml
