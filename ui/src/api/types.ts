@@ -361,3 +361,48 @@ export interface CatalogTableDetailResponse {
   columns: CatalogColumnEntry[];
   dataFiles: CatalogDataFileEntry[];
 }
+
+// ----- Federation -----
+
+export interface FederatedSourceCreateRequest {
+  alias: string;
+  setupSql: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export interface FederatedSourceResponse {
+  id: string;
+  tenantDbId: string;
+  alias: string;
+  setupSql: string;
+  description?: string;
+  disabled: boolean;
+}
+
+export interface FederatedSourceListResponse {
+  sources: FederatedSourceResponse[];
+}
+
+export interface FederatedSecretUpsertRequest {
+  name: string;
+  value?: string;
+  externalRef?: string;
+}
+
+export interface FederatedSecretResponse {
+  id: string;
+  federatedSourceId: string;
+  name: string;
+  value?: string;        // server returns "***REDACTED***" when a value exists
+  externalRef?: string;
+}
+
+export interface FederatedSecretListResponse {
+  secrets: FederatedSecretResponse[];
+}
+
+export interface FederationImportSummary {
+  sources: number;
+  secrets: number;
+}
