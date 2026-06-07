@@ -138,23 +138,29 @@ final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: 
 // `${tenant}_${suffix}` and used verbatim as the actual Postgres
 // database name on the shared server.
 final case class TenantDbRequest(
-    tenant:      String,
+    tenant:          String,
     // Suffix typed by the user; the supervisor composes the full
     // database name as `${tenant}_${suffix}` (idempotent if the caller
     // already passed the full form).
-    name:        String,
-    metastore:   Map[String, String] = Map.empty,
-    dataPath:    String              = "",
-    objectStore: Map[String, String] = Map.empty
+    name:            String,
+    kind:            String              = "ducklake",   // wire value: ducklake | duckdb-file | memory
+    metastore:       Map[String, String] = Map.empty,
+    dataPath:        String              = "",
+    objectStore:     Map[String, String] = Map.empty,
+    defaultDatabase: Option[String]      = None,
+    defaultSchema:   Option[String]      = None
 )
 final case class TenantDbResponse(
-    id:          String,
-    tenant:      String,
-    name:        String,
-    metastore:   Map[String, String],
-    dataPath:    String,
-    objectStore: Map[String, String] = Map.empty,
-    disabled:    Boolean             = false
+    id:              String,
+    tenant:          String,
+    name:            String,
+    kind:            String,                            // wire value
+    metastore:       Map[String, String],
+    dataPath:        String,
+    objectStore:     Map[String, String] = Map.empty,
+    defaultDatabase: Option[String]      = None,
+    defaultSchema:   Option[String]      = None,
+    disabled:        Boolean             = false
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)

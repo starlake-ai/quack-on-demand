@@ -317,6 +317,7 @@ object Main extends IOApp with LazyLogging:
             sup.createTenantDb(
               tenantName  = bs.tenant,
               suffix      = bs.tenantDb,
+              kind        = ai.starlake.quack.model.TenantDbKind.DuckLake,
               metastore   = tenantDbMetastore,
               dataPath    = tenantDbDataPath,
               objectStore = Map.empty

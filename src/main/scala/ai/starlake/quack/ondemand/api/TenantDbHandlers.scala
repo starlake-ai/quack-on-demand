@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.TenantDb
+import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -17,13 +17,16 @@ final class TenantDbHandlers(sup: PoolSupervisor):
 
   private def toResponse(tenantName: String, td: TenantDb): TenantDbResponse =
     TenantDbResponse(
-      id          = td.id,
-      tenant      = tenantName,
-      name        = td.name,
-      metastore   = redact(td.metastore),
-      dataPath    = td.dataPath,
-      objectStore = redact(td.objectStore),
-      disabled    = td.disabled
+      id              = td.id,
+      tenant          = tenantName,
+      name            = td.name,
+      kind            = td.kind.wireValue,
+      metastore       = redact(td.metastore),
+      dataPath        = td.dataPath,
+      objectStore     = redact(td.objectStore),
+      defaultDatabase = td.defaultDatabase,
+      defaultSchema   = td.defaultSchema,
+      disabled        = td.disabled
     )
 
   def createTenantDb(req: TenantDbRequest): Out[TenantDbResponse] =
@@ -31,19 +34,28 @@ final class TenantDbHandlers(sup: PoolSupervisor):
       IO.pure(Left((StatusCode.BadRequest,
         ErrorResponse("invalid", "tenant and name must be non-empty"))))
     else
-      sup.createTenantDb(
-        tenantName  = req.tenant,
-        suffix      = req.name,
-        metastore   = req.metastore,
-        dataPath    = req.dataPath,
-        objectStore = req.objectStore
-      ).map {
-        case Right(td) => Right(toResponse(req.tenant, td))
-        case Left(msg) if msg.startsWith("tenant not found") =>
-          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-        case Left(msg) =>
-          Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
-      }
+      TenantDbKind.fromWire(req.kind) match
+        case Left(err) =>
+          IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
+        case Right(kind) =>
+          sup.createTenantDb(
+            tenantName      = req.tenant,
+            suffix          = req.name,
+            kind            = kind,
+            metastore       = req.metastore,
+            dataPath        = req.dataPath,
+            objectStore     = req.objectStore,
+            defaultDatabase = req.defaultDatabase,
+            defaultSchema   = req.defaultSchema
+          ).map {
+            case Right(td) => Right(toResponse(req.tenant, td))
+            case Left(msg) if msg.startsWith("tenant not found") =>
+              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            case Left(msg) if msg.startsWith("invalid kind=") =>
+              Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg)))
+            case Left(msg) =>
+              Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
+          }
 
   def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.delay {
     Right(TenantDbListResponse(
