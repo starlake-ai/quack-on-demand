@@ -428,7 +428,10 @@ final class PoolSupervisor(
             acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
           }.flatMap { running =>
             val state = PoolState(key, running, dist, merged, td.objectStore, maxConcurrentPerNode,
-              kindWire = kindWire, extraSetupSql = extraBlob)
+              kindWire        = kindWire,
+              extraSetupSql   = extraBlob,
+              defaultDatabase = td.defaultDatabase,
+              defaultSchema   = td.defaultSchema)
             pools.put(key, state)
             running.foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolEntity.id))).as(running)
           }
