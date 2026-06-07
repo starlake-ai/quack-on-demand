@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { TenantDbResponse } from '../api/types';
+import type { TenantDbKind, TenantDbResponse } from '../api/types';
 import CatalogBrowser from './CatalogBrowser';
 import DataPathEditor, {
   buildObjectStore, parseExtras as parseStoreExtras,
@@ -33,6 +33,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [storeKeys, setStoreKeys]     = useState<Record<string, string>>({});
   const [storeExtras, setStoreExtras] = useState('');
 
+  const [kind, setKind]                     = useState<TenantDbKind>('ducklake');
+  const [defaultDatabase, setDefaultDatabase] = useState('');
+  const [defaultSchema, setDefaultSchema]     = useState('');
+
   const reload = () =>
     api.listTenantDbs(tenant)
       .then(r => setDbs(r.tenantDbs))
@@ -49,6 +53,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setStoreType('none');
     setStoreKeys({});
     setStoreExtras('');
+    setKind('ducklake');
+    setDefaultDatabase('');
+    setDefaultSchema('');
     setError(null);
   }
 
@@ -89,13 +96,23 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setError(null);
     if (nameError != null || name === prefix) return;
     try {
-      await api.createTenantDb({
+      const reqBody: Parameters<typeof api.createTenantDb>[0] = {
         tenant,
-        name:        name,  // server is idempotent on already-prefixed input
-        dataPath:    dataPath.trim(),
-        metastore:   collectMetastore(),
-        objectStore: buildObjectStore(storeType, storeKeys, storeExtras),
-      });
+        name,  // server is idempotent on already-prefixed input
+        kind,
+      };
+      if (kind === 'ducklake') {
+        reqBody.metastore   = collectMetastore();
+        reqBody.dataPath    = dataPath.trim();
+        reqBody.objectStore = buildObjectStore(storeType, storeKeys, storeExtras);
+      } else if (kind === 'duckdb-file') {
+        reqBody.metastore = collectMetastore();
+        reqBody.dataPath  = dataPath.trim();
+      }
+      // memory: no metastore / dataPath / objectStore
+      if (defaultDatabase.trim()) reqBody.defaultDatabase = defaultDatabase.trim();
+      if (defaultSchema.trim())   reqBody.defaultSchema   = defaultSchema.trim();
+      await api.createTenantDb(reqBody);
       resetForm();
       setAdding(false);
       await reload();
@@ -153,6 +170,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           <thead>
             <tr>
               <th>Name</th>
+              <th>Kind</th>
               <th>Schema</th>
               <th>Data path</th>
               <th></th>
@@ -171,7 +189,22 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                   </a>
                   {d.disabled && <span className="subtle"> (disabled)</span>}
                 </td>
-                <td><code>{d.metastore.schemaName || '-'}</code></td>
+                <td>
+                  <span style={{
+                    display: 'inline-block',
+                    padding: '1px 6px',
+                    borderRadius: 3,
+                    fontSize: '0.8em',
+                    fontWeight: 600,
+                    background: d.kind === 'ducklake' ? '#dbeafe'
+                              : d.kind === 'duckdb-file' ? '#fef9c3'
+                              : '#f3e8ff',
+                    color: d.kind === 'ducklake' ? '#1d4ed8'
+                         : d.kind === 'duckdb-file' ? '#854d0e'
+                         : '#6b21a8',
+                  }}>{d.kind ?? 'ducklake'}</span>
+                </td>
+                <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
                 <td><code>{d.dataPath || '-'}</code></td>
                 <td>
                   <button className="danger" onClick={() => handleDelete(d.name)}>Delete</button>
@@ -215,38 +248,105 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                   </span>
                 )}
               </label>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Schema</span>
-                <input value={schemaName} onChange={ev => setSchemaName(ev.target.value)} placeholder="main" />
-              </label>
             </div>
-            <details style={{ marginTop: '0.5rem' }}>
-              <summary style={{ cursor: 'pointer', color: '#666' }}>Advanced metastore keys</summary>
-              <p className="subtle" style={{ marginBottom: 4 }}>
-                Extra <code>key=value</code> pairs, one per line. Use for non-standard metastore options.
-              </p>
-              <textarea
-                value={extrasText}
-                onChange={ev => setExtrasText(ev.target.value)}
-                rows={6}
-                placeholder={"# example:\n# applicationName=quack-prod"}
-                style={{ width: '100%', fontFamily: 'monospace' }}
-              />
-            </details>
+
+            <div className="form-group" style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.75rem' }}>
+              <label>Kind:</label>
+              {(['ducklake', 'duckdb-file', 'memory'] as const).map(k => (
+                <label key={k} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                  <input type="radio" name="kind" value={k} checked={kind === k}
+                         onChange={() => setKind(k)} />
+                  {k}
+                </label>
+              ))}
+            </div>
+            <div className="help" style={{ fontSize: '0.85em', color: '#666', marginTop: '0.25rem' }}>
+              {kind === 'ducklake'    && 'Postgres-backed DuckLake catalog + object-store data path.'}
+              {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
+              {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
+            </div>
+
+            {kind !== 'memory' && (
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginTop: '0.5rem' }}>
+                <label style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span>Schema</span>
+                  <input value={schemaName} onChange={ev => setSchemaName(ev.target.value)} placeholder="main" />
+                </label>
+              </div>
+            )}
+
+            {kind !== 'memory' && (
+              <details style={{ marginTop: '0.5rem' }}>
+                <summary style={{ cursor: 'pointer', color: '#666' }}>Advanced metastore keys</summary>
+                <p className="subtle" style={{ marginBottom: 4 }}>
+                  Extra <code>key=value</code> pairs, one per line. Use for non-standard metastore options.
+                </p>
+                <textarea
+                  value={extrasText}
+                  onChange={ev => setExtrasText(ev.target.value)}
+                  rows={6}
+                  placeholder={"# example:\n# applicationName=quack-prod"}
+                  style={{ width: '100%', fontFamily: 'monospace' }}
+                />
+              </details>
+            )}
           </fieldset>
 
-          <div style={{ marginTop: '0.5rem' }}>
-            <DataPathEditor
-              dataPath={dataPath}
-              onDataPathChange={setDataPath}
-              storeType={storeType}
-              onStoreTypeChange={setStoreType}
-              storeKeys={storeKeys}
-              onStoreKeysChange={setStoreKeys}
-              storeExtras={storeExtras}
-              onStoreExtrasChange={setStoreExtras}
-            />
-          </div>
+          {kind === 'ducklake' && (
+            <div style={{ marginTop: '0.5rem' }}>
+              <DataPathEditor
+                dataPath={dataPath}
+                onDataPathChange={setDataPath}
+                storeType={storeType}
+                onStoreTypeChange={setStoreType}
+                storeKeys={storeKeys}
+                onStoreKeysChange={setStoreKeys}
+                storeExtras={storeExtras}
+                onStoreExtrasChange={setStoreExtras}
+              />
+            </div>
+          )}
+          {kind === 'duckdb-file' && (
+            <fieldset style={{ marginTop: '0.5rem' }}>
+              <legend>Data path</legend>
+              <p className="subtle" style={{ marginTop: 0 }}>
+                Local <code>.duckdb</code> file path attached as the default catalog.
+              </p>
+              <label style={{ display: 'flex', flexDirection: 'column', maxWidth: 400 }}>
+                <span>Path</span>
+                <input
+                  value={dataPath}
+                  onChange={ev => setDataPath(ev.target.value)}
+                  placeholder="/data/mydb.duckdb"
+                  style={{ fontFamily: 'monospace' }}
+                />
+              </label>
+            </fieldset>
+          )}
+
+          <fieldset style={{ marginTop: '0.5rem' }}>
+            <legend>Federated defaults (optional)</legend>
+            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', flexDirection: 'column' }}>
+                <span>Default catalog (optional)</span>
+                <input
+                  value={defaultDatabase}
+                  onChange={ev => setDefaultDatabase(ev.target.value)}
+                  placeholder="my_catalog"
+                  style={{ width: 220, fontFamily: 'monospace' }}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column' }}>
+                <span>Default schema (optional)</span>
+                <input
+                  value={defaultSchema}
+                  onChange={ev => setDefaultSchema(ev.target.value)}
+                  placeholder="main"
+                  style={{ width: 220, fontFamily: 'monospace' }}
+                />
+              </label>
+            </div>
+          </fieldset>
 
           <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
             <button type="submit" disabled={nameError != null || name === prefix}>Create</button>

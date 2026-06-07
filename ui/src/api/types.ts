@@ -154,21 +154,29 @@ export interface TenantOpRequest {
 }
 
 // ----- Tenant databases -----
+export type TenantDbKind = 'ducklake' | 'duckdb-file' | 'memory';
+
 export interface TenantDbRequest {
   tenant: string;
   name: string; // suffix; server composes `${tenant}_${name}`
+  kind?: TenantDbKind;          // defaults server-side to "ducklake"
   metastore?: Record<string, string>;
   dataPath?: string;
   objectStore?: Record<string, string>;
+  defaultDatabase?: string;
+  defaultSchema?: string;
 }
 
 export interface TenantDbResponse {
   id: string;
   tenant: string;
   name: string;
+  kind: TenantDbKind;           // always present in the response
   metastore: Record<string, string>;
   dataPath: string;
   objectStore: Record<string, string>;
+  defaultDatabase?: string;
+  defaultSchema?: string;
   disabled: boolean;
 }
 
