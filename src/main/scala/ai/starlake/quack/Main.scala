@@ -467,13 +467,6 @@ object Main extends IOApp with LazyLogging:
       )
       val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
 
-      val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
-        store          = store,
-        supervisor     = sup,
-        managerVersion = "dev",
-        hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown")
-      )
-
       val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
         if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
           val dm = mgrCfg.defaultMetastore
@@ -483,6 +476,21 @@ object Main extends IOApp with LazyLogging:
             sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
           Some(new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver))
         else None
+
+      val manifestFedStore: Option[FederatedSourceStore] =
+        if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+          val dm = mgrCfg.defaultMetastore
+          val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+          Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
+        else None
+
+      val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
+        store          = store,
+        supervisor     = sup,
+        managerVersion = "dev",
+        hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
+        federatedStore = manifestFedStore
+      )
 
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,

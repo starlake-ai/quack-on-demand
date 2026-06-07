@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
-import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 import cats.effect.IO
 import io.circe.syntax.*
 import io.circe.yaml.v12.{Printer, parser}
@@ -14,12 +14,13 @@ final class ManifestHandlers(
     store:          ControlPlaneStore,
     supervisor:     PoolSupervisor,
     managerVersion: String,
-    hostname:       String
+    hostname:       String,
+    federatedStore: Option[FederatedSourceStore] = None
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
   def exportYaml: IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
-    val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname)
+    val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname, federatedStore)
     Right(Yaml.pretty(m.asJson))
   }
 
@@ -29,7 +30,7 @@ final class ManifestHandlers(
         case Left(e) =>
           Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
         case Right(m) =>
-          ManifestImporter.apply(m, store) match
+          ManifestImporter.apply(m, store, federatedStore) match
             case Left(errs) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; ")))
             case Right(_) =>

@@ -167,22 +167,6 @@ object Endpoints:
     Unit, Any] =
     fedBase.delete.in(path[String]("alias") / "secrets" / path[String]("name"))
 
-  val exportFederationYaml: PublicEndpoint[
-    (String, String),
-    (sttp.model.StatusCode, ErrorResponse),
-    String, Any] =
-    fedBase.get.in("yaml" / "export")
-      .out(stringBody)
-      .out(header("Content-Type", "application/yaml"))
-
-  val importFederationYaml: PublicEndpoint[
-    (String, String, String),
-    (sttp.model.StatusCode, ErrorResponse),
-    FederationImportSummary, Any] =
-    fedBase.post.in("yaml" / "import")
-      .in(stringBody)
-      .out(jsonBody[FederationImportSummary])
-
   // ----- Catalog browser -----
 
   val listSchemasEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogSchemaEntry], Any] =

@@ -168,12 +168,6 @@ export default function FederationSection({
   const [setupSql,    setSetupSql]    = useState('');
   const [description, setDescription] = useState('');
 
-  // YAML import/export state.
-  const [yamlText,     setYamlText]     = useState('');
-  const [importResult, setImportResult] = useState<{ sources: number; secrets: number } | null>(null);
-  const [importError,  setImportError]  = useState<string | null>(null);
-  const [showImport,   setShowImport]   = useState(false);
-
   const reload = () =>
     api.listFederatedSources(tenant, tenantDb)
       .then(r => setSources(r.sources))
@@ -215,44 +209,6 @@ export default function FederationSection({
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
-  }
-
-  async function handleExport() {
-    setError(null);
-    try {
-      const yaml = await api.exportFederationYaml(tenant, tenantDb);
-      // Trigger a browser download.
-      const blob = new Blob([yaml], { type: 'text/plain' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `federation-${tenantDb}.yaml`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    }
-  }
-
-  async function handleImport(ev: React.FormEvent) {
-    ev.preventDefault();
-    setImportError(null);
-    setImportResult(null);
-    try {
-      const summary = await api.importFederationYaml(tenant, tenantDb, yamlText);
-      setImportResult(summary);
-      setYamlText('');
-      await reload();
-    } catch (e) {
-      setImportError(e instanceof ApiError ? e.message : String(e));
-    }
-  }
-
-  async function handleImportFile(ev: React.ChangeEvent<HTMLInputElement>) {
-    const file = ev.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    setYamlText(text);
   }
 
   return (
@@ -367,49 +323,6 @@ export default function FederationSection({
         </table>
       )}
 
-      <div className="row" style={{ gap: 8, marginTop: '1rem', flexWrap: 'wrap' }}>
-        <button onClick={() => void handleExport()}>Export YAML</button>
-        <button onClick={() => { setShowImport(!showImport); setImportResult(null); setImportError(null); }}>
-          {showImport ? 'Hide import' : 'Import YAML'}
-        </button>
-      </div>
-
-      {showImport && (
-        <form onSubmit={handleImport} style={{ marginTop: '0.75rem' }}>
-          <fieldset>
-            <legend>Import YAML</legend>
-            <label style={{ display: 'flex', flexDirection: 'column' }}>
-              <span>Paste YAML or load a file:</span>
-              <input
-                type="file"
-                accept=".yaml,.yml,.txt"
-                onChange={handleImportFile}
-                style={{ marginBottom: '0.5rem' }}
-              />
-              <textarea
-                value={yamlText}
-                onChange={ev => setYamlText(ev.target.value)}
-                rows={10}
-                placeholder="sources:&#10;  - alias: my_source&#10;    setupSql: ATTACH ..."
-                style={{ fontFamily: 'monospace', width: '100%' }}
-                required
-              />
-            </label>
-            {importError && <div className="login-err" style={{ marginTop: 4 }}>Error: {importError}</div>}
-            {importResult && (
-              <div style={{ marginTop: 4, color: '#166534', background: '#dcfce7', padding: '0.4rem 0.6rem', borderRadius: 4 }}>
-                Import successful: {importResult.sources} source(s), {importResult.secrets} secret(s).
-              </div>
-            )}
-            <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
-              <button type="submit">Import</button>
-              <button type="button" onClick={() => { setShowImport(false); setYamlText(''); setImportResult(null); setImportError(null); }}>
-                Cancel
-              </button>
-            </div>
-          </fieldset>
-        </form>
-      )}
     </div>
   );
 }

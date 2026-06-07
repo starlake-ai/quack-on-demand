@@ -9,7 +9,7 @@ import scala.collection.mutable.ListBuffer
   * `qodstate_federated_secret`. Cascade-delete on source -> secret is
   * enforced by the FK constraint, so deleting a source automatically
   * wipes its secrets. */
-final class FederatedSourceStore(
+class FederatedSourceStore(
     jdbcUrl:  String,
     user:     String,
     password: String

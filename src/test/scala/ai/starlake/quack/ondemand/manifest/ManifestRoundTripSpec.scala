@@ -1,8 +1,8 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestRoundTripSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacRole, RolePermission}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, InMemoryFederatedSourceStore, RbacRole, RolePermission}
 import at.favre.lib.crypto.bcrypt.BCrypt
 import io.circe.syntax.*
 import io.circe.yaml.v12.Printer
@@ -163,4 +163,108 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Passwords must be unchanged after the password-less second import
     dst.getPasswordHash(None, "admin").get shouldBe adminHash
     dst.getPasswordHash(Some("tpch"), "alice").get shouldBe aliceHash
+  }
+
+  // ------------------------------------------------------------------
+  // Test 3: federation round-trip with redact-and-reuse semantics
+  //
+  // Uses InMemoryFederatedSourceStore so no Postgres is required.
+  // Verifies:
+  //   - a source + secret survive export -> import (first pass: real value)
+  //   - the value is redacted on export ("***REDACTED***")
+  //   - re-importing the redacted YAML over the already-seeded store
+  //     reuses the existing value correctly (second pass)
+  //   - a third export produces the same structure as the first
+  // ------------------------------------------------------------------
+
+  it should "round-trip federated sources and reuse redacted secret values" in {
+    val cp = buildSrc()
+
+    // Seed one federated source with one value-backed secret in the source store.
+    val srcFed = new InMemoryFederatedSourceStore()
+    srcFed.upsertSource(FederatedSource(
+      id          = "fs-1",
+      tenantDbId  = "td-1",
+      alias       = "pg_ext",
+      setupSql    = "ATTACH 'dbname=prod' AS pg_ext (TYPE POSTGRES);",
+      description = Some("prod postgres"),
+      disabled    = false
+    ))
+    srcFed.upsertSecret(FederatedSecret(
+      id                = "fsec-1",
+      federatedSourceId = "fs-1",
+      name              = "PG_PASSWORD",
+      value             = Some("super-secret"),
+      externalRef       = None
+    ))
+
+    // Step 1: export from the populated source store.
+    val manifest1 = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(srcFed))
+    val yaml1     = Yaml.pretty(manifest1.asJson)
+
+    // The raw value must NOT appear in the YAML; the redaction sentinel must.
+    yaml1 should not include "super-secret"
+    yaml1 should     include("***REDACTED***")
+    yaml1 should     include("pg_ext")
+
+    // Verify the in-memory manifest carries the redacted value.
+    val tdb = manifest1.tenants.head.tenantDbs.head
+    tdb.federatedSources should have size 1
+    tdb.federatedSources.head.alias shouldBe "pg_ext"
+    tdb.federatedSources.head.secrets.head.value shouldBe Some("***REDACTED***")
+
+    // Step 2: first import into a fresh control-plane store, supplying the
+    // real value explicitly (not redacted) so the importer can store it.
+    val manifest1WithReal = manifest1.copy(
+      tenants = manifest1.tenants.map { mt =>
+        mt.copy(tenantDbs = mt.tenantDbs.map { mtd =>
+          mtd.copy(federatedSources = mtd.federatedSources.map { ms =>
+            ms.copy(secrets = ms.secrets.map(_.copy(value = Some("super-secret"))))
+          })
+        })
+      },
+      users = manifest1.users.map { u =>
+        val hash = (u.tenant, u.username) match
+          case (None,           "admin") => adminHash
+          case (Some("tpch"),   "alice") => aliceHash
+          case _                         => aliceHash
+        u.copy(password = Some(hash))
+      }
+    )
+
+    val dstCp  = new InMemoryControlPlaneStore()
+    val dstFed = new InMemoryFederatedSourceStore()
+    ManifestImporter.apply(manifest1WithReal, dstCp, Some(dstFed)) shouldBe Right(())
+
+    // Verify the real value landed.
+    val tdId    = dstCp.listTenants().flatMap(t => dstCp.listTenantDbs(t.id)).head.id
+    val srcList = dstFed.listSources(tdId)
+    srcList should have size 1
+    srcList.head.alias shouldBe "pg_ext"
+    dstFed.listSecrets(srcList.head.id).head.value shouldBe Some("super-secret")
+
+    // Step 3: parse yaml1 (redacted) and re-import over the already-seeded dstFed.
+    // The importer must reuse the existing value for the "***REDACTED***" sentinel.
+    val parsedRedacted = parser.parse(yaml1).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    val parsedWithPasswords = parsedRedacted.copy(
+      users = parsedRedacted.users.map { u =>
+        val hash = (u.tenant, u.username) match
+          case (None,           "admin") => adminHash
+          case (Some("tpch"),   "alice") => aliceHash
+          case _                         => aliceHash
+        u.copy(password = Some(hash))
+      }
+    )
+    ManifestImporter.apply(parsedWithPasswords, dstCp, Some(dstFed)) shouldBe Right(())
+
+    // The secret value must have been reused.
+    val srcList2 = dstFed.listSources(tdId)
+    dstFed.listSecrets(srcList2.head.id).head.value shouldBe Some("super-secret")
+
+    // Step 4: third export from the destination stores must produce the same
+    // federated-source structure as the first export (both redact the value).
+    val manifest3 = ManifestExporter.build(dstCp, ExportedAt, AdminVersion, Hostname, Some(dstFed))
+
+    manifest3.tenants.head.tenantDbs.head.federatedSources shouldBe
+      manifest1.tenants.head.tenantDbs.head.federatedSources
   }

@@ -10,10 +10,29 @@ final case class ExportedFrom(managerVersion: String, hostname: String)
 
 final case class ManifestRoleDistribution(writeonly: Int, readonly: Int, dual: Int)
 
-final case class ManifestTenantDb(
+final case class ManifestFederatedSecret(
     name:        String,
-    metastore:   Map[String, String] = Map.empty,
-    objectStore: Map[String, String] = Map.empty
+    value:       Option[String] = None,
+    externalRef: Option[String] = None
+)
+
+final case class ManifestFederatedSource(
+    alias:       String,
+    setupSql:    String,
+    description: Option[String]               = None,
+    disabled:    Boolean                      = false,
+    secrets:     List[ManifestFederatedSecret] = Nil
+)
+
+final case class ManifestTenantDb(
+    name:            String,
+    kind:            String              = "ducklake",
+    metastore:       Map[String, String] = Map.empty,
+    dataPath:        String              = "",
+    objectStore:     Map[String, String] = Map.empty,
+    defaultDatabase: Option[String]      = None,
+    defaultSchema:   Option[String]      = None,
+    federatedSources: List[ManifestFederatedSource] = Nil
 )
 
 final case class ManifestPool(
@@ -101,13 +120,42 @@ object ConfigManifest:
   // `c.getOrElse[T](name)(default)` for every field that the case class
   // declares a default for; required fields stay `c.get[T](name)`.
 
-  given Codec[ManifestTenantDb] = Codec.from(
+  given Codec[ManifestFederatedSecret] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
         name        <- c.get[String]("name")
-        metastore   <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
-        objectStore <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
-      yield ManifestTenantDb(name, metastore, objectStore)
+        value       <- c.getOrElse[Option[String]]("value")(None)
+        externalRef <- c.getOrElse[Option[String]]("externalRef")(None)
+      yield ManifestFederatedSecret(name, value, externalRef)
+    },
+    deriveEncoder[ManifestFederatedSecret]
+  )
+
+  given Codec[ManifestFederatedSource] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        alias       <- c.get[String]("alias")
+        setupSql    <- c.get[String]("setupSql")
+        description <- c.getOrElse[Option[String]]("description")(None)
+        disabled    <- c.getOrElse[Boolean]("disabled")(false)
+        secrets     <- c.getOrElse[List[ManifestFederatedSecret]]("secrets")(Nil)
+      yield ManifestFederatedSource(alias, setupSql, description, disabled, secrets)
+    },
+    deriveEncoder[ManifestFederatedSource]
+  )
+
+  given Codec[ManifestTenantDb] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        name             <- c.get[String]("name")
+        kind             <- c.getOrElse[String]("kind")("ducklake")
+        metastore        <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
+        dataPath         <- c.getOrElse[String]("dataPath")("")
+        objectStore      <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
+        defaultDatabase  <- c.getOrElse[Option[String]]("defaultDatabase")(None)
+        defaultSchema    <- c.getOrElse[Option[String]]("defaultSchema")(None)
+        federatedSources <- c.getOrElse[List[ManifestFederatedSource]]("federatedSources")(Nil)
+      yield ManifestTenantDb(name, kind, metastore, dataPath, objectStore, defaultDatabase, defaultSchema, federatedSources)
     },
     deriveEncoder[ManifestTenantDb]
   )

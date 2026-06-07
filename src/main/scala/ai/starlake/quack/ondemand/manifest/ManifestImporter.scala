@@ -1,9 +1,10 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ManifestImporter.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
+  FederatedSourceStore,
   PoolPermission,
   RbacGroup,
   RbacRole,
@@ -108,8 +109,18 @@ object ManifestImporter:
     * Passwords: a user with `password` set has it bcrypt-ed (or kept
     * verbatim if it already looks like a hash); a user with no
     * `password` field reuses the existing hash captured at the start
-    * (snapshot); a brand-new user without a password is an error. */
-  def apply(m: ConfigManifest, store: ControlPlaneStore): ValidationResult =
+    * (snapshot); a brand-new user without a password is an error.
+    *
+    * @param federatedStore when present, federated sources and secrets
+    *   nested inside each tenant-db are upserted using the same
+    *   replace-by-alias + reuse-on-redacted semantics as the dedicated
+    *   federation YAML endpoint. Pass None in file-mode or tests that
+    *   do not exercise federation. */
+  def apply(
+      m:              ConfigManifest,
+      store:          ControlPlaneStore,
+      federatedStore: Option[FederatedSourceStore] = None
+  ): ValidationResult =
     validate(m, store).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
@@ -153,17 +164,24 @@ object ManifestImporter:
           if !keepDbNames.contains(d.name) then store.deleteTenantDb(d.id)
         }
         mt.tenantDbs.foreach { mtd =>
-          val existing = store.listTenantDbs(tenantId).find(_.name == mtd.name)
-          val tdId     = existing.map(_.id).getOrElse(s"td-${UUID.randomUUID().toString.take(8)}")
-          store.upsertTenantDb(TenantDb(
-            id          = tdId,
-            tenantId    = tenantId,
-            name        = mtd.name,
-            kind        = TenantDbKind.DuckLake,
-            metastore   = mtd.metastore,
-            dataPath    = mtd.metastore.getOrElse("dataPath", ""),
-            objectStore = mtd.objectStore
-          ))
+          TenantDbKind.fromWire(mtd.kind) match
+            case Left(err) =>
+              errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
+            case Right(dbKind) =>
+              val existing = store.listTenantDbs(tenantId).find(_.name == mtd.name)
+              val tdId     = existing.map(_.id).getOrElse(s"td-${UUID.randomUUID().toString.take(8)}")
+              store.upsertTenantDb(TenantDb(
+                id              = tdId,
+                tenantId        = tenantId,
+                name            = mtd.name,
+                kind            = dbKind,
+                metastore       = mtd.metastore,
+                dataPath        = mtd.dataPath,
+                objectStore     = mtd.objectStore,
+                defaultDatabase = mtd.defaultDatabase,
+                defaultSchema   = mtd.defaultSchema
+              ))
+              applyFederatedSources(federatedStore, mtd, tdId, errs)
         }
 
         // ---- Pools: delete-then-upsert, keyed by (tenant, pool name).
@@ -321,3 +339,80 @@ object ManifestImporter:
     * for fixtures that only populate one of the two. */
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
     store.listTenants().find(t => t.displayName == name || t.name == name).map(_.id)
+
+  /** Apply federated sources from a manifest tenant-db into the federated
+    * source store. Replace-by-alias semantics: sources not present in the
+    * manifest are deleted; each present source is upserted. Secrets follow
+    * the same delete-then-upsert pattern with reuse of existing values when
+    * the manifest carries "***REDACTED***". */
+  private def applyFederatedSources(
+      federatedStore: Option[FederatedSourceStore],
+      mtd:            ManifestTenantDb,
+      tdId:           String,
+      errs:           scala.collection.mutable.ListBuffer[String]
+  ): Unit =
+    if federatedStore.isDefined && mtd.federatedSources.nonEmpty then
+      val fs = federatedStore.get
+
+      // Reject duplicate aliases in payload.
+      mtd.federatedSources.groupBy(_.alias).foreach { case (a, vs) =>
+        if vs.size > 1 then
+          errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
+      }
+
+      // Load existing for value-reuse keyed by (alias, secretName).
+      val existing: Map[(String, String), FederatedSecret] =
+        fs.listSources(tdId).flatMap { src =>
+          fs.listSecrets(src.id).map(sec => (src.alias, sec.name) -> sec)
+        }.toMap
+
+      // Delete sources not in the incoming payload.
+      val incomingAliases = mtd.federatedSources.map(_.alias).toSet
+      fs.listSources(tdId)
+        .filterNot(s => incomingAliases.contains(s.alias))
+        .foreach(s => fs.deleteSource(s.id))
+
+      // Upsert each source and its secrets.
+      mtd.federatedSources.foreach { msrc =>
+        val srcId = existing.collectFirst {
+          case ((alias, _), sec) if alias == msrc.alias => sec.federatedSourceId
+        }.getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
+
+        fs.upsertSource(FederatedSource(
+          id         = srcId,
+          tenantDbId = tdId,
+          alias      = msrc.alias,
+          setupSql   = msrc.setupSql,
+          description = msrc.description,
+          disabled   = msrc.disabled
+        ))
+
+        val incomingSecretNames = msrc.secrets.map(_.name).toSet
+        fs.listSecrets(srcId)
+          .filterNot(s => incomingSecretNames.contains(s.name))
+          .foreach(s => fs.deleteSecret(srcId, s.name))
+
+        msrc.secrets.foreach { msec =>
+          val resolved: (Option[String], Option[String]) =
+            (msec.value, msec.externalRef) match
+              case (Some("***REDACTED***"), None) | (None, None) =>
+                existing.get((msrc.alias, msec.name)) match
+                  case Some(old) => (old.value, old.externalRef)
+                  case None =>
+                    errs += s"tenant-db '${mtd.name}' source '${msrc.alias}' secret '${msec.name}': " +
+                            "no existing value to reuse; provide value or externalRef"
+                    (None, None)
+              case (v, ref) => (v, ref)
+
+          if resolved._1.isDefined || resolved._2.isDefined then
+            val secId = existing.get((msrc.alias, msec.name)).map(_.id)
+              .getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
+            fs.upsertSecret(FederatedSecret(
+              id                = secId,
+              federatedSourceId = srcId,
+              name              = msec.name,
+              value             = resolved._1,
+              externalRef       = resolved._2
+            ))
+        }
+      }
