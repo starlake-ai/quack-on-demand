@@ -36,8 +36,9 @@ final class ManagerServer(
     groups:          GroupHandlers,
     memberships:     MembershipHandlers,
     poolPermissions: PoolPermissionHandlers,
-    serverConfig:    ConfigHandlers,
-    manifest:        ManifestHandlers
+    serverConfig:        ConfigHandlers,
+    manifest:            ManifestHandlers,
+    federatedSources:    Option[FederatedSourceHandlers] = None
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -143,6 +144,20 @@ final class ManagerServer(
 
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
 
+    val federatedSourceEndpoints: List[ServerEndpoint[Any, IO]] = federatedSources.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        Endpoints.createFederatedSource.serverLogic { case (t, td, req) => h.createSource(t, td, req) },
+        Endpoints.listFederatedSources.serverLogic  { case (t, td)       => h.listSources(t, td) },
+        Endpoints.getFederatedSource.serverLogic    { case (t, td, alias) => h.getSource(t, td, alias) },
+        Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias) => h.deleteSource(t, td, alias) },
+        Endpoints.listFederatedSecrets.serverLogic  { case (t, td, alias) => h.listSecrets(t, td, alias) },
+        Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req) => h.upsertSecret(t, td, alias, req) },
+        Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) => h.deleteSecret(t, td, alias, name) },
+        Endpoints.exportFederationYaml.serverLogic  { case (t, td) => h.exportYaml(t, td) },
+        Endpoints.importFederationYaml.serverLogic  { case (t, td, body) => h.importYaml(t, td, body) }
+      )
+    }
+
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       Endpoints.createPool.serverLogic(pools.createPool),
       Endpoints.scalePool.serverLogic(pools.scalePool),
@@ -175,7 +190,7 @@ final class ManagerServer(
       Endpoints.serverConfig.serverLogic(_ => serverConfig.list),
       Endpoints.manifestExport.serverLogic(_ => manifest.exportYaml),
       Endpoints.manifestImport.serverLogic(body => manifest.importYaml(body))
-    ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 
