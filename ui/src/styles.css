@@ -576,3 +576,13 @@ button.cancel-button[disabled] { background: #1a1a1a; color: #888; }
   color: var(--text-mute);
   font-style: italic;
 }
+
+/* SQL syntax highlighting in the Recent-statements card.
+   Token classes are emitted by SqlHighlight (pages/Nodes.tsx). Colors
+   pulled from the existing palette so themed dark surfaces stay
+   consistent. */
+.sql-tok-kw  { color: var(--accent);    font-weight: 600; }   /* SELECT, FROM, ... */
+.sql-tok-str { color: var(--good);   }                         /* 'foo' literals */
+.sql-tok-num { color: var(--link);   }                         /* 1, 1.5 */
+.sql-tok-com { color: var(--text-mute); font-style: italic; }  /* -- and /* */
+.sql-tok-id  { color: #c4b5fd; }                               /* "quoted identifier" */

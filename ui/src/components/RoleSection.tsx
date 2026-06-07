@@ -168,48 +168,49 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
               <h4 style={{ marginTop: 0 }}>
                 Permissions for <code>{selected.name}</code>
               </h4>
-              {perms.length === 0 ? (
-                <div className="empty">(no permissions yet)</div>
-              ) : (
-                <table>
-                  <thead><tr>
-                    <th>Catalog</th><th>Schema</th><th>Table</th><th>Verb</th><th></th>
-                  </tr></thead>
-                  <tbody>{perms.map(p => (
-                    <tr key={p.id}>
-                      <td><code>{p.catalogName}</code></td>
-                      <td><code>{p.schemaName}</code></td>
-                      <td><code>{p.tableName}</code></td>
-                      <td><code>{p.verb}</code></td>
-                      <td>
-                        <button className="danger" onClick={() => handleRevoke(p)}>Revoke</button>
-                      </td>
+              {/* Hidden form anchor for the inline Grant row. Inputs and the
+                  submit button below opt into this form via the HTML
+                  `form="..."` attribute so the Grant button aligns under
+                  the Revoke column without nesting <form> inside <table>
+                  (which is invalid HTML). */}
+              <form id="role-perm-grant-form" onSubmit={handleGrant} />
+              <table>
+                <thead><tr>
+                  <th>Catalog</th><th>Schema</th><th>Table</th><th>Verb</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {perms.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="empty" style={{ padding: '.5rem' }}>(no permissions yet)</td>
                     </tr>
-                  ))}</tbody>
-                </table>
-              )}
-
-              <form onSubmit={handleGrant} className="row" style={{ gap: 8, marginTop: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                <label>
-                  Catalog<br/>
-                  <input value={grantCatalog} onChange={ev => setGrantCatalog(ev.target.value)} style={{ width: 140 }} />
-                </label>
-                <label>
-                  Schema<br/>
-                  <input value={grantSchema} onChange={ev => setGrantSchema(ev.target.value)} style={{ width: 140 }} />
-                </label>
-                <label>
-                  Table<br/>
-                  <input value={grantTable} onChange={ev => setGrantTable(ev.target.value)} style={{ width: 140 }} />
-                </label>
-                <label>
-                  Verb<br/>
-                  <select value={grantVerb} onChange={ev => setGrantVerb(ev.target.value)}>
-                    {VERBS.map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                <button type="submit">Grant</button>
-              </form>
+                  ) : (
+                    perms.map(p => (
+                      <tr key={p.id}>
+                        <td><code>{p.catalogName}</code></td>
+                        <td><code>{p.schemaName}</code></td>
+                        <td><code>{p.tableName}</code></td>
+                        <td><code>{p.verb}</code></td>
+                        <td>
+                          <button className="danger" onClick={() => handleRevoke(p)}>Revoke</button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td><input form="role-perm-grant-form" value={grantCatalog} onChange={ev => setGrantCatalog(ev.target.value)} placeholder="Catalog" /></td>
+                    <td><input form="role-perm-grant-form" value={grantSchema}  onChange={ev => setGrantSchema(ev.target.value)}  placeholder="Schema" /></td>
+                    <td><input form="role-perm-grant-form" value={grantTable}   onChange={ev => setGrantTable(ev.target.value)}   placeholder="Table" /></td>
+                    <td>
+                      <select form="role-perm-grant-form" value={grantVerb} onChange={ev => setGrantVerb(ev.target.value)}>
+                        {VERBS.map(v => <option key={v} value={v}>{v}</option>)}
+                      </select>
+                    </td>
+                    <td><button type="submit" form="role-perm-grant-form">Grant</button></td>
+                  </tr>
+                </tfoot>
+              </table>
             </>
           )}
         </div>

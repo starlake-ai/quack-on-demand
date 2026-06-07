@@ -465,16 +465,7 @@ export default function FederationSection({
                   <td>{s.description ?? <span className="subtle">-</span>}</td>
                   <td>{s.disabled ? 'Yes' : 'No'}</td>
                   <td>
-                    <div className="row" style={{ gap: 6 }}>
-                      <button
-                        type="button"
-                        className="link-button"
-                        onClick={() => setExpanded(expanded === s.alias ? null : s.alias)}
-                      >
-                        {expanded === s.alias ? 'Hide details' : 'Show details'}
-                      </button>
-                      <button className="danger" onClick={() => void handleDelete(s.alias)}>Delete</button>
-                    </div>
+                    <button className="danger" onClick={() => void handleDelete(s.alias)}>Delete</button>
                   </td>
                 </tr>
                 {expanded === s.alias && (
