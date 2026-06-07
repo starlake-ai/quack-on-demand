@@ -1,0 +1,110 @@
+# Statement-level federation: per-tenant-db registry of (alias, setup SQL)
+# plus per-source secrets. Aliases become DuckDB catalog names; ACL on
+# (catalog, schema, table) covers them with no schema change.
+databaseChangeLog:
+
+  - changeSet:
+      id: 0007-federated-source
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_federated_source
+            columns:
+              - column:
+                  name: id
+                  type: VARCHAR(64)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: tenant_db_id
+                  type: VARCHAR(64)
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_fedsrc_tenant_db
+                    references: qodstate_tenant_db(id)
+                    deleteCascade: true
+              - column:
+                  name: alias
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: setup_sql
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: description
+                  type: TEXT
+                  constraints:
+                    nullable: true
+              - column:
+                  name: disabled
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMPTZ
+                  defaultValueComputed: now()
+                  constraints:
+                    nullable: false
+        - addUniqueConstraint:
+            tableName: qodstate_federated_source
+            columnNames: tenant_db_id, alias
+            constraintName: uq_fedsrc_tenant_db_alias
+
+  - changeSet:
+      id: 0007-federated-secret
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_federated_secret
+            columns:
+              - column:
+                  name: id
+                  type: VARCHAR(64)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: federated_source_id
+                  type: VARCHAR(64)
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_fedsec_source
+                    references: qodstate_federated_source(id)
+                    deleteCascade: true
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: value
+                  type: TEXT
+                  constraints:
+                    nullable: true
+              - column:
+                  name: external_ref
+                  type: TEXT
+                  constraints:
+                    nullable: true
+              - column:
+                  name: created_at
+                  type: TIMESTAMPTZ
+                  defaultValueComputed: now()
+                  constraints:
+                    nullable: false
+        - addUniqueConstraint:
+            tableName: qodstate_federated_secret
+            columnNames: federated_source_id, name
+            constraintName: uq_fedsec_source_name
+        - sql:
+            sql: >-
+              ALTER TABLE qodstate_federated_secret
+              ADD CONSTRAINT qodstate_federated_secret_value_xor_external_ref
+              CHECK ((value IS NOT NULL AND external_ref IS NULL)
+                  OR (value IS NULL AND external_ref IS NOT NULL))
