@@ -73,7 +73,7 @@ ThisBuild / developers := List(
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
-val libquackwireVersion = "1.5.3-87cd65b912a8-2"
+val libquackwireVersion = "1.5.3-87cd65b912a8-2-SNAPSHOT"
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(
