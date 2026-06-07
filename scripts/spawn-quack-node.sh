@@ -33,6 +33,15 @@ dbName="${dbName:-db1}"
 schemaName="${schemaName:-main}"
 dataPath="${dataPath:-/Users/hayssams/git/public/quack-on-demand/ducklake/$dbName}"
 
+kind="${kind:?kind env var is required (ducklake | duckdb-file | memory)}"
+case "$kind" in
+  ducklake|duckdb-file|memory) ;;
+  *)
+    echo "fatal: unknown kind='$kind' (expected: ducklake | duckdb-file | memory)" >&2
+    exit 92
+    ;;
+esac
+
 if [[ "$schemaName" == "$dbName" ]]; then
   echo "ERROR: schemaName ($schemaName) must differ from dbName ($dbName)." >&2
   echo "       DuckDB rejects 2-part identifiers like \"$dbName\".<table> as" >&2
@@ -81,7 +90,7 @@ CREATE OR REPLACE SECRET quack_azure (
     ;;
 esac
 
-if [[ "$IS_REMOTE" == "0" ]]; then
+if [[ "$kind" != "memory" && "$IS_REMOTE" == "0" ]]; then
   mkdir -p "$dataPath"
 fi
 
@@ -93,7 +102,8 @@ command -v duckdb >/dev/null 2>&1 || {
 # Ensure the Postgres database $dbName exists. Connects to PG_ADMIN_DB (default
 # `postgres`) as admin and runs CREATE DATABASE if missing. Skipped when psql
 # isn't available - the DuckLake ATTACH below will fail loudly in that case.
-if command -v psql >/dev/null 2>&1; then
+# Only needed for kind=ducklake.
+if [[ "$kind" == "ducklake" ]] && command -v psql >/dev/null 2>&1; then
   ADMIN_DB="${PG_ADMIN_DB:-postgres}"
   EXISTS=$(PGPASSWORD="$pgPassword" psql -h "$pgHost" -p "$pgPort" -U "$pgUser" \
     -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = '$dbName'" 2>/dev/null || true)
@@ -144,39 +154,56 @@ if [[ -n "$PROXY_URL" ]]; then
   PROXY_SQL="SET http_proxy = '$HOSTPORT';"
 fi
 
-# Feed init SQL
-#
-# Race protection. DuckLake's first ATTACH against a fresh tenant-db
-# Postgres runs CREATE TABLE __ducklake_metadata + sibling tables.
-# Concurrent first-time ATTACHes (e.g. K8s spawning N pool pods in
-# parallel) race on Postgres's pg_type uniqueness. Wrap the ATTACH
-# in a per-dbname pg_advisory_lock taken via the `postgres` extension
-# on the SAME tenant-db connection so first-time ATTACHes serialize
-# across concurrent spawns. Subsequent ATTACHes hit existing tables
-# and are no-ops; the lock turns the no-op into a properly-serialized
-# no-op. See guides/ROADMAP.md and issue #3.
-cat >&9 <<SQL
-$PROXY_SQL
-INSTALL ducklake; LOAD ducklake;
-INSTALL postgres; LOAD postgres;
-INSTALL quack;    LOAD quack;
-$STORAGE_SQL
+# Feed init SQL. Per-kind branching below:
+#   ducklake    - INSTALL/ATTACH the DuckLake catalog via a per-dbname
+#                 pg_advisory_lock to serialize first-time
+#                 __ducklake_metadata creation across concurrent K8s
+#                 pod spawns (see guides/ROADMAP.md, issue #3).
+#   duckdb-file - ATTACH the on-disk .duckdb file directly. No
+#                 advisory lock; per-node file is independent.
+#   memory      - DuckDB's built-in 'memory' catalog is the default,
+#                 no ATTACH needed. Federation aliases (in extraSetupSql)
+#                 are typically the only catalogs available.
 
-ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);
-SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');
+# Build init SQL piecemeal based on $kind so kind=memory and
+# kind=duckdb-file skip DuckLake-specific setup entirely.
+INIT_SQL=""
+INIT_SQL+="$PROXY_SQL"$'\n'
+INIT_SQL+=$'INSTALL quack;    LOAD quack;\n'
 
-ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS $dbName
-  (DATA_PATH '$dataPath');
+case "$kind" in
+  ducklake)
+    INIT_SQL+=$'INSTALL ducklake; LOAD ducklake;\n'
+    INIT_SQL+=$'INSTALL postgres; LOAD postgres;\n'
+    INIT_SQL+="$STORAGE_SQL"$'\n'
+    INIT_SQL+="ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);"$'\n'
+    INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
+    INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS $dbName"$'\n'
+    INIT_SQL+="  (DATA_PATH '$dataPath');"$'\n'
+    INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
+    INIT_SQL+=$'DETACH qod_init_pg;\n'
+    INIT_SQL+="USE $dbName;"$'\n'
+    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS $schemaName;"$'\n'
+    INIT_SQL+="USE $dbName.$schemaName;"$'\n'
+    ;;
+  duckdb-file)
+    INIT_SQL+="ATTACH '$dataPath' AS $dbName;"$'\n'
+    INIT_SQL+="USE $dbName;"$'\n'
+    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS $schemaName;"$'\n'
+    INIT_SQL+="USE $dbName.$schemaName;"$'\n'
+    ;;
+  memory)
+    : # nothing; DuckDB's built-in 'memory' catalog is the default
+    ;;
+esac
 
-SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');
-DETACH qod_init_pg;
+if [[ -n "${extraSetupSql:-}" ]]; then
+  INIT_SQL+="$extraSetupSql"$'\n'
+fi
 
-USE $dbName;
-CREATE SCHEMA IF NOT EXISTS $schemaName;
-USE $dbName.$schemaName;
+INIT_SQL+="CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
 
-CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);
-SQL
+printf '%s' "$INIT_SQL" >&9
 
 # Block until duckdb is killed (typically SIGTERM from the manager).
 wait "$DUCK_PID"
