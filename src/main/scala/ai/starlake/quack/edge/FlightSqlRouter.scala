@@ -63,14 +63,27 @@ final class FlightSqlRouter(
     // Per-pool dbName/schemaName overrides feed the SQL parser so
     // unqualified table refs resolve to what the Quack node actually
     // sees at execution time.
-    val poolMeta = supervisor.get(poolKey).map(_.metastore).getOrElse(Map.empty)
+    val maybeState = supervisor.get(poolKey)
+    val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
+    val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
+
+    def perKindDb: Option[String] = kindWire match
+      case "ducklake" | "duckdb-file" => poolMeta.get("dbName").filter(_.nonEmpty)
+      case "memory"                   => Some("memory")
+      case _                          => None
+
+    def perKindSchema: Option[String] = kindWire match
+      case "ducklake" | "duckdb-file" => poolMeta.get("schemaName").filter(_.nonEmpty)
+      case "memory"                   => Some("main")
+      case _                          => None
+
     val ctx = ValidationContext(
       username        = user,
       database        = poolKey.toString,
       statement       = sql,
       peer            = connectionId,
-      defaultDatabase = poolMeta.get("dbName").filter(_.nonEmpty),
-      defaultSchema   = poolMeta.get("schemaName").filter(_.nonEmpty),
+      defaultDatabase = maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
+      defaultSchema   = maybeState.flatMap(_.defaultSchema).orElse(perKindSchema),
       effectiveSet    = effectiveSet
     )
     validator.validate(ctx) match
