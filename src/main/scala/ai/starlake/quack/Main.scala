@@ -18,6 +18,7 @@ import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
   AzureSecretsManagerResolver,
+  DispatchingSecretResolver,
   EnvSecretResolver,
   FederationBlobBuilder,
   GcpSecretsManagerResolver,
@@ -154,7 +155,20 @@ object Main extends IOApp with LazyLogging:
           mgrCfg.k8s.podLabel, mgrCfg.k8s.startupTimeoutSec, mgrCfg.defaultMetastore.asMap)
       case other => sys.error(s"unknown runtime: $other")
 
+    // `dispatch` routes per-secret based on the row's shape (value -> Postgres,
+    // externalRef prefix -> matching cloud / env / vault resolver). Other
+    // values force a single backend; useful only when an operator wants to
+    // hard-restrict the manager to one secret store.
     val secretResolver: SecretResolver = mgrCfg.federation.secretStore match {
+      case "dispatch" | "auto" =>
+        new DispatchingSecretResolver(
+          postgres = new PostgresSecretResolver,
+          env      = new EnvSecretResolver(),
+          awsSm    = new AwsSecretsManagerResolver,
+          gcpSm    = new GcpSecretsManagerResolver,
+          azureKv  = new AzureSecretsManagerResolver,
+          vault    = new VaultSecretResolver
+        )
       case "postgres" => new PostgresSecretResolver
       case "env"      => new EnvSecretResolver()
       case "aws-sm"   => new AwsSecretsManagerResolver

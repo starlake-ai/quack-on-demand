@@ -130,6 +130,189 @@ function DetailItem({
   );
 }
 
+/** Secret backends the UI knows how to format. The wire shape sent to
+  * `PUT .../secrets`:
+  *   - postgres -> { value: <input> }
+  *   - any other store -> { externalRef: "<store>:<input>" }
+  * The manager's DispatchingSecretResolver routes by the same prefix at
+  * node spawn, so the UI's select drives the route. */
+type SecretStore = 'postgres' | 'env' | 'aws-sm' | 'gcp-sm' | 'azure-kv' | 'vault';
+
+type SecretStoreSpec = {
+  id:           SecretStore;
+  label:        string;
+  inputLabel:   string;
+  placeholder:  string;
+  mono:         boolean;
+  /** Resolution path: a short sentence the operator can scan to know
+    * where the value comes from. */
+  resolution:   string;
+  /** Credentials the manager process needs to reach the backend. */
+  credentials:  string;
+  example?:     string;
+};
+
+const SECRET_STORES: SecretStoreSpec[] = [
+  {
+    id:          'postgres',
+    label:       'Postgres (inline value)',
+    inputLabel:  'Value',
+    placeholder: 'hunter2',
+    mono:        false,
+    resolution:  'Stored as plaintext in qodstate_federated_secret.value. PostgresSecretResolver reads it on every node spawn.',
+    credentials: 'None beyond the control-plane Postgres connection the manager already holds (defaultMetastore.{pgHost,pgUser,pgPassword,dbName}).',
+  },
+  {
+    id:          'env',
+    label:       'Process env var',
+    inputLabel:  'Environment variable name',
+    placeholder: 'SL_QOD_SECRET_PG_PWD',
+    mono:        true,
+    resolution:  'EnvSecretResolver calls System.getenv on the var name. Reads happen in the manager JVM at node spawn, not in the Quack node.',
+    credentials: 'None. The var just needs to be exported into the manager process.',
+    example:     'env:SL_QOD_SECRET_PG_PWD',
+  },
+  {
+    id:          'aws-sm',
+    label:       'AWS Secrets Manager (stub)',
+    inputLabel:  'ARN or name[#jsonKey]',
+    placeholder: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/pg-RaNDom',
+    mono:        true,
+    resolution:  'AwsSecretsManagerResolver calls GetSecretValue. Optional #jsonKey selects a field from a JSON-shaped secret.',
+    credentials: 'AWS SDK default credential chain: env vars (AWS_ACCESS_KEY_ID etc.), ~/.aws/credentials, EC2 instance profile, EKS IRSA, ECS task role. Region picked from federation.aws-sm.region.',
+    example:     'aws-sm:prod/warehouse/pg#password',
+  },
+  {
+    id:          'gcp-sm',
+    label:       'GCP Secret Manager (stub)',
+    inputLabel:  'Resource name',
+    placeholder: 'projects/my-project/secrets/prod-warehouse-pg/versions/latest',
+    mono:        true,
+    resolution:  'GcpSecretsManagerResolver calls google-cloud-secretmanager accessSecretVersion on the resource path.',
+    credentials: 'Application Default Credentials: GOOGLE_APPLICATION_CREDENTIALS service-account JSON, GKE Workload Identity, or the GCE metadata server.',
+    example:     'gcp-sm:projects/my-project/secrets/prod-pg/versions/latest',
+  },
+  {
+    id:          'azure-kv',
+    label:       'Azure Key Vault (stub)',
+    inputLabel:  'Secret name',
+    placeholder: 'prod-warehouse-pg-password',
+    mono:        true,
+    resolution:  'AzureSecretsManagerResolver calls SecretClient.getSecret on the configured vault URL.',
+    credentials: 'DefaultAzureCredential chain: AZURE_* env vars, AKS workload identity, az CLI login (dev). Vault URL picked from federation.azure-kv.vaultUrl.',
+    example:     'azure-kv:prod-warehouse-pg-password',
+  },
+  {
+    id:          'vault',
+    label:       'HashiCorp Vault (stub)',
+    inputLabel:  'Path[#key]',
+    placeholder: 'secret/data/prod/warehouse/pg#password',
+    mono:        true,
+    resolution:  'VaultSecretResolver reads the KV v2 path and (optionally) selects a single field via #key.',
+    credentials: 'Static token read from the env var named by federation.vault.tokenEnv (default VAULT_TOKEN). Vault address from federation.vault.address.',
+    example:     'vault:secret/data/prod/warehouse/pg#password',
+  },
+];
+
+/** Result of validating the user-typed secret-reference body against
+  * the currently-selected store. `ok: true` means the form is safe to
+  * submit. On `ok: false` the form blocks submission, shows the
+  * message, and (if `suggestion` is set) offers a one-click fix. */
+type SecretRefValidation =
+  | { ok: true }
+  | { ok: false; message: string; suggestion?: string };
+
+/** The full set of store prefixes the manager understands -- used to
+  * detect "user pasted a full externalRef including the prefix" across
+  * stores, not just the currently-selected one. */
+const KNOWN_PREFIXES: SecretStore[] = ['env', 'aws-sm', 'gcp-sm', 'azure-kv', 'vault'];
+
+/** Validate the body the user typed (no prefix; the form adds the
+  * `<store>:` prefix automatically). Catches three classes of issue:
+  *   1. Empty input.
+  *   2. User accidentally typed the store prefix themselves -- offer to
+  *      strip it.
+  *   3. Body doesn't match the selected store's expected shape. */
+function validateSecretRef(store: SecretStore, raw: string): SecretRefValidation {
+  const s = raw.trim();
+
+  // 1. Empty
+  if (s.length === 0) {
+    return { ok: false, message: store === 'postgres'
+      ? 'Value is required.'
+      : 'A reference is required.' };
+  }
+
+  // 2. Prefix detection. Match any known store prefix (not just the
+  //    currently-selected one) so we can also warn when the user pasted
+  //    e.g. an `aws-sm:` ref while the dropdown is on `vault`.
+  for (const p of KNOWN_PREFIXES) {
+    if (s.startsWith(`${p}:`)) {
+      const after = s.slice(p.length + 1);
+      if (p === store) {
+        return {
+          ok: false,
+          message: `Drop the "${p}:" prefix - the form adds it for you.`,
+          suggestion: after,
+        };
+      } else {
+        return {
+          ok: false,
+          message: `That looks like a "${p}:" reference, but the store is set to "${store}". Either change the store or paste the body only.`,
+          suggestion: after,
+        };
+      }
+    }
+  }
+
+  // 3. Per-store shape.
+  switch (store) {
+    case 'postgres':
+      return { ok: true };
+
+    case 'env':
+      return /^[A-Za-z_][A-Za-z0-9_]*$/.test(s)
+        ? { ok: true }
+        : { ok: false, message: 'Expected a POSIX env var name: [A-Za-z_][A-Za-z0-9_]*' };
+
+    case 'aws-sm': {
+      const parts = s.split('#');
+      if (parts.length > 2)
+        return { ok: false, message: 'At most one #jsonKey suffix is allowed.' };
+      const base = parts[0];
+      if (base.startsWith('arn:')) {
+        return /^arn:aws:secretsmanager:[a-z0-9-]+:\d+:secret:.+/.test(base)
+          ? { ok: true }
+          : { ok: false, message: 'ARN should match arn:aws:secretsmanager:<region>:<accountId>:secret:<name>.' };
+      }
+      // bare name path: AWS Secrets Manager names allow A-Za-z0-9 and /_+=.@-
+      return /^[A-Za-z0-9/_+=.@-]+$/.test(base)
+        ? { ok: true }
+        : { ok: false, message: 'Secret name allows A-Za-z0-9 and /_+=.@-' };
+    }
+
+    case 'gcp-sm':
+      return /^projects\/[^/]+\/secrets\/[^/]+\/versions\/[^/]+$/.test(s)
+        ? { ok: true }
+        : { ok: false, message: 'Expected projects/<project>/secrets/<name>/versions/<version-or-latest>.' };
+
+    case 'azure-kv':
+      return /^[A-Za-z0-9-]{1,127}$/.test(s)
+        ? { ok: true }
+        : { ok: false, message: 'Azure Key Vault secret names are 1-127 chars, alphanumeric or dashes only.' };
+
+    case 'vault': {
+      const parts = s.split('#');
+      if (parts.length > 2)
+        return { ok: false, message: 'At most one #key suffix is allowed.' };
+      const path = parts[0];
+      return /^[A-Za-z0-9_\-/]+$/.test(path)
+        ? { ok: true }
+        : { ok: false, message: 'Vault path expects [A-Za-z0-9_-/], optionally followed by #key.' };
+    }
+  }
+}
+
 /** Secret sub-editor shown when a source row is expanded. */
 function SecretEditor({
   tenant,
@@ -143,11 +326,21 @@ function SecretEditor({
   const [secrets, setSecrets] = useState<FederatedSecretResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
 
-  // Add-secret form state.
-  const [newName,        setNewName]        = useState('');
-  const [secretMode,     setSecretMode]     = useState<'value' | 'externalRef'>('value');
-  const [newValue,       setNewValue]       = useState('');
-  const [newExternalRef, setNewExternalRef] = useState('');
+  // Add-secret form state. `store` drives both the input shape and the
+  // payload the form POSTs: postgres -> {value}, anything else ->
+  // {externalRef: "<store>:<input>"}.
+  const [newName,  setNewName]  = useState('');
+  const [store,    setStore]    = useState<SecretStore>('postgres');
+  const [newValue, setNewValue] = useState('');
+  // `touched` gates inline validation messages: don't shout "required"
+  // the instant the form mounts, only after the user has interacted.
+  const [touched,  setTouched]  = useState(false);
+  const storeSpec  = SECRET_STORES.find(s => s.id === store)!;
+  const validation = validateSecretRef(store, newValue);
+  // Always show a prefix-mismatch warning (touched or not) so a user
+  // pasting in a full externalRef sees the fix immediately. Only gate
+  // the generic "required" / shape errors on `touched`.
+  const showError  = !validation.ok && (touched || newValue.length > 0);
 
   const reload = () =>
     api.listFederatedSecrets(tenant, tenantDb, alias)
@@ -159,16 +352,23 @@ function SecretEditor({
   async function handleAdd(ev: React.FormEvent) {
     ev.preventDefault();
     setError(null);
+    setTouched(true);
+    // Belt-and-suspenders: the submit button is also disabled on invalid,
+    // but block here too in case keyboard submit slipped through.
+    if (!validation.ok) return;
     try {
+      const trimmedValue = newValue.trim();
+      const payload =
+        store === 'postgres'
+          ? { value: newValue }
+          : { externalRef: `${store}:${trimmedValue}` };
       await api.upsertFederatedSecret(tenant, tenantDb, alias, {
         name: newName.trim(),
-        ...(secretMode === 'value'
-          ? { value: newValue }
-          : { externalRef: newExternalRef.trim() }),
+        ...payload,
       });
       setNewName('');
       setNewValue('');
-      setNewExternalRef('');
+      setTouched(false);
       await reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -205,7 +405,7 @@ function SecretEditor({
               <th>Name</th>
               <th>Value</th>
               <th>External ref</th>
-              <th></th>
+              <th style={{ textAlign: 'right', width: '1%', whiteSpace: 'nowrap' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -222,7 +422,7 @@ function SecretEditor({
                     ? <code>{s.externalRef}</code>
                     : <span className="subtle">-</span>}
                 </td>
-                <td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                   <button className="danger" onClick={() => void handleDelete(s.name)}>Delete</button>
                 </td>
               </tr>
@@ -231,47 +431,97 @@ function SecretEditor({
         </table>
       )}
 
-      <form onSubmit={handleAdd} style={{ marginTop: '0.75rem', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <label style={{ display: 'flex', flexDirection: 'column' }}>
-          <span>Name</span>
-          <input
-            value={newName}
-            onChange={ev => setNewName(ev.target.value)}
-            placeholder="MY_SECRET"
-            style={{ width: 180, fontFamily: 'monospace' }}
-            required
-          />
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column' }}>
-          <span>Mode</span>
-          <select value={secretMode} onChange={ev => setSecretMode(ev.target.value as 'value' | 'externalRef')}>
-            <option value="value">Inline value</option>
-            <option value="externalRef">External ref</option>
-          </select>
-        </label>
-        {secretMode === 'value' ? (
+      <form onSubmit={handleAdd} style={{ marginTop: '0.75rem' }}>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label style={{ display: 'flex', flexDirection: 'column' }}>
-            <span>Value</span>
+            <span>Name</span>
             <input
-              type="password"
+              value={newName}
+              onChange={ev => setNewName(ev.target.value)}
+              placeholder="MY_SECRET"
+              style={{ width: 180, fontFamily: 'var(--mono)' }}
+              required
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', minWidth: 240 }}>
+            <span>Store</span>
+            <select value={store} onChange={ev => setStore(ev.target.value as SecretStore)}>
+              {SECRET_STORES.map(s => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 280 }}>
+            <span>{storeSpec.inputLabel}</span>
+            <input
+              type={store === 'postgres' ? 'password' : 'text'}
               value={newValue}
               onChange={ev => setNewValue(ev.target.value)}
-              placeholder="secret value"
-              style={{ width: 200 }}
+              onBlur={() => setTouched(true)}
+              placeholder={storeSpec.placeholder}
+              style={{
+                fontFamily: storeSpec.mono ? 'var(--mono)' : undefined,
+                borderColor: showError ? 'var(--bad)' : undefined,
+              }}
+              aria-invalid={showError}
             />
           </label>
-        ) : (
-          <label style={{ display: 'flex', flexDirection: 'column' }}>
-            <span>External ref</span>
-            <input
-              value={newExternalRef}
-              onChange={ev => setNewExternalRef(ev.target.value)}
-              placeholder="arn:aws:secretsmanager:..."
-              style={{ width: 280, fontFamily: 'monospace' }}
-            />
-          </label>
+          <button type="submit" disabled={!validation.ok}>Add / update</button>
+        </div>
+
+        {showError && !validation.ok && (
+          <div style={{
+            marginTop: '.4rem',
+            padding: '.4rem .65rem',
+            background: 'rgba(248, 113, 113, 0.08)',
+            border: '1px solid rgba(248, 113, 113, 0.4)',
+            borderRadius: 'var(--radius)',
+            color: 'var(--bad)',
+            fontSize: '.85em',
+            display: 'flex',
+            gap: '.6rem',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}>
+            <span>{validation.message}</span>
+            {validation.suggestion !== undefined && (
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => setNewValue(validation.suggestion!)}
+              >
+                Use "{validation.suggestion}"
+              </button>
+            )}
+          </div>
         )}
-        <button type="submit">Add / update</button>
+
+        {/* Inline docs for the currently-selected store: resolution path
+            + credentials + the wire shape of the externalRef. Stays
+            visible so an operator setting up a new secret can verify
+            they understand how the manager will reach the backend. */}
+        <div className="secret-store-doc">
+          <div className="secret-store-doc-row">
+            <span className="secret-store-doc-label">Resolved by</span>
+            <span>{storeSpec.resolution}</span>
+          </div>
+          <div className="secret-store-doc-row">
+            <span className="secret-store-doc-label">Credentials</span>
+            <span>{storeSpec.credentials}</span>
+          </div>
+          {store !== 'postgres' && storeSpec.example && (
+            <div className="secret-store-doc-row">
+              <span className="secret-store-doc-label">externalRef stored as</span>
+              <code>{storeSpec.example}</code>
+            </div>
+          )}
+          {store === 'postgres' && (
+            <div className="secret-store-doc-row">
+              <span className="secret-store-doc-label">externalRef stored as</span>
+              <span style={{ color: 'var(--text-mute)' }}>(none; the literal value is written to qodstate_federated_secret.value)</span>
+            </div>
+          )}
+        </div>
       </form>
     </div>
   );
