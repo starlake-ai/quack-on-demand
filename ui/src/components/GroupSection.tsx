@@ -264,29 +264,37 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
           {!selected ? null : (
             <>
               <h4 style={{ marginTop: 0 }}>Pool grants</h4>
-              {poolPerms.length === 0 ? <div className="empty">(none)</div> : (
-                <table>
-                  <thead><tr><th>Pool</th><th></th></tr></thead>
-                  <tbody>{poolPerms.map(p => (
-                    <tr key={p.id}>
-                      <td><code>{p.poolId ?? '*'}</code></td>
-                      <td><button className="danger" onClick={() => handleRevokePool(p)}>Revoke</button></td>
+              <form id="group-pool-grant-form" onSubmit={handleGrantPool} />
+              <table>
+                <thead><tr><th>Pool</th><th></th></tr></thead>
+                <tbody>
+                  {poolPerms.length === 0 ? (
+                    <tr>
+                      <td colSpan={2} className="empty" style={{ padding: '.5rem' }}>(none)</td>
                     </tr>
-                  ))}</tbody>
-                </table>
-              )}
-              <form onSubmit={handleGrantPool} className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <label>
-                  Pool id<br/>
-                  <input
-                    value={grantPoolId}
-                    onChange={ev => setGrantPoolId(ev.target.value)}
-                    placeholder="(blank = every pool)"
-                    style={{ width: 180 }}
-                  />
-                </label>
-                <button type="submit">Grant</button>
-              </form>
+                  ) : (
+                    poolPerms.map(p => (
+                      <tr key={p.id}>
+                        <td><code>{p.poolId ?? '*'}</code></td>
+                        <td><button className="danger" onClick={() => handleRevokePool(p)}>Revoke</button></td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td>
+                      <input
+                        form="group-pool-grant-form"
+                        value={grantPoolId}
+                        onChange={ev => setGrantPoolId(ev.target.value)}
+                        placeholder="Pool id (blank = every pool)"
+                      />
+                    </td>
+                    <td><button type="submit" form="group-pool-grant-form">Grant</button></td>
+                  </tr>
+                </tfoot>
+              </table>
             </>
           )}
         </div>
