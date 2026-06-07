@@ -165,6 +165,47 @@ final case class TenantDbResponse(
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
 
+// ----- Federation -----
+
+final case class FederatedSourceCreateRequest(
+    alias:       String,
+    setupSql:    String,
+    description: Option[String] = None,
+    disabled:    Boolean        = false
+)
+
+final case class FederatedSourceResponse(
+    id:          String,
+    tenantDbId:  String,
+    alias:       String,
+    setupSql:    String,
+    description: Option[String] = None,
+    disabled:    Boolean        = false
+)
+
+final case class FederatedSourceListResponse(sources: List[FederatedSourceResponse])
+
+final case class FederatedSecretUpsertRequest(
+    name:        String,
+    value:       Option[String] = None,    // postgres-resolver backed
+    externalRef: Option[String] = None     // external-resolver backed
+)
+
+final case class FederatedSecretResponse(
+    id:                String,
+    federatedSourceId: String,
+    name:              String,
+    value:             Option[String],     // ALWAYS redacted in response: "***REDACTED***" if originally non-null
+    externalRef:       Option[String]
+)
+
+final case class FederatedSecretListResponse(secrets: List[FederatedSecretResponse])
+
+final case class FederationImportSummary(
+    sources: Int,
+    secrets: Int
+)
+
 // ----- UI login -----
 final case class LoginRequest(username: String, password: String)
 final case class LoginResponse(token: String, username: String, role: String)
@@ -587,3 +628,12 @@ object Dtos:
   given Codec[CatalogColumnEntry]         = deriveCodec
   given Codec[CatalogDataFileEntry]       = deriveCodec
   given Codec[CatalogTableDetailResponse] = deriveCodec
+
+  // Federation
+  given Codec[FederatedSourceCreateRequest] = deriveCodec
+  given Codec[FederatedSourceResponse]       = deriveCodec
+  given Codec[FederatedSourceListResponse]   = deriveCodec
+  given Codec[FederatedSecretUpsertRequest]  = deriveCodec
+  given Codec[FederatedSecretResponse]       = deriveCodec
+  given Codec[FederatedSecretListResponse]   = deriveCodec
+  given Codec[FederationImportSummary]       = deriveCodec

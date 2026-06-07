@@ -474,12 +474,22 @@ object Main extends IOApp with LazyLogging:
         hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown")
       )
 
+      val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
+        if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+          val dm = mgrCfg.defaultMetastore
+          val jdbcUrlForFed = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+          val fedHandlersStore = new FederatedSourceStore(jdbcUrlForFed, dm.pgUser, dm.pgPassword)
+          val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
+            sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
+          Some(new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver))
+        else None
+
       val mgr = new ManagerServer(
         mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
         authHandlers, sessionTokens, authService.hasProviders,
         historyHandlers, catalogHandlers, metricsEndpoint,
         userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers,
-        serverConfigHandlers, manifestHandlers
+        serverConfigHandlers, manifestHandlers, federatedSourceHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

@@ -115,6 +115,74 @@ object Endpoints:
         .in(query[Option[Int]]("limit"))
         .out(jsonBody[StatementHistoryResponse])
 
+  // ----- Federated sources -----
+
+  private val fedBase =
+    base.in("tenants" / path[String]("tenant") / "tenant-dbs" / path[String]("tenantDb") / "federated-sources")
+
+  val createFederatedSource: PublicEndpoint[
+    (String, String, FederatedSourceCreateRequest),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSourceResponse, Any] =
+    fedBase.post.in(jsonBody[FederatedSourceCreateRequest]).out(jsonBody[FederatedSourceResponse])
+
+  val listFederatedSources: PublicEndpoint[
+    (String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSourceListResponse, Any] =
+    fedBase.get.out(jsonBody[FederatedSourceListResponse])
+
+  val getFederatedSource: PublicEndpoint[
+    (String, String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSourceResponse, Any] =
+    fedBase.get.in(path[String]("alias")).out(jsonBody[FederatedSourceResponse])
+
+  val deleteFederatedSource: PublicEndpoint[
+    (String, String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit, Any] =
+    fedBase.delete.in(path[String]("alias"))
+
+  val listFederatedSecrets: PublicEndpoint[
+    (String, String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSecretListResponse, Any] =
+    fedBase.get
+      .in(path[String]("alias") / "secrets")
+      .out(jsonBody[FederatedSecretListResponse])
+
+  val upsertFederatedSecret: PublicEndpoint[
+    (String, String, String, FederatedSecretUpsertRequest),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSecretResponse, Any] =
+    fedBase.put
+      .in(path[String]("alias") / "secrets")
+      .in(jsonBody[FederatedSecretUpsertRequest])
+      .out(jsonBody[FederatedSecretResponse])
+
+  val deleteFederatedSecret: PublicEndpoint[
+    (String, String, String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit, Any] =
+    fedBase.delete.in(path[String]("alias") / "secrets" / path[String]("name"))
+
+  val exportFederationYaml: PublicEndpoint[
+    (String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    String, Any] =
+    fedBase.get.in("yaml" / "export")
+      .out(stringBody)
+      .out(header("Content-Type", "application/yaml"))
+
+  val importFederationYaml: PublicEndpoint[
+    (String, String, String),
+    (sttp.model.StatusCode, ErrorResponse),
+    FederationImportSummary, Any] =
+    fedBase.post.in("yaml" / "import")
+      .in(stringBody)
+      .out(jsonBody[FederationImportSummary])
+
   // ----- Catalog browser -----
 
   val listSchemasEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogSchemaEntry], Any] =
