@@ -58,6 +58,12 @@ final case class RoleDistributionConfig(
     dual: Int
 )
 
+final case class FederationConfig(
+    @field @ConfigField(envVar = "QOD_FEDERATION_SECRET_STORE",
+      description = "Federation secret resolver: postgres | env | aws-sm | gcp-sm | azure-kv | vault.")
+    secretStore: String
+)
+
 final case class BootstrapConfig(
     @field @ConfigField(envVar = "QOD_BOOTSTRAP_ENABLED",
       description = "Auto-create starter tenant + pool on boot. Idempotent.")
@@ -163,7 +169,8 @@ final case class ManagerConfig(
     defaultMetastore: DefaultMetastoreConfig,
     admin: AdminConfig,
     k8s: K8sConfig,
-    bootstrap: BootstrapConfig
+    bootstrap: BootstrapConfig,
+    federation: FederationConfig
 )
 
 final case class FlightConfig(
