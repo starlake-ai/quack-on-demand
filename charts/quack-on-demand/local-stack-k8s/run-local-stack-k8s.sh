@@ -248,6 +248,25 @@ if [[ -n "$LOAD_TPCH" ]]; then
           QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
           QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
       /app/scripts/load-tpch-dbgen.sh
+
+    # Register a SECOND tenant-db (kind=memory) + a federated source
+    # pointing at the seeded Postgres database. Reaches the manager
+    # through the Traefik ingress on :20900. The setupSql uses the
+    # in-cluster Postgres hostname `postgres` because the quack node
+    # (which evaluates the SQL) runs inside the cluster.
+    echo "[5/5] registering memory tenant-db + federated source pointing at '$TENANT_DB_NAME'..."
+    REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+    MANAGER_URL="http://localhost:${INGRESS_PORT:-20900}" \
+    MANAGER_API_KEY="${QOD_API_KEY:-}" \
+    WAIT_TIMEOUT_SEC=60 \
+    BS_TENANT="tpch" \
+    FED_TENANTDB="${FED_TENANTDB:-fed}" \
+    FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
+    PG_HOST="postgres" PG_PORT="5432" \
+    PG_USER="postgres" PG_PASS="azizam" \
+    TARGET_DB="$TENANT_DB_NAME" \
+      "$REPO_ROOT/scripts/register-tpch-federation.sh" || \
+      echo "[5/5] WARN: federation registration failed; TPC-H seed itself succeeded" >&2
   fi
 fi
 

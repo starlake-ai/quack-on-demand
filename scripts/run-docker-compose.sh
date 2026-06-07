@@ -367,6 +367,24 @@ if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
     -e DATA_PATH="$data_path" \
     -e SF="$tpch_sf" \
     quack /app/scripts/load-tpch-dbgen.sh
+
+  # Register a SECOND tenant-db (kind=memory) plus a federated source
+  # that ATTACHes the seeded Postgres database. Demonstrates federation
+  # against the same db the user just seeded, without disturbing the
+  # primary DuckLake-backed tenant-db. See scripts/register-tpch-federation.sh.
+  echo "registering memory tenant-db + federated source pointing at '$tenant_db_name'..."
+  MANAGER_URL="http://localhost:${QOD_MANAGER_PORT:-20900}" \
+  MANAGER_API_KEY="${QOD_API_KEY:-}" \
+  BS_TENANT="$bootstrap_tenant" \
+  FED_TENANTDB="${FED_TENANTDB:-fed}" \
+  FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
+  PG_HOST="postgres" \
+  PG_PORT="5432" \
+  PG_USER="$pg_user" \
+  PG_PASS="$pg_pass" \
+  TARGET_DB="$tenant_db_name" \
+    "$REPO_DIR/scripts/register-tpch-federation.sh" || \
+    echo "WARN: federation registration failed; TPC-H seed itself succeeded" >&2
 fi
 
 # ---- Summary ----

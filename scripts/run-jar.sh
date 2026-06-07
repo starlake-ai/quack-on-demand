@@ -496,6 +496,26 @@ if [[ -n "${LOAD_TPCH:-}" ]]; then
     PG_ADMIN_DB="$pg_admin_db" \
     DB_NAME="$bs_tenantdb_name" SCHEMA_NAME="$tpch_schema" SF="$LOAD_TPCH" \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
+
+    # Register a SECOND tenant-db (kind=memory) + a federated source
+    # pointing at the seeded Postgres database. Demonstrates federation
+    # against the same db without disturbing the primary DuckLake setup.
+    # Forked into the background because the manager hasn't booted yet
+    # (we exec java below); the helper polls /health then POSTs.
+    (
+      MANAGER_URL="http://127.0.0.1:${QOD_ON_DEMAND_PORT:-20900}" \
+      MANAGER_API_KEY="${QOD_API_KEY:-}" \
+      WAIT_TIMEOUT_SEC=180 \
+      BS_TENANT="$bs_tenant" \
+      FED_TENANTDB="${FED_TENANTDB:-fed}" \
+      FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
+      PG_HOST="$pg_host" PG_PORT="$pg_port" \
+      PG_USER="$pg_user" PG_PASS="$pg_pass" \
+      TARGET_DB="$bs_tenantdb_name" \
+        "$REPO_DIR/scripts/register-tpch-federation.sh" \
+        || echo "WARN: federation registration failed (manager came up?); TPC-H seed itself succeeded" >&2
+    ) &
+    disown $! 2>/dev/null || true
   fi
 fi
 
