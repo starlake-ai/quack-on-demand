@@ -15,12 +15,7 @@ final case class TenantDb(
     defaultDatabase: Option[String]      = None,
     defaultSchema:   Option[String]      = None,
     disabled:        Boolean             = false
-) {
-  // Per-kind contract from the spec, section 2.1. Enforced here so any
-  // path that materializes a TenantDb (REST, store, hand-rolled tests)
-  // gets the same validation without duplicating the rules.
-  TenantDb.validate(this).foreach(msg => sys.error(s"invalid TenantDb($name): $msg"))
-}
+)
 
 object TenantDb {
 
