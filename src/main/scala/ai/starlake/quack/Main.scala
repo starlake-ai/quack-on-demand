@@ -15,6 +15,15 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.federation.{
+  AwsSecretsManagerResolver,
+  AzureSecretsManagerResolver,
+  EnvSecretResolver,
+  GcpSecretsManagerResolver,
+  PostgresSecretResolver,
+  SecretResolver,
+  VaultSecretResolver
+}
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
@@ -40,6 +49,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AdminConfig]            = ProductHint[AdminConfig](camelMapping)
   given ProductHint[RoleDistributionConfig] = ProductHint[RoleDistributionConfig](camelMapping)
   given ProductHint[BootstrapConfig]        = ProductHint[BootstrapConfig](camelMapping)
+  given ProductHint[FederationConfig]       = ProductHint[FederationConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig] = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[ManagerConfig]          = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]           = ProductHint[FlightConfig](camelMapping)
@@ -56,6 +66,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
   given ConfigReader[RoleDistributionConfig] = deriveReader[RoleDistributionConfig]
   given ConfigReader[BootstrapConfig]        = deriveReader[BootstrapConfig]
+  given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
@@ -140,6 +151,17 @@ object Main extends IOApp with LazyLogging:
           k8s, mgrCfg.k8s.namespace, mgrCfg.k8s.image, mgrCfg.k8s.quackPort,
           mgrCfg.k8s.podLabel, mgrCfg.k8s.startupTimeoutSec, mgrCfg.defaultMetastore.asMap)
       case other => sys.error(s"unknown runtime: $other")
+
+    val secretResolver: SecretResolver = mgrCfg.federation.secretStore match {
+      case "postgres" => new PostgresSecretResolver
+      case "env"      => new EnvSecretResolver()
+      case "aws-sm"   => new AwsSecretsManagerResolver
+      case "gcp-sm"   => new GcpSecretsManagerResolver
+      case "azure-kv" => new AzureSecretsManagerResolver
+      case "vault"    => new VaultSecretResolver
+      case other      => sys.error(s"unknown federation.secretStore: '$other'")
+    }
+    logger.info(s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}")
 
     val tracker  = new NodeLoadTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
