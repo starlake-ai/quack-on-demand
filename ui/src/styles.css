@@ -586,3 +586,32 @@ button.cancel-button[disabled] { background: #1a1a1a; color: #888; }
 .sql-tok-num { color: var(--link);   }                         /* 1, 1.5 */
 .sql-tok-com { color: var(--text-mute); font-style: italic; }  /* -- and /* */
 .sql-tok-id  { color: #c4b5fd; }                               /* "quoted identifier" */
+
+/* Inline documentation block under the federation secret form. Shows
+   the selected store's resolution path + credentials + the externalRef
+   wire shape so the operator can see how the manager will reach the
+   backend without leaving the form. */
+.secret-store-doc {
+  margin-top: .75rem;
+  padding: .65rem .85rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: .85em;
+  color: var(--text-soft);
+  display: grid;
+  gap: .35rem;
+}
+.secret-store-doc-row {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: .5rem;
+  align-items: baseline;
+}
+.secret-store-doc-label {
+  color: var(--text-mute);
+  font-size: .75em;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-weight: 600;
+}
