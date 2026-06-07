@@ -174,28 +174,37 @@ object Main extends IOApp with LazyLogging:
     // for each `qodstate_tenant_db` row the supervisor manages.
     val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
 
-    // Federation blob lookup: resolves enabled federated sources + their
-    // secrets into a ready-to-execute SQL blob for each tenant-db. Only
-    // wired in postgres mode; file mode has no federated-source tables.
-    val federationBlobOf: String => IO[Option[String]] =
+    // Shared FederatedSourceStore: used by federationBlobOf (resolves
+    // sources + secrets into spawn SQL), by TenantDbHandlers (counts
+    // sources per tenant-db for the UI), by FederatedSourceHandlers
+    // (CRUD), and by ManifestHandlers (YAML round-trip). Only wired in
+    // postgres mode; file mode has no federated-source tables.
+    val manifestFedStore: Option[FederatedSourceStore] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
         val dm = mgrCfg.defaultMetastore
         val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
-        val federatedStore = new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword)
-        val builder = new FederationBlobBuilder(
-          loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
-          loadSecrets = sid  => IO.blocking(federatedStore.listSecrets(sid)),
-          resolver    = secretResolver
-        )
-        tdId => builder.build(tdId)
-      else
-        _ => IO.pure(None)
+        Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
+      else None
+
+    // Federation blob lookup: resolves enabled federated sources + their
+    // secrets into a ready-to-execute SQL blob for each tenant-db.
+    val federationBlobOf: String => IO[Option[String]] =
+      manifestFedStore match
+        case Some(federatedStore) =>
+          val builder = new FederationBlobBuilder(
+            loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
+            loadSecrets = sid  => IO.blocking(federatedStore.listSecrets(sid)),
+            resolver    = secretResolver
+          )
+          tdId => builder.build(tdId)
+        case None =>
+          _ => IO.pure(None)
 
     val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore.asMap, dbAdmin, federationBlobOf)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)
-    val tenantDbs = new TenantDbHandlers(sup)
+    val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
     val health   = new HealthHandler(sup)
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
@@ -212,7 +221,9 @@ object Main extends IOApp with LazyLogging:
             (tenant, tenantDb),
             { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
           )
-        Some(new CatalogHandlers(reader))
+        def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
+          sup.findTenantDb(tenant, tenantDb).map(_.kind)
+        Some(new CatalogHandlers(reader, kindOf))
       else None
 
     val sessionTokens     = new SessionTokenStore
@@ -477,12 +488,10 @@ object Main extends IOApp with LazyLogging:
           Some(new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver))
         else None
 
-      val manifestFedStore: Option[FederatedSourceStore] =
-        if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-          val dm = mgrCfg.defaultMetastore
-          val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
-          Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
-        else None
+      // manifestFedStore is hoisted above the supervisor build (see top of
+      // this Resource.eval block); reuse the same instance here so the
+      // manifest sees the same federation table as TenantDbHandlers /
+      // FederatedSourceHandlers.
 
       val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
         store          = store,
