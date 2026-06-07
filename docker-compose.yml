@@ -70,7 +70,7 @@ services:
     # FlightSQL statements (`quack-on-demand.drainTimeoutSec`, default
     # 60s) before SIGTERMing the child Quack node processes. 75s gives
     # the drain a comfortable margin before Docker escalates to SIGKILL.
-    stop_grace_period: 75s
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy

@@ -5,7 +5,7 @@
 # SIGTERMs the child Quack node processes before exiting, so a plain
 # `docker compose down` is graceful by default. `stop_grace_period`
 # on the `quack` service in docker-compose.yml gives the JVM hook
-# enough room (75s) before Docker escalates to SIGKILL.
+# enough room (30s) before Docker escalates to SIGKILL.
 #
 # Env vars:
 #   NUKE          "1" to wipe ./pgdata, ./ducklake, ./certs after teardown.
