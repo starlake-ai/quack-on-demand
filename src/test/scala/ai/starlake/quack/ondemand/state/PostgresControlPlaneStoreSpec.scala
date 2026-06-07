@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -59,6 +59,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     id        = "tdb-1",
     tenantId  = "tenant-1",
     name      = "acme_default",
+    kind      = TenantDbKind.DuckLake,
     metastore = Map("pgHost" -> "h", "schemaName" -> "main"),
     dataPath  = "/data/acme"
   )
