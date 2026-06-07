@@ -240,16 +240,22 @@ echo
 # `with-defaults` accepts the prompts non-interactively. We still pass
 # the explicit version overrides on the command line so PR-driven
 # releases can pin them via env without touching version.sbt first.
-sbt_args=(release with-defaults)
-[[ -n "${RELEASE_VERSION:-}" ]] && sbt_args+=("release-version" "$RELEASE_VERSION")
-[[ -n "${NEXT_VERSION:-}"    ]] && sbt_args+=("next-version"    "$NEXT_VERSION")
+#
+# IMPORTANT: the release command + its parser args must be passed as ONE
+# sbt CLI argument. Splitting them (e.g. `sbt release with-defaults`)
+# makes sbt treat each token as a separate command - `release` runs
+# interactively (no `with-defaults` consumed), then sbt tries `with-
+# defaults` as the next command and aborts with "Not a valid command".
+sbt_release_cmd="release with-defaults"
+[[ -n "${RELEASE_VERSION:-}" ]] && sbt_release_cmd+=" release-version $RELEASE_VERSION"
+[[ -n "${NEXT_VERSION:-}"    ]] && sbt_release_cmd+=" next-version $NEXT_VERSION"
 
 # pgpPassphrase is injected via -Dgpg... so sbt-pgp's signing step does
 # not block on the gpg-agent prompt.
 SBT_OPTS="${SBT_OPTS:--Xss8M -Xmx5g -XX:+UseG1GC}" \
 sbt -no-colors \
   "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
-  "${sbt_args[@]}"
+  "$sbt_release_cmd"
 
 # Bump libquackwire to next snapshot AFTER the manager release succeeded.
 echo "bumping libquackwire build.sbt: $libq_release -> $libq_next"
