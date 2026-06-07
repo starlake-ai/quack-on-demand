@@ -538,7 +538,25 @@ object Dtos:
   given Codec[ConfigListResponse]   = deriveCodec
   given Codec[ManifestImportSummary] = deriveCodec
 
-  given Codec[TenantDbRequest]      = deriveCodec
+  // Hand-rolled decoder so omitted optional fields fall back to the
+  // case-class defaults (deriveCodec ignores Scala defaults and treats
+  // every field as required). Without this, POST {"tenant":"x","name":"y","kind":"memory"}
+  // is rejected with "Missing required field at 'metastore'/'dataPath'/'objectStore'".
+  given Codec[TenantDbRequest] = io.circe.Codec.from(
+    io.circe.Decoder.instance { c =>
+      for
+        tenant          <- c.get[String]("tenant")
+        name            <- c.get[String]("name")
+        kind            <- c.getOrElse[String]("kind")("ducklake")
+        metastore       <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
+        dataPath        <- c.getOrElse[String]("dataPath")("")
+        objectStore     <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
+        defaultDatabase <- c.getOrElse[Option[String]]("defaultDatabase")(None)
+        defaultSchema   <- c.getOrElse[Option[String]]("defaultSchema")(None)
+      yield TenantDbRequest(tenant, name, kind, metastore, dataPath, objectStore, defaultDatabase, defaultSchema)
+    },
+    io.circe.generic.semiauto.deriveEncoder[TenantDbRequest]
+  )
   given Codec[TenantDbResponse]     = deriveCodec
   given Codec[TenantDbListResponse] = deriveCodec
   given Codec[TenantDbOpRequest]    = deriveCodec
