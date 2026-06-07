@@ -132,15 +132,19 @@ final class PostgresControlPlaneStore(
   def upsertTenantDb(t: TenantDb): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_db
-        |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled)
-        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?)
+        |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
+        |   kind, default_database, default_schema)
+        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id            = EXCLUDED.tenant_id,
         |  name                 = EXCLUDED.name,
         |  metastore_params     = EXCLUDED.metastore_params,
         |  data_path            = EXCLUDED.data_path,
         |  object_store_params  = EXCLUDED.object_store_params,
-        |  disabled             = EXCLUDED.disabled""".stripMargin
+        |  disabled             = EXCLUDED.disabled,
+        |  kind                 = EXCLUDED.kind,
+        |  default_database     = EXCLUDED.default_database,
+        |  default_schema       = EXCLUDED.default_schema""".stripMargin
     )
     try
       ps.setString(1, t.id)
@@ -150,13 +154,17 @@ final class PostgresControlPlaneStore(
       ps.setString(5, t.dataPath)
       ps.setString(6, mapToJson(t.objectStore))
       ps.setBoolean(7, t.disabled)
+      ps.setString(8, t.kind.wireValue)
+      ps.setString(9, t.defaultDatabase.orNull)
+      ps.setString(10, t.defaultSchema.orNull)
       ps.executeUpdate()
     finally ps.close()
   }
 
   def listTenantDbs(tenantId: String): List[TenantDb] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled
+      """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
+        |       kind, default_database, default_schema
         |FROM qodstate_tenant_db WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -172,15 +180,17 @@ final class PostgresControlPlaneStore(
 
   private def readTenantDb(rs: ResultSet): TenantDb =
     TenantDb(
-      id          = rs.getString("id"),
-      tenantId    = rs.getString("tenant_id"),
-      name        = rs.getString("name"),
-      // TODO(task-5): read kind from rs.getString("kind") once 0008 lands
-      kind        = TenantDbKind.DuckLake,
-      metastore   = jsonToMap(rs.getString("metastore_params")),
-      dataPath    = rs.getString("data_path"),
-      objectStore = jsonToMap(rs.getString("object_store_params")),
-      disabled    = rs.getBoolean("disabled")
+      id              = rs.getString("id"),
+      tenantId        = rs.getString("tenant_id"),
+      name            = rs.getString("name"),
+      kind            = TenantDbKind.fromWire(rs.getString("kind"))
+                          .fold(err => sys.error(s"qodstate_tenant_db.kind invalid: '${rs.getString("kind")}' ($err)"), identity),
+      metastore       = jsonToMap(rs.getString("metastore_params")),
+      dataPath        = rs.getString("data_path"),
+      objectStore     = jsonToMap(rs.getString("object_store_params")),
+      defaultDatabase = Option(rs.getString("default_database")),
+      defaultSchema   = Option(rs.getString("default_schema")),
+      disabled        = rs.getBoolean("disabled")
     )
 
   // ---------------- Pool ----------------
@@ -971,7 +981,7 @@ final class PostgresControlPlaneStore(
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
     ControlPlaneSnapshot(
       tenants   = selectAll(c, "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name", readTenant),
-      tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled FROM qodstate_tenant_db ORDER BY name", readTenantDb),
+      tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema FROM qodstate_tenant_db ORDER BY name", readTenantDb),
       pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled FROM qodstate_pool ORDER BY name", readPool),
       nodes     = selectAll(c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
