@@ -19,11 +19,13 @@ import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
   AzureSecretsManagerResolver,
   EnvSecretResolver,
+  FederationBlobBuilder,
   GcpSecretsManagerResolver,
   PostgresSecretResolver,
   SecretResolver,
   VaultSecretResolver
 }
+import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
@@ -171,7 +173,25 @@ object Main extends IOApp with LazyLogging:
     // against the `postgres` system DB and issues CREATE/DROP DATABASE
     // for each `qodstate_tenant_db` row the supervisor manages.
     val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore.asMap, dbAdmin)
+
+    // Federation blob lookup: resolves enabled federated sources + their
+    // secrets into a ready-to-execute SQL blob for each tenant-db. Only
+    // wired in postgres mode; file mode has no federated-source tables.
+    val federationBlobOf: String => IO[Option[String]] =
+      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+        val dm = mgrCfg.defaultMetastore
+        val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+        val federatedStore = new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword)
+        val builder = new FederationBlobBuilder(
+          loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
+          loadSecrets = sid  => IO.blocking(federatedStore.listSecrets(sid)),
+          resolver    = secretResolver
+        )
+        tdId => builder.build(tdId)
+      else
+        _ => IO.pure(None)
+
+    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore.asMap, dbAdmin, federationBlobOf)
     val pools    = new PoolHandlers(sup, tracker)
     val nodes    = new NodeHandlers(sup, tracker, backend)
     val tenants  = new TenantHandlers(sup)

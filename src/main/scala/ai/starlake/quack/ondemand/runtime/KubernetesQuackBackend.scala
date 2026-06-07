@@ -78,6 +78,16 @@ final class KubernetesQuackBackend(
           envs.add(e)
         }
     }
+    // Pass the tenant-db kind so spawn-quack-node.sh selects the right
+    // catalog attach path (ducklake / duckdb-file / in-memory).
+    val kindEnv = new EnvVar()
+    kindEnv.setName("kind")
+    kindEnv.setValue(spec.kindWire)
+    envs.add(kindEnv)
+    // TODO(federation): propagate spec.extraSetupSql as an env var or K8s
+    // Secret mount for federation E2E on the K8s backend. Currently only
+    // the Local backend receives extraSetupSql; K8s federation is a
+    // follow-up task.
     val tokenEnv = new EnvVar()
     tokenEnv.setName("QOD_NODE_TOKEN")
     tokenEnv.setValue(token)
