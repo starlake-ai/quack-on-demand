@@ -105,6 +105,7 @@ export default function CreatePool() {
         </button>
         <button
           type="button"
+          className="cancel-button"
           onClick={() => nav(`/tenant/${encodeURIComponent(tenant!)}`)}
         >
           Cancel

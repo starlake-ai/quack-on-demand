@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import type { PoolResponse, TenantResponse } from '../api/types';
 import AuthProviderSection from '../components/AuthProviderSection';
@@ -10,9 +10,8 @@ import Tabs from '../components/Tabs';
 
 export default function TenantDetail() {
   const { tenant } = useParams<{ tenant: string }>();
-  const nav = useNavigate();
   const [data, setData]   = useState<TenantResponse | null>(null);
-  const [pools, setPools] = useState<PoolResponse[]>([]);
+  const [, setPools]      = useState<PoolResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   function refresh() {
@@ -31,19 +30,6 @@ export default function TenantDetail() {
 
   useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [tenant]);
 
-  async function handleDelete() {
-    if (!tenant || !data) return;
-    if (pools.length > 0) {
-      alert(`Cannot delete - tenant has ${pools.length} active pool(s). Stop them first.`);
-      return;
-    }
-    if (!confirm(`Delete tenant '${tenant}'?`)) return;
-    try {
-      await api.deleteTenant({ name: tenant });
-      nav('/tenants');
-    } catch (e) { setError(String(e)); }
-  }
-
   if (error) return <div className="login-err">Error: {error}</div>;
   if (!data)  return <div className="loading">Loading…</div>;
 
@@ -59,12 +45,9 @@ export default function TenantDetail() {
       />
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: '1rem' }}>
         <h1>{data.name}</h1>
-        <div className="row" style={{ gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
-          <button className="danger" onClick={handleDelete}>Delete tenant</button>
-          <Link to="/tenants">
-            <button type="button">← Back to tenants</button>
-          </Link>
-        </div>
+        <Link to="/tenants">
+          <button type="button" className="link-button">← Back to tenants</button>
+        </Link>
       </div>
 
       <div className="row" style={{ gap: 12, marginBottom: '1rem', flexWrap: 'wrap' }}>

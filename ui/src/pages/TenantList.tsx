@@ -29,6 +29,21 @@ export default function TenantList() {
     }
   }
 
+  async function handleDelete(t: TenantResponse) {
+    setError(null);
+    if (!window.confirm(
+      `Delete tenant "${t.name}"?\n\n` +
+      `This is irreversible. Tenants with active pools cannot be deleted ` +
+      `until the pools are stopped.`
+    )) return;
+    try {
+      await api.deleteTenant({ name: t.name });
+      await reload();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (tenants.length === 0) return (
     <p>No tenants yet. <Link to="/create-tenant">Create one</Link>.</p>
@@ -46,6 +61,7 @@ export default function TenantList() {
             <th align="left">Name</th>
             <th align="right">Pools</th>
             <th align="right">Enabled</th>
+            <th align="right">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -66,6 +82,21 @@ export default function TenantList() {
                   />
                   <span className="subtle">{t.disabled ? 'off' : 'on'}</span>
                 </label>
+              </td>
+              <td align="right">
+                <button
+                  type="button"
+                  className="link-button"
+                  style={{ color: 'var(--bad)' }}
+                  onClick={() => void handleDelete(t)}
+                  aria-label={`Delete tenant ${t.name}`}
+                  disabled={t.pools.length > 0}
+                  title={t.pools.length > 0
+                    ? `Stop the ${t.pools.length} active pool(s) before deleting.`
+                    : 'Permanently delete this tenant.'}
+                >
+                  Delete
+                </button>
               </td>
             </tr>
           ))}

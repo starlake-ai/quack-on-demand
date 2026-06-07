@@ -308,7 +308,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
             </div>
             <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
               <button type="submit">Create</button>
-              <button type="button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
+              <button type="button" className="cancel-button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
             </div>
           </fieldset>
         </form>

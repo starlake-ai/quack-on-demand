@@ -208,7 +208,7 @@ export default function UserSection({
                         />
                       </label>
                       <button type="submit">Save</button>
-                      <button type="button" onClick={() => { setEditingId(null); setEditPassword(''); }}>Cancel</button>
+                      <button type="button" className="cancel-button" onClick={() => { setEditingId(null); setEditPassword(''); }}>Cancel</button>
                     </form>
                   </td>
                 </tr>
@@ -268,7 +268,7 @@ export default function UserSection({
             </div>
             <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
               <button type="submit">{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
-              <button type="button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
+              <button type="button" className="cancel-button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
             </div>
           </fieldset>
         </form>

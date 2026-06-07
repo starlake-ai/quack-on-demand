@@ -306,10 +306,10 @@ export default function PoolDetailBody({
             )}
           </div>
           {onBack
-            ? <button type="button" onClick={onBack}>← Back to pools</button>
+            ? <button type="button" className="link-button" onClick={onBack}>← Back to pools</button>
             : (
               <Link to={`/tenant/${encodeURIComponent(data.tenant)}`}>
-                <button type="button">← Back to pools</button>
+                <button type="button" className="link-button">← Back to pools</button>
               </Link>
             )}
         </div>
@@ -350,7 +350,7 @@ export default function PoolDetailBody({
               )}
               <div className="row" style={{ display: 'flex', gap: '.5rem', marginTop: '1rem' }}>
                 <button type="submit" disabled={ro + wo + dual === 0}>Apply</button>
-                <button type="button" className="secondary" onClick={() => setShowScale(false)}>Cancel</button>
+                <button type="button" className="cancel-button" onClick={() => setShowScale(false)}>Cancel</button>
               </div>
             </form>
           </div>

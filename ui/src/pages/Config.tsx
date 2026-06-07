@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { ConfigEntryView, ManifestImportSummary } from '../api/types';
 
@@ -20,6 +20,12 @@ export default function Config() {
 
   const [importResult, setImportResult] = useState<ManifestImportSummary | null>(null);
   const [importError,  setImportError]  = useState<string | null>(null);
+  // Staged file: chosen via drop or file picker, applied on explicit click.
+  const [stagedFile,  setStagedFile]  = useState<File | null>(null);
+  const [stagedYaml,  setStagedYaml]  = useState<string | null>(null);
+  const [dragOver,    setDragOver]    = useState(false);
+  const [applying,    setApplying]    = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function onExportClick() {
     try {
@@ -36,26 +42,51 @@ export default function Config() {
     }
   }
 
-  async function onUploadChange(ev: React.ChangeEvent<HTMLInputElement>) {
-    const file = ev.target.files?.[0];
-    if (!file) return;
-    if (!window.confirm(
-      `Apply ${file.name} against this manager?\n\n` +
-      `This upserts every resource in the file. Resources not in the file are left alone.`)) {
-      ev.target.value = '';
-      return;
-    }
+  async function stageFile(file: File) {
     setImportError(null);
     setImportResult(null);
     try {
       const yaml = await file.text();
-      const summary = await api.importManifest(yaml);
+      setStagedFile(file);
+      setStagedYaml(yaml);
+    } catch (e) {
+      setImportError(`could not read ${file.name}: ${String(e)}`);
+    }
+  }
+
+  function clearStaged() {
+    setStagedFile(null);
+    setStagedYaml(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  async function applyStaged() {
+    if (!stagedYaml) return;
+    setApplying(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const summary = await api.importManifest(stagedYaml);
       setImportResult(summary);
+      clearStaged();
     } catch (e) {
       setImportError(e instanceof ApiError ? e.message : String(e));
     } finally {
-      ev.target.value = '';
+      setApplying(false);
     }
+  }
+
+  function onUploadChange(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    void stageFile(file);
+  }
+
+  function onDrop(ev: React.DragEvent<HTMLDivElement>) {
+    ev.preventDefault();
+    setDragOver(false);
+    const file = ev.dataTransfer.files?.[0];
+    if (file) void stageFile(file);
   }
 
   useEffect(() => {
@@ -121,35 +152,107 @@ export default function Config() {
       <div className="card" style={{ marginTop: '1rem' }}>
         <h2 style={{ marginTop: 0 }}>Manifest</h2>
         <p style={{ color: 'var(--text-mute)', maxWidth: 880 }}>
-          Export the manager's control-plane state (tenants, pools, users, roles, groups,
-          pool grants) to a YAML file, or upload one to apply against this manager.
-          User passwords are never included in the export; existing hashes are preserved
-          on re-import.
+          The full control-plane state (tenants, tenant-dbs, federated sources,
+          pools, users, roles, groups, pool grants) round-trips through a single
+          YAML file. User passwords are never exported; existing hashes are
+          preserved on re-import. Federation secret values are redacted on
+          export and reused from the matching row on import.
         </p>
 
-        <div className="row" style={{ gap: '.75rem', flexWrap: 'wrap' }}>
-          <button onClick={onExportClick}>Download YAML</button>
-          <label className="secondary" style={{ display: 'inline-block', cursor: 'pointer',
-                                                 padding: '.55rem 1.1rem', borderRadius: 6,
-                                                 border: '1px solid var(--border)' }}>
-            Upload YAML…
-            <input type="file" accept=".yaml,.yml,application/yaml" hidden
-                   onChange={onUploadChange} />
-          </label>
+        <div className="manifest-grid">
+          <section className="manifest-pane">
+            <h3 className="manifest-pane-title">Export</h3>
+            <p style={{ color: 'var(--text-mute)', marginTop: 0 }}>
+              Download a snapshot of this manager's state as YAML.
+            </p>
+            <button onClick={onExportClick}>Download YAML</button>
+          </section>
+
+          <section className="manifest-pane">
+            <h3 className="manifest-pane-title">Import</h3>
+            <p style={{ color: 'var(--text-mute)', marginTop: 0 }}>
+              Drop a YAML file below or click to browse. Review the file, then
+              apply when ready. Resources absent from the file are left alone.
+            </p>
+
+            {!stagedFile && (
+              <div
+                className={`manifest-dropzone${dragOver ? ' is-over' : ''}`}
+                onDragEnter={e => { e.preventDefault(); setDragOver(true); }}
+                onDragOver ={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop     ={onDrop}
+                onClick    ={() => fileInputRef.current?.click()}
+                role="button"
+                tabIndex={0}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    fileInputRef.current?.click();
+                  }
+                }}
+              >
+                <div className="manifest-dropzone-headline">Drop a .yaml file here</div>
+                <div className="manifest-dropzone-sub">or click to browse</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".yaml,.yml,application/yaml"
+                  hidden
+                  onChange={onUploadChange}
+                />
+              </div>
+            )}
+
+            {stagedFile && (
+              <div className="manifest-staged">
+                <div className="manifest-staged-info">
+                  <div className="manifest-staged-name">{stagedFile.name}</div>
+                  <div className="manifest-staged-meta">
+                    {(stagedFile.size / 1024).toFixed(1)} kB
+                    {stagedYaml ? ` · ${stagedYaml.split('\n').length} lines` : ''}
+                  </div>
+                </div>
+                <div className="row" style={{ gap: '.5rem' }}>
+                  <button onClick={() => void applyStaged()} disabled={applying}>
+                    {applying ? 'Applying…' : 'Apply'}
+                  </button>
+                  <button type="button" className="cancel-button" onClick={clearStaged} disabled={applying}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
 
         {importResult && (
-          <p style={{ marginTop: '1rem', color: 'var(--good)' }}>
-            Imported: {importResult.tenants} tenants, {importResult.tenantDbs} tenant-dbs,
-            {' '}{importResult.pools} pools, {importResult.roles} roles,
-            {' '}{importResult.groups} groups, {importResult.users} users.
-          </p>
+          <div className="manifest-summary">
+            <div className="manifest-summary-title">Imported</div>
+            <div className="manifest-summary-grid">
+              <ManifestStat label="Tenants"     value={importResult.tenants} />
+              <ManifestStat label="Tenant-DBs"  value={importResult.tenantDbs} />
+              <ManifestStat label="Pools"       value={importResult.pools} />
+              <ManifestStat label="Roles"       value={importResult.roles} />
+              <ManifestStat label="Groups"      value={importResult.groups} />
+              <ManifestStat label="Users"       value={importResult.users} />
+            </div>
+          </div>
         )}
         {importError && (
-          <p style={{ marginTop: '1rem', color: 'var(--bad)' }}>{importError}</p>
+          <div className="manifest-error">{importError}</div>
         )}
       </div>
     </>
+  );
+}
+
+function ManifestStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="manifest-stat">
+      <div className="manifest-stat-value">{value}</div>
+      <div className="manifest-stat-label">{label}</div>
+    </div>
   );
 }
 

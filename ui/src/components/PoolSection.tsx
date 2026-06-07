@@ -48,6 +48,20 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
+  async function handleDelete(p: PoolResponse) {
+    setError(null);
+    const mode = p.nodes.length > 0
+      ? `\n\nThis pool has ${p.nodes.length} active node(s); they will drain gracefully.`
+      : '';
+    if (!window.confirm(`Delete pool "${p.tenantDb}/${p.pool}"?${mode}`)) return;
+    try {
+      await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force: false });
+      await reloadPools();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
   function resetForm() {
     setPoolName('');
     setRo(0);
@@ -149,6 +163,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               <th align="left">Pool</th>
               <th align="right">Nodes</th>
               <th align="right">Enabled</th>
+              <th align="right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -179,6 +194,18 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     />
                     <span className="subtle">{p.disabled ? 'off' : 'on'}</span>
                   </label>
+                </td>
+                <td align="right">
+                  <button
+                    type="button"
+                    className="link-button"
+                    style={{ color: 'var(--bad)' }}
+                    onClick={() => void handleDelete(p)}
+                    aria-label={`Delete pool ${p.pool}`}
+                    title="Drain and stop this pool."
+                  >
+                    Delete
+                  </button>
                 </td>
               </tr>
             ))}
@@ -256,7 +283,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             <button type="submit" disabled={size === 0 || !tenantDb || !poolName}>
               Create
             </button>
-            <button type="button" onClick={cancelForm}>Cancel</button>
+            <button type="button" className="cancel-button" onClick={cancelForm}>Cancel</button>
           </div>
         </form>
       )}

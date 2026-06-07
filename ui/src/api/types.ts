@@ -178,6 +178,9 @@ export interface TenantDbResponse {
   defaultDatabase?: string;
   defaultSchema?: string;
   disabled: boolean;
+  /** Number of registered federated sources on this tenant-db.
+    * 0 in file-storage mode (no federation tables). */
+  federatedSourceCount?: number;
 }
 
 export interface TenantDbListResponse {

@@ -87,9 +87,12 @@ export default function CreateTenant() {
         )}
       </fieldset>
 
-      <button type="submit" disabled={!formReady} style={{ marginTop: '0.75rem' }}>
-        Create
-      </button>
+      <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
+        <button type="submit" disabled={!formReady}>Create</button>
+        <button type="button" className="cancel-button" onClick={() => nav(-1)}>
+          Cancel
+        </button>
+      </div>
     </form>
   );
 }
