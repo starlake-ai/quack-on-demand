@@ -22,7 +22,7 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
         disabled     = false,
         authProvider = "db",
         authConfig   = Map.empty,
-        tenantDbs    = List(ManifestTenantDb("tpch_tpch1", Map.empty, Map.empty)),
+        tenantDbs    = List(ManifestTenantDb(name = "tpch_tpch1")),
         pools        = List(ManifestPool(
           name = "sales", tenantDb = "tpch_tpch1",
           roleDistribution = ManifestRoleDistribution(1, 1, 1),

@@ -59,7 +59,6 @@ import type {
   FederatedSecretUpsertRequest,
   FederatedSecretResponse,
   FederatedSecretListResponse,
-  FederationImportSummary,
 } from './types';
 
 const BASE = '/api';
@@ -213,27 +212,6 @@ export const api = {
       { method: 'DELETE', headers: authHeaders() }
     );
     return handle<void>(r);
-  },
-
-  exportFederationYaml: async (tenant: string, tenantDb: string): Promise<string> => {
-    const r = await fetch(
-      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/yaml/export`,
-      { headers: authHeaders() }
-    );
-    if (!r.ok) throw new ApiError(r.status, await r.text());
-    return r.text();
-  },
-
-  importFederationYaml: async (tenant: string, tenantDb: string, body: string): Promise<FederationImportSummary> => {
-    const r = await fetch(
-      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/yaml/import`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain', ...authHeaders() },
-        body,
-      }
-    );
-    return handle<FederationImportSummary>(r);
   },
 
   // ----- RBAC: users -----

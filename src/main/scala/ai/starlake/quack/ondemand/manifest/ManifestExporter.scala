@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 
 import java.time.Instant
 
@@ -10,14 +10,23 @@ import java.time.Instant
   * since those are operator-supplied and cannot be recovered if lost. */
 object ManifestExporter:
 
+  private val Redacted = "***REDACTED***"
+
   /** Build a [[ConfigManifest]] from the live control-plane store.
     * Named `build` rather than `export` because `export` is a reserved
-    * keyword in Scala 3. */
+    * keyword in Scala 3.
+    *
+    * @param federatedStore when present, each tenant-db's federated sources
+    *   and their secrets are included in the manifest. Secrets with an
+    *   inline value are exported as "***REDACTED***"; external-ref secrets
+    *   carry their ref verbatim. Pass None in file-mode or in tests that
+    *   do not exercise federation. */
   def build(
       store:          ControlPlaneStore,
       exportedAt:     Instant,
       managerVersion: String,
-      hostname:       String
+      hostname:       String,
+      federatedStore: Option[FederatedSourceStore] = None
   ): ConfigManifest =
 
     val tenants = store.listTenants().sortBy(_.displayName).map { t =>
@@ -35,7 +44,33 @@ object ManifestExporter:
       val groupIdToName: Map[String, String] = groupRows.map(g => g.id -> g.name).toMap
 
       val manifestDbs = dbRows.map { d =>
-        ManifestTenantDb(name = d.name, metastore = d.metastore, objectStore = d.objectStore)
+        val fedSources: List[ManifestFederatedSource] = federatedStore.toList.flatMap { fs =>
+          fs.listSources(d.id).map { src =>
+            ManifestFederatedSource(
+              alias       = src.alias,
+              setupSql    = src.setupSql,
+              description = src.description,
+              disabled    = src.disabled,
+              secrets     = fs.listSecrets(src.id).map { sec =>
+                ManifestFederatedSecret(
+                  name        = sec.name,
+                  value       = sec.value.map(_ => Redacted),
+                  externalRef = sec.externalRef
+                )
+              }
+            )
+          }
+        }
+        ManifestTenantDb(
+          name             = d.name,
+          kind             = d.kind.wireValue,
+          metastore        = d.metastore,
+          dataPath         = d.dataPath,
+          objectStore      = d.objectStore,
+          defaultDatabase  = d.defaultDatabase,
+          defaultSchema    = d.defaultSchema,
+          federatedSources = fedSources
+        )
       }
 
       val manifestPools = poolRows.map { p =>

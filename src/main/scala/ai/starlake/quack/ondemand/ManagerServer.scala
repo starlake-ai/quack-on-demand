@@ -152,9 +152,7 @@ final class ManagerServer(
         Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias) => h.deleteSource(t, td, alias) },
         Endpoints.listFederatedSecrets.serverLogic  { case (t, td, alias) => h.listSecrets(t, td, alias) },
         Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req) => h.upsertSecret(t, td, alias, req) },
-        Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) => h.deleteSecret(t, td, alias, name) },
-        Endpoints.exportFederationYaml.serverLogic  { case (t, td) => h.exportYaml(t, td) },
-        Endpoints.importFederationYaml.serverLogic  { case (t, td, body) => h.importYaml(t, td, body) }
+        Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) => h.deleteSecret(t, td, alias, name) }
       )
     }
 
