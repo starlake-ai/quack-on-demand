@@ -38,6 +38,8 @@ final class LocalQuackBackend(
     val env = pb.environment()
     defaultMetastore.foreach { case (k, v) => env.put(k, v) }
     spec.metastore.foreach { case (k, v) => env.put(k, v) }
+    env.put("kind", spec.kindWire)
+    if spec.extraSetupSql.nonEmpty then env.put("extraSetupSql", spec.extraSetupSql)
     val proc = pb.start()
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)

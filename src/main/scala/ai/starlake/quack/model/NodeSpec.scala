@@ -7,5 +7,7 @@ final case class NodeSpec(
     role: Role,
     metastore: Map[String, String], // pgHost, pgPort, ... -- opaque to manager
     s3: Map[String, String],        // optional keys; empty when local FS
-    maxConcurrent: Int = 0          // 0 = unlimited; hard cap on in-flight queries
+    maxConcurrent: Int = 0,         // 0 = unlimited; hard cap on in-flight queries
+    kindWire: String = "ducklake",  // passed to spawn script as `kind` env var
+    extraSetupSql: String = ""      // resolved federation blob
 )

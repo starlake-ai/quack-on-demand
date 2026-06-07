@@ -10,6 +10,8 @@ final case class PoolState(
     s3: Map[String, String],
     maxConcurrentPerNode: Int = 0,
     draining: Set[String] = Set.empty,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    kindWire: String = "ducklake",  // propagated to NodeSpec for spawn-quack-node.sh
+    extraSetupSql: String = ""      // resolved federation blob; propagated to NodeSpec
 ):
   def size: Int = nodes.size

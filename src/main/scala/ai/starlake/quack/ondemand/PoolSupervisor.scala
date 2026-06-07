@@ -12,6 +12,7 @@ import ai.starlake.quack.ondemand.state.{
 }
 import ai.starlake.quack.route.PoolSnapshot
 import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import org.slf4j.LoggerFactory
 
 import java.util.UUID
@@ -28,11 +29,12 @@ import scala.collection.concurrent.TrieMap
   *                     Inherits the tenant-db's metastore + objectStore.
   *   - `RunningNode`   runtime instance of a pool's compute. */
 final class PoolSupervisor(
-    backend:          QuackBackend,
-    tracker:          NodeLoadTracker,
-    store:            ControlPlaneStore,
-    defaultMetastore: Map[String, String] = Map.empty,
-    dbAdmin:          DbAdmin             = NoopDbAdmin
+    backend:           QuackBackend,
+    tracker:           NodeLoadTracker,
+    store:             ControlPlaneStore,
+    defaultMetastore:  Map[String, String] = Map.empty,
+    dbAdmin:           DbAdmin             = NoopDbAdmin,
+    federationBlobOf:  String => IO[Option[String]] = _ => IO.pure(None)
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -110,7 +112,9 @@ final class PoolSupervisor(
               role          = n.role,
               metastore     = state.metastore,
               s3            = state.s3,
-              maxConcurrent = n.maxConcurrent
+              maxConcurrent = n.maxConcurrent,
+              kindWire      = state.kindWire,
+              extraSetupSql = state.extraSetupSql
             )).flatMap { fresh =>
               poolIdByKey.get(key) match
                 case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
@@ -399,7 +403,9 @@ final class PoolSupervisor(
           "in a different tenant-db; pool names must be unique per tenant"
         ))
       case Some(td) =>
-        val merged = defaultMetastore ++ td.metastore
+        val merged     = defaultMetastore ++ td.metastore
+        val kindWire   = td.kind.wireValue
+        val extraBlob  = federationBlobOf(td.id).unsafeRunSync().getOrElse("")
         val poolEntity = Pool(
           id                   = newId("p"),
           tenantId             = td.tenantId,
@@ -415,12 +421,14 @@ final class PoolSupervisor(
         } *> {
           val specs = dist.asRoleList.zipWithIndex.map { case (role, i) =>
             NodeSpec(key, PoolSupervisor.nodeId(key, i + 1), role,
-              merged, td.objectStore, maxConcurrent = maxConcurrentPerNode)
+              merged, td.objectStore, maxConcurrent = maxConcurrentPerNode,
+              kindWire = kindWire, extraSetupSql = extraBlob)
           }
           specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
             acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
           }.flatMap { running =>
-            val state = PoolState(key, running, dist, merged, td.objectStore, maxConcurrentPerNode)
+            val state = PoolState(key, running, dist, merged, td.objectStore, maxConcurrentPerNode,
+              kindWire = kindWire, extraSetupSql = extraBlob)
             pools.put(key, state)
             running.foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolEntity.id))).as(running)
           }
@@ -470,7 +478,10 @@ final class PoolSupervisor(
           val specs = roles.zipWithIndex.map { case (role, i) =>
             NodeSpec(key,
               PoolSupervisor.nodeId(key, state.size + i + 1),
-              role, state.metastore, state.s3, maxConcurrent = state.maxConcurrentPerNode)
+              role, state.metastore, state.s3,
+              maxConcurrent  = state.maxConcurrentPerNode,
+              kindWire       = state.kindWire,
+              extraSetupSql  = state.extraSetupSql)
           }
           specs.foldLeft(IO.pure(state.nodes)) { (acc, spec) =>
             acc.flatMap(rs => backend.start(spec).map(rs :+ _))
