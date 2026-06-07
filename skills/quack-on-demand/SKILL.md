@@ -129,6 +129,123 @@ Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`.
 
 ACL is *off* by default (`acl.enabled=false`). Flip with `QOD_ACL_ENABLED=true` to actually enforce.
 
+## Federation - external catalogs via DuckDB extensions
+
+Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='SELECT')` grants access to a federated alias just like a DuckLake table.
+
+### Tenant-db kinds
+
+When creating a tenant-db, pick a `kind`:
+
+- `ducklake` (default) - Postgres metastore + object-store dataPath. Production multi-node persistence.
+- `duckdb-file` - Local `.duckdb` file at `dataPath`. Single-node only (file must exist on every node).
+- `memory` - No persistent default catalog. Use with `defaultDatabase` pointing at a federated alias.
+
+Example: create an in-memory tenant-db that only serves federated sources.
+
+```bash
+curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
+  "$MGR/api/database/create" \
+  -d '{
+    "tenant": "acme",
+    "name": "fed",
+    "kind": "memory",
+    "metastore": {},
+    "dataPath": "",
+    "defaultDatabase": "fedpg",
+    "defaultSchema": "public"
+  }'
+```
+
+### Register a federated source
+
+```bash
+curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
+  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
+  -d '{
+    "alias": "fedpg",
+    "description": "Prod warehouse Postgres",
+    "setupSql": "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST '\''pg.prod'\'', PORT 5432, DATABASE '\''warehouse'\'', USER '\''svc_qod'\'', PASSWORD '\''{{secret.PG_PWD}}'\''); ATTACH '\'''\'' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
+  }'
+```
+
+Placeholders:
+- `{{alias}}` - replaced with the source's `alias` field.
+- `{{secret.NAME}}` - replaced with the resolved value of the secret named `NAME`.
+
+### Add a Postgres-backed secret
+
+```bash
+curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
+  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
+  -d '{"name": "PG_PWD", "value": "hunter2"}'
+```
+
+Or a secret backed by an external store (env var, AWS Secrets Manager, etc.):
+
+```bash
+curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
+  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
+  -d '{"name": "PG_PWD", "externalRef": "vault:secret/data/qod/fedpg#password"}'
+```
+
+### Switch the secret resolver
+
+`secretStore = postgres | env | aws-sm | gcp-sm | azure-kv | vault`. Set via `QOD_FEDERATION_SECRET_STORE=env` (and per-backend config keys). The four KMS backends are stubbed in v1; calling `resolve()` raises `NotImplementedError`. To enable one, fill in the corresponding resolver class with the real SDK call.
+
+`externalRef` formats:
+
+| Backend  | Format                                                       |
+| -------- | ------------------------------------------------------------ |
+| env      | `env:SL_QOD_SECRET_FOO`                                      |
+| aws-sm   | `aws-sm:arn:aws:secretsmanager:...` or `aws-sm:name#jsonKey` |
+| gcp-sm   | `gcp-sm:projects/<p>/secrets/<name>/versions/latest`         |
+| azure-kv | `azure-kv:<secretName>` (vault URL from config)              |
+| vault    | `vault:secret/data/<path>#<key>`                             |
+
+### Export / import as YAML
+
+Export (`***REDACTED***` replaces every value-backed secret; `externalRef` is left as-is):
+
+```bash
+curl -H 'X-API-Key: '"$API_KEY" \
+  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/export" > fed.yaml
+```
+
+Re-import after editing. Secrets with `value: "***REDACTED***"` (and no `externalRef`) reuse the existing row's value, so a round-trip never requires re-typing passwords:
+
+```bash
+curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: text/plain' \
+  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/import" --data-binary @fed.yaml
+```
+
+Import semantics: replace-by-alias inside the tenant-db. Sources absent from the YAML are deleted; secrets absent from a source are deleted.
+
+### Lifecycle
+
+- **Edits take effect on the next spawn.** Editing or disabling a source affects every Quack node spawned after the commit: idle-timeout replacement, manual restart, scale-up additions, pool recreation. Already-running nodes keep their attached catalogs until they exit.
+- **Boot-time failure is fatal.** If a source's `setupSql` errors at node startup (extension missing, bad credentials, DNS), the spawn script exits 91 and the supervisor surfaces the last lines of stderr.
+- **Disabled sources** are filtered out at blob assembly. No live DETACH.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `unresolved secret 'X' in source '<alias>'` in supervisor log | Source's setupSql references `{{secret.X}}` but no matching row | Add the secret row via `PUT .../federated-sources/<alias>/secrets` |
+| `unsubstituted placeholder` at boot | Typo in setupSql like `{{secret.X}` (missing brace) | Fix setupSql via re-create (POST upserts); recycle the pool |
+| `catalog 'fedpg' does not exist` from the client | Pool was not recycled after editing the source | Drop and recreate the pool, or wait for idle-timeout recycle |
+| `missing SELECT grant on fedpg.public.X` | ACL not granted on the federated alias | `INSERT INTO qodstate_role_permission(role_id, catalog_name, schema_name, table_name, verb) VALUES (...)` |
+| `kind env var is required` from spawn script | Manager invoked the script without setting `kind` | Old `LocalQuackBackend` build - rebuild the manager (`sbt assembly`) and restart |
+| `secret '<name>' for source '<alias>' has no existing value to reuse` on YAML import | Imported `***REDACTED***` for a new source that didn't exist before | Provide the actual `value` or `externalRef` for that secret in the YAML |
+| YAML import HTTP 400 `duplicate alias '<X>' in payload` | Two sources in the imported YAML have the same alias | Dedupe in the YAML before re-importing |
+
+### What does NOT need an ACL change
+
+The existing RBAC graph covers federated tables with zero changes:
+- Grant `SELECT` on `fedpg.public.orders` to role `analyst` via `INSERT INTO qodstate_role_permission`.
+- Federated writes (INSERT/UPDATE/DELETE on a federated alias) are denied by default - extending DML grants is a separate concern.
+- Read-only is enforced at ATTACH time (the user's `setupSql` should include `READ_ONLY`), not in the validator.
+
 ## Node status + metrics
 
 ```bash
