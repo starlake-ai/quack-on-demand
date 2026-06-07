@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
 import io.circe.parser.parse
 import io.circe.syntax._
 import io.circe.Json
@@ -175,6 +175,8 @@ final class PostgresControlPlaneStore(
       id          = rs.getString("id"),
       tenantId    = rs.getString("tenant_id"),
       name        = rs.getString("name"),
+      // TODO(task-5): read kind from rs.getString("kind") once 0008 lands
+      kind        = TenantDbKind.DuckLake,
       metastore   = jsonToMap(rs.getString("metastore_params")),
       dataPath    = rs.getString("data_path"),
       objectStore = jsonToMap(rs.getString("object_store_params")),

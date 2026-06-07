@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestImporterApplySpec.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Tenant, TenantDb}
+import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import at.favre.lib.crypto.bcrypt.BCrypt
 import org.scalatest.flatspec.AnyFlatSpec
@@ -75,6 +75,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       id        = "td-1",
       tenantId  = "t-tpch",
       name      = "tpch_tpch1",
+      kind      = TenantDbKind.DuckLake,
       metastore = Map.empty,
       dataPath  = "/tmp/data"
     ))

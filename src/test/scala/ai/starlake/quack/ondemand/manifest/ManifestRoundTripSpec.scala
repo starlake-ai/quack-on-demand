@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestRoundTripSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacRole, RolePermission}
 import at.favre.lib.crypto.bcrypt.BCrypt
 import io.circe.syntax.*
@@ -37,6 +37,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       id          = "td-1",
       tenantId    = "t-1",
       name        = "tpch_tpch1",
+      kind        = TenantDbKind.DuckLake,
       metastore   = Map.empty,
       dataPath    = "/tmp/data",
       objectStore = Map.empty

@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -16,6 +16,7 @@ class ManifestExporterSpec extends AnyFlatSpec with Matchers:
       id        = "td-1",
       tenantId  = "t-1",
       name      = "tpch_tpch1",
+      kind      = TenantDbKind.DuckLake,
       metastore = Map.empty,
       dataPath  = "/tmp/data",
       objectStore = Map.empty

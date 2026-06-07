@@ -1,7 +1,7 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ManifestImporter.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   PoolPermission,
@@ -159,6 +159,7 @@ object ManifestImporter:
             id          = tdId,
             tenantId    = tenantId,
             name        = mtd.name,
+            kind        = TenantDbKind.DuckLake,
             metastore   = mtd.metastore,
             dataPath    = mtd.metastore.getOrElse("dataPath", ""),
             objectStore = mtd.objectStore

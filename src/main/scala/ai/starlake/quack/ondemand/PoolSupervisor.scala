@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
-  Names, NodeSpec, Pool, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDb
+  Names, NodeSpec, Pool, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind
 }
 import ai.starlake.quack.ondemand.rbac.RbacResolver
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -312,6 +312,7 @@ final class PoolSupervisor(
                   id          = newId("td"),
                   tenantId    = t.id,
                   name        = full,
+                  kind        = TenantDbKind.DuckLake,
                   metastore   = metaWithDb,
                   dataPath    = dataPath,
                   objectStore = objectStore
