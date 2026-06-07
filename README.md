@@ -7,7 +7,7 @@
 
 # Quack on Demand
 
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](guides/RESILIENCE.md)
+[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](guides/RESILIENCE.md)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
@@ -24,7 +24,9 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 ### Project status
 
-**Alpha (`0.2.x`).** Designed to be **safely restartable**, not highly available, single-instance, no active-active manager yet. [`RESILIENCE.md`](guides/RESILIENCE.md) is the honest failure-and-recovery matrix; planned work is tracked on the GitHub issues board. APIs and config keys may change between `0.x` releases.
+**Beta.** Quack on Demand is in active use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg via DuckDB extensions, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are all considered stable.
+
+The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process. [`RESILIENCE.md`](guides/RESILIENCE.md) documents the failure-and-recovery matrix in full so operators can decide where it fits. Roadmap work toward a multi-manager mode is tracked on the GitHub issues board.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
