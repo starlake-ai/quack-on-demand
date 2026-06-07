@@ -150,7 +150,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
           )}
           <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
             <button type="submit" disabled={!formReady}>Save</button>
-            <button type="button" onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
+            <button type="button" className="cancel-button" onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
           </div>
         </form>
       )}

@@ -5,6 +5,131 @@ import type {
   FederatedSecretResponse,
 } from '../api/types';
 
+/** Copy-pasteable Setup SQL templates surfaced as quick-insert buttons above
+  * the textarea. Each picks a common DuckDB federation flow. Placeholders
+  * `{{alias}}` and `{{secret.NAME}}` are resolved server-side at node spawn. */
+const SETUP_SAMPLES: { label: string; hint: string; sql: string }[] = [
+  {
+    label: 'Postgres (read-only)',
+    hint:  'ATTACH an external Postgres database via the postgres extension. Password resolved from secret PG_PWD.',
+    sql:
+      "INSTALL postgres; LOAD postgres;\n" +
+      "CREATE OR REPLACE SECRET {{alias}}_sec (\n" +
+      "  TYPE POSTGRES,\n" +
+      "  HOST 'pg.example.com',\n" +
+      "  PORT 5432,\n" +
+      "  DATABASE 'warehouse',\n" +
+      "  USER 'svc_qod',\n" +
+      "  PASSWORD '{{secret.PG_PWD}}'\n" +
+      ");\n" +
+      "ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET {{alias}}_sec, READ_ONLY);\n",
+  },
+  {
+    label: 'MySQL (read-only)',
+    hint:  'ATTACH an external MySQL database via the mysql extension. Password resolved from secret MYSQL_PWD.',
+    sql:
+      "INSTALL mysql; LOAD mysql;\n" +
+      "CREATE OR REPLACE SECRET {{alias}}_sec (\n" +
+      "  TYPE MYSQL,\n" +
+      "  HOST 'mysql.example.com',\n" +
+      "  PORT 3306,\n" +
+      "  DATABASE 'warehouse',\n" +
+      "  USER 'svc_qod',\n" +
+      "  PASSWORD '{{secret.MYSQL_PWD}}'\n" +
+      ");\n" +
+      "ATTACH '' AS {{alias}} (TYPE MYSQL, SECRET {{alias}}_sec, READ_ONLY);\n",
+  },
+  {
+    label: 'SQLite file',
+    hint:  'ATTACH a local SQLite file as a read-only catalog.',
+    sql:
+      "INSTALL sqlite; LOAD sqlite;\n" +
+      "ATTACH '/data/example.db' AS {{alias}} (TYPE SQLITE, READ_ONLY);\n",
+  },
+  {
+    label: 'S3 Parquet (views)',
+    hint:  'Expose S3 parquet files as views in a memory schema under this alias.',
+    sql:
+      "INSTALL httpfs; LOAD httpfs;\n" +
+      "CREATE OR REPLACE SECRET {{alias}}_sec (\n" +
+      "  TYPE S3,\n" +
+      "  KEY_ID '{{secret.S3_KEY}}',\n" +
+      "  SECRET '{{secret.S3_SECRET}}',\n" +
+      "  REGION 'us-east-1'\n" +
+      ");\n" +
+      "ATTACH ':memory:' AS {{alias}};\n" +
+      "CREATE SCHEMA IF NOT EXISTS {{alias}}.lake;\n" +
+      "CREATE OR REPLACE VIEW {{alias}}.lake.orders   AS SELECT * FROM read_parquet('s3://my-bucket/orders/*.parquet');\n" +
+      "CREATE OR REPLACE VIEW {{alias}}.lake.lineitem AS SELECT * FROM read_parquet('s3://my-bucket/lineitem/*.parquet');\n",
+  },
+  {
+    label: 'Iceberg (REST catalog)',
+    hint:  'ATTACH an Iceberg REST catalog (e.g. Polaris, Nessie). Token resolved from secret ICEBERG_TOKEN.',
+    sql:
+      "INSTALL iceberg; LOAD iceberg;\n" +
+      "INSTALL httpfs;  LOAD httpfs;\n" +
+      "CREATE OR REPLACE SECRET {{alias}}_sec (\n" +
+      "  TYPE ICEBERG,\n" +
+      "  TOKEN '{{secret.ICEBERG_TOKEN}}'\n" +
+      ");\n" +
+      "ATTACH 'https://catalog.example.com/iceberg' AS {{alias}} (\n" +
+      "  TYPE ICEBERG,\n" +
+      "  SECRET {{alias}}_sec,\n" +
+      "  WAREHOUSE 'my_warehouse'\n" +
+      ");\n",
+  },
+  {
+    label: 'DuckDB file (read-only)',
+    hint:  'ATTACH another DuckDB file as a read-only catalog under this alias.',
+    sql:
+      "ATTACH '/data/external.duckdb' AS {{alias}} (READ_ONLY);\n",
+  },
+  {
+    label: 'HTTPS Parquet (single file)',
+    hint:  'Expose a remote parquet file over HTTPS as a view, no credentials required.',
+    sql:
+      "INSTALL httpfs; LOAD httpfs;\n" +
+      "ATTACH ':memory:' AS {{alias}};\n" +
+      "CREATE OR REPLACE VIEW {{alias}}.main.taxi\n" +
+      "  AS SELECT * FROM read_parquet(\n" +
+      "    'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2023-01.parquet'\n" +
+      "  );\n",
+  },
+];
+
+/** Inline labeled-value pair used in the federation-source detail view.
+  * Renders a small uppercase label above the value. The `mono` prop
+  * switches to the monospace font family for code-like values; `subtle`
+  * dims the value when it's metadata (ids) the operator rarely cares
+  * about. */
+function DetailItem({
+  label,
+  value,
+  mono,
+  subtle,
+}: {
+  label:   string;
+  value:   string;
+  mono?:   boolean;
+  subtle?: boolean;
+}) {
+  return (
+    <div>
+      <div style={{
+        fontSize: '.7rem',
+        color: 'var(--text-mute)',
+        textTransform: 'uppercase',
+        letterSpacing: '.06em',
+      }}>{label}</div>
+      <div style={{
+        fontFamily: mono ? 'var(--mono)' : undefined,
+        color: subtle ? 'var(--text-mute)' : 'var(--text)',
+        marginTop: 2,
+      }}>{value}</div>
+    </div>
+  );
+}
+
 /** Secret sub-editor shown when a source row is expanded. */
 function SecretEditor({
   tenant,
@@ -62,7 +187,13 @@ function SecretEditor({
   }
 
   return (
-    <div style={{ padding: '0.5rem 1rem', background: '#f8f8f8', borderTop: '1px solid #e0e0e0' }}>
+    <div style={{
+      padding: '0.5rem 1rem',
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius)',
+      color: 'var(--text)',
+    }}>
       <strong>Secrets for <code>{alias}</code></strong>
       {error && <div className="login-err" style={{ marginTop: 4 }}>Error: {error}</div>}
       {secrets.length === 0 ? (
@@ -219,9 +350,9 @@ export default function FederationSection({
         </div>
         <div className="row" style={{ gap: 8 }}>
           {!adding && (
-            <button onClick={() => { resetAddForm(); setAdding(true); }}>+ Add federated source</button>
+            <button type="button" className="link-button" onClick={() => { resetAddForm(); setAdding(true); }}>+ Add federated source</button>
           )}
-          <button onClick={onClose}>&larr; Back to databases</button>
+          <button type="button" className="link-button" onClick={onClose}>&larr; Back to databases</button>
         </div>
       </div>
       <p className="subtle">
@@ -258,15 +389,40 @@ export default function FederationSection({
             </div>
             <label style={{ display: 'flex', flexDirection: 'column', marginTop: '0.5rem' }}>
               <span>Setup SQL <span style={{ color: '#c33' }}>*</span></span>
+              <div className="setup-templates">
+                <label className="setup-templates-label" htmlFor="setup-template-picker">
+                  Start from a template
+                </label>
+                <select
+                  id="setup-template-picker"
+                  className="setup-templates-picker"
+                  defaultValue=""
+                  onChange={ev => {
+                    const idx = ev.target.value;
+                    if (idx === '') return;
+                    const sample = SETUP_SAMPLES[parseInt(idx, 10)];
+                    if (sample) setSetupSql(sample.sql);
+                    ev.target.value = '';   // reset so the same pick can fire again
+                  }}
+                >
+                  <option value="">Pick a template...</option>
+                  {SETUP_SAMPLES.map((s, i) => (
+                    <option key={s.label} value={i} title={s.hint}>{s.label}</option>
+                  ))}
+                </select>
+                <span className="setup-templates-hint">
+                  inserts a skeleton into the box below; edit before saving
+                </span>
+              </div>
               <textarea
                 value={setupSql}
                 onChange={ev => setSetupSql(ev.target.value)}
-                rows={6}
+                rows={20}
                 placeholder={
-                  "-- Examples:\n" +
-                  "-- ATTACH 'dbname=mydb host=pg.example.com' AS pg_src (TYPE POSTGRES);\n" +
-                  "-- ATTACH 's3://my-bucket/data.parquet' AS parquet_src;\n" +
-                  "-- INSTALL httpfs; LOAD httpfs; SET s3_region='us-east-1';"
+                  "Pick a template above, or write your own.\n\n" +
+                  "Placeholders:\n" +
+                  "  {{alias}}        - replaced with this source's alias\n" +
+                  "  {{secret.NAME}}  - replaced with the resolved value of secret NAME"
                 }
                 style={{ fontFamily: 'monospace', width: '100%' }}
                 required
@@ -274,7 +430,7 @@ export default function FederationSection({
             </label>
             <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
               <button type="submit">Create</button>
-              <button type="button" onClick={() => { setAdding(false); resetAddForm(); }}>Cancel</button>
+              <button type="button" className="cancel-button" onClick={() => { setAdding(false); resetAddForm(); }}>Cancel</button>
             </div>
           </fieldset>
         </form>
@@ -296,24 +452,76 @@ export default function FederationSection({
             {sources.map(s => (
               <>
                 <tr key={s.id}>
-                  <td><code>{s.alias}</code></td>
+                  <td>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setExpanded(expanded === s.alias ? null : s.alias)}
+                      title="Show connection details"
+                    >
+                      <code>{s.alias}</code>
+                    </button>
+                  </td>
                   <td>{s.description ?? <span className="subtle">-</span>}</td>
                   <td>{s.disabled ? 'Yes' : 'No'}</td>
                   <td>
                     <div className="row" style={{ gap: 6 }}>
                       <button
+                        type="button"
+                        className="link-button"
                         onClick={() => setExpanded(expanded === s.alias ? null : s.alias)}
                       >
-                        {expanded === s.alias ? 'Hide secrets' : 'Edit secrets'}
+                        {expanded === s.alias ? 'Hide details' : 'Show details'}
                       </button>
                       <button className="danger" onClick={() => void handleDelete(s.alias)}>Delete</button>
                     </div>
                   </td>
                 </tr>
                 {expanded === s.alias && (
-                  <tr key={`${s.id}-secrets`}>
-                    <td colSpan={4} style={{ padding: 0 }}>
-                      <SecretEditor tenant={tenant} tenantDb={tenantDb} alias={s.alias} />
+                  <tr key={`${s.id}-detail`}>
+                    <td colSpan={4} style={{ padding: 0, background: 'var(--bg-elev)' }}>
+                      <div style={{ padding: '.75rem 1rem' }}>
+                        <div className="row" style={{ gap: '1.5rem', flexWrap: 'wrap', marginBottom: '.6rem' }}>
+                          <DetailItem label="Alias"       value={s.alias} mono />
+                          <DetailItem label="Source ID"   value={s.id} mono subtle />
+                          <DetailItem label="Tenant-DB"   value={s.tenantDbId} mono subtle />
+                          <DetailItem label="Disabled"    value={s.disabled ? 'Yes' : 'No'} />
+                          {s.description && <DetailItem label="Description" value={s.description} />}
+                        </div>
+                        <div style={{ marginTop: '.4rem' }}>
+                          <div style={{
+                            fontSize: '.75rem', color: 'var(--text-mute)',
+                            textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                          }}>
+                            Setup SQL
+                          </div>
+                          <pre style={{
+                            margin: 0,
+                            padding: '.6rem .8rem',
+                            background: 'var(--bg-card)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            fontFamily: 'var(--mono)',
+                            fontSize: '.85em',
+                            color: 'var(--text)',
+                            whiteSpace: 'pre-wrap',
+                            overflowX: 'auto',
+                          }}>{s.setupSql}</pre>
+                          <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
+                            <code>{'{{alias}}'}</code> and <code>{'{{secret.NAME}}'}</code> placeholders are
+                            resolved at node spawn; never logged in resolved form.
+                          </div>
+                        </div>
+                        <div style={{ marginTop: '.9rem' }}>
+                          <div style={{
+                            fontSize: '.75rem', color: 'var(--text-mute)',
+                            textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                          }}>
+                            Secrets
+                          </div>
+                          <SecretEditor tenant={tenant} tenantDb={tenantDb} alias={s.alias} />
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 )}

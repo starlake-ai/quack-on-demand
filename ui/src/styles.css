@@ -214,7 +214,7 @@ button.dropdown-item.danger:hover { background: rgba(248,113,113,.1); }
 
 /* ----- Forms ----- */
 label { display: block; margin-bottom: .75rem; color: var(--text-soft); }
-input, select {
+input, select, textarea {
   display: block;
   width: 100%;
   margin-top: .25rem;
@@ -234,6 +234,7 @@ input, select {
   line-height: 1.4;
   height: 2.4rem;
 }
+input::placeholder, textarea::placeholder { color: var(--text-mute); opacity: 0.7; }
 /* Strip the native chrome from <select> so its height matches <input>,
    and reinstate a CSS-drawn caret on the right. */
 select {
@@ -246,9 +247,17 @@ select {
   background-position: right .65rem center;
   background-size: 10px 7px;
 }
-/* Textareas keep auto height. */
-textarea { height: auto; box-sizing: border-box; }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Textareas keep auto height and resize vertically only. */
+textarea {
+  height: auto;
+  min-height: 6rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
 /* Native number-input spinner arrows: the browser draws them in its
    own dark grey, and CSS filter recipes drift across versions, so we
    hide the native spinner entirely and paint two orange chevrons
@@ -398,3 +407,172 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
   color: var(--text);
 }
 .tab-body   { /* container hook; cards inside carry their own padding */ }
+
+/* ----- Manifest export/import (Config page) ----- */
+.manifest-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+@media (max-width: 760px) {
+  .manifest-grid { grid-template-columns: 1fr; }
+}
+.manifest-pane {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+.manifest-pane-title {
+  margin: 0;
+  font-size: .8rem;
+  color: var(--text-mute);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.manifest-dropzone {
+  margin-top: .25rem;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 1.6rem 1rem;
+  text-align: center;
+  color: var(--text-mute);
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.manifest-dropzone:hover,
+.manifest-dropzone:focus-visible,
+.manifest-dropzone.is-over {
+  border-color: var(--accent);
+  background: rgba(245, 158, 11, 0.06);
+  color: var(--text);
+  outline: none;
+}
+.manifest-dropzone-headline { font-weight: 600; color: var(--text); }
+.manifest-dropzone-sub      { font-size: .85em; margin-top: .25rem; }
+.manifest-staged {
+  margin-top: .25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .75rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .75rem;
+}
+.manifest-staged-info     { min-width: 0; }
+.manifest-staged-name     { font-family: var(--mono); color: var(--text); word-break: break-all; }
+.manifest-staged-meta     { font-size: .8em; color: var(--text-mute); margin-top: .1rem; }
+.manifest-summary {
+  margin-top: 1rem;
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  border-radius: var(--radius);
+  padding: .9rem 1.1rem;
+}
+.manifest-summary-title {
+  color: var(--good);
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: .6rem;
+}
+.manifest-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: .5rem;
+}
+.manifest-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .55rem .8rem;
+}
+.manifest-stat-value { font-size: 1.25rem; font-weight: 600; color: var(--text); }
+.manifest-stat-label { font-size: .75rem; color: var(--text-mute); text-transform: uppercase; letter-spacing: .04em; }
+.manifest-error {
+  margin-top: 1rem;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: var(--bad);
+  border-radius: var(--radius);
+  padding: .75rem 1.1rem;
+  font-family: var(--mono);
+  font-size: .9em;
+  white-space: pre-wrap;
+}
+
+/* Strip button chrome and render as inline-text hyperlink. Use for SPA
+   actions that are visually closer to "navigate/disclose" than to a
+   primary commit-action button (e.g. "+ Add X", "Back to ...", section
+   toggles). Keeps semantic <button> for keyboard/focus, but visually
+   reads as a link. */
+button.link-button {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--link);
+  cursor: pointer;
+  text-decoration: none;
+}
+button.link-button:hover  { text-decoration: underline; }
+button.link-button:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+button.link-button[disabled] {
+  opacity: .4;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* Consistent Cancel-button styling across every form in the app. White
+   text on solid black; subtle on the page's dark surface but clearly
+   distinct from primary commit buttons (which use --accent yellow). */
+button.cancel-button {
+  background: #000;
+  color: #fff;
+  border: 1px solid #000;
+}
+button.cancel-button:hover { background: #111; border-color: #333; }
+button.cancel-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button.cancel-button[disabled] { background: #1a1a1a; color: #888; }
+
+/* Federation "Setup SQL" template picker: a compact inline row above the
+   textarea. A native <select> beats a button strip because (a) it scales
+   to N templates without wrapping, (b) keyboard navigation is free, and
+   (c) it visually de-emphasises the templates so the textarea stays the
+   primary focus. */
+.setup-templates {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  margin: .25rem 0 .4rem;
+  font-size: .85em;
+  color: var(--text-mute);
+}
+.setup-templates-label {
+  font-weight: 500;
+}
+.setup-templates-picker {
+  font-family: var(--mono);
+  font-size: .85em;
+  padding: .25rem .5rem;
+  min-width: 240px;
+}
+.setup-templates-hint {
+  color: var(--text-mute);
+  font-style: italic;
+}

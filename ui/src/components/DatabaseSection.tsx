@@ -145,7 +145,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           <div className="card-title" style={{ margin: 0 }}>
             Catalog &mdash; <code>{browsing}</code>
           </div>
-          <button onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
+          <button type="button" className="link-button" onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
         </div>
         <CatalogBrowser tenant={tenant} tenantDb={browsing} />
       </div>
@@ -168,7 +168,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>Databases</div>
         {!adding && (
-          <button onClick={openForm}>+ New database</button>
+          <button type="button" className="link-button" onClick={openForm}>+ New database</button>
         )}
       </div>
       <p className="subtle">
@@ -188,7 +188,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <th>Kind</th>
               <th>Schema</th>
               <th>Data path</th>
-              <th></th>
+              <th>Federation</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -222,8 +223,23 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
                 <td><code>{d.dataPath || '-'}</code></td>
                 <td>
+                  <button type="button" className="link-button" onClick={() => setFederating(d.name)}>
+                    Federation
+                    {(d.federatedSourceCount ?? 0) > 0 && (
+                      <span style={{
+                        marginLeft: 6,
+                        padding: '0 6px',
+                        borderRadius: 9,
+                        background: 'var(--accent)',
+                        color: 'var(--accent-fg)',
+                        fontSize: '0.75em',
+                        fontWeight: 600,
+                      }}>{d.federatedSourceCount}</span>
+                    )}
+                  </button>
+                </td>
+                <td>
                   <div className="row" style={{ gap: 6 }}>
-                    <button onClick={() => setFederating(d.name)}>Federation</button>
                     <button className="danger" onClick={() => handleDelete(d.name)}>Delete</button>
                   </div>
                 </td>
@@ -268,20 +284,22 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               </label>
             </div>
 
-            <div className="form-group" style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginTop: '0.75rem' }}>
-              <label>Kind:</label>
-              {(['ducklake', 'duckdb-file', 'memory'] as const).map(k => (
-                <label key={k} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                  <input type="radio" name="kind" value={k} checked={kind === k}
-                         onChange={() => setKind(k)} />
-                  {k}
-                </label>
-              ))}
-            </div>
-            <div className="help" style={{ fontSize: '0.85em', color: '#666', marginTop: '0.25rem' }}>
-              {kind === 'ducklake'    && 'Postgres-backed DuckLake catalog + object-store data path.'}
-              {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
-              {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
+            <div className="form-group" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.75rem' }}>
+              <label htmlFor="tenant-db-kind" style={{ marginRight: '0.25rem' }}>Kind:</label>
+              <select
+                id="tenant-db-kind"
+                value={kind}
+                onChange={e => setKind(e.target.value as TenantDbKind)}
+              >
+                <option value="ducklake">ducklake</option>
+                <option value="duckdb-file">duckdb-file</option>
+                <option value="memory">memory</option>
+              </select>
+              <span style={{ fontSize: '0.85em', color: '#666' }}>
+                {kind === 'ducklake'    && 'Postgres-backed DuckLake catalog + object-store data path.'}
+                {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
+                {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
+              </span>
             </div>
 
             {kind !== 'memory' && (
@@ -368,7 +386,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
           <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
             <button type="submit" disabled={nameError != null || name === prefix}>Create</button>
-            <button type="button" onClick={() => { setAdding(false); resetForm(); }}>Cancel</button>
+            <button type="button" className="cancel-button" onClick={() => { setAdding(false); resetForm(); }}>Cancel</button>
           </div>
         </form>
       )}
