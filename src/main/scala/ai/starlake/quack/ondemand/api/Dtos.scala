@@ -151,16 +151,17 @@ final case class TenantDbRequest(
     defaultSchema:   Option[String]      = None
 )
 final case class TenantDbResponse(
-    id:              String,
-    tenant:          String,
-    name:            String,
-    kind:            String,                            // wire value
-    metastore:       Map[String, String],
-    dataPath:        String,
-    objectStore:     Map[String, String] = Map.empty,
-    defaultDatabase: Option[String]      = None,
-    defaultSchema:   Option[String]      = None,
-    disabled:        Boolean             = false
+    id:                   String,
+    tenant:               String,
+    name:                 String,
+    kind:                 String,                            // wire value
+    metastore:            Map[String, String],
+    dataPath:             String,
+    objectStore:          Map[String, String] = Map.empty,
+    defaultDatabase:      Option[String]      = None,
+    defaultSchema:        Option[String]      = None,
+    disabled:             Boolean             = false,
+    federatedSourceCount: Int                 = 0
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
@@ -648,7 +649,21 @@ object Dtos:
   given Codec[CatalogTableDetailResponse] = deriveCodec
 
   // Federation
-  given Codec[FederatedSourceCreateRequest] = deriveCodec
+  // Hand-rolled decoder so omitted optional fields fall back to the
+  // case-class defaults (deriveCodec ignores Scala defaults and treats
+  // `disabled` as required). Without this, POST {"alias":"x","setupSql":"..."}
+  // gets rejected with "Missing required field at 'disabled'".
+  given Codec[FederatedSourceCreateRequest] = io.circe.Codec.from(
+    io.circe.Decoder.instance { c =>
+      for
+        alias       <- c.get[String]("alias")
+        setupSql    <- c.get[String]("setupSql")
+        description <- c.getOrElse[Option[String]]("description")(None)
+        disabled    <- c.getOrElse[Boolean]("disabled")(false)
+      yield FederatedSourceCreateRequest(alias, setupSql, description, disabled)
+    },
+    io.circe.generic.semiauto.deriveEncoder[FederatedSourceCreateRequest]
+  )
   given Codec[FederatedSourceResponse]       = deriveCodec
   given Codec[FederatedSourceListResponse]   = deriveCodec
   given Codec[FederatedSecretUpsertRequest]  = deriveCodec

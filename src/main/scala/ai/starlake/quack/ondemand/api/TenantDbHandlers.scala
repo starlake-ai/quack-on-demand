@@ -2,31 +2,42 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import cats.effect.IO
 import sttp.model.StatusCode
 
 /** REST handlers for the `qodstate_tenant_db` rows owned by each
   * tenant. Identified by the natural `(tenant, name)` pair; the
-  * surrogate `id` ships on responses for rename-stable callers. */
-final class TenantDbHandlers(sup: PoolSupervisor):
+  * surrogate `id` ships on responses for rename-stable callers.
+  *
+  * `federatedStore` is optional: file-mode deployments don't have a
+  * federation store wired up, so the count is reported as 0. */
+final class TenantDbHandlers(
+    sup:             PoolSupervisor,
+    federatedStore:  Option[FederatedSourceStore] = None
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def redact(m: Map[String, String]): Map[String, String] =
     m.filterNot(_._1.equalsIgnoreCase("pgPassword"))
 
+  private def federatedCount(tenantDbId: String): Int =
+    federatedStore.fold(0)(_.listSources(tenantDbId).size)
+
   private def toResponse(tenantName: String, td: TenantDb): TenantDbResponse =
     TenantDbResponse(
-      id              = td.id,
-      tenant          = tenantName,
-      name            = td.name,
-      kind            = td.kind.wireValue,
-      metastore       = redact(td.metastore),
-      dataPath        = td.dataPath,
-      objectStore     = redact(td.objectStore),
-      defaultDatabase = td.defaultDatabase,
-      defaultSchema   = td.defaultSchema,
-      disabled        = td.disabled
+      id                   = td.id,
+      tenant               = tenantName,
+      name                 = td.name,
+      kind                 = td.kind.wireValue,
+      metastore            = redact(td.metastore),
+      dataPath             = td.dataPath,
+      objectStore          = redact(td.objectStore),
+      defaultDatabase      = td.defaultDatabase,
+      defaultSchema        = td.defaultSchema,
+      disabled             = td.disabled,
+      federatedSourceCount = federatedCount(td.id)
     )
 
   def createTenantDb(req: TenantDbRequest): Out[TenantDbResponse] =

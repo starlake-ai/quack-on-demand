@@ -58,7 +58,11 @@ final class ManagerServer(
     * Always-open paths: `/api/auth/login`, `/api/config/client`,
     * `/health`, and everything outside `/api/...` (incl. `/ui/...`). */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
-    cfg.apiKey match
+    // Treat an empty string the same as unset. Compose / k8s configs
+    // routinely pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=`
+    // empty; pureconfig then materializes `Some("")`, which would
+    // otherwise enable the guard with a key no client ever sends.
+    cfg.apiKey.filter(_.nonEmpty) match
       case None =>
         logger.warn(
           "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +

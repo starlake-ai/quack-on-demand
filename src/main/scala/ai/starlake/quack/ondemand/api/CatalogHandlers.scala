@@ -1,19 +1,34 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.model.TenantDbKind
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 
 /** Catalog browser handlers. Catalog reads are scoped to a specific
   * `(tenant, tenantDb)` pair because each tenant-db owns its own
   * DuckLake catalog. Tests stub `resolveReader`; production wires it
   * to a `(tenant, tenantDb) -> reader` cache backed by
-  * `PoolSupervisor.effectiveMetastoreFor`. */
-class CatalogHandlers(resolveReader: (String, String) => DuckLakeCatalogReader):
+  * `PoolSupervisor.effectiveMetastoreFor`.
+  *
+  * `kindOf` short-circuits the DuckLake JDBC query for tenant-dbs whose
+  * `kind` is `duckdb-file` or `memory` -- those have no `ducklake_schema`
+  * metadata table to query, so the reader would 500 with a Postgres
+  * "relation does not exist" error. Returning empty lists keeps the UI's
+  * catalog browser usable; admins can still browse via FlightSQL. */
+class CatalogHandlers(
+    resolveReader: (String, String) => DuckLakeCatalogReader,
+    kindOf:        (String, String) => Option[TenantDbKind] = (_, _) => Some(TenantDbKind.DuckLake)
+):
+
+  private def isDuckLake(tenant: String, tenantDb: String): Boolean =
+    kindOf(tenant, tenantDb).contains(TenantDbKind.DuckLake)
 
   def listSchemas(tenant: String, tenantDb: String): List[CatalogSchemaEntry] =
-    resolveReader(tenant, tenantDb).listSchemas()
+    if !isDuckLake(tenant, tenantDb) then Nil
+    else resolveReader(tenant, tenantDb).listSchemas()
 
   def listTables(tenant: String, tenantDb: String, schema: String): List[CatalogTableEntry] =
-    resolveReader(tenant, tenantDb).listTables(schema)
+    if !isDuckLake(tenant, tenantDb) then Nil
+    else resolveReader(tenant, tenantDb).listTables(schema)
 
   def getTable(
       tenant:   String,
@@ -21,4 +36,5 @@ class CatalogHandlers(resolveReader: (String, String) => DuckLakeCatalogReader):
       schema:   String,
       table:    String
   ): Option[CatalogTableDetailResponse] =
-    resolveReader(tenant, tenantDb).getTable(schema, table)
+    if !isDuckLake(tenant, tenantDb) then None
+    else resolveReader(tenant, tenantDb).getTable(schema, table)
