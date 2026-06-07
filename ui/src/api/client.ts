@@ -52,6 +52,14 @@ import type {
   PoolPermissionRevokeRequest,
   PoolPermissionListResponse,
   EffectivePermissionsResponse,
+  // Federation
+  FederatedSourceCreateRequest,
+  FederatedSourceResponse,
+  FederatedSourceListResponse,
+  FederatedSecretUpsertRequest,
+  FederatedSecretResponse,
+  FederatedSecretListResponse,
+  FederationImportSummary,
 } from './types';
 
 const BASE = '/api';
@@ -151,6 +159,82 @@ export const api = {
     get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
   createTenantDb: (req: TenantDbRequest) => post<TenantDbResponse>('/database/create', req),
   deleteTenantDb: (req: TenantDbOpRequest) => post<void>('/database/delete', req),
+
+  // ----- Federation -----
+  listFederatedSources: (tenant: string, tenantDb: string) =>
+    get<FederatedSourceListResponse>(
+      `/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources`
+    ),
+
+  createFederatedSource: (tenant: string, tenantDb: string, req: FederatedSourceCreateRequest) =>
+    post<FederatedSourceResponse>(
+      `/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources`,
+      req
+    ),
+
+  deleteFederatedSource: async (tenant: string, tenantDb: string, alias: string): Promise<void> => {
+    const r = await fetch(
+      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}`,
+      { method: 'DELETE', headers: authHeaders() }
+    );
+    return handle<void>(r);
+  },
+
+  listFederatedSecrets: (tenant: string, tenantDb: string, alias: string) =>
+    get<FederatedSecretListResponse>(
+      `/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}/secrets`
+    ),
+
+  upsertFederatedSecret: async (
+    tenant: string,
+    tenantDb: string,
+    alias: string,
+    req: FederatedSecretUpsertRequest
+  ): Promise<FederatedSecretResponse> => {
+    const r = await fetch(
+      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}/secrets`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(req),
+      }
+    );
+    return handle<FederatedSecretResponse>(r);
+  },
+
+  deleteFederatedSecret: async (
+    tenant: string,
+    tenantDb: string,
+    alias: string,
+    name: string
+  ): Promise<void> => {
+    const r = await fetch(
+      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}/secrets/${encodeURIComponent(name)}`,
+      { method: 'DELETE', headers: authHeaders() }
+    );
+    return handle<void>(r);
+  },
+
+  exportFederationYaml: async (tenant: string, tenantDb: string): Promise<string> => {
+    const r = await fetch(
+      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/yaml/export`,
+      { headers: authHeaders() }
+    );
+    if (!r.ok) throw new ApiError(r.status, await r.text());
+    return r.text();
+  },
+
+  importFederationYaml: async (tenant: string, tenantDb: string, body: string): Promise<FederationImportSummary> => {
+    const r = await fetch(
+      `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/yaml/import`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain', ...authHeaders() },
+        body,
+      }
+    );
+    return handle<FederationImportSummary>(r);
+  },
 
   // ----- RBAC: users -----
   listUsers: (tenant?: string) => {

@@ -6,6 +6,7 @@ import DataPathEditor, {
   buildObjectStore, parseExtras as parseStoreExtras,
   type StoreType,
 } from './DataPathEditor';
+import FederationSection from './FederationSection';
 
 /** Databases card for the TenantDetail page. Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
@@ -20,6 +21,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   // browsed inline via <CatalogBrowser>. Clicking "Back" returns to
   // the list without leaving the Databases tab.
   const [browsing, setBrowsing] = useState<string | null>(null);
+  // null = show the list; otherwise the name of the database whose
+  // federation sources are being managed inline via <FederationSection>.
+  const [federating, setFederating] = useState<string | null>(null);
 
   // Form state. The Name input always starts with the tenant prefix
   // and the locked-prefix logic in `onNameChange` keeps it there.
@@ -148,6 +152,17 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     );
   }
 
+  // Federation mode: show the FederationSection for the selected database.
+  if (federating != null) {
+    return (
+      <FederationSection
+        tenant={tenant}
+        tenantDb={federating}
+        onClose={() => setFederating(null)}
+      />
+    );
+  }
+
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -207,7 +222,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
                 <td><code>{d.dataPath || '-'}</code></td>
                 <td>
-                  <button className="danger" onClick={() => handleDelete(d.name)}>Delete</button>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button onClick={() => setFederating(d.name)}>Federation</button>
+                    <button className="danger" onClick={() => handleDelete(d.name)}>Delete</button>
+                  </div>
                 </td>
               </tr>
             ))}
