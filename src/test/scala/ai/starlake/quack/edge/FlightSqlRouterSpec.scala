@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, TenantDbKind}
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -46,7 +46,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
                                  new InMemoryControlPlaneStore())
     // Pre-register the tenant so createPool succeeds under the new contract.
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
-    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, Map.empty, "").unsafeRunSync()
+    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
 

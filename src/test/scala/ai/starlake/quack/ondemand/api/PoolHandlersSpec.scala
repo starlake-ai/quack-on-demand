@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, RoleDistribution, RunningNode, Tenant}
+import ai.starlake.quack.model.{NodeSpec, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
@@ -36,7 +36,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val sup = new PoolSupervisor(stubBackend, tracker,
                                  new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     new PoolHandlers(sup, tracker)
 
   /** Variant without any tenant/tenant-db -- for the missing-tenant test. */

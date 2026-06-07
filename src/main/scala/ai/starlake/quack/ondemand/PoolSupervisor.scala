@@ -275,11 +275,14 @@ final class PoolSupervisor(
   // ---------- TenantDb API ----------
 
   def createTenantDb(
-      tenantName:  String,
-      suffix:      String,
-      metastore:   Map[String, String],
-      dataPath:    String,
-      objectStore: Map[String, String] = Map.empty
+      tenantName:      String,
+      suffix:          String,
+      kind:            TenantDbKind,
+      metastore:       Map[String, String],
+      dataPath:        String,
+      objectStore:     Map[String, String] = Map.empty,
+      defaultDatabase: Option[String]      = None,
+      defaultSchema:   Option[String]      = None
   ): IO[Either[String, TenantDb]] = IO.blocking {
     Names.normalizeTenantDbName(tenantName, suffix) match
       case Left(err) => Left(err)
@@ -290,36 +293,53 @@ final class PoolSupervisor(
           case Some(t) if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
             Left(s"tenant-db '$full' already exists in tenant '$tn'")
           case Some(t) =>
-            val metaWithDb = metastore.updated("dbName", full)
-            dbAdmin.createDatabase(full) match
-              case Left(err) => Left(s"failed to provision Postgres database '$full': $err")
-              case Right(_) =>
-                // Pre-init the ducklake_* metadata tables in the fresh
-                // tenant-db Postgres so the first batch of pool nodes
-                // doesn't race on `CREATE TABLE __ducklake_metadata`.
-                // Best-effort: failures here only forfeit race protection,
-                // the per-node ATTACH still creates the tables. Skips
-                // silently when the metastore lacks pgHost (e.g. tests
-                // with NoopDbAdmin).
-                try
-                  DuckLakeInitializer.initBlocking(metaWithDb.updated("dataPath", dataPath))
-                catch case t: Throwable =>
-                  logger.warn(
-                    s"createTenantDb: DuckLake pre-init for '$full' failed; " +
-                    s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
-                  )
-                val td = TenantDb(
-                  id          = newId("td"),
-                  tenantId    = t.id,
-                  name        = full,
-                  kind        = TenantDbKind.DuckLake,
-                  metastore   = metaWithDb,
-                  dataPath    = dataPath,
-                  objectStore = objectStore
-                )
-                store.upsertTenantDb(td)
-                tenantDbs.put(td.id, td)
-                Right(td)
+            // Per-kind config preparation. DuckLake auto-injects dbName and
+            // pre-provisions the Postgres database + DuckLake metadata tables.
+            // DuckDbFile and InMemory skip both: a file-backed catalog needs no
+            // Postgres tables, and an in-memory catalog has no persistence at
+            // all.
+            val effectiveMeta = kind match
+              case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
+              case TenantDbKind.DuckDbFile => metastore
+              case TenantDbKind.InMemory   => metastore
+
+            val td = TenantDb(
+              id              = newId("td"),
+              tenantId        = t.id,
+              name            = full,
+              kind            = kind,
+              metastore       = effectiveMeta,
+              dataPath        = dataPath,
+              objectStore     = objectStore,
+              defaultDatabase = defaultDatabase,
+              defaultSchema   = defaultSchema
+            )
+
+            TenantDb.validate(td) match
+              case Some(msg) => Left(s"invalid kind=${kind.wireValue}: $msg")
+              case None =>
+                kind match
+                  case TenantDbKind.DuckLake =>
+                    dbAdmin.createDatabase(full) match
+                      case Left(err) => Left(s"failed to provision Postgres database '$full': $err")
+                      case Right(_) =>
+                        // Pre-init the ducklake_* metadata tables in the fresh
+                        // tenant-db Postgres so the first batch of pool nodes
+                        // doesn't race on `CREATE TABLE __ducklake_metadata`.
+                        try
+                          DuckLakeInitializer.initBlocking(effectiveMeta.updated("dataPath", dataPath))
+                        catch case t: Throwable =>
+                          logger.warn(
+                            s"createTenantDb: DuckLake pre-init for '$full' failed; " +
+                            s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
+                          )
+                        store.upsertTenantDb(td)
+                        tenantDbs.put(td.id, td)
+                        Right(td)
+                  case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
+                    store.upsertTenantDb(td)
+                    tenantDbs.put(td.id, td)
+                    Right(td)
   }
 
   def deleteTenantDb(tenantName: String, tenantDbName: String): IO[Either[String, Unit]] =

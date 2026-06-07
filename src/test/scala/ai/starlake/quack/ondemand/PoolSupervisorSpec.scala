@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
 import cats.effect.IO
@@ -56,7 +56,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   private def freshSupervisor() =
     val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", ms, dataPath = "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
     sup
 
   private def freshSupervisorWithBackend(): (PoolSupervisor, CapturingBackend) =
@@ -158,7 +158,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "cascade-delete tenant-dbs (no pools) when deleting the tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("foo")).unsafeRunSync()
-    sup.createTenantDb("foo", "default", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("foo", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.deleteTenant("foo").unsafeRunSync() shouldBe Right(())
     sup.listTenantDbsByTenant("foo") shouldBe empty
     sup.getTenant("foo")             shouldBe None
@@ -176,8 +176,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val out = sup.createTenantDb(
       tenantName  = "tpch",
       suffix      = "tpch1",
-      metastore   = Map("pgHost" -> "h"),
-      dataPath    = "/data/tpch_tpch1"
+      kind        = TenantDbKind.InMemory,
+      metastore   = Map.empty,
+      dataPath    = ""
     ).unsafeRunSync()
     out.isRight shouldBe true
     out.toOption.get.name shouldBe "tpch_tpch1"
@@ -186,21 +187,22 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "reject a duplicate tenant-db inside the same tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()
-    sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
-    val again = sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("tpch", "tpch1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val again = sup.createTenantDb("tpch", "tpch1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     again.isLeft shouldBe true
     again.swap.toOption.get should include("already exists")
 
   it should "reject a tenant-db when the tenant doesn't exist" in:
     val (sup, _) = freshSupervisorWithBackend()
-    val out = sup.createTenantDb("ghost", "prod", Map.empty, "").unsafeRunSync()
+    val out = sup.createTenantDb("ghost", "prod", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     out.isLeft shouldBe true
 
   "bootstrap chain" should "thread createTenant -> createTenantDb -> createPool" in:
     val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()
     sup.createTenantDb("tpch", "tpch1",
-      metastore = Map("schemaName" -> "main"),
+      kind      = TenantDbKind.DuckDbFile,
+      metastore = Map("dbName" -> "tpch_tpch1", "schemaName" -> "main"),
       dataPath  = "/data/tpch_tpch1"
     ).unsafeRunSync()
     val poolKey = PoolKey("tpch", "tpch_tpch1", "sales")
@@ -230,7 +232,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   "PoolSupervisor.createTenantDb" should "invoke DbAdmin.createDatabase with the composed name" in:
     val (sup, admin) = supWithAdmin()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()
-    val out = sup.createTenantDb("tpch", "tpch1", Map.empty, "/data/tpch_tpch1").unsafeRunSync()
+    val out = sup.createTenantDb("tpch", "tpch1",
+      TenantDbKind.DuckLake,
+      Map("pgHost" -> "h", "pgPort" -> "0", "pgUser" -> "u",
+          "pgPassword" -> "s", "dbName" -> "ignored", "schemaName" -> "main"),
+      "/data/tpch_tpch1"
+    ).unsafeRunSync()
     out.isRight shouldBe true
     admin.created.toList shouldBe List("tpch_tpch1")
     admin.dropped.toList shouldBe Nil
@@ -238,15 +245,19 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "auto-populate metastore.dbName with the composed name" in:
     val (sup, _) = supWithAdmin()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()
-    val td = sup.createTenantDb("tpch", "prod", Map("schemaName" -> "main"), "")
-      .unsafeRunSync().toOption.get
+    val td = sup.createTenantDb("tpch", "prod",
+      TenantDbKind.DuckLake,
+      Map("pgHost" -> "h", "pgPort" -> "0", "pgUser" -> "u",
+          "pgPassword" -> "s", "dbName" -> "ignored", "schemaName" -> "main"),
+      "/data/tpch_prod"
+    ).unsafeRunSync().toOption.get
     td.metastore("dbName")     shouldBe "tpch_prod"
     td.metastore("schemaName") shouldBe "main"
 
   "PoolSupervisor.deleteTenantDb" should "invoke DbAdmin.dropDatabase after the row is gone" in:
     val (sup, admin) = supWithAdmin()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()
-    sup.createTenantDb("tpch", "tpch1", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("tpch", "tpch1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.deleteTenantDb("tpch", "tpch_tpch1").unsafeRunSync() shouldBe Right(())
     admin.dropped.toList shouldBe List("tpch_tpch1")
     sup.listTenantDbsByTenant("tpch") shouldBe empty
@@ -254,7 +265,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "refuse the delete when a pool still points at the tenant-db" in:
     val (sup, admin) = supWithAdmin()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", ms, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
     out.isLeft shouldBe true
@@ -266,11 +277,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   "PoolSupervisor.createPool" should "pass the tenant-db's metastore into the NodeSpec" in:
     val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", Map(
-      "pgHost"     -> "tenant-host",
-      "pgPort"     -> "5432",
-      "shared"     -> "tenant-val"
-    ), dataPath = "").unsafeRunSync()
+    sup.createTenantDb("acme", "default",
+      TenantDbKind.DuckDbFile,
+      Map("pgHost" -> "tenant-host", "pgPort" -> "5432",
+          "shared" -> "tenant-val", "dbName" -> "acme_default", "schemaName" -> "main"),
+      dataPath = "/data/acme_default"
+    ).unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val spec = backend.specs.head
     spec.metastore("pgHost") shouldBe "tenant-host"
@@ -285,8 +297,16 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(Tenant("eu")).unsafeRunSync()
     sup.createTenant(Tenant("us")).unsafeRunSync()
-    sup.createTenantDb("eu", "default", Map("dataPath" -> "/data/eu-west"), "").unsafeRunSync()
-    sup.createTenantDb("us", "default", Map("dataPath" -> "s3://us-east-data/"), "").unsafeRunSync()
+    sup.createTenantDb("eu", "default",
+      TenantDbKind.DuckDbFile,
+      Map("dataPath" -> "/data/eu-west", "dbName" -> "eu_default", "schemaName" -> "main"),
+      "/data/eu-west"
+    ).unsafeRunSync()
+    sup.createTenantDb("us", "default",
+      TenantDbKind.DuckDbFile,
+      Map("dataPath" -> "s3://us-east-data/", "dbName" -> "us_default", "schemaName" -> "main"),
+      "s3://us-east-data/"
+    ).unsafeRunSync()
     sup.effectiveMetastoreFor("eu", "eu_default")("dataPath") shouldBe "/data/eu-west"
     sup.effectiveMetastoreFor("us", "us_default")("dataPath") shouldBe "s3://us-east-data/"
 
@@ -296,5 +316,5 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       defaultMetastore = Map("dataPath" -> "/data/global")
     )
     sup.createTenant(Tenant("legacy")).unsafeRunSync()
-    sup.createTenantDb("legacy", "default", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("legacy", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.effectiveMetastoreFor("legacy", "legacy_default")("dataPath") shouldBe "/data/global"

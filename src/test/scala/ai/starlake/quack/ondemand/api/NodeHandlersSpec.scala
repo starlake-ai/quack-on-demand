@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
@@ -36,7 +36,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
                                  new InMemoryControlPlaneStore())
     // Tenants are first-class - must exist before a pool can be created.
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", Map.empty, "").unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.createPool(PoolKey("acme", "acme_default", "sales"),
                    RoleDistribution(0, 1, 1)).unsafeRunSync()
     (sup, tracker, new NodeHandlers(sup, tracker, backend))
