@@ -3,50 +3,70 @@ import { api, ApiError } from '../api/client';
 import type {
   GroupResponse, PoolPermissionResponse, PoolResponse, RoleResponse, UserResponse,
 } from '../api/types';
+import Tabs from './Tabs';
+import { DeleteIcon, EditIcon } from './Icons';
 
-/** Groups tab on the /users page. Three-pane:
-  *   - left:   groups list (per-tenant) + "+ New group"
-  *   - middle: members of the selected group + role memberships
-  *   - right:  pool grants attached to the selected group
-  *
-  * Membership add/remove is intentionally minimalist -- pick a user or
-  * role from a dropdown of every user/role in the tenant and submit.
-  * Tab-completion in a real UI is left for a later iteration. */
+/** Groups tab on the /users page. Single-pane list of groups (one row per
+  * group, with member/role/pool-grant counts) plus a per-row Edit button
+  * that opens a 3-tab modal (Users / Roles / Pool grants) for that group.
+  * Counts are computed client-side from the tenant-scoped user list,
+  * per-group role membership probes, and a single tenant-wide pool
+  * permission fetch bucketed by groupId. */
 export default function GroupSection({ tenant }: { tenant: string | null }) {
   const [groups, setGroups]   = useState<GroupResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
 
+  // The group currently being edited; non-null opens the edit modal.
   const [selected, setSelected] = useState<GroupResponse | null>(null);
 
-  // Members + role memberships of the selected group are derived by
-  // listing every user/role in the tenant and filtering by the
-  // /user/{id}/effective view + role membership lookups. To keep this
-  // lightweight we use /user/list (which already reports each user's
-  // groups by name) + /role/list and trim client-side.
-  const [users, setUsers]     = useState<UserResponse[]>([]);
-  const [roles, setRoles]     = useState<RoleResponse[]>([]);
-  const [groupRoles, setGroupRoles] = useState<RoleResponse[]>([]);
-  const [poolPerms, setPoolPerms] = useState<PoolPermissionResponse[]>([]);
-  // Pools available in this tenant. Used both to render the grant
-  // dropdown (name-keyed → id) and to label existing grants by name
-  // instead of UUID.
+  // Tenant context shared by the list (for counts) and the edit modal.
+  const [users, setUsers]             = useState<UserResponse[]>([]);
+  const [roles, setRoles]             = useState<RoleResponse[]>([]);
+  const [groupRoles, setGroupRoles]   = useState<RoleResponse[]>([]);
+  const [poolPerms, setPoolPerms]     = useState<PoolPermissionResponse[]>([]);
   const [tenantPools, setTenantPools] = useState<PoolResponse[]>([]);
 
-  // New-group form
+  // Per-group counts shown in the list. roleCounts: N parallel calls to
+  // /membership/group-role/list. poolCounts: one tenant-wide
+  // /pool/permission/list bucketed by groupId. userCounts are derived
+  // inline from the `users` list (each user already reports its groups
+  // by name).
+  const [roleCounts, setRoleCounts] = useState<Record<string, number>>({});
+  const [poolCounts, setPoolCounts] = useState<Record<string, number>>({});
+
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
 
-  // Inline membership add controls
   const [addUserId, setAddUserId]     = useState('');
   const [addRoleId, setAddRoleId]     = useState('');
   const [grantPoolId, setGrantPoolId] = useState<string>(''); // '' = wildcard
 
   function reloadGroups() {
     setError(null);
-    if (!tenant) { setGroups([]); setSelected(null); return; }
+    if (!tenant) { setGroups([]); setSelected(null); setRoleCounts({}); setPoolCounts({}); return; }
     api.listGroups(tenant)
-      .then(r => setGroups(r.groups))
+      .then(async r => {
+        setGroups(r.groups);
+        // Pool-grant counts: one tenant-wide call bucketed by groupId.
+        api.listPoolPermissions({ tenant })
+          .then(pp => {
+            const counts: Record<string, number> = {};
+            for (const p of pp.permissions) {
+              if (p.groupId) counts[p.groupId] = (counts[p.groupId] ?? 0) + 1;
+            }
+            setPoolCounts(counts);
+          })
+          .catch(() => setPoolCounts({}));
+        // Role counts: one call per group. Acceptable for the typical
+        // group fan-out (handful per tenant in the admin UI).
+        const entries = await Promise.all(r.groups.map(g =>
+          api.listGroupRoles(g.id)
+            .then(x => [g.id, x.roles.length] as const)
+            .catch(() => [g.id, 0] as const),
+        ));
+        setRoleCounts(Object.fromEntries(entries));
+      })
       .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
   }
 
@@ -142,6 +162,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       await api.addGroupRole({ groupId: selected.id, roleId: addRoleId });
       setAddRoleId('');
       reloadGroupRoles(selected);
+      setRoleCounts(c => ({ ...c, [selected.id]: (c[selected.id] ?? 0) + 1 }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
@@ -153,6 +174,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     try {
       await api.removeGroupRole({ groupId: selected.id, roleId });
       reloadGroupRoles(selected);
+      setRoleCounts(c => ({ ...c, [selected.id]: Math.max(0, (c[selected.id] ?? 1) - 1) }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
@@ -170,6 +192,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       });
       setGrantPoolId('');
       reloadGroupPools(selected);
+      setPoolCounts(c => ({ ...c, [selected.id]: (c[selected.id] ?? 0) + 1 }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
@@ -182,6 +205,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     try {
       await api.revokePoolPermission({ id: p.id });
       reloadGroupPools(selected);
+      setPoolCounts(c => ({ ...c, [selected.id]: Math.max(0, (c[selected.id] ?? 1) - 1) }));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
@@ -196,8 +220,12 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     );
   }
 
-  // Members of the selected group: every user whose `groups` column contains
-  // the group name. Cheap client-side filter on the already-fetched user list.
+  // Per-list-row user count: derived from already-fetched users. Pool +
+  // role counts use the pre-computed maps from reloadGroups.
+  const userCount = (g: GroupResponse) =>
+    users.filter(u => u.groups.includes(g.name)).length;
+
+  // Selected-group derivations (modal only).
   const members = selected
     ? users.filter(u => u.groups.includes(selected.name))
     : [];
@@ -205,164 +233,195 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     ? users.filter(u => !u.groups.includes(selected.name))
     : [];
 
+  const usersTab = !selected ? null : (
+    <>
+      <form onSubmit={handleAddUser} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+        <select style={{ flex: 1 }} value={addUserId} onChange={ev => setAddUserId(ev.target.value)}>
+          <option value="">(pick a user)</option>
+          {nonMembers.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
+        </select>
+        <button type="submit" disabled={!addUserId} style={{ whiteSpace: 'nowrap' }}>+ Add member</button>
+      </form>
+      {members.length === 0 ? <div className="empty">(no members)</div> : (
+        <table>
+          <thead><tr><th>Username</th><th className="actions"></th></tr></thead>
+          <tbody>{members.map(u => (
+            <tr key={u.id}>
+              <td><code>{u.username}</code></td>
+              <td className="actions"><button className="icon-btn danger" title="Remove" aria-label="Remove" onClick={() => handleRemoveUser(u.id)}><DeleteIcon /></button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+    </>
+  );
+
+  const rolesTab = !selected ? null : (
+    <>
+      <form onSubmit={handleAddRole} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+        <select style={{ flex: 1 }} value={addRoleId} onChange={ev => setAddRoleId(ev.target.value)}>
+          <option value="">(pick a role)</option>
+          {roles
+            .filter(r => !groupRoles.some(gr => gr.id === r.id))
+            .map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+        </select>
+        <button type="submit" disabled={!addRoleId} style={{ whiteSpace: 'nowrap' }}>+ Add role</button>
+      </form>
+      {groupRoles.length === 0 ? <div className="empty">(no role memberships)</div> : (
+        <table>
+          <thead><tr><th>Role</th><th className="actions"></th></tr></thead>
+          <tbody>{groupRoles.map(r => (
+            <tr key={r.id}>
+              <td><code>{r.name}</code></td>
+              <td className="actions"><button className="icon-btn danger" title="Remove" aria-label="Remove" onClick={() => handleRemoveRole(r.id)}><DeleteIcon /></button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+    </>
+  );
+
+  const poolsTab = !selected ? null : (
+    <>
+      <form onSubmit={handleGrantPool} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+        <select
+          style={{ flex: 1 }}
+          value={grantPoolId}
+          onChange={ev => setGrantPoolId(ev.target.value)}
+        >
+          <option value="">(every pool in tenant)</option>
+          {tenantPools.map(p => (
+            <option key={p.id} value={p.id}>{p.pool}</option>
+          ))}
+        </select>
+        <button type="submit" style={{ whiteSpace: 'nowrap' }}>+ Grant pool</button>
+      </form>
+      {poolPerms.length === 0 ? <div className="empty">(no pool grants)</div> : (
+        <table>
+          <thead><tr><th>Pool</th><th className="actions"></th></tr></thead>
+          <tbody>
+            {poolPerms.map(p => {
+              const name = p.poolId
+                ? (tenantPools.find(tp => tp.id === p.poolId)?.pool ?? p.poolId)
+                : '*';
+              return (
+                <tr key={p.id}>
+                  <td><code>{name}</code></td>
+                  <td className="actions"><button className="icon-btn danger" title="Revoke" aria-label="Revoke" onClick={() => handleRevokePool(p)}><DeleteIcon /></button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>Groups</div>
         {!adding && (
-          <button onClick={() => setAdding(true)}>+ New group</button>
+          <button type="button" className="link-button" onClick={() => setAdding(true)}>+ New group</button>
         )}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
 
-      <div className="row" style={{ alignItems: 'flex-start', gap: 16 }}>
-        {/* Left: groups list */}
-        <div style={{ flex: '0 0 220px' }}>
-          {groups.length === 0 ? (
-            <div className="empty">(no groups)</div>
-          ) : (
-            <table>
-              <thead><tr><th>Name</th><th></th></tr></thead>
-              <tbody>{groups.map(g => (
-                <tr
-                  key={g.id}
-                  onClick={() => setSelected(g)}
-                  style={{
-                    cursor: 'pointer',
-                    background: selected?.id === g.id ? 'rgba(0,0,0,0.04)' : undefined,
-                  }}
-                >
-                  <td><code>{g.name}</code></td>
-                  <td>
-                    <button className="danger" onClick={ev => { ev.stopPropagation(); void handleDelete(g); }}>Delete</button>
-                  </td>
-                </tr>
-              ))}</tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Middle: members + role memberships */}
-        <div style={{ flex: 1 }}>
-          {!selected ? (
-            <div className="subtle">(select a group)</div>
-          ) : (
-            <>
-              <h4 style={{ marginTop: 0 }}>Members of <code>{selected.name}</code></h4>
-              {members.length === 0 ? <div className="empty">(none)</div> : (
-                <table>
-                  <thead><tr><th>Username</th><th></th></tr></thead>
-                  <tbody>{members.map(u => (
-                    <tr key={u.id}>
-                      <td><code>{u.username}</code></td>
-                      <td><button className="danger" onClick={() => handleRemoveUser(u.id)}>Remove</button></td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              )}
-              <form onSubmit={handleAddUser} className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center' }}>
-                <select value={addUserId} onChange={ev => setAddUserId(ev.target.value)}>
-                  <option value="">(pick a user)</option>
-                  {nonMembers.map(u => <option key={u.id} value={u.id}>{u.username}</option>)}
-                </select>
-                <button type="submit" disabled={!addUserId}>+ Add member</button>
-              </form>
-
-              <h4>Role memberships</h4>
-              {groupRoles.length === 0 ? <div className="empty">(none)</div> : (
-                <table>
-                  <thead><tr><th>Role</th><th></th></tr></thead>
-                  <tbody>{groupRoles.map(r => (
-                    <tr key={r.id}>
-                      <td><code>{r.name}</code></td>
-                      <td><button className="danger" onClick={() => handleRemoveRole(r.id)}>Remove</button></td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              )}
-              <form onSubmit={handleAddRole} className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center' }}>
-                <select value={addRoleId} onChange={ev => setAddRoleId(ev.target.value)}>
-                  <option value="">(pick a role)</option>
-                  {roles
-                    .filter(r => !groupRoles.some(gr => gr.id === r.id))
-                    .map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                </select>
-                <button type="submit" disabled={!addRoleId}>+ Add role</button>
-              </form>
-            </>
-          )}
-        </div>
-
-        {/* Right: pool grants */}
-        <div style={{ flex: '0 0 280px' }}>
-          {!selected ? null : (
-            <>
-              <h4 style={{ marginTop: 0 }}>Pool grants</h4>
-              <form id="group-pool-grant-form" onSubmit={handleGrantPool} />
-              <table>
-                <thead><tr><th>Pool</th><th></th></tr></thead>
-                <tbody>
-                  {poolPerms.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="empty" style={{ padding: '.5rem' }}>(none)</td>
-                    </tr>
-                  ) : (
-                    poolPerms.map(p => {
-                      const name = p.poolId
-                        ? (tenantPools.find(tp => tp.id === p.poolId)?.pool ?? p.poolId)
-                        : '*';
-                      return (
-                        <tr key={p.id}>
-                          <td><code>{name}</code></td>
-                          <td><button className="danger" onClick={() => handleRevokePool(p)}>Revoke</button></td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-                <tfoot>
-                  <tr>
-                    <td>
-                      <select
-                        form="group-pool-grant-form"
-                        value={grantPoolId}
-                        onChange={ev => setGrantPoolId(ev.target.value)}
-                      >
-                        <option value="">(every pool in tenant)</option>
-                        {tenantPools.map(p => (
-                          <option key={p.id} value={p.id}>{p.pool}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td><button type="submit" form="group-pool-grant-form">Grant</button></td>
-                  </tr>
-                </tfoot>
-              </table>
-            </>
-          )}
-        </div>
-      </div>
+      {groups.length === 0 ? (
+        <div className="empty">(no groups)</div>
+      ) : (
+        <table>
+          <thead><tr>
+            <th>Name</th>
+            <th>Users</th>
+            <th>Roles</th>
+            <th>Pool grants</th>
+            <th className="actions"></th>
+          </tr></thead>
+          <tbody>{groups.map(g => (
+            <tr key={g.id}>
+              <td><code>{g.name}</code></td>
+              <td>{userCount(g)}</td>
+              <td>{roleCounts[g.id] ?? '-'}</td>
+              <td>{poolCounts[g.id] ?? 0}</td>
+              <td className="actions">
+                <button className="icon-btn" title="Edit" aria-label="Edit" onClick={() => setSelected(g)}><EditIcon /></button>
+                {' '}
+                <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(g)}><DeleteIcon /></button>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
 
       {adding && (
-        <form onSubmit={handleCreate} style={{ marginTop: '0.75rem' }}>
-          <fieldset>
-            <legend>New group</legend>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <div
+          className="modal-backdrop"
+          onClick={() => { setAdding(false); setError(null); }}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 560 }}
+          >
+            <div className="card-title">New group</div>
+            <form onSubmit={handleCreate}>
               <label>
                 Name
                 <input value={newName} onChange={ev => setNewName(ev.target.value)} required />
               </label>
-              <label style={{ flex: 1, minWidth: 240 }}>
+              <label>
                 Description
                 <input value={newDesc} onChange={ev => setNewDesc(ev.target.value)} />
               </label>
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }}>Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {selected && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSelected(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{
+              width: '90%', maxWidth: 720,
+              height: '80vh', maxHeight: 'calc(100vh - 4rem)',
+              display: 'flex', flexDirection: 'column',
+            }}
+          >
+            <div className="card-title">Edit group <code>{selected.name}</code></div>
+            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+              <Tabs
+                tabs={[
+                  { id: 'users', label: 'Users',       body: usersTab },
+                  { id: 'roles', label: 'Roles',       body: rolesTab },
+                  { id: 'pools', label: 'Pool grants', body: poolsTab },
+                ]}
+              />
             </div>
-            <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
-              <button type="submit">Create</button>
-              <button type="button" className="cancel-button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
+            <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+              <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => setSelected(null)}>Close</button>
             </div>
-          </fieldset>
-        </form>
+          </div>
+        </div>
       )}
     </div>
   );

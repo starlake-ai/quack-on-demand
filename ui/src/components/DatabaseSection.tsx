@@ -7,6 +7,7 @@ import DataPathEditor, {
   type StoreType,
 } from './DataPathEditor';
 import FederationSection from './FederationSection';
+import { DeleteIcon } from './Icons';
 
 /** Databases card for the TenantDetail page. Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
@@ -240,7 +241,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 </td>
                 <td>
                   <div className="row" style={{ gap: 6 }}>
-                    <button className="danger" onClick={() => handleDelete(d.name)}>Delete</button>
+                    <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(d.name)}><DeleteIcon /></button>
                   </div>
                 </td>
               </tr>
@@ -259,61 +260,46 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               advanced metastore keys -- are per-database. The Postgres database itself is
               created automatically as <code>{`${tenant}_<suffix>`}</code>.
             </p>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Name</span>
-                <input
-                  value={name}
-                  onChange={ev => onNameChange(ev.target.value)}
-                  placeholder={`${prefix}prod`}
-                  aria-invalid={nameError != null}
-                  style={{
-                    width: 280,
-                    fontFamily: 'monospace',
-                    borderColor: nameError ? '#c33' : undefined
-                  }}
-                  required
-                />
-                {nameError ? (
-                  <span style={{ color: '#c33', fontSize: '0.85em', marginTop: 2 }}>{nameError}</span>
-                ) : (
-                  <span className="subtle" style={{ fontSize: '0.85em', marginTop: 2 }}>
-                    The <code>{prefix}</code> prefix is mandatory and locked; only the suffix is editable.
-                  </span>
-                )}
-              </label>
-            </div>
-
-            <div className="form-group" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginTop: '0.75rem' }}>
-              <label htmlFor="tenant-db-kind" style={{ marginRight: '0.25rem' }}>Kind:</label>
-              <select
-                id="tenant-db-kind"
-                value={kind}
-                onChange={e => setKind(e.target.value as TenantDbKind)}
-              >
+            <label>
+              Name
+              <input
+                value={name}
+                onChange={ev => onNameChange(ev.target.value)}
+                placeholder={`${prefix}prod`}
+                aria-invalid={nameError != null}
+                style={nameError ? { borderColor: 'var(--bad)' } : undefined}
+                required
+              />
+            </label>
+            {nameError ? (
+              <p style={{ color: 'var(--bad)', fontSize: '0.85em', marginTop: '-0.5rem' }}>{nameError}</p>
+            ) : (
+              <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>
+                The <code>{prefix}</code> prefix is mandatory and locked; only the suffix is editable.
+              </p>
+            )}
+            <label>
+              Kind
+              <select value={kind} onChange={e => setKind(e.target.value as TenantDbKind)}>
                 <option value="ducklake">ducklake</option>
                 <option value="duckdb-file">duckdb-file</option>
                 <option value="memory">memory</option>
               </select>
-              <span style={{ fontSize: '0.85em', color: '#666' }}>
-                {kind === 'ducklake'    && 'Postgres-backed DuckLake catalog + object-store data path.'}
-                {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
-                {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
-              </span>
-            </div>
-
+            </label>
+            <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>
+              {kind === 'ducklake'    && 'Postgres-backed DuckLake catalog + object-store data path.'}
+              {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
+              {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
+            </p>
             {kind !== 'memory' && (
-              <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                <label style={{ display: 'flex', flexDirection: 'column' }}>
-                  <span>Schema</span>
-                  <input value={schemaName} onChange={ev => setSchemaName(ev.target.value)} placeholder="main" />
-                </label>
-              </div>
+              <label>
+                Schema
+                <input value={schemaName} onChange={ev => setSchemaName(ev.target.value)} placeholder="main" />
+              </label>
             )}
-
             {kind !== 'memory' && (
-              <details style={{ marginTop: '0.5rem' }}>
-                <summary style={{ cursor: 'pointer', color: '#666' }}>Advanced metastore keys</summary>
+              <details style={{ marginTop: '0.25rem' }}>
+                <summary style={{ cursor: 'pointer', color: 'var(--text-mute)' }}>Advanced metastore keys</summary>
                 <p className="subtle" style={{ marginBottom: 4 }}>
                   Extra <code>key=value</code> pairs, one per line. Use for non-standard metastore options.
                 </p>
@@ -322,7 +308,6 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                   onChange={ev => setExtrasText(ev.target.value)}
                   rows={6}
                   placeholder={"# example:\n# applicationName=quack-prod"}
-                  style={{ width: '100%', fontFamily: 'monospace' }}
                 />
               </details>
             )}
@@ -348,13 +333,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <p className="subtle" style={{ marginTop: 0 }}>
                 Local <code>.duckdb</code> file path attached as the default catalog.
               </p>
-              <label style={{ display: 'flex', flexDirection: 'column', maxWidth: 400 }}>
-                <span>Path</span>
+              <label>
+                Path
                 <input
                   value={dataPath}
                   onChange={ev => setDataPath(ev.target.value)}
                   placeholder="/data/mydb.duckdb"
-                  style={{ fontFamily: 'monospace' }}
                 />
               </label>
             </fieldset>
@@ -362,31 +346,27 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
           <fieldset style={{ marginTop: '0.5rem' }}>
             <legend>Federated defaults (optional)</legend>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Default catalog (optional)</span>
-                <input
-                  value={defaultDatabase}
-                  onChange={ev => setDefaultDatabase(ev.target.value)}
-                  placeholder="my_catalog"
-                  style={{ width: 220, fontFamily: 'monospace' }}
-                />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Default schema (optional)</span>
-                <input
-                  value={defaultSchema}
-                  onChange={ev => setDefaultSchema(ev.target.value)}
-                  placeholder="main"
-                  style={{ width: 220, fontFamily: 'monospace' }}
-                />
-              </label>
-            </div>
+            <label>
+              Default catalog (optional)
+              <input
+                value={defaultDatabase}
+                onChange={ev => setDefaultDatabase(ev.target.value)}
+                placeholder="my_catalog"
+              />
+            </label>
+            <label>
+              Default schema (optional)
+              <input
+                value={defaultSchema}
+                onChange={ev => setDefaultSchema(ev.target.value)}
+                placeholder="main"
+              />
+            </label>
           </fieldset>
 
-          <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
-            <button type="submit" disabled={nameError != null || name === prefix}>Create</button>
-            <button type="button" className="cancel-button" onClick={() => { setAdding(false); resetForm(); }}>Cancel</button>
+          <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'flex-end' }}>
+            <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setAdding(false); resetForm(); }}>Cancel</button>
+            <button type="submit" style={{ minWidth: '7rem' }} disabled={nameError != null || name === prefix}>Create</button>
           </div>
         </form>
       )}

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
+import { EditIcon } from './Icons';
 
 /** Auth-provider tab on the TenantDetail page. Shows the tenant's
   * current provider + config and lets the admin swap it. Users / roles /
@@ -82,7 +83,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>Auth provider</div>
         {!editing && (
-          <button onClick={openEditor}>Edit</button>
+          <button className="icon-btn" title="Edit" aria-label="Edit auth provider" onClick={openEditor}><EditIcon /></button>
         )}
       </div>
       <p className="subtle">
@@ -93,66 +94,81 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
       </p>
       {error && <div className="login-err">Error: {error}</div>}
 
-      {!editing ? (
-        <table>
-          <tbody>
-            <tr>
-              <th style={{ textAlign: 'left', width: 160 }}>Provider</th>
-              <td><code>{tenant.authProvider}</code> <span className="subtle">— {PROVIDER_LABELS[tenant.authProvider]}</span></td>
-            </tr>
-            {fields.length === 0 ? (
-              <tr>
-                <th style={{ textAlign: 'left' }}>Config</th>
-                <td className="subtle">(none — the username on each user record IS the identity)</td>
-              </tr>
-            ) : (
-              fields.map(f => (
-                <tr key={f.key}>
-                  <th style={{ textAlign: 'left' }}>{f.label}</th>
-                  <td><code>{activeConfig[f.key] ?? <span className="subtle">(not set)</span>}</code></td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      ) : (
-        <form onSubmit={save}>
-          <label>
-            Provider<br/>
-            <select
-              value={provider}
-              onChange={ev => pickProvider(ev.target.value as AuthProvider)}
-            >
-              {(Object.keys(PROVIDER_LABELS) as AuthProvider[]).map(k => (
-                <option key={k} value={k}>{PROVIDER_LABELS[k]}</option>
-              ))}
-            </select>
-          </label>
+      <table>
+        <tbody>
+          <tr>
+            <th style={{ textAlign: 'left', width: 160 }}>Provider</th>
+            <td><code>{tenant.authProvider}</code> <span className="subtle">— {PROVIDER_LABELS[tenant.authProvider]}</span></td>
+          </tr>
           {fields.length === 0 ? (
-            <p className="subtle" style={{ marginTop: '0.5rem' }}>
-              <code>db</code> needs no extra config.
-            </p>
+            <tr>
+              <th style={{ textAlign: 'left' }}>Config</th>
+              <td className="subtle">(none — the username on each user record IS the identity)</td>
+            </tr>
           ) : (
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap', marginTop: '0.5rem' }}>
-              {fields.map(f => (
-                <label key={f.key} style={{ flex: '1 1 280px' }}>
-                  {f.label}<br/>
-                  <input
-                    value={config[f.key] ?? ''}
-                    onChange={ev => setConfigField(f.key, ev.target.value)}
-                    placeholder={f.placeholder}
-                    style={{ width: '100%' }}
-                    required
-                  />
-                </label>
-              ))}
-            </div>
+            fields.map(f => (
+              <tr key={f.key}>
+                <th style={{ textAlign: 'left' }}>{f.label}</th>
+                <td><code>{activeConfig[f.key] ?? <span className="subtle">(not set)</span>}</code></td>
+              </tr>
+            ))
           )}
-          <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
-            <button type="submit" disabled={!formReady}>Save</button>
-            <button type="button" className="cancel-button" onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
+        </tbody>
+      </table>
+
+      {editing && (
+        <div
+          className="modal-backdrop"
+          onClick={() => { setEditing(false); setError(null); }}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 560 }}
+          >
+            <div className="card-title">Edit auth provider</div>
+            <form onSubmit={save}>
+              <label>
+                Provider
+                <select
+                  value={provider}
+                  onChange={ev => pickProvider(ev.target.value as AuthProvider)}
+                >
+                  {(Object.keys(PROVIDER_LABELS) as AuthProvider[]).map(k => (
+                    <option key={k} value={k}>{PROVIDER_LABELS[k]}</option>
+                  ))}
+                </select>
+              </label>
+              {fields.length === 0 ? (
+                <p className="subtle" style={{ marginTop: 0 }}>
+                  <code>db</code> needs no extra config — the username on each
+                  user record IS the identity.
+                </p>
+              ) : (
+                fields.map(f => (
+                  <label key={f.key}>
+                    {f.label}
+                    <input
+                      value={config[f.key] ?? ''}
+                      onChange={ev => setConfigField(f.key, ev.target.value)}
+                      placeholder={f.placeholder}
+                      required
+                    />
+                  </label>
+                ))
+              )}
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={!formReady}>Save</button>
+              </div>
+            </form>
           </div>
-        </form>
+        </div>
       )}
     </div>
   );

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { TenantResponse, UserResponse } from '../api/types';
 import EffectivePermsCard from './EffectivePermsCard';
+import { DeleteIcon, EditIcon } from './Icons';
 
 /** Users tab on the /users page. Renders the user table for the
   * selected tenant (or every user when `tenant === null`), with inline
@@ -45,8 +46,9 @@ export default function UserSection({
   // Per-row edit (password rotation only). Edit form opens inline
   // below the table row. Skipped for OIDC-tenant users -- the IdP
   // owns password rotation there.
-  const [editingId, setEditingId]     = useState<string | null>(null);
+  const [editingId, setEditingId]       = useState<string | null>(null);
   const [editPassword, setEditPassword] = useState('');
+  const [editIsAdmin, setEditIsAdmin]   = useState(false);
 
   // Resolve the selected new-tenant to its provider so the form can
   // adapt. Superuser always uses the db backend (no IdP routing).
@@ -102,8 +104,12 @@ export default function UserSection({
   async function handleUpdate(id: string) {
     setError(null);
     try {
-      await api.updateUser({ id, password: editPassword || null });
-      setEditingId(null); setEditPassword('');
+      await api.updateUser({
+        id,
+        password: editPassword || null,
+        role:     editIsAdmin ? 'admin' : 'user',
+      });
+      setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditIsAdmin(false);
       reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -131,7 +137,7 @@ export default function UserSection({
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>Users</div>
         {!adding && (
-          <button onClick={() => setAdding(true)}>{createLabel}</button>
+          <button type="button" className="link-button" onClick={() => setAdding(true)}>{createLabel}</button>
         )}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
@@ -152,11 +158,12 @@ export default function UserSection({
             <tr>
               <th>Username</th>
               <th>Tenant</th>
+              <th>Admin</th>
               <th>Roles</th>
               <th>Groups</th>
               <th>Pool grants</th>
               <th>Enabled</th>
-              <th></th>
+              <th className="actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -179,66 +186,73 @@ export default function UserSection({
                     </button>
                   </td>
                   <td>{u.tenant ? <code>{u.tenant}</code> : <em>(superuser)</em>}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={u.role === 'admin'}
+                      disabled
+                      title="Admin status is edited in the Edit modal"
+                    />
+                  </td>
                   <td>{u.roles.length === 0 ? <span className="subtle">-</span> : u.roles.join(', ')}</td>
                   <td>{u.groups.length === 0 ? <span className="subtle">-</span> : u.groups.join(', ')}</td>
                   <td>{u.poolGrants.length === 0 ? <span className="subtle">-</span> : u.poolGrants.join(', ')}</td>
                   <td>{u.enabled ? '✓' : '✗'}</td>
-                  <td>
+                  <td className="actions">
                     {allowEdit ? (
-                      <button onClick={() => { setEditingId(u.id); setEditPassword(''); }}>Edit</button>
+                      <button
+                        className="icon-btn"
+                        title="Edit"
+                        aria-label="Edit"
+                        onClick={() => { setEditingId(u.id); setEditPassword(''); setEditIsAdmin(u.role === 'admin'); }}
+                      ><EditIcon /></button>
                     ) : (
                       <button
+                        className="icon-btn"
                         disabled
+                        aria-label="Edit"
                         title={`Password is managed by the tenant's ${rowProvider} provider`}
-                      >Edit</button>
+                      ><EditIcon /></button>
                     )}
                     {' '}
-                    <button className="danger" onClick={() => handleDelete(u)}>Delete</button>
+                    <button
+                      className="icon-btn danger"
+                      title="Delete"
+                      aria-label="Delete"
+                      onClick={() => handleDelete(u)}
+                    ><DeleteIcon /></button>
                   </td>
                 </tr>
               );
               const perms = isExpanded ? [(
                 <tr key={u.id + '-perms'} className="expanded-row">
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <EffectivePermsCard userId={u.id} />
                   </td>
                 </tr>
               )] : [];
-              if (editingId !== u.id) return [row, ...perms];
-              const edit = (
-                <tr key={u.id + '-edit'} className="edit-row">
-                  <td colSpan={7}>
-                    <form
-                      onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id); }}
-                      className="row"
-                      style={{ gap: 8, alignItems: 'center' }}
-                    >
-                      <label>
-                        New password
-                        <input
-                          type="password"
-                          value={editPassword}
-                          onChange={ev => setEditPassword(ev.target.value)}
-                          placeholder="(leave blank to leave unchanged)"
-                          style={{ marginLeft: 6, width: 280 }}
-                        />
-                      </label>
-                      <button type="submit">Save</button>
-                      <button type="button" className="cancel-button" onClick={() => { setEditingId(null); setEditPassword(''); }}>Cancel</button>
-                    </form>
-                  </td>
-                </tr>
-              );
-              return [row, ...perms, edit];
+              return [row, ...perms];
             })}
           </tbody>
         </table>
       )}
 
       {adding && (
-        <form onSubmit={handleCreate} style={{ marginTop: '0.75rem' }}>
-          <fieldset>
-            <legend>{createLabel}</legend>
+        <div
+          className="modal-backdrop"
+          onClick={() => { setAdding(false); setError(null); }}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 560 }}
+          >
+            <div className="card-title">{createLabel}</div>
             {!newTenantIsDb && (
               <p className="subtle" style={{ marginTop: 0 }}>
                 <code>{newTenantRow?.authProvider}</code> tenant: the IdP owns
@@ -247,7 +261,7 @@ export default function UserSection({
                 same row is reused on the user's first sign-in.
               </p>
             )}
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <form onSubmit={handleCreate}>
               <label>
                 Username
                 <input value={newUsername} onChange={ev => setNewUsername(ev.target.value)} required />
@@ -274,21 +288,72 @@ export default function UserSection({
                   ))}
                 </select>
               </label>
-              <label>
-                Role label
-                <select value={newRole} onChange={ev => setNewRole(ev.target.value as 'user' | 'admin')}>
-                  <option value="user">user</option>
-                  <option value="admin">admin</option>
-                </select>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={newRole === 'admin'}
+                  onChange={ev => setNewRole(ev.target.checked ? 'admin' : 'user')}
+                />
+                {' '}Admin User
               </label>
-            </div>
-            <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
-              <button type="submit">{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
-              <button type="button" className="cancel-button" onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
-            </div>
-          </fieldset>
-        </form>
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }}>{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
+
+      {editingId && (() => {
+        const u = rows.find(r => r.id === editingId);
+        if (!u) return null;
+        return (
+          <div
+            className="modal-backdrop"
+            onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}
+            style={{
+              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+              zIndex: 100, paddingTop: '4rem',
+            }}
+          >
+            <div
+              className="modal card"
+              onClick={ev => ev.stopPropagation()}
+              style={{ width: '90%', maxWidth: 480 }}
+            >
+              <div className="card-title">
+                Edit user <code>{u.username}</code>
+                {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
+              </div>
+              <form onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id); }}>
+                <label>
+                  New password
+                  <input
+                    type="password"
+                    value={editPassword}
+                    onChange={ev => setEditPassword(ev.target.value)}
+                    placeholder="(leave blank to leave unchanged)"
+                  />
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={editIsAdmin}
+                    onChange={ev => setEditIsAdmin(ev.target.checked)}
+                  />
+                  {' '}Admin User
+                </label>
+                <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}>Cancel</button>
+                  <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

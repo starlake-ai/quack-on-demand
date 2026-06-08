@@ -4,6 +4,7 @@ import type {
   FederatedSourceResponse,
   FederatedSecretResponse,
 } from '../api/types';
+import { DeleteIcon, EditIcon } from './Icons';
 
 /** Copy-pasteable Setup SQL templates surfaced as quick-insert buttons above
   * the textarea. Each picks a common DuckDB federation flow. Placeholders
@@ -326,8 +327,13 @@ function SecretEditor({
   const [secrets, setSecrets] = useState<FederatedSecretResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
 
-  // Add-secret form state. `store` drives both the input shape and the
-  // payload the form POSTs: postgres -> {value}, anything else ->
+  // Modal state. `editingName === null` is create-mode; non-null is
+  // edit-mode (Name field locked, prefilled where possible).
+  const [modalOpen,   setModalOpen]   = useState(false);
+  const [editingName, setEditingName] = useState<string | null>(null);
+
+  // Add/edit-secret form state. `store` drives both the input shape and
+  // the payload the form POSTs: postgres -> {value}, anything else ->
   // {externalRef: "<store>:<input>"}.
   const [newName,  setNewName]  = useState('');
   const [store,    setStore]    = useState<SecretStore>('postgres');
@@ -335,6 +341,35 @@ function SecretEditor({
   // `touched` gates inline validation messages: don't shout "required"
   // the instant the form mounts, only after the user has interacted.
   const [touched,  setTouched]  = useState(false);
+
+  function openCreate() {
+    setEditingName(null);
+    setNewName(''); setStore('postgres'); setNewValue('');
+    setTouched(false); setError(null);
+    setModalOpen(true);
+  }
+  function openEdit(s: FederatedSecretResponse) {
+    setEditingName(s.name);
+    setNewName(s.name);
+    if (s.externalRef != null) {
+      const match = KNOWN_PREFIXES.find(p => s.externalRef!.startsWith(p + ':'));
+      if (match) {
+        setStore(match);
+        setNewValue(s.externalRef!.slice(match.length + 1));
+      } else {
+        setStore('env');
+        setNewValue(s.externalRef!);
+      }
+    } else {
+      // Postgres-stored secret: value is REDACTED on read; the user must
+      // re-enter the value to update it.
+      setStore('postgres');
+      setNewValue('');
+    }
+    setTouched(false); setError(null);
+    setModalOpen(true);
+  }
+  function closeModal() { setModalOpen(false); setError(null); }
   const storeSpec  = SECRET_STORES.find(s => s.id === store)!;
   const validation = validateSecretRef(store, newValue);
   // Always show a prefix-mismatch warning (touched or not) so a user
@@ -366,9 +401,7 @@ function SecretEditor({
         name: newName.trim(),
         ...payload,
       });
-      setNewName('');
-      setNewValue('');
-      setTouched(false);
+      setModalOpen(false);
       await reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -394,7 +427,10 @@ function SecretEditor({
       borderRadius: 'var(--radius)',
       color: 'var(--text)',
     }}>
-      <strong>Secrets for <code>{alias}</code></strong>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <strong>Secrets for <code>{alias}</code></strong>
+        <button type="button" className="link-button" onClick={openCreate}>+ New secret</button>
+      </div>
       {error && <div className="login-err" style={{ marginTop: 4 }}>Error: {error}</div>}
       {secrets.length === 0 ? (
         <div className="empty" style={{ marginTop: 4 }}>(no secrets)</div>
@@ -405,7 +441,7 @@ function SecretEditor({
               <th>Name</th>
               <th>Value</th>
               <th>External ref</th>
-              <th style={{ textAlign: 'right', width: '1%', whiteSpace: 'nowrap' }}>Actions</th>
+              <th className="actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -422,8 +458,10 @@ function SecretEditor({
                     ? <code>{s.externalRef}</code>
                     : <span className="subtle">-</span>}
                 </td>
-                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  <button className="danger" onClick={() => void handleDelete(s.name)}>Delete</button>
+                <td className="actions">
+                  <button className="icon-btn" title="Edit" aria-label={`Edit secret ${s.name}`} onClick={() => openEdit(s)}><EditIcon /></button>
+                  {' '}
+                  <button className="icon-btn danger" title="Delete" aria-label={`Delete secret ${s.name}`} onClick={() => void handleDelete(s.name)}><DeleteIcon /></button>
                 </td>
               </tr>
             ))}
@@ -431,98 +469,120 @@ function SecretEditor({
         </table>
       )}
 
-      <form onSubmit={handleAdd} style={{ marginTop: '0.75rem' }}>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <label style={{ display: 'flex', flexDirection: 'column' }}>
-            <span>Name</span>
-            <input
-              value={newName}
-              onChange={ev => setNewName(ev.target.value)}
-              placeholder="MY_SECRET"
-              style={{ width: 180, fontFamily: 'var(--mono)' }}
-              required
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', minWidth: 240 }}>
-            <span>Store</span>
-            <select value={store} onChange={ev => setStore(ev.target.value as SecretStore)}>
-              {SECRET_STORES.map(s => (
-                <option key={s.id} value={s.id}>{s.label}</option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 280 }}>
-            <span>{storeSpec.inputLabel}</span>
-            <input
-              type={store === 'postgres' ? 'password' : 'text'}
-              value={newValue}
-              onChange={ev => setNewValue(ev.target.value)}
-              onBlur={() => setTouched(true)}
-              placeholder={storeSpec.placeholder}
-              style={{
-                fontFamily: storeSpec.mono ? 'var(--mono)' : undefined,
-                borderColor: showError ? 'var(--bad)' : undefined,
-              }}
-              aria-invalid={showError}
-            />
-          </label>
-          <button type="submit" disabled={!validation.ok}>Add / update</button>
-        </div>
-
-        {showError && !validation.ok && (
-          <div style={{
-            marginTop: '.4rem',
-            padding: '.4rem .65rem',
-            background: 'rgba(248, 113, 113, 0.08)',
-            border: '1px solid rgba(248, 113, 113, 0.4)',
-            borderRadius: 'var(--radius)',
-            color: 'var(--bad)',
-            fontSize: '.85em',
-            display: 'flex',
-            gap: '.6rem',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-          }}>
-            <span>{validation.message}</span>
-            {validation.suggestion !== undefined && (
-              <button
-                type="button"
-                className="link-button"
-                onClick={() => setNewValue(validation.suggestion!)}
-              >
-                Use "{validation.suggestion}"
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Inline docs for the currently-selected store: resolution path
-            + credentials + the wire shape of the externalRef. Stays
-            visible so an operator setting up a new secret can verify
-            they understand how the manager will reach the backend. */}
-        <div className="secret-store-doc">
-          <div className="secret-store-doc-row">
-            <span className="secret-store-doc-label">Resolved by</span>
-            <span>{storeSpec.resolution}</span>
-          </div>
-          <div className="secret-store-doc-row">
-            <span className="secret-store-doc-label">Credentials</span>
-            <span>{storeSpec.credentials}</span>
-          </div>
-          {store !== 'postgres' && storeSpec.example && (
-            <div className="secret-store-doc-row">
-              <span className="secret-store-doc-label">externalRef stored as</span>
-              <code>{storeSpec.example}</code>
+      {modalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={closeModal}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 640 }}
+          >
+            <div className="card-title">
+              {editingName ? <>Edit secret <code>{editingName}</code></> : 'New secret'}
             </div>
-          )}
-          {store === 'postgres' && (
-            <div className="secret-store-doc-row">
-              <span className="secret-store-doc-label">externalRef stored as</span>
-              <span style={{ color: 'var(--text-mute)' }}>(none; the literal value is written to qodstate_federated_secret.value)</span>
-            </div>
-          )}
+            <form onSubmit={handleAdd}>
+              <label>
+                Name
+                <input
+                  value={newName}
+                  onChange={ev => setNewName(ev.target.value)}
+                  placeholder="MY_SECRET"
+                  disabled={editingName != null}
+                  required
+                />
+              </label>
+              <label>
+                Store
+                <select value={store} onChange={ev => setStore(ev.target.value as SecretStore)}>
+                  {SECRET_STORES.map(s => (
+                    <option key={s.id} value={s.id}>{s.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {storeSpec.inputLabel}
+                <input
+                  type={store === 'postgres' ? 'password' : 'text'}
+                  value={newValue}
+                  onChange={ev => setNewValue(ev.target.value)}
+                  onBlur={() => setTouched(true)}
+                  placeholder={
+                    editingName && store === 'postgres'
+                      ? '(enter a new value to replace the existing secret)'
+                      : storeSpec.placeholder
+                  }
+                  style={showError ? { borderColor: 'var(--bad)' } : undefined}
+                  aria-invalid={showError}
+                />
+              </label>
+
+              {showError && !validation.ok && (
+                <div style={{
+                  marginTop: '.4rem',
+                  padding: '.4rem .65rem',
+                  background: 'rgba(248, 113, 113, 0.08)',
+                  border: '1px solid rgba(248, 113, 113, 0.4)',
+                  borderRadius: 'var(--radius)',
+                  color: 'var(--bad)',
+                  fontSize: '.85em',
+                  display: 'flex',
+                  gap: '.6rem',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                }}>
+                  <span>{validation.message}</span>
+                  {validation.suggestion !== undefined && (
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setNewValue(validation.suggestion!)}
+                    >
+                      Use "{validation.suggestion}"
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Inline docs for the currently-selected store: resolution path
+                  + credentials + the wire shape of the externalRef. */}
+              <div className="secret-store-doc">
+                <div className="secret-store-doc-row">
+                  <span className="secret-store-doc-label">Resolved by</span>
+                  <span>{storeSpec.resolution}</span>
+                </div>
+                <div className="secret-store-doc-row">
+                  <span className="secret-store-doc-label">Credentials</span>
+                  <span>{storeSpec.credentials}</span>
+                </div>
+                {store !== 'postgres' && storeSpec.example && (
+                  <div className="secret-store-doc-row">
+                    <span className="secret-store-doc-label">externalRef stored as</span>
+                    <code>{storeSpec.example}</code>
+                  </div>
+                )}
+                {store === 'postgres' && (
+                  <div className="secret-store-doc-row">
+                    <span className="secret-store-doc-label">externalRef stored as</span>
+                    <span style={{ color: 'var(--text-mute)' }}>(none; the literal value is written to qodstate_federated_secret.value)</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeModal}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={!validation.ok}>Save</button>
+              </div>
+            </form>
+          </div>
         </div>
-      </form>
+      )}
     </div>
   );
 }
@@ -541,10 +601,15 @@ export default function FederationSection({
   const [sources, setSources] = useState<FederatedSourceResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
+  // Edit-mode: alias being edited, or null in create-mode. Alias is the
+  // identity key and is locked in edit-mode; description / setupSql are
+  // editable. Save uses the same `createFederatedSource` endpoint which
+  // is an upsert by alias server-side.
+  const [editingAlias, setEditingAlias] = useState<string | null>(null);
   // Alias of the source whose secrets are expanded; null = all collapsed.
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  // Add-source form state.
+  // Add/edit-source form state.
   const [alias,       setAlias]       = useState('');
   const [setupSql,    setSetupSql]    = useState('');
   const [description, setDescription] = useState('');
@@ -563,6 +628,27 @@ export default function FederationSection({
     setError(null);
   }
 
+  function openCreate() {
+    resetAddForm();
+    setEditingAlias(null);
+    setAdding(true);
+  }
+
+  function openEdit(s: FederatedSourceResponse) {
+    setAlias(s.alias);
+    setSetupSql(s.setupSql);
+    setDescription(s.description ?? '');
+    setError(null);
+    setEditingAlias(s.alias);
+    setAdding(true);
+  }
+
+  function closeForm() {
+    setAdding(false);
+    setEditingAlias(null);
+    resetAddForm();
+  }
+
   async function handleCreate(ev: React.FormEvent) {
     ev.preventDefault();
     setError(null);
@@ -572,8 +658,7 @@ export default function FederationSection({
         setupSql:    setupSql.trim(),
         description: description.trim() || undefined,
       });
-      resetAddForm();
-      setAdding(false);
+      closeForm();
       await reload();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -600,7 +685,7 @@ export default function FederationSection({
         </div>
         <div className="row" style={{ gap: 8 }}>
           {!adding && (
-            <button type="button" className="link-button" onClick={() => { resetAddForm(); setAdding(true); }}>+ Add federated source</button>
+            <button type="button" className="link-button" onClick={openCreate}>+ Add federated source</button>
           )}
           <button type="button" className="link-button" onClick={onClose}>&larr; Back to databases</button>
         </div>
@@ -614,31 +699,49 @@ export default function FederationSection({
       {error && <div className="login-err">Error: {error}</div>}
 
       {adding && (
-        <form onSubmit={handleCreate} style={{ marginBottom: '0.75rem' }}>
-          <fieldset>
-            <legend>New federated source</legend>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Alias <span style={{ color: '#c33' }}>*</span></span>
-                <input
-                  value={alias}
-                  onChange={ev => setAlias(ev.target.value)}
-                  placeholder="my_s3_source"
-                  style={{ width: 200, fontFamily: 'monospace' }}
-                  required
-                />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 240 }}>
-                <span>Description</span>
-                <input
-                  value={description}
-                  onChange={ev => setDescription(ev.target.value)}
-                  placeholder="Optional description"
-                />
-              </label>
+        <div
+          className="modal-backdrop"
+          onClick={closeForm}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{
+              width: '90%', maxWidth: 800,
+              height: '85vh', maxHeight: 'calc(100vh - 4rem)',
+              display: 'flex', flexDirection: 'column',
+            }}
+          >
+            <div className="card-title">
+              {editingAlias ? <>Edit federated source <code>{editingAlias}</code></> : 'New federated source'}
             </div>
-            <label style={{ display: 'flex', flexDirection: 'column', marginTop: '0.5rem' }}>
-              <span>Setup SQL <span style={{ color: '#c33' }}>*</span></span>
+            <form onSubmit={handleCreate} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+            <label>
+              Alias <span style={{ color: 'var(--bad)' }}>*</span>
+              <input
+                value={alias}
+                onChange={ev => setAlias(ev.target.value)}
+                placeholder="my_s3_source"
+                disabled={editingAlias != null}
+                required
+              />
+            </label>
+            <label>
+              Description
+              <input
+                value={description}
+                onChange={ev => setDescription(ev.target.value)}
+                placeholder="Optional description"
+              />
+            </label>
+            <label>
+              Setup SQL <span style={{ color: 'var(--bad)' }}>*</span>
               <div className="setup-templates">
                 <label className="setup-templates-label" htmlFor="setup-template-picker">
                   Start from a template
@@ -667,23 +770,24 @@ export default function FederationSection({
               <textarea
                 value={setupSql}
                 onChange={ev => setSetupSql(ev.target.value)}
-                rows={20}
+                rows={12}
                 placeholder={
                   "Pick a template above, or write your own.\n\n" +
                   "Placeholders:\n" +
                   "  {{alias}}        - replaced with this source's alias\n" +
                   "  {{secret.NAME}}  - replaced with the resolved value of secret NAME"
                 }
-                style={{ fontFamily: 'monospace', width: '100%' }}
                 required
               />
             </label>
-            <div className="row" style={{ gap: 8, marginTop: '0.5rem' }}>
-              <button type="submit">Create</button>
-              <button type="button" className="cancel-button" onClick={() => { setAdding(false); resetAddForm(); }}>Cancel</button>
-            </div>
-          </fieldset>
-        </form>
+              </div>
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeForm}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }}>{editingAlias ? 'Save' : 'Create'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {sources.length === 0 ? (
@@ -695,7 +799,7 @@ export default function FederationSection({
               <th>Alias</th>
               <th>Description</th>
               <th>Disabled</th>
-              <th>Actions</th>
+              <th className="actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -714,8 +818,10 @@ export default function FederationSection({
                   </td>
                   <td>{s.description ?? <span className="subtle">-</span>}</td>
                   <td>{s.disabled ? 'Yes' : 'No'}</td>
-                  <td>
-                    <button className="danger" onClick={() => void handleDelete(s.alias)}>Delete</button>
+                  <td className="actions">
+                    <button className="icon-btn" title="Edit" aria-label={`Edit federated source ${s.alias}`} onClick={() => openEdit(s)}><EditIcon /></button>
+                    {' '}
+                    <button className="icon-btn danger" title="Delete" aria-label={`Delete federated source ${s.alias}`} onClick={() => void handleDelete(s.alias)}><DeleteIcon /></button>
                   </td>
                 </tr>
                 {expanded === s.alias && (

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { ClientConfigResponse, PoolResponse } from '../api/types';
@@ -13,13 +13,14 @@ export default function PoolDetailBody({
   tenant,
   tenantDb,
   pool,
-  onStopped,
   onBack,
 }: {
   tenant:    string;
   tenantDb:  string;
   pool:      string;
-  onStopped: () => void;
+  /** Reserved for callers that still navigate on stop; the detail view
+    * no longer renders a Stop/Drain button so it's never invoked here. */
+  onStopped?: () => void;
   /** Custom Back-button handler. When provided, the header renders a
     * "Back to pools" button that calls this (used by PoolSection to
     * collapse the inline view). When omitted, the header falls back to
@@ -30,43 +31,6 @@ export default function PoolDetailBody({
   const [data, setData] = useState<PoolResponse | null>(null);
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Scale modal state. Seeded from the live pool on open so the form
-  // shows the current per-role node counts.
-  const [showScale, setShowScale] = useState(false);
-  const [ro, setRo]     = useState(0);
-  const [wo, setWo]     = useState(0);
-  const [dual, setDual] = useState(0);
-  const [forceScale, setForceScale] = useState(false);
-  const [scaleErr, setScaleErr]     = useState<string | null>(null);
-
-  function openScale() {
-    if (!data) return;
-    setRo(data.nodes.filter(n => n.role === 'READONLY' || n.role === 'ReadOnly').length);
-    setWo(data.nodes.filter(n => n.role === 'WRITEONLY' || n.role === 'WriteOnly').length);
-    setDual(data.nodes.filter(n => n.role === 'DUAL'      || n.role === 'Dual').length);
-    setForceScale(false);
-    setScaleErr(null);
-    setShowScale(true);
-  }
-
-  async function submitScale(e: FormEvent) {
-    e.preventDefault();
-    setScaleErr(null);
-    const target = ro + wo + dual;
-    try {
-      const updated = await api.scalePool({
-        tenant, tenantDb, pool,
-        targetSize: target,
-        roleDistribution: { writeonly: wo, readonly: ro, dual },
-        force: forceScale,
-      });
-      setData(updated);
-      setShowScale(false);
-    } catch (e) {
-      setScaleErr(String(e));
-    }
-  }
 
   useEffect(() => {
     api.clientConfig().then(setCfg).catch(e => setError(String(e)));
@@ -92,23 +56,6 @@ export default function PoolDetailBody({
       return typeof window !== 'undefined' ? window.location.hostname : 'localhost';
     }
     return host;
-  }
-
-  // Delete-pool dropdown (Drain vs Force).
-  const [showDeleteMenu, setShowDeleteMenu] = useState(false);
-
-  async function handleDelete(force: boolean) {
-    setShowDeleteMenu(false);
-    const mode = force ? 'FORCE' : 'DRAIN';
-    if (!confirm(
-      `Delete pool ${tenant}/${tenantDb}/${pool} (${mode})?\n\n` +
-      (force
-        ? 'Nodes are stopped immediately; outstanding queries fail.'
-        : 'Nodes stop accepting new queries first, then shut down.') +
-      '\nThe pool registry entry is removed.'
-    )) return;
-    await api.stopPool({ tenant, tenantDb, pool, force });
-    onStopped();
   }
 
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
@@ -262,49 +209,6 @@ export default function PoolDetailBody({
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0 }}>{data.tenant} / {data.tenantDb} / {data.pool}</h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
-          <button onClick={openScale}>Scale</button>
-          <div className="dropdown" style={{ position: 'relative' }}>
-            <button
-              className="danger"
-              aria-haspopup="menu"
-              aria-expanded={showDeleteMenu}
-              onClick={() => setShowDeleteMenu(v => !v)}
-            >
-              Delete pool ▾
-            </button>
-            {showDeleteMenu && (
-              <>
-                <div
-                  className="dropdown-backdrop"
-                  onClick={() => setShowDeleteMenu(false)}
-                  style={{ position: 'fixed', inset: 0, zIndex: 49 }}
-                />
-                <div role="menu" className="dropdown-menu" style={{
-                  position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 50,
-                  minWidth: 160,
-                }}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="dropdown-item"
-                    onClick={() => void handleDelete(false)}
-                    title="Stop accepting new queries first, then shut down"
-                  >
-                    Drain
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="dropdown-item danger"
-                    onClick={() => void handleDelete(true)}
-                    title="Stop immediately; outstanding queries fail"
-                  >
-                    Force
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
           {onBack
             ? <button type="button" className="link-button" onClick={onBack}>← Back to pools</button>
             : (
@@ -314,48 +218,6 @@ export default function PoolDetailBody({
             )}
         </div>
       </header>
-
-      {showScale && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setShowScale(false)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 480 }}
-          >
-            <div className="card-title">Scale {data.tenant}/{data.tenantDb}/{data.pool}</div>
-            <p className="subtle" style={{ marginTop: 0 }}>
-              Current size: {data.nodes.length}. Target: {ro + wo + dual}.
-            </p>
-            {scaleErr && <p style={{ color: 'var(--bad)' }}>{scaleErr}</p>}
-            <form onSubmit={submitScale}>
-              <fieldset>
-                <legend>Role distribution</legend>
-                <label>WriteOnly <input type="number" min={0} value={wo}   onChange={e => setWo(+e.target.value)} /></label>
-                <label>ReadOnly  <input type="number" min={0} value={ro}   onChange={e => setRo(+e.target.value)} /></label>
-                <label>Dual      <input type="number" min={0} value={dual} onChange={e => setDual(+e.target.value)} /></label>
-              </fieldset>
-              {ro + wo + dual < data.nodes.length && (
-                <label style={{ display: 'block', marginTop: '1rem', color: 'var(--bad)' }}>
-                  <input type="checkbox" checked={forceScale} onChange={e => setForceScale(e.target.checked)} />
-                  {' '}Force (skip graceful drain - outstanding queries fail)
-                </label>
-              )}
-              <div className="row" style={{ display: 'flex', gap: '.5rem', marginTop: '1rem' }}>
-                <button type="submit" disabled={ro + wo + dual === 0}>Apply</button>
-                <button type="button" className="cancel-button" onClick={() => setShowScale(false)}>Cancel</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       <Tabs
         tabs={[
