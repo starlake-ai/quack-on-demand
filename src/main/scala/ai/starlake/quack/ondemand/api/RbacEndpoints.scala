@@ -79,6 +79,9 @@ object RbacEndpoints:
   val removeGroupRoleMembership: PublicEndpoint[GroupRoleMembershipRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
     base.post.in("membership" / "group-role" / "remove").in(jsonBody[GroupRoleMembershipRequest])
 
+  val listGroupRoleMembership: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), RoleListResponse, Any] =
+    base.get.in("membership" / "group-role" / "list").in(query[String]("groupId")).out(jsonBody[RoleListResponse])
+
   // ----- RBAC: pool permissions -----
   val grantPoolPermission: PublicEndpoint[PoolPermissionGrantRequest, (sttp.model.StatusCode, ErrorResponse), PoolPermissionResponse, Any] =
     base.post.in("pool" / "permission" / "grant").in(jsonBody[PoolPermissionGrantRequest]).out(jsonBody[PoolPermissionResponse])

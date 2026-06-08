@@ -250,6 +250,8 @@ export const api = {
   removeUserGroup:(req: UserGroupMembershipRequest) => post<void>('/membership/user-group/remove', req),
   addGroupRole:   (req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/add',    req),
   removeGroupRole:(req: GroupRoleMembershipRequest) => post<void>('/membership/group-role/remove', req),
+  listGroupRoles: (groupId: string) =>
+    get<RoleListResponse>(`/membership/group-role/list?groupId=${encodeURIComponent(groupId)}`),
 
   // ----- RBAC: pool permissions -----
   listPoolPermissions: (filters: { tenant?: string; userId?: string; groupId?: string } = {}) => {

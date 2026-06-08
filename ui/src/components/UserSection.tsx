@@ -57,6 +57,13 @@ export default function UserSection({
   const tenantProviderOf = (tenantName: string | null): string =>
     tenantName ? (tenants.find(t => t.name === tenantName)?.authProvider ?? 'db') : 'db';
 
+  // When the page filter is pinned to a single tenant backed by an
+  // external IdP, surface a banner so the operator knows accounts are
+  // authoritatively owned elsewhere and the local rows are just
+  // pre-provisioned shells for role/group/grant attachment.
+  const filterProvider = tenant ? tenantProviderOf(tenant) : null;
+  const externalProvider = filterProvider && filterProvider !== 'db' ? filterProvider : null;
+
   function reload() {
     setError(null);
     api.listUsers(tenant ?? undefined)
@@ -128,6 +135,15 @@ export default function UserSection({
         )}
       </div>
       {error && <div className="login-err">Error: {error}</div>}
+      {externalProvider && (
+        <div className="external-provider-notice">
+          Users for tenant <code>{tenant}</code> are managed by the external
+          {' '}<code>{externalProvider}</code> identity provider. Accounts
+          authenticate against the IdP — the rows below are local
+          pre-provisioned shells used only to attach roles, groups, and
+          pool grants. Password edits are disabled.
+        </div>
+      )}
       {rows.length === 0 ? (
         <div className="empty">(no users)</div>
       ) : (

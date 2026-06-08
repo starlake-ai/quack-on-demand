@@ -470,7 +470,7 @@ object Main extends IOApp with LazyLogging:
       val userHandlers     = new UserHandlers(sup, userStoreForRbac)
       val roleHandlers     = new RoleHandlers(sup, userHandlers)
       val groupHandlers    = new GroupHandlers(sup, userHandlers)
-      val membershipHandlers = new MembershipHandlers(sup)
+      val membershipHandlers = new MembershipHandlers(sup, userHandlers)
       val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
 
       // Config page registry. The roots list pairs each typed config

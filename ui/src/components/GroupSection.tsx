@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type {
-  GroupResponse, PoolPermissionResponse, RoleResponse, UserResponse,
+  GroupResponse, PoolPermissionResponse, PoolResponse, RoleResponse, UserResponse,
 } from '../api/types';
 
 /** Groups tab on the /users page. Three-pane:
@@ -26,7 +26,12 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
   // groups by name) + /role/list and trim client-side.
   const [users, setUsers]     = useState<UserResponse[]>([]);
   const [roles, setRoles]     = useState<RoleResponse[]>([]);
+  const [groupRoles, setGroupRoles] = useState<RoleResponse[]>([]);
   const [poolPerms, setPoolPerms] = useState<PoolPermissionResponse[]>([]);
+  // Pools available in this tenant. Used both to render the grant
+  // dropdown (name-keyed → id) and to label existing grants by name
+  // instead of UUID.
+  const [tenantPools, setTenantPools] = useState<PoolResponse[]>([]);
 
   // New-group form
   const [newName, setNewName] = useState('');
@@ -49,6 +54,9 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     if (!tenant) return;
     api.listUsers(tenant).then(r => setUsers(r.users)).catch(() => {});
     api.listRoles(tenant).then(r => setRoles(r.roles)).catch(() => {});
+    api.listPools()
+      .then(r => setTenantPools(r.pools.filter(p => p.tenant === tenant)))
+      .catch(() => setTenantPools([]));
   }
 
   function reloadGroupPools(g: GroupResponse) {
@@ -57,13 +65,20 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
   }
 
+  function reloadGroupRoles(g: GroupResponse) {
+    api.listGroupRoles(g.id)
+      .then(r => setGroupRoles(r.roles))
+      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+  }
+
   useEffect(() => { reloadGroups(); reloadTenantContext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
   useEffect(() => {
-    if (!selected) { setPoolPerms([]); return; }
+    if (!selected) { setPoolPerms([]); setGroupRoles([]); return; }
     reloadGroupPools(selected);
+    reloadGroupRoles(selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
@@ -126,9 +141,18 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
     try {
       await api.addGroupRole({ groupId: selected.id, roleId: addRoleId });
       setAddRoleId('');
-      // role list display refresh happens via /user/list role names;
-      // the group->role wiring isn't directly visible to the user pane
-      // so we just clear the input.
+      reloadGroupRoles(selected);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function handleRemoveRole(roleId: string) {
+    if (!selected) return;
+    setError(null);
+    try {
+      await api.removeGroupRole({ groupId: selected.id, roleId });
+      reloadGroupRoles(selected);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     }
@@ -245,16 +269,26 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
               </form>
 
               <h4>Role memberships</h4>
-              <form onSubmit={handleAddRole} className="row" style={{ gap: 8, alignItems: 'center' }}>
+              {groupRoles.length === 0 ? <div className="empty">(none)</div> : (
+                <table>
+                  <thead><tr><th>Role</th><th></th></tr></thead>
+                  <tbody>{groupRoles.map(r => (
+                    <tr key={r.id}>
+                      <td><code>{r.name}</code></td>
+                      <td><button className="danger" onClick={() => handleRemoveRole(r.id)}>Remove</button></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              )}
+              <form onSubmit={handleAddRole} className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center' }}>
                 <select value={addRoleId} onChange={ev => setAddRoleId(ev.target.value)}>
                   <option value="">(pick a role)</option>
-                  {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                  {roles
+                    .filter(r => !groupRoles.some(gr => gr.id === r.id))
+                    .map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                 </select>
                 <button type="submit" disabled={!addRoleId}>+ Add role</button>
               </form>
-              <p className="subtle" style={{ marginTop: 4 }}>
-                Use the per-user "Effective…" drilldown to confirm a member inherited the role.
-              </p>
             </>
           )}
         </div>
@@ -273,23 +307,32 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
                       <td colSpan={2} className="empty" style={{ padding: '.5rem' }}>(none)</td>
                     </tr>
                   ) : (
-                    poolPerms.map(p => (
-                      <tr key={p.id}>
-                        <td><code>{p.poolId ?? '*'}</code></td>
-                        <td><button className="danger" onClick={() => handleRevokePool(p)}>Revoke</button></td>
-                      </tr>
-                    ))
+                    poolPerms.map(p => {
+                      const name = p.poolId
+                        ? (tenantPools.find(tp => tp.id === p.poolId)?.pool ?? p.poolId)
+                        : '*';
+                      return (
+                        <tr key={p.id}>
+                          <td><code>{name}</code></td>
+                          <td><button className="danger" onClick={() => handleRevokePool(p)}>Revoke</button></td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
                 <tfoot>
                   <tr>
                     <td>
-                      <input
+                      <select
                         form="group-pool-grant-form"
                         value={grantPoolId}
                         onChange={ev => setGrantPoolId(ev.target.value)}
-                        placeholder="Pool id (blank = every pool)"
-                      />
+                      >
+                        <option value="">(every pool in tenant)</option>
+                        {tenantPools.map(p => (
+                          <option key={p.id} value={p.id}>{p.pool}</option>
+                        ))}
+                      </select>
                     </td>
                     <td><button type="submit" form="group-pool-grant-form">Grant</button></td>
                   </tr>

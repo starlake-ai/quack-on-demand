@@ -381,6 +381,17 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
 .spacer-y { height: .75rem; }
 .subtle  { color: var(--text-mute); font-size: .85rem; }
 
+.external-provider-notice {
+  background: rgba(96,165,250,.08);
+  border: 1px solid rgba(96,165,250,.35);
+  color: var(--text);
+  padding: .6rem .8rem;
+  border-radius: 6px;
+  margin-bottom: .75rem;
+  font-size: .85rem;
+  line-height: 1.4;
+}
+
 /* ----- Loading / empty state ----- */
 .loading { padding: 2rem; text-align: center; color: var(--text-mute); }
 .empty   { padding: 1rem; text-align: center; color: var(--text-mute); border: 1px dashed var(--border); border-radius: var(--radius); }

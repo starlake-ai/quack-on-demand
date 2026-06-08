@@ -145,6 +145,12 @@ final class PoolSupervisor(
   // ---------- Read API ----------
 
   def get(key: PoolKey): Option[PoolState] = pools.get(key)
+
+  /** Surface the internal `qodstate_pool.id` for a (tenant, tenantDb, pool)
+    * triple so the RBAC pool-grant UI can render a name-keyed select that
+    * submits the id the grant endpoint expects. None until the pool has
+    * been hydrated by the supervisor. */
+  def poolId(key: PoolKey): Option[String] = poolIdByKey.get(key)
   def list(): List[PoolState]              = pools.values.toList
   def snapshot(key: PoolKey): Option[PoolSnapshot] =
     pools.get(key).map(p => PoolSnapshot(p.key, p.nodes, tracker.snapshotAll))
@@ -682,6 +688,9 @@ final class PoolSupervisor(
   }
 
   def listGroups(tenantId: String): List[RbacGroup] = store.listGroups(tenantId)
+
+  def listRolesForGroup(groupId: String): List[RbacRole] =
+    rbacResolver.rolesForGroup(groupId).toList.flatMap(rbacResolver.role).sortBy(_.name)
 
   // ---------- RBAC: memberships ----------
 

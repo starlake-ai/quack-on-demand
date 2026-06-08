@@ -42,7 +42,8 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
                     },
         status    = if p.disabled then "disabled" else "ready",
         metastore = redact(p.metastore),
-        disabled  = p.disabled
+        disabled  = p.disabled,
+        id        = sup.poolId(key).getOrElse("")
       )
     }
 
