@@ -26,6 +26,7 @@ export interface NodeInfo {
 }
 
 export interface PoolResponse {
+  id: string;
   tenant: string;
   tenantDb: string;
   pool: string;

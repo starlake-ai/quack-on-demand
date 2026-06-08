@@ -9,7 +9,7 @@ import sttp.model.StatusCode
   * DO NOTHING on adds, and remove returns 204 whether or not a row
   * existed) so retry-on-409 callers don't trip alarms in operator
   * dashboards. */
-final class MembershipHandlers(sup: PoolSupervisor):
+final class MembershipHandlers(sup: PoolSupervisor, mappers: UserHandlers):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -28,3 +28,7 @@ final class MembershipHandlers(sup: PoolSupervisor):
 
   def addGroupRole   (req: GroupRoleMembershipRequest): Out[Unit] = mapErr(sup.addGroupRole   (req.groupId, req.roleId))
   def removeGroupRole(req: GroupRoleMembershipRequest): Out[Unit] = mapErr(sup.removeGroupRole(req.groupId, req.roleId))
+
+  def listGroupRoles(groupId: String): Out[RoleListResponse] = IO.blocking {
+    Right(RoleListResponse(sup.listRolesForGroup(groupId).map(mappers.toRoleResponse)))
+  }

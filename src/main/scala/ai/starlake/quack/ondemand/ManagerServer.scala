@@ -140,6 +140,7 @@ final class ManagerServer(
       RbacEndpoints.removeUserGroupMembership.serverLogic(memberships.removeUserGroup),
       RbacEndpoints.addGroupRoleMembership   .serverLogic(memberships.addGroupRole),
       RbacEndpoints.removeGroupRoleMembership.serverLogic(memberships.removeGroupRole),
+      RbacEndpoints.listGroupRoleMembership  .serverLogic(memberships.listGroupRoles),
 
       RbacEndpoints.grantPoolPermission .serverLogic(poolPermissions.grant),
       RbacEndpoints.revokePoolPermission.serverLogic(poolPermissions.revoke),

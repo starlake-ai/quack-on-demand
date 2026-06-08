@@ -43,7 +43,8 @@ final case class PoolResponse(
     nodes: List[NodeInfo],
     status: String,
     metastore: Map[String, String] = Map.empty,  // effective metastore inherited from the tenant-db, password redacted
-    disabled: Boolean = false                    // when true, the edge rejects fresh handshakes targeting this pool
+    disabled: Boolean = false,                   // when true, the edge rejects fresh handshakes targeting this pool
+    id: String = ""                              // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
 )
 
 final case class ScalePoolRequest(
