@@ -8,7 +8,8 @@ import ai.starlake.quack.ondemand.state.RolePermission
 import ai.starlake.quack.route.StatementClassifier
 import com.typesafe.scalalogging.LazyLogging
 
-/** Per-statement ACL gate backed by the cached [[EffectiveSet]] pinned on
+/** Per-statement ACL gate backed by the cached
+  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] pinned on
   * [[ai.starlake.quack.edge.ConnectionContext]] at handshake time. Reads
   * a tenant-scoped principal's table permissions in-memory; superusers
   * (`effectiveSet.user.tenant.isEmpty`) bypass.

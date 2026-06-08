@@ -11,7 +11,8 @@ import scala.jdk.CollectionConverters._
 /** Kubernetes-backed quack node runtime.
   *
   * Creates one Pod + one Service per node. Labels carry pool key, role and
-  * `maxConcurrent` so an orphan-discovery pass can reconstruct [[RunningNode]]
+  * `maxConcurrent` so an orphan-discovery pass can reconstruct
+  * [[ai.starlake.quack.model.RunningNode]]
   * after a manager restart.
   *
   * v1 limitation: the per-node token is held only in-memory. After a manager

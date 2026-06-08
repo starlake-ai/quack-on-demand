@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.federation
 import ai.starlake.quack.model.FederatedSecret
 import cats.effect.IO
 
-/** Routes a [[FederatedSecret]] to the right concrete resolver based on
+/** Routes a [[ai.starlake.quack.model.FederatedSecret]] to the right concrete resolver based on
   * the row's shape:
   *
   *   1. `value` is set        -> [[PostgresSecretResolver]] returns the literal
