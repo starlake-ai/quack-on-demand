@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { PoolResponse, TenantDbResponse } from '../api/types';
 import PoolDetailBody from './PoolDetailBody';
+import { DeleteIcon } from './Icons';
 
 /** Pools card for the TenantDetail page. Mirrors DatabaseSection's
   * shape: list pools, plus an inline "+ New pool" form that opens
@@ -15,6 +16,16 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   // inline via <PoolDetailBody>. Clicking "Back" returns to the list
   // without leaving the Pools tab.
   const [browsing, setBrowsing]   = useState<{ tenantDb: string; pool: string } | null>(null);
+
+  // Per-row Scale modal state. `scaling` is the pool currently being
+  // resized (null = closed). The role counters mirror the same shape as
+  // the Scale modal in <PoolDetailBody>.
+  const [scaling, setScaling]   = useState<PoolResponse | null>(null);
+  const [scaleRo, setScaleRo]   = useState(0);
+  const [scaleWo, setScaleWo]   = useState(0);
+  const [scaleDual, setScaleDual] = useState(0);
+  const [scaleForce, setScaleForce] = useState(false);
+  const [scaleErr, setScaleErr]     = useState<string | null>(null);
 
   // Form state.
   const [tenantDb, setTenantDb]   = useState('');
@@ -48,17 +59,49 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
-  async function handleDelete(p: PoolResponse) {
+  async function handleDelete(p: PoolResponse, force: boolean) {
     setError(null);
-    const mode = p.nodes.length > 0
-      ? `\n\nThis pool has ${p.nodes.length} active node(s); they will drain gracefully.`
-      : '';
-    if (!window.confirm(`Delete pool "${p.tenantDb}/${p.pool}"?${mode}`)) return;
+    const mode = force ? 'FORCE' : 'DRAIN';
+    if (!window.confirm(
+      `Delete pool "${p.tenantDb}/${p.pool}" (${mode})?\n\n` +
+      (force
+        ? 'Nodes stop immediately; outstanding queries fail.'
+        : 'Nodes stop accepting new queries first, then shut down.')
+    )) return;
     try {
-      await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force: false });
+      await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force });
       await reloadPools();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  function openScale(p: PoolResponse) {
+    setScaleRo(p.nodes.filter(n => n.role === 'READONLY'  || n.role === 'ReadOnly').length);
+    setScaleWo(p.nodes.filter(n => n.role === 'WRITEONLY' || n.role === 'WriteOnly').length);
+    setScaleDual(p.nodes.filter(n => n.role === 'DUAL'    || n.role === 'Dual').length);
+    setScaleForce(false);
+    setScaleErr(null);
+    setScaling(p);
+  }
+  function closeScale() { setScaling(null); setScaleErr(null); }
+
+  async function submitScale(ev: React.FormEvent) {
+    ev.preventDefault();
+    if (!scaling) return;
+    setScaleErr(null);
+    const target = scaleRo + scaleWo + scaleDual;
+    try {
+      await api.scalePool({
+        tenant, tenantDb: scaling.tenantDb, pool: scaling.pool,
+        targetSize: target,
+        roleDistribution: { writeonly: scaleWo, readonly: scaleRo, dual: scaleDual },
+        force: scaleForce,
+      });
+      setScaling(null);
+      await reloadPools();
+    } catch (e) {
+      setScaleErr(String(e));
     }
   }
 
@@ -144,6 +187,8 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         <div className="card-title" style={{ margin: 0 }}>Pools</div>
         {!adding && (
           <button
+            type="button"
+            className="link-button"
             onClick={openForm}
             disabled={tenantDbs.length === 0}
             title={tenantDbs.length === 0 ? 'Create a database first on the Databases tab' : undefined}
@@ -163,7 +208,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               <th align="left">Pool</th>
               <th align="right">Nodes</th>
               <th align="right">Enabled</th>
-              <th align="right">Actions</th>
+              <th className="actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -195,16 +240,35 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     <span className="subtle">{p.disabled ? 'off' : 'on'}</span>
                   </label>
                 </td>
-                <td align="right">
+                <td className="actions">
                   <button
                     type="button"
-                    className="link-button"
-                    style={{ color: 'var(--bad)' }}
-                    onClick={() => void handleDelete(p)}
-                    aria-label={`Delete pool ${p.pool}`}
-                    title="Drain and stop this pool."
+                    onClick={() => openScale(p)}
+                    title="Resize this pool (per-role distribution)."
                   >
-                    Delete
+                    Scale
+                  </button>
+                  {' '}
+                  <button
+                    type="button"
+                    className="danger"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    onClick={() => void handleDelete(p, false)}
+                    aria-label={`Drain pool ${p.pool}`}
+                    title="Drain: stop accepting new queries, then shut down gracefully."
+                  >
+                    <DeleteIcon /> Drain
+                  </button>
+                  {' '}
+                  <button
+                    type="button"
+                    className="danger"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    onClick={() => void handleDelete(p, true)}
+                    aria-label={`Force-stop pool ${p.pool}`}
+                    title="Force: stop immediately; outstanding queries fail."
+                  >
+                    <DeleteIcon /> Force
                   </button>
                 </td>
               </tr>
@@ -214,18 +278,36 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       )}
 
       {adding && (
-        <form onSubmit={handleCreate} style={{ marginTop: '0.75rem' }}>
-          <fieldset>
-            <legend>Identity</legend>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Database</span>
+        <div
+          className="modal-backdrop"
+          onClick={cancelForm}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 560 }}
+          >
+            <div className="card-title">New pool</div>
+            <p className="subtle" style={{ marginTop: 0 }}>
+              The pool inherits the metastore, data path, and object-store
+              config from the database. Pool names must be unique within the
+              tenant -- the server resolves <code>(tenant, pool)</code> to
+              the owning database at handshake time.
+            </p>
+            <form onSubmit={handleCreate}>
+              <label>
+                Database
                 <select value={tenantDb} onChange={ev => setTenantDb(ev.target.value)} required>
                   {tenantDbs.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
                 </select>
               </label>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Pool name</span>
+              <label>
+                Pool name
                 <input
                   value={poolName}
                   onChange={ev => setPoolName(ev.target.value)}
@@ -233,59 +315,75 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   required
                 />
               </label>
-            </div>
-            <p className="subtle" style={{ marginTop: 4 }}>
-              The pool inherits the metastore, data path, and object-store
-              config from the database. Pool names must be unique within the
-              tenant -- the server resolves <code>(tenant, pool)</code> to
-              the owning database at handshake time.
-            </p>
-          </fieldset>
-
-          <fieldset style={{ marginTop: '0.5rem' }}>
-            <legend>Role distribution (size = {size})</legend>
-            <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>WriteOnly</span>
-                <input type="number" min={0} value={wo}   onChange={ev => setWo(+ev.target.value)}   style={{ width: 100 }} />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>ReadOnly</span>
-                <input type="number" min={0} value={ro}   onChange={ev => setRo(+ev.target.value)}   style={{ width: 100 }} />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column' }}>
-                <span>Dual</span>
-                <input type="number" min={0} value={dual} onChange={ev => setDual(+ev.target.value)} style={{ width: 100 }} />
-              </label>
-            </div>
-          </fieldset>
-
-          <fieldset style={{ marginTop: '0.5rem' }}>
-            <legend>Concurrency</legend>
-            <label style={{ display: 'flex', flexDirection: 'column' }}>
-              <span>Max concurrent per node</span>
-              <div className="row" style={{ gap: 8 }}>
+              <fieldset style={{ marginTop: '0.5rem' }}>
+                <legend>Role distribution (size = {size})</legend>
+                <label>WriteOnly <input type="number" min={0} value={wo}   onChange={ev => setWo(+ev.target.value)} /></label>
+                <label>ReadOnly  <input type="number" min={0} value={ro}   onChange={ev => setRo(+ev.target.value)} /></label>
+                <label>Dual      <input type="number" min={0} value={dual} onChange={ev => setDual(+ev.target.value)} /></label>
+              </fieldset>
+              <label>
+                Max concurrent per node
                 <input
                   type="number"
                   min={0}
                   value={maxConcurrent}
                   onChange={ev => setMaxConcurrent(+ev.target.value)}
-                  style={{ width: 100 }}
                 />
-                <span className="subtle">
-                  {maxConcurrent === 0 ? '(0 = unlimited)' : ''}
-                </span>
+              </label>
+              {maxConcurrent === 0 && (
+                <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>(0 = unlimited)</p>
+              )}
+              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={cancelForm}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={size === 0 || !tenantDb || !poolName}>
+                  Create
+                </button>
               </div>
-            </label>
-          </fieldset>
-
-          <div className="row" style={{ gap: 8, marginTop: '0.75rem' }}>
-            <button type="submit" disabled={size === 0 || !tenantDb || !poolName}>
-              Create
-            </button>
-            <button type="button" className="cancel-button" onClick={cancelForm}>Cancel</button>
+            </form>
           </div>
-        </form>
+        </div>
+      )}
+
+      {scaling && (
+        <div
+          className="modal-backdrop"
+          onClick={closeScale}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            zIndex: 100, paddingTop: '4rem',
+          }}
+        >
+          <div
+            className="modal card"
+            onClick={ev => ev.stopPropagation()}
+            style={{ width: '90%', maxWidth: 480 }}
+          >
+            <div className="card-title">Scale {scaling.tenant}/{scaling.tenantDb}/{scaling.pool}</div>
+            <p className="subtle" style={{ marginTop: 0 }}>
+              Current size: {scaling.nodes.length}. Target: {scaleRo + scaleWo + scaleDual}.
+            </p>
+            {scaleErr && <p style={{ color: 'var(--bad)' }}>{scaleErr}</p>}
+            <form onSubmit={submitScale}>
+              <fieldset>
+                <legend>Role distribution</legend>
+                <label>WriteOnly <input type="number" min={0} value={scaleWo}   onChange={e => setScaleWo(+e.target.value)} /></label>
+                <label>ReadOnly  <input type="number" min={0} value={scaleRo}   onChange={e => setScaleRo(+e.target.value)} /></label>
+                <label>Dual      <input type="number" min={0} value={scaleDual} onChange={e => setScaleDual(+e.target.value)} /></label>
+              </fieldset>
+              {scaleRo + scaleWo + scaleDual < scaling.nodes.length && (
+                <label style={{ display: 'block', marginTop: '1rem', color: 'var(--bad)' }}>
+                  <input type="checkbox" checked={scaleForce} onChange={e => setScaleForce(e.target.checked)} />
+                  {' '}Force (skip graceful drain - outstanding queries fail)
+                </label>
+              )}
+              <div className="row" style={{ display: 'flex', gap: '.5rem', marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeScale}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={scaleRo + scaleWo + scaleDual === 0}>Apply</button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

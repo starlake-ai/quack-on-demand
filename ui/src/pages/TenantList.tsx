@@ -1,11 +1,22 @@
-import { useEffect, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { TenantResponse } from '../api/types';
+import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
+import type { AuthProvider, TenantResponse } from '../api/types';
+import { DeleteIcon } from '../components/Icons';
 
 export default function TenantList() {
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
+
+  // "+ New tenant" modal state. Mirrors the form on /create-tenant; the
+  // route is kept for direct URL access (bookmarks) but the modal is the
+  // primary affordance from the list.
+  const [adding, setAdding]     = useState(false);
+  const [newName, setNewName]   = useState('');
+  const [newProvider, setNewProvider] = useState<AuthProvider>('db');
+  const [newConfig, setNewConfig]     = useState<Record<string, string>>({});
+  const [createErr, setCreateErr]     = useState<string | null>(null);
 
   function reload() {
     return api.listTenants()
@@ -14,6 +25,29 @@ export default function TenantList() {
   }
 
   useEffect(() => { void reload(); }, []);
+
+  function openCreate() {
+    setNewName(''); setNewProvider('db'); setNewConfig({}); setCreateErr(null);
+    setAdding(true);
+  }
+  function closeCreate() { setAdding(false); setCreateErr(null); }
+
+  function pickProvider(p: AuthProvider) {
+    setNewProvider(p);
+    setNewConfig({});
+  }
+
+  async function submitCreate(ev: FormEvent) {
+    ev.preventDefault();
+    setCreateErr(null);
+    try {
+      await api.createTenant({ name: newName, authProvider: newProvider, authConfig: newConfig });
+      setAdding(false);
+      await reload();
+    } catch (e) {
+      setCreateErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
 
   async function toggle(t: TenantResponse) {
     setError(null);
@@ -44,16 +78,88 @@ export default function TenantList() {
     }
   }
 
+  const fields = PROVIDER_FIELDS[newProvider];
+  const createReady = newName.length > 0 &&
+    fields.every(f => (newConfig[f.key] ?? '').trim().length > 0);
+
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
+
+  const createModal = adding && (
+    <div
+      className="modal-backdrop"
+      onClick={closeCreate}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+        zIndex: 100, paddingTop: '4rem',
+      }}
+    >
+      <div
+        className="modal card"
+        onClick={ev => ev.stopPropagation()}
+        style={{ width: '90%', maxWidth: 560 }}
+      >
+        <div className="card-title">New tenant</div>
+        <p className="subtle" style={{ marginTop: 0 }}>
+          A tenant is a logical owner. Storage details (metastore, data path,
+          object store) are configured per-database, after the tenant is
+          created.
+        </p>
+        {createErr && <p style={{ color: 'var(--bad)' }}>{createErr}</p>}
+        <form onSubmit={submitCreate}>
+          <label>
+            Name
+            <input value={newName} onChange={ev => setNewName(ev.target.value)} required />
+          </label>
+          <label>
+            Auth provider
+            <select value={newProvider} onChange={ev => pickProvider(ev.target.value as AuthProvider)}>
+              {(Object.keys(PROVIDER_LABELS) as AuthProvider[]).map(k => (
+                <option key={k} value={k}>{PROVIDER_LABELS[k]}</option>
+              ))}
+            </select>
+          </label>
+          {fields.length === 0 ? (
+            <p className="subtle" style={{ marginTop: 0 }}>
+              <code>db</code> needs no extra config — the username on the user
+              record IS the identity.
+            </p>
+          ) : (
+            fields.map(f => (
+              <label key={f.key}>
+                {f.label}
+                <input
+                  value={newConfig[f.key] ?? ''}
+                  onChange={ev => setNewConfig(prev => ({ ...prev, [f.key]: ev.target.value }))}
+                  placeholder={f.placeholder}
+                  required
+                />
+              </label>
+            ))
+          )}
+          <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+            <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeCreate}>Cancel</button>
+            <button type="submit" style={{ minWidth: '7rem' }} disabled={!createReady}>Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+
   if (tenants.length === 0) return (
-    <p>No tenants yet. <Link to="/create-tenant">Create one</Link>.</p>
+    <div>
+      <p>No tenants yet.{' '}
+        <button type="button" className="link-button" onClick={openCreate}>Create one</button>.
+      </p>
+      {createModal}
+    </div>
   );
 
   return (
     <div>
       <header style={{ display: 'flex', justifyContent: 'space-between' }}>
         <h2>Tenants</h2>
-        <Link to="/create-tenant">+ New tenant</Link>
+        <button type="button" className="link-button" onClick={openCreate}>+ New tenant</button>
       </header>
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
@@ -61,7 +167,7 @@ export default function TenantList() {
             <th align="left">Name</th>
             <th align="right">Pools</th>
             <th align="right">Enabled</th>
-            <th align="right">Actions</th>
+            <th className="actions">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -83,11 +189,10 @@ export default function TenantList() {
                   <span className="subtle">{t.disabled ? 'off' : 'on'}</span>
                 </label>
               </td>
-              <td align="right">
+              <td className="actions">
                 <button
                   type="button"
-                  className="link-button"
-                  style={{ color: 'var(--bad)' }}
+                  className="icon-btn danger"
                   onClick={() => void handleDelete(t)}
                   aria-label={`Delete tenant ${t.name}`}
                   disabled={t.pools.length > 0}
@@ -95,13 +200,14 @@ export default function TenantList() {
                     ? `Stop the ${t.pools.length} active pool(s) before deleting.`
                     : 'Permanently delete this tenant.'}
                 >
-                  Delete
+                  <DeleteIcon />
                 </button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+      {createModal}
     </div>
   );
 }
