@@ -9,7 +9,8 @@ import scala.collection.concurrent.TrieMap
 /** Thread-safe map of `peerIdentity → Entry`, populated by the auth handler
   * during Handshake and read by the producer during `getStream`.
   *
-  * Every authenticated entry carries an [[EffectiveSet]] computed once
+  * Every authenticated entry carries an
+  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] computed once
   * at handshake time. The per-statement ACL gate reads this cached
   * snapshot via `effectiveSetFor(peer)` -- no per-RPC join against
   * qodstate_role_permission / qodstate_user_role. Superusers carry an
