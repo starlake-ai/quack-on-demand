@@ -9,9 +9,7 @@ export default function TenantList() {
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
 
-  // "+ New tenant" modal state. Mirrors the form on /create-tenant; the
-  // route is kept for direct URL access (bookmarks) but the modal is the
-  // primary affordance from the list.
+  // "+ New tenant" modal state.
   const [adding, setAdding]     = useState(false);
   const [newName, setNewName]   = useState('');
   const [newProvider, setNewProvider] = useState<AuthProvider>('db');

@@ -1,6 +1,9 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{
+  NodePlacement, NodeToleration, Pool, PoolCohort, PoolKey, Role, RoleDistribution,
+  RunningNode, Tenant, TenantDb, TenantDbKind
+}
 import io.circe.parser.parse
 import io.circe.syntax._
 import io.circe.Json
@@ -200,8 +203,8 @@ final class PostgresControlPlaneStore(
       """INSERT INTO qodstate_pool
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
-        |   max_concurrent_per_node, idle_timeout_sec, disabled)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -212,7 +215,8 @@ final class PostgresControlPlaneStore(
         |  dist_dual               = EXCLUDED.dist_dual,
         |  max_concurrent_per_node = EXCLUDED.max_concurrent_per_node,
         |  idle_timeout_sec        = EXCLUDED.idle_timeout_sec,
-        |  disabled                = EXCLUDED.disabled""".stripMargin
+        |  disabled                = EXCLUDED.disabled,
+        |  cohorts                 = EXCLUDED.cohorts""".stripMargin
     )
     try
       ps.setString(1,  p.id)
@@ -228,6 +232,7 @@ final class PostgresControlPlaneStore(
         case Some(v) => ps.setInt(10, v)
         case None    => ps.setNull(10, Types.INTEGER)
       ps.setBoolean(11, p.disabled)
+      ps.setString(12, PostgresControlPlaneStore.cohortsToJson(p.cohorts))
       ps.executeUpdate()
     finally ps.close()
   }
@@ -236,7 +241,7 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
-        |       max_concurrent_per_node, idle_timeout_sec, disabled
+        |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -264,7 +269,8 @@ final class PostgresControlPlaneStore(
       ),
       maxConcurrentPerNode = rs.getInt("max_concurrent_per_node"),
       idleTimeoutSec       = Option(idle).map(_.asInstanceOf[Number].intValue),
-      disabled             = rs.getBoolean("disabled")
+      disabled             = rs.getBoolean("disabled"),
+      cohorts              = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts"))
     )
 
   // ---------------- Node ----------------
@@ -982,7 +988,7 @@ final class PostgresControlPlaneStore(
     ControlPlaneSnapshot(
       tenants   = selectAll(c, "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name", readTenant),
       tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema FROM qodstate_tenant_db ORDER BY name", readTenantDb),
-      pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled FROM qodstate_pool ORDER BY name", readPool),
+      pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts FROM qodstate_pool ORDER BY name", readPool),
       nodes     = selectAll(c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
           |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
@@ -1055,3 +1061,58 @@ object PostgresControlPlaneStore:
     val pass = required("pgPassword")
     val db   = required("dbName")
     new PostgresControlPlaneStore(s"jdbc:postgresql://$host:$port/$db", user, pass)
+
+  // ---------------- PoolCohort JSON ----------------
+  // Stored as a JSON array in `qodstate_pool.cohorts`. We keep the on-disk
+  // format hand-rolled rather than depending on a generic circe codec so
+  // that adding new optional placement keys (e.g. affinity rules) later
+  // can stay backward-compatible without a Liquibase migration.
+
+  def cohortsToJson(cohorts: List[PoolCohort]): String =
+    val arr = Json.fromValues(cohorts.map { c =>
+      Json.obj(
+        "placement" -> Json.obj(
+          "nodeSelector" -> Json.fromFields(c.placement.nodeSelector.map((k, v) => k -> Json.fromString(v))),
+          "tolerations"  -> Json.fromValues(c.placement.tolerations.map { t =>
+            Json.fromFields(List(
+              Some("key"      -> Json.fromString(t.key)),
+              Some("operator" -> Json.fromString(t.operator)),
+              t.value.map(v => "value" -> Json.fromString(v)),
+              t.effect.map(e => "effect" -> Json.fromString(e))
+            ).flatten)
+          })
+        ),
+        "distribution" -> Json.obj(
+          "writeonly" -> Json.fromInt(c.distribution.writeonly),
+          "readonly"  -> Json.fromInt(c.distribution.readonly),
+          "dual"      -> Json.fromInt(c.distribution.dual)
+        )
+      )
+    })
+    arr.noSpaces
+
+  def cohortsFromJson(raw: String): List[PoolCohort] =
+    if raw == null || raw.isEmpty then Nil
+    else parse(raw).toOption.flatMap(_.asArray).getOrElse(Vector.empty).toList.flatMap { j =>
+      val cur = j.hcursor
+      val placement = cur.downField("placement")
+      val ns = placement.downField("nodeSelector").as[Map[String, String]].getOrElse(Map.empty)
+      val tols = placement.downField("tolerations").focus
+        .flatMap(_.asArray).getOrElse(Vector.empty).toList.flatMap { tj =>
+          val tc = tj.hcursor
+          tc.downField("key").as[String].toOption.map { key =>
+            NodeToleration(
+              key      = key,
+              operator = tc.downField("operator").as[String].getOrElse("Equal"),
+              value    = tc.downField("value").as[String].toOption,
+              effect   = tc.downField("effect").as[String].toOption
+            )
+          }
+        }
+      val dist = cur.downField("distribution")
+      for
+        w <- dist.downField("writeonly").as[Int].toOption
+        r <- dist.downField("readonly").as[Int].toOption
+        d <- dist.downField("dual").as[Int].toOption
+      yield PoolCohort(NodePlacement(ns, tols), RoleDistribution(w, r, d))
+    }

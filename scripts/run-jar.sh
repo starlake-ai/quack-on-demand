@@ -357,7 +357,7 @@ echo "jar: $JAR"
 # ---- Resolve java ----
 JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/}java"
 command -v "${JAVA_BIN:-java}" >/dev/null 2>&1 || {
-  echo "ERROR: java not found. Install JDK 17+ or set JAVA_HOME." >&2
+  echo "ERROR: java not found. Install JDK 21+ or set JAVA_HOME." >&2
   exit 1
 }
 echo "java: $("${JAVA_BIN:-java}" -version 2>&1 | head -1)"
@@ -597,7 +597,16 @@ preflight_ports
 # unsafe allocator works on Java 17+ without extra flags. The system
 # property pins Arrow's allocator - without it Arrow picks netty and
 # crashes with NoSuchFieldError: chunkSize.
-exec "${JAVA_BIN:-java}" \
+#
+# Terminal hygiene:
+#   - </dev/null  : the JVM does not need stdin. Without this the JVM
+#                   grabs the terminal's read side, so any keystrokes
+#                   are consumed by Java instead of the shell.
+#   - stty sane   : if the JVM exits abnormally (Ctrl-C, OOM) it can
+#                   leave the WSL pty in raw / no-echo mode. We do NOT
+#                   `exec` so the trap still fires after Java returns.
+trap 'stty sane 2>/dev/null || true' EXIT INT TERM
+"${JAVA_BIN:-java}" \
   -Darrow.allocation.manager.type=Unsafe \
   ${JAVA_OPTS:-} \
-  -jar "$JAR"
+  -jar "$JAR" </dev/null

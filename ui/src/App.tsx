@@ -3,10 +3,7 @@ import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
 import TenantList from './pages/TenantList';
 import TenantDetail from './pages/TenantDetail';
-import CreateTenant from './pages/CreateTenant';
-import CreatePool from './pages/CreatePool';
 import PoolDetail from './pages/PoolDetail';
-import ScalePool from './pages/ScalePool';
 import Nodes from './pages/Nodes';
 import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
@@ -46,11 +43,8 @@ function Shell() {
         <Routes>
           <Route path="/"                                 element={<Nodes />} />
           <Route path="/tenants"                          element={<TenantList />} />
-          <Route path="/create-tenant"                    element={<CreateTenant />} />
           <Route path="/tenant/:tenant"                   element={<TenantDetail />} />
-          <Route path="/tenant/:tenant/create-pool"                element={<CreatePool />} />
           <Route path="/pool/:tenant/:tenantDb/:pool"              element={<PoolDetail />} />
-          <Route path="/pool/:tenant/:tenantDb/:pool/scale"        element={<ScalePool />} />
           <Route path="/nodes"                                     element={<Nodes />} />
           <Route path="/users"                                     element={<Users />} />
           <Route path="/catalog"                                   element={<Catalog />} />
