@@ -26,7 +26,7 @@ you want a small, well-scoped task.
 
 You need:
 
-- JDK 17+
+- JDK 21+
 - `sbt` 1.x and `npm` 18+ (the UI builds as part of `sbt assembly`)
 - The `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - A reachable **PostgreSQL 16+** (default `localhost:5432`, user `postgres`,

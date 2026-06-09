@@ -10,6 +10,10 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
+  /** Exposed for `/api/config/client` so the UI can hide the placement
+    * controls in non-K8s mode. */
+  def supportsPlacement: Boolean = sup.supportsPlacement
+
   /** Hide secret-like keys from the API response. Today: just `pgPassword`. */
   private def redact(metastore: Map[String, String]): Map[String, String] =
     metastore.filterNot(_._1.equalsIgnoreCase("pgPassword"))
@@ -17,6 +21,7 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
   /** Build the response for an existing pool by looking up its supervisor state. */
   private def respond(key: PoolKey): Option[PoolResponse] =
     sup.get(key).map { p =>
+      val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
       PoolResponse(
         tenant    = key.tenant,
         tenantDb  = key.tenantDb,
@@ -43,7 +48,8 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
         status    = if p.disabled then "disabled" else "ready",
         metastore = redact(p.metastore),
         disabled  = p.disabled,
-        id        = sup.poolId(key).getOrElse("")
+        id        = sup.poolId(key).getOrElse(""),
+        cohorts   = poolEntityCohorts.map(PoolCohortDto.fromModel)
       )
     }
 
@@ -66,7 +72,8 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
               IO.pure(Left((StatusCode.Conflict,
                 ErrorResponse("exists", s"pool $key already exists"))))
             case None =>
-              sup.createPool(key, req.roleDistribution, req.maxConcurrentPerNode)
+              val cohorts = req.cohorts.map(PoolCohortDto.toModel)
+              sup.createPool(key, req.roleDistribution, req.maxConcurrentPerNode, cohorts, req.disabled)
                 .map(_ => Right(respond(key).getOrElse(
                   PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty))))
                 .handleError(t => Left((StatusCode.InternalServerError,

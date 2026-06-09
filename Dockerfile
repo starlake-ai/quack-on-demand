@@ -3,7 +3,7 @@
 # =========================================================================
 #  Stage 1 - Build the uber-jar (UI + Scala)
 # =========================================================================
-FROM eclipse-temurin:17-jdk AS build
+FROM eclipse-temurin:21-jdk AS build
 
 # sbt + node (the project's `sbt assembly` shells out to `npm run build` for
 # the React admin console).
@@ -69,7 +69,7 @@ EOF
 # =========================================================================
 #  Stage 2 - Runtime
 # =========================================================================
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:21-jre
 
 ARG DUCKDB_VERSION=1.5.3
 ARG TARGETARCH

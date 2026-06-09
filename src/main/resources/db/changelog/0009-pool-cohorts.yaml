@@ -1,0 +1,19 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0009-qodstate-pool-cohorts
+      author: quack-on-demand
+      changes:
+        # Per-pool K8s scheduling plan: a JSON array of cohorts, each
+        # carrying { placement: { nodeSelector, tolerations }, distribution }.
+        # NULL / '[]' = no placement constraint (legacy behavior;
+        # supervisor synthesizes a single empty-placement cohort from
+        # `dist_writeonly`/`dist_readonly`/`dist_dual`).
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name:                 cohorts
+                  type:                 JSONB
+                  defaultValueComputed: "'[]'::jsonb"
+                  constraints:
+                    nullable: false

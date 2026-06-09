@@ -1,9 +1,44 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.RoleDistribution
+import ai.starlake.quack.model.{NodePlacement, NodeToleration, PoolCohort, RoleDistribution}
 import io.circe.{Codec, Decoder, Encoder, HCursor, Json, JsonObject}
 import io.circe.generic.semiauto.deriveCodec
 import io.circe.syntax._
+
+final case class NodeTolerationDto(
+    key:      String,
+    operator: String         = "Equal",
+    value:    Option[String] = None,
+    effect:   Option[String] = None
+)
+final case class NodePlacementDto(
+    nodeSelector: Map[String, String]      = Map.empty,
+    tolerations:  List[NodeTolerationDto]  = Nil
+)
+final case class PoolCohortDto(
+    placement:    NodePlacementDto = NodePlacementDto(),
+    distribution: RoleDistribution
+)
+
+object PoolCohortDto:
+  def fromModel(c: PoolCohort): PoolCohortDto =
+    PoolCohortDto(
+      placement = NodePlacementDto(
+        nodeSelector = c.placement.nodeSelector,
+        tolerations  = c.placement.tolerations.map(t =>
+          NodeTolerationDto(t.key, t.operator, t.value, t.effect))
+      ),
+      distribution = c.distribution
+    )
+  def toModel(d: PoolCohortDto): PoolCohort =
+    PoolCohort(
+      placement = NodePlacement(
+        nodeSelector = d.placement.nodeSelector,
+        tolerations  = d.placement.tolerations.map(t =>
+          NodeToleration(t.key, t.operator, t.value, t.effect))
+      ),
+      distribution = d.distribution
+    )
 
 final case class CreatePoolRequest(
     tenant: String,
@@ -12,7 +47,17 @@ final case class CreatePoolRequest(
     size: Int,
     roleDistribution: RoleDistribution,
     idleTimeoutSec: Int = -1,
-    maxConcurrentPerNode: Int = 0
+    maxConcurrentPerNode: Int = 0,
+    // Optional placement plan. When empty, the supervisor schedules
+    // every node with no constraint (legacy behavior). When non-empty,
+    // the per-cohort RoleDistributions must sum to `roleDistribution`
+    // and the total count must equal `size`. Ignored in non-K8s mode.
+    cohorts: List[PoolCohortDto] = Nil,
+    // When true, the pool is persisted with `disabled = true` so the
+    // FlightSQL edge rejects fresh handshakes until enabled. Nodes are
+    // still spawned (the pool is "warm but not serving"); this matches
+    // the semantics of `setPoolDisabled` applied after the fact.
+    disabled: Boolean = false
 )
 
 final case class NodeInfo(
@@ -44,7 +89,8 @@ final case class PoolResponse(
     status: String,
     metastore: Map[String, String] = Map.empty,  // effective metastore inherited from the tenant-db, password redacted
     disabled: Boolean = false,                   // when true, the edge rejects fresh handshakes targeting this pool
-    id: String = ""                              // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
+    id: String = "",                             // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
+    cohorts: List[PoolCohortDto] = Nil           // persisted placement plan, empty when none was supplied
 )
 
 final case class ScalePoolRequest(
@@ -69,7 +115,11 @@ final case class ClientConfigResponse(
     // True iff any basic / bearer auth provider is configured. When false,
     // the UI skips the login screen entirely (there's no credential
     // backend to validate against; `/api/auth/login` would 503).
-    authEnabled: Boolean = true
+    authEnabled: Boolean = true,
+    // True iff the runtime backend is Kubernetes (i.e. supports
+    // nodeSelector / tolerations placement). The UI hides the per-pool
+    // cohort/placement controls when false.
+    placementSupported: Boolean = false
 )
 
 /** One row of the admin UI Config page: a single scalar from
@@ -380,6 +430,54 @@ final case class CatalogTableDetailResponse(
 
 object Dtos:
   given Codec[RoleDistribution]  = deriveCodec
+  // Hand-rolled codecs so optional fields with case-class defaults survive
+  // a round-trip through the wire (circe 0.14 deriveCodec is strict).
+  given Codec[NodeTolerationDto] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        key      <- c.get[String]("key")
+        operator <- c.getOrElse[String]("operator")("Equal")
+        value    <- c.getOrElse[Option[String]]("value")(None)
+        effect   <- c.getOrElse[Option[String]]("effect")(None)
+      yield NodeTolerationDto(key, operator, value, effect)
+    },
+    Encoder.instance { t =>
+      Json.fromJsonObject(JsonObject(
+        "key"      -> t.key.asJson,
+        "operator" -> t.operator.asJson,
+        "value"    -> t.value.asJson,
+        "effect"   -> t.effect.asJson
+      ))
+    }
+  )
+  given Codec[NodePlacementDto] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        nodeSelector <- c.getOrElse[Map[String, String]]("nodeSelector")(Map.empty)
+        tolerations  <- c.getOrElse[List[NodeTolerationDto]]("tolerations")(Nil)
+      yield NodePlacementDto(nodeSelector, tolerations)
+    },
+    Encoder.instance { p =>
+      Json.fromJsonObject(JsonObject(
+        "nodeSelector" -> p.nodeSelector.asJson,
+        "tolerations"  -> p.tolerations.asJson
+      ))
+    }
+  )
+  given Codec[PoolCohortDto] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        placement    <- c.getOrElse[NodePlacementDto]("placement")(NodePlacementDto())
+        distribution <- c.get[RoleDistribution]("distribution")
+      yield PoolCohortDto(placement, distribution)
+    },
+    Encoder.instance { p =>
+      Json.fromJsonObject(JsonObject(
+        "placement"    -> p.placement.asJson,
+        "distribution" -> p.distribution.asJson
+      ))
+    }
+  )
   // Custom codec for CreatePoolRequest so that optional fields with case-class
   // defaults stay optional in the wire JSON (circe 0.14 deriveCodec ignores Scala 3 defaults).
   given Codec[CreatePoolRequest] = Codec.from(
@@ -392,7 +490,9 @@ object Dtos:
         roleDistribution     <- c.get[RoleDistribution]("roleDistribution")
         idleTimeoutSec       <- c.getOrElse[Int]("idleTimeoutSec")(-1)
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
-      yield CreatePoolRequest(tenant, tenantDb, pool, size, roleDistribution, idleTimeoutSec, maxConcurrentPerNode)
+        cohorts              <- c.getOrElse[List[PoolCohortDto]]("cohorts")(Nil)
+        disabled             <- c.getOrElse[Boolean]("disabled")(false)
+      yield CreatePoolRequest(tenant, tenantDb, pool, size, roleDistribution, idleTimeoutSec, maxConcurrentPerNode, cohorts, disabled)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(JsonObject(
@@ -402,7 +502,9 @@ object Dtos:
         "size"                 -> r.size.asJson,
         "roleDistribution"     -> r.roleDistribution.asJson,
         "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
-        "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson
+        "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
+        "cohorts"              -> r.cohorts.asJson,
+        "disabled"             -> r.disabled.asJson
       ))
     }
   )

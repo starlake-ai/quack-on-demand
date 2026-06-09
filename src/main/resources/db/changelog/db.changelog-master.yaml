@@ -21,3 +21,5 @@ databaseChangeLog:
       file: db/changelog/0007-federation.yaml
   - include:
       file: db/changelog/0008-tenant-db-defaults.yaml
+  - include:
+      file: db/changelog/0009-pool-cohorts.yaml

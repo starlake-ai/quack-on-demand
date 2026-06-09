@@ -20,7 +20,7 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 ## Path 1 - Native run, against an external Postgres
 
 ### Prerequisites
-- JDK 17+ (to run the jar)
+- JDK 21+ (to run the jar)
 - `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)

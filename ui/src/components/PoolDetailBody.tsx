@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import type { ClientConfigResponse, PoolResponse } from '../api/types';
 import Tabs from './Tabs';
 
-/** Header (title + Back / Scale / Delete pool actions) + the three-tab
+/** Header (title + Back / Scale / Delete pool actions) + the four-tab
   * body for one pool. No breadcrumb -- callers compose that themselves.
   * The `onStopped` callback lets the standalone page navigate elsewhere
   * after a successful delete, while the inline view inside the Pools
@@ -171,6 +171,76 @@ export default function PoolDetailBody({
     </div>
   );
 
+  const placementTab = (
+    <div className="card">
+      <div className="card-title">Node placement</div>
+      {(!data.cohorts || data.cohorts.length === 0) ? (
+        <p style={{ color: '#888' }}>
+          No placement plan: every node is scheduled wherever the cluster's
+          default scheduler chooses (or, in local mode, as a child process).
+          To pin nodes to specific Kubernetes node labels, recreate the pool
+          and tick "Pin nodes to Kubernetes node labels" in the New pool form.
+        </p>
+      ) : (
+        <>
+          <p style={{ color: '#888', marginTop: 0 }}>
+            The pool was created with {data.cohorts.length} cohort
+            {data.cohorts.length === 1 ? '' : 's'}. Each cohort's nodes are
+            scheduled only on Kubernetes nodes whose labels match every
+            entry in its <code>nodeSelector</code>.
+          </p>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th align="left">#</th>
+                <th align="left">Roles</th>
+                <th align="left">nodeSelector</th>
+                <th align="left">Tolerations</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.cohorts.map((c, i) => {
+                const selectorEntries = Object.entries(c.placement?.nodeSelector ?? {});
+                const tolerations = c.placement?.tolerations ?? [];
+                return (
+                  <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td><code>{i + 1}</code></td>
+                    <td>
+                      {c.distribution.writeonly > 0 && <span>WO×{c.distribution.writeonly} </span>}
+                      {c.distribution.readonly  > 0 && <span>RO×{c.distribution.readonly} </span>}
+                      {c.distribution.dual      > 0 && <span>Dual×{c.distribution.dual}</span>}
+                    </td>
+                    <td>
+                      {selectorEntries.length === 0
+                        ? <span style={{ color: '#888' }}>(none)</span>
+                        : selectorEntries.map(([k, v]) => (
+                            <div key={k}><code>{k}={v}</code></div>
+                          ))}
+                    </td>
+                    <td>
+                      {tolerations.length === 0
+                        ? <span style={{ color: '#888' }}>(none)</span>
+                        : tolerations.map((t, ti) => (
+                            <div key={ti}>
+                              <code>
+                                {t.key}
+                                {t.operator && t.operator !== 'Equal' ? ` ${t.operator}` : ''}
+                                {t.value ? `=${t.value}` : ''}
+                                {t.effect ? ` :${t.effect}` : ''}
+                              </code>
+                            </div>
+                          ))}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+
   const storageTab = (
     <div className="card">
       <div className="card-title">Storage</div>
@@ -224,6 +294,7 @@ export default function PoolDetailBody({
           { id: 'nodes',       label: 'Nodes',       body: nodesTab },
           { id: 'connections', label: 'Connections', body: connectionsTab },
           { id: 'storage',     label: 'Storage',     body: storageTab },
+          { id: 'placement',   label: 'Placement',   body: placementTab },
         ]}
       />
     </>

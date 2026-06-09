@@ -147,7 +147,10 @@ export default function Nodes() {
     api.listPools()
       .then((r: { pools: PoolResponse[] }) => {
         const now = Date.now();
-        const flat: Row[] = r.pools.flatMap(p =>
+        // Disabled pools' nodes don't accept fresh handshakes, so they're
+        // noise on the live dashboard. Operators can still inspect them
+        // from the tenant page where the disabled state is meaningful.
+        const flat: Row[] = r.pools.filter(p => !p.disabled).flatMap(p =>
           p.nodes.map(n => {
             const key = `${p.tenant}/${p.tenantDb}/${p.pool}/${n.nodeId}`;
             const prior = prev.current[key];

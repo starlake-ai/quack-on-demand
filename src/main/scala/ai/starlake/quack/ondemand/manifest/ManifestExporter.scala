@@ -84,7 +84,22 @@ object ManifestExporter:
             dual      = p.distribution.dual
           ),
           maxConcurrentPerNode = p.maxConcurrentPerNode,
-          disabled             = p.disabled
+          disabled             = p.disabled,
+          cohorts              = p.cohorts.map { c =>
+            ManifestPoolCohort(
+              placement    = ManifestNodePlacement(
+                nodeSelector = c.placement.nodeSelector,
+                tolerations  = c.placement.tolerations.map { t =>
+                  ManifestNodeToleration(t.key, t.operator, t.value, t.effect)
+                }
+              ),
+              distribution = ManifestRoleDistribution(
+                writeonly = c.distribution.writeonly,
+                readonly  = c.distribution.readonly,
+                dual      = c.distribution.dual
+              )
+            )
+          }
         )
       }
 

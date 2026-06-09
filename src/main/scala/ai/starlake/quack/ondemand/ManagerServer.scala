@@ -183,11 +183,12 @@ final class ManagerServer(
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.clientConfig.serverLogic(_ => IO.pure(Right(
         ClientConfigResponse(
-          flightSqlHost = edgeCfg.host,
-          flightSqlPort = edgeCfg.port,
-          flightSqlTls  = edgeCfg.tlsEnabled,
-          tenantClaim   = edgeCfg.tenantClaim,
-          authEnabled   = authEnabled
+          flightSqlHost      = edgeCfg.host,
+          flightSqlPort      = edgeCfg.port,
+          flightSqlTls       = edgeCfg.tlsEnabled,
+          tenantClaim        = edgeCfg.tenantClaim,
+          authEnabled        = authEnabled,
+          placementSupported = pools.supportsPlacement
         )
       ))),
       Endpoints.serverConfig.serverLogic(_ => serverConfig.list),

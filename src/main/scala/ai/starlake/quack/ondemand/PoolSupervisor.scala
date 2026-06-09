@@ -2,7 +2,8 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
-  Names, NodeSpec, Pool, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind
+  Names, NodePlacement, NodeSpec, Pool, PoolCohort, PoolKey, RoleDistribution,
+  RunningNode, Tenant, TenantDb, TenantDbKind
 }
 import ai.starlake.quack.ondemand.rbac.RbacResolver
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -114,7 +115,12 @@ final class PoolSupervisor(
               s3            = state.s3,
               maxConcurrent = n.maxConcurrent,
               kindWire      = state.kindWire,
-              extraSetupSql = state.extraSetupSql
+              extraSetupSql = state.extraSetupSql,
+              // Recover the original cohort placement from the node's
+              // 1-based suffix index. Falls back to no placement when
+              // the pool was created without explicit cohorts or when
+              // the id is in an unexpected shape.
+              placement     = placementForNodeId(key, n.nodeId)
             )).flatMap { fresh =>
               poolIdByKey.get(key) match
                 case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
@@ -127,6 +133,29 @@ final class PoolSupervisor(
         IO.delay(pools.put(key, updated)).as(updated)
       else IO.pure(state)
     }
+
+  /** Find the cohort placement that owns the node at 1-based `index`
+    * in the pool's deterministic spawn order. Returns
+    * [[NodePlacement.empty]] when the pool has no explicit cohorts or
+    * the index is out of range. Used by reconcile to respawn a dead
+    * node onto the same K8s nodeSelector as the original. */
+  private def placementForNodeId(key: PoolKey, nodeId: String): NodePlacement =
+    val maybeIdx = nodeId.split('-').lastOption.flatMap(_.toIntOption)
+    val maybePoolEntity = poolIdByKey.get(key).flatMap(poolRows.get)
+    (maybeIdx, maybePoolEntity) match
+      case (Some(i), Some(p)) if p.cohorts.nonEmpty =>
+        var remaining = i
+        var found: NodePlacement = NodePlacement.empty
+        val it = p.cohorts.iterator
+        while remaining > 0 && it.hasNext do
+          val c = it.next()
+          val size = c.distribution.total
+          if remaining <= size then
+            found     = c.placement
+            remaining = 0
+          else remaining -= size
+        found
+      case _ => NodePlacement.empty
 
   private def isReachable(n: RunningNode): Boolean =
     n.pid match
@@ -144,6 +173,12 @@ final class PoolSupervisor(
 
   // ---------- Read API ----------
 
+  /** True when the underlying [[QuackBackend]] can honor node placement
+    * hints (K8s nodeSelector / tolerations). Exposed so the
+    * `/client-config` endpoint can flag the UI to hide cohort controls
+    * in local mode. */
+  def supportsPlacement: Boolean = backend.supportsPlacement
+
   def get(key: PoolKey): Option[PoolState] = pools.get(key)
 
   /** Surface the internal `qodstate_pool.id` for a (tenant, tenantDb, pool)
@@ -151,6 +186,11 @@ final class PoolSupervisor(
     * submits the id the grant endpoint expects. None until the pool has
     * been hydrated by the supervisor. */
   def poolId(key: PoolKey): Option[String] = poolIdByKey.get(key)
+
+  /** Surface the persisted [[Pool]] row by id so REST handlers can
+    * read fields the runtime [[PoolState]] doesn't carry (today: the
+    * cohorts placement plan). */
+  def poolEntity(id: String): Option[Pool] = poolRows.get(id)
   def list(): List[PoolState]              = pools.values.toList
   def snapshot(key: PoolKey): Option[PoolSnapshot] =
     pools.get(key).map(p => PoolSnapshot(p.key, p.nodes, tracker.snapshotAll))
@@ -385,13 +425,41 @@ final class PoolSupervisor(
   def createPool(
       key:                  PoolKey,
       dist:                 RoleDistribution,
-      maxConcurrentPerNode: Int = 0
+      maxConcurrentPerNode: Int              = 0,
+      cohorts:              List[PoolCohort] = Nil,
+      // Persist with disabled=true so the edge refuses fresh handshakes
+      // until the operator explicitly enables the pool. Nodes are still
+      // spawned -- same semantics as calling setPoolDisabled(true) right
+      // after a normal create.
+      disabled:             Boolean          = false
   ): IO[List[RunningNode]] = IO.defer {
     val size = dist.total
     require(dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
       s"role distribution must be non-negative: $dist")
     require(size > 0, s"role distribution must sum to at least 1: $dist")
     require(dist.isValidFor(size), s"role distribution does not sum to $size")
+    // Cohorts are always persisted as authored so a pool defined on
+    // local can be exported and replayed on K8s with placement intact.
+    // The K8s backend reads `NodeSpec.placement`; local backends ignore
+    // it -- the UI already shows a warning before the operator submits.
+    if cohorts.nonEmpty && !backend.supportsPlacement then
+      logger.info(
+        s"backend ${backend.getClass.getSimpleName} does not honor node placement; " +
+          s"persisting ${cohorts.size} cohort(s) for pool $key but they will be " +
+          "ignored at runtime")
+    // When cohorts are provided, the per-cohort distributions must sum
+    // back to `dist`. Reject mismatches up-front so the persisted
+    // `qodstate_pool` row never disagrees with the spawned nodes.
+    cohorts.foreach { c =>
+      require(c.distribution.writeonly >= 0 && c.distribution.readonly >= 0 && c.distribution.dual >= 0,
+        s"cohort distribution must be non-negative: ${c.distribution}")
+    }
+    if cohorts.nonEmpty then
+      val summed = cohorts.map(_.distribution).foldLeft(RoleDistribution(0, 0, 0)) { (a, b) =>
+        RoleDistribution(a.writeonly + b.writeonly, a.readonly + b.readonly, a.dual + b.dual)
+      }
+      require(summed == dist,
+        s"cohort distributions sum to $summed but pool distribution is $dist")
 
     findTenantDb(key.tenant, key.tenantDb) match
       case None =>
@@ -419,21 +487,32 @@ final class PoolSupervisor(
           name                 = key.pool,
           size                 = size,
           distribution         = dist,
-          maxConcurrentPerNode = maxConcurrentPerNode
+          maxConcurrentPerNode = maxConcurrentPerNode,
+          disabled             = disabled,
+          cohorts              = cohorts
         )
         IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
           poolRows.put(poolEntity.id, poolEntity)
           poolIdByKey.put(key, poolEntity.id)
         } *> {
-          val specs = dist.asRoleList.zipWithIndex.map { case (role, i) =>
+          // Walk cohorts in order; each role gets the cohort's placement.
+          // Empty `cohorts` falls back to a single placement-less cohort
+          // carrying `dist`, matching pre-cohort behavior exactly.
+          val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
+            poolEntity.effectiveCohorts.flatMap { c =>
+              c.distribution.asRoleList.map(role => (role, c.placement))
+            }
+          val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
             NodeSpec(key, PoolSupervisor.nodeId(key, i + 1), role,
               merged, td.objectStore, maxConcurrent = maxConcurrentPerNode,
-              kindWire = kindWire, extraSetupSql = extraBlob)
+              kindWire = kindWire, extraSetupSql = extraBlob,
+              placement = placement)
           }
           specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
             acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
           }.flatMap { running =>
             val state = PoolState(key, running, dist, merged, td.objectStore, maxConcurrentPerNode,
+              disabled        = disabled,
               kindWire        = kindWire,
               extraSetupSql   = extraBlob,
               defaultDatabase = td.defaultDatabase,
@@ -944,7 +1023,10 @@ final class PoolSupervisor(
 
   private def updatePoolEntityDist(key: PoolKey, dist: RoleDistribution, size: Int): Unit =
     poolIdByKey.get(key).flatMap(poolRows.get).foreach { p =>
-      val updated = p.copy(size = size, distribution = dist)
+      // Scale changes the role distribution out from under any explicit
+      // cohort plan, so clear cohorts; the recreate-with-cohorts path
+      // is the supported way to change placement after the fact.
+      val updated = p.copy(size = size, distribution = dist, cohorts = Nil)
       store.upsertPool(updated)
       poolRows.put(updated.id, updated)
     }

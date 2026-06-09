@@ -1,7 +1,10 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ManifestImporter.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{
+  FederatedSecret, FederatedSource, NodePlacement, NodeToleration, Pool, PoolCohort,
+  RoleDistribution, Tenant, TenantDb, TenantDbKind
+}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   FederatedSourceStore,
@@ -87,6 +90,16 @@ object ManifestImporter:
       t.pools.foreach { p =>
         if !dbNames.contains(p.tenantDb) then
           errs += s"tenant '${t.name}' pool '${p.name}': tenantDb '${p.tenantDb}' not declared under tenant"
+        // Per-cohort sums must match the pool's roleDistribution and total.
+        if p.cohorts.nonEmpty then
+          val sumW = p.cohorts.map(_.distribution.writeonly).sum
+          val sumR = p.cohorts.map(_.distribution.readonly).sum
+          val sumD = p.cohorts.map(_.distribution.dual).sum
+          val rd   = p.roleDistribution
+          if sumW != rd.writeonly || sumR != rd.readonly || sumD != rd.dual then
+            errs += s"tenant '${t.name}' pool '${p.name}': cohort distributions " +
+              s"sum to (wo=$sumW, ro=$sumR, dual=$sumD) but pool roleDistribution is " +
+              s"(wo=${rd.writeonly}, ro=${rd.readonly}, dual=${rd.dual})"
       }
     }
 
@@ -208,6 +221,20 @@ object ManifestImporter:
               readonly  = mp.roleDistribution.readonly,
               dual      = mp.roleDistribution.dual
             )
+            val cohorts = mp.cohorts.map { mc =>
+              PoolCohort(
+                placement    = NodePlacement(
+                  nodeSelector = mc.placement.nodeSelector,
+                  tolerations  = mc.placement.tolerations.map(t =>
+                    NodeToleration(t.key, t.operator, t.value, t.effect))
+                ),
+                distribution = RoleDistribution(
+                  writeonly = mc.distribution.writeonly,
+                  readonly  = mc.distribution.readonly,
+                  dual      = mc.distribution.dual
+                )
+              )
+            }
             store.upsertPool(Pool(
               id                   = poolId,
               tenantId             = tenantId,
@@ -216,7 +243,8 @@ object ManifestImporter:
               size                 = dist.total,
               distribution         = dist,
               maxConcurrentPerNode = mp.maxConcurrentPerNode,
-              disabled             = mp.disabled
+              disabled             = mp.disabled,
+              cohorts              = cohorts
             ))
         }
       }

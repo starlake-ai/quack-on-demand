@@ -3,6 +3,13 @@ import { api, ApiError } from '../api/client';
 import type { PoolResponse, TenantDbResponse } from '../api/types';
 import PoolDetailBody from './PoolDetailBody';
 import { DeleteIcon } from './Icons';
+import CohortEditor, {
+  CohortDraft,
+  cohortDraftToWire,
+  cohortsTotal,
+  emptyCohort,
+  PlacementUnsupportedWarning,
+} from './CohortEditor';
 
 /** Pools card for the TenantDetail page. Mirrors DatabaseSection's
   * shape: list pools, plus an inline "+ New pool" form that opens
@@ -34,8 +41,21 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   const [wo, setWo]               = useState(0);
   const [dual, setDual]           = useState(1);
   const [maxConcurrent, setMaxConcurrent] = useState(0); // 0 = unlimited
+  // When true, the pool is persisted with disabled=true so the edge
+  // rejects fresh handshakes until the operator enables it. Useful for
+  // pre-provisioning a pool before its tenant goes live.
+  const [createDisabled, setCreateDisabled] = useState(false);
 
-  const size = ro + wo + dual;
+  // Placement plan. Always available; on non-K8s backends the cohorts
+  // are persisted so a YAML export still survives, but the runtime
+  // ignores them. `placementSupported` defaults to true; the effect
+  // below corrects it from /api/config/client.
+  const [placementSupported, setPlacementSupported] = useState(true);
+  const [useCohorts, setUseCohorts] = useState(false);
+  const [cohorts, setCohorts]       = useState<CohortDraft[]>([emptyCohort()]);
+
+  const effective = useCohorts ? cohortsTotal(cohorts) : { wo, ro, dual };
+  const size = effective.wo + effective.ro + effective.dual;
 
   function reloadPools() {
     return api.listPools()
@@ -56,6 +76,9 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   useEffect(() => {
     void reloadPools();
     void reloadTenantDbs();
+    api.clientConfig()
+      .then(cfg => setPlacementSupported(!!cfg.placementSupported))
+      .catch(() => setPlacementSupported(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
@@ -111,6 +134,9 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     setWo(0);
     setDual(1);
     setMaxConcurrent(0);
+    setUseCohorts(false);
+    setCohorts([emptyCohort()]);
+    setCreateDisabled(false);
     setError(null);
     if (tenantDbs.length > 0) setTenantDb(tenantDbs[0].name);
   }
@@ -148,11 +174,18 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     e.preventDefault();
     setError(null);
     if (!tenantDb) { setError('pick a tenant database'); return; }
+    const wireCohorts = useCohorts ? cohorts.map(cohortDraftToWire) : undefined;
     try {
       await api.createPool({
         tenant, tenantDb, pool: poolName, size,
-        roleDistribution: { writeonly: wo, readonly: ro, dual },
+        roleDistribution: {
+          writeonly: effective.wo,
+          readonly:  effective.ro,
+          dual:      effective.dual,
+        },
         maxConcurrentPerNode: maxConcurrent,
+        ...(wireCohorts ? { cohorts: wireCohorts } : {}),
+        ...(createDisabled ? { disabled: true } : {}),
       });
       const justCreated = { tenantDb, pool: poolName };
       setAdding(false);
@@ -285,6 +318,11 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
             zIndex: 100, paddingTop: '4rem',
+            // Outer is the scroll container: when the inner content (with
+            // many cohorts) exceeds the viewport the modal scrolls
+            // instead of running off the bottom of the screen.
+            overflowY: 'auto',
+            paddingBottom: '2rem',
           }}
         >
           <div
@@ -316,11 +354,29 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                 />
               </label>
               <fieldset style={{ marginTop: '0.5rem' }}>
-                <legend>Role distribution (size = {size})</legend>
-                <label>WriteOnly <input type="number" min={0} value={wo}   onChange={ev => setWo(+ev.target.value)} /></label>
-                <label>ReadOnly  <input type="number" min={0} value={ro}   onChange={ev => setRo(+ev.target.value)} /></label>
-                <label>Dual      <input type="number" min={0} value={dual} onChange={ev => setDual(+ev.target.value)} /></label>
+                <legend>Node placement</legend>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={useCohorts}
+                    onChange={ev => setUseCohorts(ev.target.checked)}
+                  />{' '}
+                  Pin nodes to Kubernetes node labels (cohorts)
+                </label>
+                {useCohorts && !placementSupported && <PlacementUnsupportedWarning />}
               </fieldset>
+              {!useCohorts ? (
+                <fieldset style={{ marginTop: '0.5rem' }}>
+                  <legend>Role distribution (size = {size})</legend>
+                  <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                    <label>WriteOnly <input type="number" min={0} value={wo}   onChange={ev => setWo(+ev.target.value)}   style={{ width: 72 }} /></label>
+                    <label>ReadOnly  <input type="number" min={0} value={ro}   onChange={ev => setRo(+ev.target.value)}   style={{ width: 72 }} /></label>
+                    <label>Dual      <input type="number" min={0} value={dual} onChange={ev => setDual(+ev.target.value)} style={{ width: 72 }} /></label>
+                  </div>
+                </fieldset>
+              ) : (
+                <CohortEditor cohorts={cohorts} onChange={setCohorts} />
+              )}
               <label>
                 Max concurrent per node
                 <input
@@ -333,6 +389,14 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               {maxConcurrent === 0 && (
                 <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>(0 = unlimited)</p>
               )}
+              <label style={{ display: 'block', marginTop: '.5rem' }}>
+                <input
+                  type="checkbox"
+                  checked={createDisabled}
+                  onChange={ev => setCreateDisabled(ev.target.checked)}
+                />{' '}
+                Create disabled (nodes spawn, but the edge rejects fresh handshakes until enabled)
+              </label>
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={cancelForm}>Cancel</button>
                 <button type="submit" style={{ minWidth: '7rem' }} disabled={size === 0 || !tenantDb || !poolName}>
@@ -352,6 +416,8 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
             zIndex: 100, paddingTop: '4rem',
+            overflowY: 'auto',
+            paddingBottom: '2rem',
           }}
         >
           <div
@@ -367,9 +433,11 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             <form onSubmit={submitScale}>
               <fieldset>
                 <legend>Role distribution</legend>
-                <label>WriteOnly <input type="number" min={0} value={scaleWo}   onChange={e => setScaleWo(+e.target.value)} /></label>
-                <label>ReadOnly  <input type="number" min={0} value={scaleRo}   onChange={e => setScaleRo(+e.target.value)} /></label>
-                <label>Dual      <input type="number" min={0} value={scaleDual} onChange={e => setScaleDual(+e.target.value)} /></label>
+                <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                  <label>WriteOnly <input type="number" min={0} value={scaleWo}   onChange={e => setScaleWo(+e.target.value)}   style={{ width: 72 }} /></label>
+                  <label>ReadOnly  <input type="number" min={0} value={scaleRo}   onChange={e => setScaleRo(+e.target.value)}   style={{ width: 72 }} /></label>
+                  <label>Dual      <input type="number" min={0} value={scaleDual} onChange={e => setScaleDual(+e.target.value)} style={{ width: 72 }} /></label>
+                </div>
               </fieldset>
               {scaleRo + scaleWo + scaleDual < scaling.nodes.length && (
                 <label style={{ display: 'block', marginTop: '1rem', color: 'var(--bad)' }}>

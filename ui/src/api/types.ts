@@ -6,6 +6,23 @@ export interface RoleDistribution {
   dual: number;
 }
 
+export interface NodeToleration {
+  key: string;
+  operator?: string;     // "Equal" (default) | "Exists"
+  value?: string;
+  effect?: string;       // "NoSchedule" | "PreferNoSchedule" | "NoExecute"
+}
+
+export interface NodePlacement {
+  nodeSelector?: Record<string, string>;
+  tolerations?: NodeToleration[];
+}
+
+export interface PoolCohort {
+  placement?: NodePlacement;
+  distribution: RoleDistribution;
+}
+
 export interface NodeInfo {
   nodeId: string;
   role: string;
@@ -36,6 +53,10 @@ export interface PoolResponse {
   // pgPassword is redacted.
   metastore: Record<string, string>;
   disabled: boolean;
+  // Persisted placement plan. Empty array (the default) means no
+  // placement constraint — all nodes scheduled wherever the runtime puts
+  // them. Only meaningful on the Kubernetes backend.
+  cohorts?: PoolCohort[];
 }
 
 export interface SetPoolDisabledRequest {
@@ -52,6 +73,13 @@ export interface CreatePoolRequest {
   size: number;
   roleDistribution: RoleDistribution;
   maxConcurrentPerNode?: number; // default 0 = unlimited
+  // Optional placement plan. Must sum back to roleDistribution / size when
+  // present. The manager ignores cohorts when the runtime backend is not
+  // Kubernetes (see ClientConfigResponse.placementSupported).
+  cohorts?: PoolCohort[];
+  // When true the pool is persisted disabled; the FlightSQL edge rejects
+  // fresh handshakes until it's enabled. Nodes still spawn.
+  disabled?: boolean;
 }
 
 export interface ScalePoolRequest {
@@ -93,6 +121,9 @@ export interface ClientConfigResponse {
   // skips the login screen entirely. The REST API may still require an
   // X-API-Key - that's a separate gate.
   authEnabled: boolean;
+  // True iff the runtime backend supports node placement (Kubernetes).
+  // The UI hides cohort/placement controls when false.
+  placementSupported?: boolean;
 }
 
 /** One row of the Config page. `value` is masked ("(set)" / "(unset)")

@@ -10,6 +10,23 @@ final case class ExportedFrom(managerVersion: String, hostname: String)
 
 final case class ManifestRoleDistribution(writeonly: Int, readonly: Int, dual: Int)
 
+final case class ManifestNodeToleration(
+    key:      String,
+    operator: String         = "Equal",
+    value:    Option[String] = None,
+    effect:   Option[String] = None
+)
+
+final case class ManifestNodePlacement(
+    nodeSelector: Map[String, String]          = Map.empty,
+    tolerations:  List[ManifestNodeToleration] = Nil
+)
+
+final case class ManifestPoolCohort(
+    placement:    ManifestNodePlacement = ManifestNodePlacement(),
+    distribution: ManifestRoleDistribution
+)
+
 final case class ManifestFederatedSecret(
     name:        String,
     value:       Option[String] = None,
@@ -39,8 +56,13 @@ final case class ManifestPool(
     name:                  String,
     tenantDb:              String,
     roleDistribution:      ManifestRoleDistribution,
-    maxConcurrentPerNode:  Int     = 0,
-    disabled:              Boolean = false
+    maxConcurrentPerNode:  Int                       = 0,
+    disabled:              Boolean                   = false,
+    // Optional placement plan. When empty, the importer creates the
+    // pool with no cohorts (single placement-less group). The
+    // supervisor ignores cohorts when the runtime backend can't
+    // honor placement (e.g. local mode).
+    cohorts:               List[ManifestPoolCohort]  = Nil
 )
 
 final case class ManifestIdentity(
@@ -111,6 +133,38 @@ object ConfigManifest:
   given Codec[ManifestTablePermission]  = deriveCodec
   given Codec[ManifestPoolGrant]        = deriveCodec
 
+  // Placement codecs: every field but `key` (tolerations) and
+  // `distribution` (cohorts) is optional in YAML.
+  given Codec[ManifestNodeToleration] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        key      <- c.get[String]("key")
+        operator <- c.getOrElse[String]("operator")("Equal")
+        value    <- c.getOrElse[Option[String]]("value")(None)
+        effect   <- c.getOrElse[Option[String]]("effect")(None)
+      yield ManifestNodeToleration(key, operator, value, effect)
+    },
+    deriveEncoder[ManifestNodeToleration]
+  )
+  given Codec[ManifestNodePlacement] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        nodeSelector <- c.getOrElse[Map[String, String]]("nodeSelector")(Map.empty)
+        tolerations  <- c.getOrElse[List[ManifestNodeToleration]]("tolerations")(Nil)
+      yield ManifestNodePlacement(nodeSelector, tolerations)
+    },
+    deriveEncoder[ManifestNodePlacement]
+  )
+  given Codec[ManifestPoolCohort] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        placement    <- c.getOrElse[ManifestNodePlacement]("placement")(ManifestNodePlacement())
+        distribution <- c.get[ManifestRoleDistribution]("distribution")
+      yield ManifestPoolCohort(placement, distribution)
+    },
+    deriveEncoder[ManifestPoolCohort]
+  )
+
   // Case classes with default values get hand-rolled decoders that honor
   // those defaults when the field is omitted in YAML. circe's deriveCodec
   // generates strict decoders that always require every field, regardless
@@ -168,7 +222,8 @@ object ConfigManifest:
         roleDistribution     <- c.get[ManifestRoleDistribution]("roleDistribution")
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
-      yield ManifestPool(name, tenantDb, roleDistribution, maxConcurrentPerNode, disabled)
+        cohorts              <- c.getOrElse[List[ManifestPoolCohort]]("cohorts")(Nil)
+      yield ManifestPool(name, tenantDb, roleDistribution, maxConcurrentPerNode, disabled, cohorts)
     },
     deriveEncoder[ManifestPool]
   )

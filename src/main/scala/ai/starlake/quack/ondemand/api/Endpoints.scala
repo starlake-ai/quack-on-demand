@@ -9,8 +9,16 @@ import sttp.tapir.json.circe._
 // tapir's generic auto-derivation chokes on the bigger NodeInfo case class
 // in Scala 3, so we materialize them once here and reuse.
 private given Schema[NodeInfo]           = Schema.derived
+// Placement DTOs (transitively reachable from PoolResponse and
+// CreatePoolRequest). Anchor each one explicitly so magnolia derives
+// them once instead of expanding the chain twice through `auto._`,
+// which in Scala 3 blows up with an inline budget error.
+private given Schema[NodeTolerationDto]  = Schema.derived
+private given Schema[NodePlacementDto]   = Schema.derived
+private given Schema[PoolCohortDto]      = Schema.derived
 private given Schema[PoolResponse]       = Schema.derived
 private given Schema[PoolListResponse]   = Schema.derived
+private given Schema[CreatePoolRequest]  = Schema.derived
 
 object Endpoints:
 

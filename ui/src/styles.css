@@ -1,6 +1,12 @@
 /* Quack on Demand admin console - design tokens + base styles. */
 
 :root {
+  /* Tells Chromium/Firefox/Safari the page is dark themed so they
+     draw native form controls (incl. number-input spinner arrows) in
+     a light palette that matches --text instead of the default dark
+     grey, which was invisible on our --bg #0f1115. */
+  color-scheme: dark;
+
   --bg:         #0f1115;
   --bg-elev:   #1a1d24;
   --bg-card:   #20242c;
@@ -262,27 +268,10 @@ input:focus, select:focus, textarea:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
-/* Native number-input spinner arrows: the browser draws them in its
-   own dark grey, and CSS filter recipes drift across versions, so we
-   hide the native spinner entirely and paint two orange chevrons
-   (rgb(245,158,11), matching --accent) via background-image on the
-   input itself. Keyboard up/down still increments the value; click
-   on the chevrons does not (acceptable for our admin forms). */
-input[type="number"] {
-  -moz-appearance: textfield;
-  background-image:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='rgb(245,158,11)' d='M6 0L0 8h12z'/></svg>"),
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path fill='rgb(245,158,11)' d='M6 8L0 0h12z'/></svg>");
-  background-repeat: no-repeat, no-repeat;
-  background-position: right .55rem top .35rem, right .55rem bottom .35rem;
-  background-size: 9px 6px, 9px 6px;
-  padding-right: 1.6rem;
-}
-input[type="number"]::-webkit-inner-spin-button,
-input[type="number"]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
+/* Native number-input spinner arrows. The previous build hid them and
+   painted decorative chevrons via background-image; the chevrons were
+   not clickable, only keyboard up/down worked. Cohort editors needed
+   functional spinners, so we let the browser draw and handle them. */
 /* Reset the input-base width/height/display defaults so checkboxes render
    at their native size next to a label instead of stretching across the row. */
 input[type="checkbox"], input[type="radio"] {

@@ -39,6 +39,8 @@ final class KubernetesQuackBackend(
 
   private val tokens = scala.collection.concurrent.TrieMap.empty[String, String]
 
+  override val supportsPlacement: Boolean = true
+
   private def buildLabels(spec: NodeSpec): java.util.Map[String, String] =
     val m = new java.util.HashMap[String, String]()
     m.put(labelKey, labelValue)
@@ -109,6 +111,23 @@ final class KubernetesQuackBackend(
 
     val podSpec = new PodSpec()
     podSpec.setContainers(java.util.List.of(container))
+
+    // Apply the cohort's placement, if any. Empty selector + empty
+    // tolerations leaves the default scheduler in charge -- same as
+    // a pool created without explicit cohorts.
+    if spec.placement.nodeSelector.nonEmpty then
+      podSpec.setNodeSelector(spec.placement.nodeSelector.asJava)
+    if spec.placement.tolerations.nonEmpty then
+      val tols = new java.util.ArrayList[Toleration]()
+      spec.placement.tolerations.foreach { t =>
+        val tol = new Toleration()
+        tol.setKey(t.key)
+        tol.setOperator(t.operator)
+        t.value.foreach(tol.setValue)
+        t.effect.foreach(tol.setEffect)
+        tols.add(tol)
+      }
+      podSpec.setTolerations(tols)
 
     val meta = new ObjectMeta()
     meta.setName(spec.nodeId)
