@@ -26,14 +26,20 @@ export default function Users() {
     api.listTenants()
       .then(r => {
         setTenants(r.tenants);
-        if (r.tenants.length > 0) setSelected(r.tenants[0].name);
-        else setSelected(ALL);
+        // Default to "(all)" so the initial Users tab includes
+        // superusers (tenant IS NULL) and every tenant's users. Picking
+        // a specific tenant from the dropdown narrows from there.
+        setSelected(ALL);
       })
       .catch(() => setSelected(ALL));
   }, []);
 
-  const usersFilter   = selected === ALL ? null : selected;
-  const tenantForRoles = (selected && selected !== ALL && selected !== '(superusers)')
+  // "(superusers)" is a UI-only sentinel; the backend has no
+  // first-class concept for "list superusers only" via listUsers, so we
+  // fetch all (tenant=null) and let UserSection narrow on the client.
+  const superusersOnly = selected === '(superusers)';
+  const usersFilter    = selected === ALL || superusersOnly ? null : selected;
+  const tenantForRoles = (selected && selected !== ALL && !superusersOnly)
     ? selected
     : null;
   const tenantRow = tenants.find(t => t.name === tenantForRoles);
@@ -69,8 +75,9 @@ export default function Users() {
         tabs={[
           { id: 'users',  label: 'Users',
             body: <UserSection
-                    tenant={usersFilter === '(superusers)' ? null : usersFilter}
+                    tenant={usersFilter}
                     tenants={tenants}
+                    superusersOnly={superusersOnly}
                   /> },
           { id: 'groups', label: 'Groups',
             body: <GroupSection tenant={tenantForRoles} /> },
