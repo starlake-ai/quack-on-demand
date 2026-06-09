@@ -12,12 +12,12 @@ export interface TabSpec {
 /** Plain useState-driven tab strip. The first tab in `tabs` is active
   * on mount; clicking a header swaps the visible body.
   *
-  * Every tab body is mounted once and stays mounted -- inactive ones
-  * are hidden with `display:none`. This preserves each tab's local
-  * state (fetched data, open inline forms, picked rows in two-/three-
-  * pane layouts) across tab switches. The cost is that all tabs fetch
-  * on first page load instead of lazily, which is acceptable for the
-  * dev / admin UI scale.
+  * Only the active tab body is mounted. Each tab switch (or re-click
+  * of the active tab) unmounts the previous body and mounts a fresh
+  * instance, so callers get the same state they would on first display
+  * of that tab -- fetched data, inline forms, and pickers all reset.
+  * The cost is a refetch on every switch, which is acceptable for the
+  * dev / admin UI scale and was explicitly requested.
   *
   * Nothing is persisted to the URL -- callers that need shareable
   * links should lift the active id into the route. */
@@ -29,27 +29,35 @@ export default function Tabs({
   initialId?: string;
 }) {
   const [active, setActive] = useState<string>(initialId ?? tabs[0]?.id ?? '');
+  // Bumped on every header click (incl. re-clicks of the active tab)
+  // so the keyed panel below remounts. That gives callers the same
+  // state they'd see on first display of the tab.
+  const [nonce, setNonce]   = useState(0);
+  const activeTab = tabs.find(t => t.id === active);
   return (
     <div className="tabs">
       <div className="tab-bar" role="tablist">
         {tabs.map(t => (
           <button
             key={t.id}
+            type="button"
             role="tab"
             aria-selected={t.id === active}
             className={'tab' + (t.id === active ? ' active' : '')}
-            onClick={() => setActive(t.id)}
+            onClick={() => {
+              setActive(t.id);
+              setNonce(n => n + 1);
+            }}
           >
             {t.label}
           </button>
         ))}
       </div>
-      <div className="tab-body" role="tabpanel">
-        {tabs.map(t => (
-          <div key={t.id} hidden={t.id !== active}>
-            {t.body}
-          </div>
-        ))}
+      {/* `key={active-nonce}` unmounts the previous panel on every
+          click and mounts a fresh instance, so the rendered body is
+          the same first-display state every time. */}
+      <div className="tab-body" role="tabpanel" key={`${active}-${nonce}`}>
+        {activeTab?.body}
       </div>
     </div>
   );

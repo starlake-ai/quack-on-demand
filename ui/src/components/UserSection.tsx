@@ -23,9 +23,15 @@ import { DeleteIcon, EditIcon } from './Icons';
 export default function UserSection({
   tenant,
   tenants,
+  superusersOnly = false,
 }: {
   tenant:  string | null;
   tenants: TenantResponse[];
+  /** When true, the rendered table is filtered client-side to users
+    * whose `tenant` field is null (superusers). The backend has no
+    * dedicated endpoint for "superusers only" via listUsers, so the
+    * caller passes `tenant = null` and we narrow on the client. */
+  superusersOnly?: boolean;
 }) {
   const [rows, setRows]       = useState<UserResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
@@ -69,7 +75,7 @@ export default function UserSection({
   function reload() {
     setError(null);
     api.listUsers(tenant ?? undefined)
-      .then(r => setRows(r.users))
+      .then(r => setRows(superusersOnly ? r.users.filter(u => u.tenant == null) : r.users))
       .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
   }
 
@@ -77,7 +83,7 @@ export default function UserSection({
     setNewTenant(tenant ?? SUPERUSER);
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant]);
+  }, [tenant, superusersOnly]);
 
   async function handleCreate(ev: React.FormEvent) {
     ev.preventDefault();
