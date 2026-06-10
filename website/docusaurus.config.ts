@@ -43,12 +43,21 @@ const config: Config = {
       items: [
         { type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs' },
         { to: 'pathname:///api/', label: 'API', position: 'left' },
+        { href: 'https://discord.gg/xHj9D6Rebp', label: 'Discord', position: 'right' },
         { href: 'https://github.com/starlake-ai/quack-on-demand', label: 'GitHub', position: 'right' },
       ],
     },
     footer: {
       style: 'dark',
-      links: [],
+      links: [
+        {
+          title: 'Community',
+          items: [
+            { label: 'Discord', href: 'https://discord.gg/xHj9D6Rebp' },
+            { label: 'GitHub', href: 'https://github.com/starlake-ai/quack-on-demand' },
+          ],
+        },
+      ],
       copyright: `Copyright (c) ${new Date().getFullYear()} Starlake. Apache-2.0.`,
     },
   } satisfies Preset.ThemeConfig,
