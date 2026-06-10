@@ -29,6 +29,6 @@
     "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
   },
   "engines": {
-    "node": ">=18.0"
+    "node": ">=18.0 <24"
   }
 }
