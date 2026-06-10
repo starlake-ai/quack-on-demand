@@ -7,6 +7,18 @@ This page describes the role-based access control (RBAC) model enforced by quack
 
 ACL enforcement is disabled by default. Set `QOD_ACL_ENABLED=true` to enforce it. The rest of this page assumes enforcement is on.
 
+## Pools and databases
+
+Access to a database is granted through pools, so it helps to be precise about how the two relate before looking at table permissions.
+
+- A **tenant** owns one or more **tenant-dbs**. A tenant-db *is* a database: in the default `ducklake` kind it is a Postgres database holding a DuckLake catalog, with a catalog name and a default schema.
+- A **pool** is a set of DuckDB Quack nodes and is bound to exactly one tenant-db (`qodstate_pool.tenant_db_id`). Every node in the pool opens that tenant-db's catalog. A pool's full identity is the triple `(tenant, tenantDb, pool)`, the `PoolKey`.
+- A client handshake supplies only a `tenant` and a `pool` (via gRPC headers or JWT claims). The gateway resolves which tenant-db that pool belongs to server-side; the client never names the database directly.
+
+The consequence is the part that is easy to miss: **admission to a pool is admission to that pool's database.** The pool-access check (gate 1 below) is therefore the database-access gate. Granting a user or group a `qodstate_pool_permission` row for pool `p` is what lets them open a session against `p`'s tenant-db; a principal with no pool permission reaching a tenant-db cannot query that database at all, regardless of any table grants they hold. Once admitted, the tenant-db's catalog name and default schema become the session's defaults, which the per-statement gate uses to qualify unqualified table names.
+
+Table permissions (the rest of this page) then decide *which tables inside the reachable databases* a statement may touch. The two are independent: pool access decides the database; table permissions decide the tables.
+
 ## Entities
 
 The RBAC graph is stored in the control-plane Postgres database (default `qod`) using tables with the `qodstate_` prefix.
@@ -128,7 +140,7 @@ Every FlightSQL request passes through two sequential gates.
 
 ### Gate 1: handshake (pool-access)
 
-When a client opens a FlightSQL connection it supplies a tenant and pool name (via gRPC headers or JWT claims). The handshake:
+This is the database-access gate. Because each pool is bound to exactly one tenant-db (see "Pools and databases" above), admitting the pool admits its database. When a client opens a FlightSQL connection it supplies a tenant and pool name (via gRPC headers or JWT claims). The handshake:
 
 1. Authenticates the credential (database bcrypt check, JWT validation, or OIDC; see the authentication page for details).
 2. Resolves the user in `qodstate_user`.
@@ -160,6 +172,121 @@ quack-flightsql.acl.dialect = "duckdb"   # default, only option wired today
 ```
 
 Environment variable: `QOD_ACL_DIALECT`.
+
+## Worked examples
+
+These scenarios show how the entities, the EffectiveSet, and the two gates combine in practice. Each one lists the setup as entities plus grants, then the resulting allow/deny decision for representative statements. The grant notation `verb on catalog.schema.table` is one `qodstate_role_permission` row. For the REST and UI steps to create these, see the "Administering access" page; this section is about understanding the outcomes. All examples assume `QOD_ACL_ENABLED=true` and a tenant named `acme` whose tenant-db (catalog) is `sales` with schemas `raw`, `staging`, and `mart`.
+
+### Read-only analyst
+
+A BI analyst should query the curated `mart` schema and nothing else.
+
+Setup:
+
+| Entity | Value |
+|---|---|
+| User | `alice` (tenant `acme`) |
+| Role | `analyst_ro` |
+| Role permission | `SELECT on sales.mart.*` |
+| Pool grant | `analyst_ro` reaches pool `bi` (via the user's group or a direct pool permission) |
+| Edge | `alice` assigned `analyst_ro` directly (`qodstate_user_role`) |
+
+Results, connecting to pool `bi`:
+
+| Statement | Decision | Why |
+|---|---|---|
+| `SELECT * FROM mart.daily_revenue` | Allowed | Read access on `sales.mart.daily_revenue` covered by `SELECT on sales.mart.*`. |
+| `SELECT * FROM mart.a JOIN mart.b USING (id)` | Allowed | Both joined tables are reads under `sales.mart.*`. |
+| `SELECT * FROM raw.events` | Denied | `sales.raw.events` is not under `sales.mart.*`; no covering grant. |
+| `INSERT INTO mart.daily_revenue VALUES (...)` | Denied | Write access needs `INSERT`/`UPDATE`/`DELETE`/`ALL`; the analyst holds only `SELECT`. |
+
+### ETL pipeline through a group
+
+A service account loads `staging` from `raw` on a schedule. Permissions are attached to a role, the role to a group, and the account to the group, so onboarding a second loader is just one group membership.
+
+Setup:
+
+| Entity | Value |
+|---|---|
+| User | `etl-bot` (tenant `acme`) |
+| Group | `data-eng` |
+| Role | `etl` |
+| Role permissions | `SELECT on sales.raw.*`, `INSERT on sales.staging.*` |
+| Edges | `data-eng` carries `etl` (`qodstate_group_role`); `etl-bot` is in `data-eng` (`qodstate_user_group`) |
+| Pool grant | `data-eng` holds a pool permission for pool `etl` |
+
+Results, connecting to pool `etl`:
+
+| Statement | Decision | Why |
+|---|---|---|
+| `INSERT INTO staging.orders SELECT * FROM raw.orders` | Allowed | Write target `sales.staging.orders` covered by `INSERT`; read source `sales.raw.orders` covered by `SELECT`. Both sides must pass. |
+| `DELETE FROM staging.orders WHERE day < '2026-01-01'` | Allowed | DELETE collapses to the same `Write` class that the `INSERT on sales.staging.*` grant covers. |
+| `CREATE TABLE staging.orders_v2 AS SELECT * FROM raw.orders` | Denied | The `CREATE` is a `Ddl` access; only `ALL` covers DDL. The read source would pass, but the unmet DDL access denies the whole statement. |
+| `SELECT * FROM mart.daily_revenue` | Denied | No grant reaches `sales.mart.*`. |
+
+The DELETE example is the practical consequence of write-verb collapsing: holding any one of `INSERT`/`UPDATE`/`DELETE` on a table authorizes all three.
+
+### Narrow single-table grant
+
+The finance team may read exactly one table, not its whole schema.
+
+Setup:
+
+| Entity | Value |
+|---|---|
+| Group | `finance` with role `gl_reader` |
+| Role permission | `SELECT on sales.finance.ledger` (all three parts literal, no wildcard) |
+
+Results:
+
+| Statement | Decision | Why |
+|---|---|---|
+| `SELECT balance FROM finance.ledger` | Allowed | Exact literal match on all three name parts. |
+| `SELECT * FROM finance.journal` | Denied | `journal` does not match the literal `ledger`; a single-table grant does not extend to siblings. |
+
+To widen this later, change the table part to `*` (`SELECT on sales.finance.*`).
+
+### Tenant admin and the cross-tenant boundary
+
+A tenant administrator should have full control inside their own tenant but must not reach another tenant's data.
+
+Setup:
+
+| Entity | Value |
+|---|---|
+| User | `acme-admin` (tenant `acme`, not a superuser) |
+| Role | `tenant_admin` |
+| Role permission | `ALL on *.*.*` |
+
+Results:
+
+| Statement | Decision | Why |
+|---|---|---|
+| `SELECT * FROM raw.events` | Allowed | `ALL` covers `Read`; `*` matches any catalog in tenant `acme`. |
+| `CREATE TABLE mart.summary AS SELECT ...` | Allowed | `ALL` covers `Ddl` and the `Read` source. |
+| `SELECT * FROM widgets.public.orders` (a different tenant's catalog) | Denied | The catalog `*` wildcard is scoped to the session's tenant; it does not match `widgets`. |
+
+To grant a cross-tenant read deliberately, name the other catalog literally, for example `SELECT on widgets.*.*`. That bypasses the tenant-scoped wildcard through the literal-match path. Contrast with a superuser (`tenant IS NULL`), who skips the per-statement gate entirely and needs no such grant.
+
+### Pool gate versus statement gate
+
+Table permissions and pool access are independent. Holding the right table grants does not let a user onto a pool they were never granted.
+
+Setup:
+
+| Entity | Value |
+|---|---|
+| User | `bob` with role granting `SELECT on sales.mart.*` |
+| Pool grant | a pool permission for pool `bi` only |
+
+Results:
+
+| Action | Decision | Why |
+|---|---|---|
+| Connect to pool `bi`, then `SELECT * FROM mart.daily_revenue` | Allowed | Gate 1 admits the pool; gate 2 admits the read. |
+| Connect to pool `etl` | Denied at handshake | Gate 1: `bob`'s effective pools do not include `etl`. No SQL is ever evaluated. |
+
+A pool permission with a null `pool_id` would admit `bob` to every pool in tenant `acme`, collapsing the two rows above into one tenant-wide grant.
 
 ## Privilege-escalation guards
 

@@ -3,4 +3,59 @@ id: cli
 title: CLI
 ---
 
-> Placeholder created in P0. Full content lands in later phases.
+The manager is one uber-jar. Run with no arguments it boots the manager; it also has two `manifest` subcommands for scripting. A set of wrapper scripts under `scripts/` cover the common boot and teardown flows.
+
+## The manager jar
+
+```bash
+# Boot the manager (REST + UI + FlightSQL edge). The default with no args.
+java -jar quack-on-demand-assembly-<version>.jar
+
+# Export the whole control-plane configuration as YAML to stdout.
+java -jar quack-on-demand-assembly-<version>.jar manifest export > manifest.yaml
+
+# Import a configuration manifest from stdin.
+java -jar quack-on-demand-assembly-<version>.jar manifest import < manifest.yaml
+```
+
+The `manifest export` / `manifest import` subcommands operate on the Postgres control-plane store directly (they do not need a running manager) and mirror the `/api/manifest/*` REST endpoints; see [Manifest backup and restore](/operating/manifest). All behavior is configured through `QOD_*` / `PROXY_*` environment variables; see the [Configuration reference](/reference/configuration).
+
+## Wrapper scripts
+
+### `run-jar.sh`
+
+Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres reachability probe.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `BUILD` | `0` | `1` runs `sbt assembly` first instead of using the existing jar. |
+| `QOD_VERSION` | latest | Release to resolve from Maven Central (`0.3.2`, `latest-snapshot`, ...). |
+| `LOAD_TPCH` | unset | Numeric value seeds TPC-H at that scale factor before boot. |
+| `NUKE` | `0` | `1` drops the control-plane DB and wipes local state dirs first. Irreversible. |
+
+```bash
+./scripts/run-jar.sh
+BUILD=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+./scripts/stop-jar.sh        # SIGTERM, wait, then SIGKILL
+```
+
+### `run-docker-compose.sh`
+
+Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPCH` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
+
+```bash
+./scripts/run-docker-compose.sh
+PROFILES=observability ./scripts/run-docker-compose.sh
+./scripts/stop-docker-compose.sh
+```
+
+### `run-docker.sh`
+
+Runs a single manager container against an external Postgres (requires `PG_HOST` and `PG_PASSWORD`). See the Docker section of [Installation](/getting-started/install). Stop with `stop-docker.sh`.
+
+### Other scripts
+
+- `load-tpch-dbgen.sh` - seed TPC-H into the bootstrap tenant-db (invoked by the boot scripts via `LOAD_TPCH`, or run directly inside a running container).
+- `spawn-quack-node.sh` - spawns one Quack node. Invoked by `LocalQuackBackend` with the right port, token, and metastore contract; do not run it directly.
+- `loadtest/loadtest.py` - the bundled ADBC load tester, usable as a one-shot client. See [Connecting clients](/connecting/clients).

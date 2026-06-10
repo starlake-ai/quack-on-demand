@@ -1,0 +1,109 @@
+---
+id: admin-ui
+title: Admin UI guide
+---
+
+The manager serves a React admin console at `http://<host>:20900/ui/`. It is an operator console: it manages tenants, databases, pools, users, and access control, and surfaces live node and statement telemetry. It is not an end-user query tool; clients run SQL over the FlightSQL edge, not through this UI.
+
+Every screen here is backed by a REST endpoint documented in the [REST API reference](pathname:///api/); the UI is a thin front end over the same `/api/*` calls shown on the operator pages. Where a screen maps to a task already covered in prose, this guide links there rather than repeating it.
+
+The screenshots below are from a local demo deployment with the bootstrap TPC-H tenant.
+
+## Signing in
+
+The login screen takes a username and password and mints a session token used for the rest of the session. When the server has no auth providers configured (the no-auth dev mode), the login screen is skipped and the session is a synthetic anonymous superuser. The signed-in user and role appear in the top-right pill; the no-auth mode shows `anonymous / no-auth`.
+
+![The Quack on Demand admin login screen](/img/ui/login.png)
+
+For how credentials are validated and how to wire an external provider, see [Authentication](/operating/authentication) and [Authentication providers](/operating/auth-providers).
+
+## Navigation
+
+The top navigation bar has **Nodes**, **Tenants**, **Users**, and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it.
+
+![The top navigation bar](/img/ui/nav.png)
+
+## Nodes
+
+`Nodes` is the landing page and the at-a-glance operational view: a live table of every Quack node across all tenants, grouped by tenant and pool. Each row shows the node's in-flight count, total served, and average latency, the same telemetry the router uses to place statements. Use it to spot a hot pool, a draining node, or an idle one.
+
+![The Nodes overview with live per-node counters](/img/ui/nodes.png)
+
+## Tenants
+
+`Tenants` lists every tenant and offers a **New tenant** form to create one. Selecting a tenant opens its detail page.
+
+The tenant detail page has three tabs:
+
+- **Databases** - create and manage the tenant's databases (tenant-dbs): kind, data path, default schema. This is the UI form for the calls on the "Tenants and databases" page.
+- **Pools** - create pools bound to a database (a **New pool** form with the role distribution and a create-disabled toggle), and per-pool **Scale**, **Drain**, and **Force** actions. Drain is the graceful stop (stop accepting new queries, then shut down); Force stops immediately and fails outstanding queries.
+- **Auth provider** - the tenant's auth provider and its configuration.
+
+The page also shows the tenant's live nodes and recent statements.
+
+![The tenant detail page on the Pools tab](/img/ui/tenant-pools.png)
+
+### Databases and federation
+
+The **Databases** tab lists the tenant's databases with their kind, schema, and data path, plus a per-database **Federation** link and a **New database** form.
+
+![The Databases tab](/img/ui/databases.png)
+
+Clicking **Federation** on a database opens its federated-source panel, where DuckDB `ATTACH` / extension catalogs are registered (with their secrets) and injected at session start. See [Federation](/operating/federation).
+
+![The federation panel for a database](/img/ui/federation.png)
+
+### Pool detail
+
+Opening an individual pool shows its detail page, with tabs for **Nodes** (the per-node table with role, host, port, and a per-node max-concurrency control), **Connections**, **Storage**, and **Placement**, plus **Scale** and **Delete** actions. The concepts behind role distribution, scaling, and graceful drain are covered on the "Pools and cohorts" page.
+
+![The pool detail page on the Nodes tab](/img/ui/pool-detail.png)
+
+The **Connections** tab gives ready-made JDBC, ODBC, and ADBC connection strings pre-filled with the pool's `tenant` and `pool`, plus direct per-node `ATTACH` URIs (see [Connecting clients](/connecting/clients)). The **Storage** tab shows the pool's data path, catalog database, schema, and Postgres endpoint.
+
+![The pool Connections tab with client connection strings](/img/ui/pool-connections.png)
+
+![The pool Storage tab](/img/ui/pool-storage.png)
+
+### Node placement
+
+When you create a pool, the **New pool** form has a **Node placement** section. Enabling "Pin nodes to Kubernetes node labels (cohorts)" opens the cohort editor: per-cohort read-only / write-only / dual counts and a `nodeSelector` of `key=value` Kubernetes node labels, with **+ add cohort** for additional cohorts. On a manager that is not running on Kubernetes, the form shows a warning that placement is saved with the pool (and survives a manifest export to a K8s cluster) but ignored at runtime, where the local backend spawns every node regardless. The model is described on the [Pools and cohorts](/operating/pools-cohorts) page.
+
+![The New pool form with the cohort placement editor open](/img/ui/placement.png)
+
+## Users and access control
+
+`Users` is the RBAC console, titled **Users & access control**. A tenant selector at the top scopes the view, and three tabs cover the graph:
+
+- **Users** - create users, set their role, and assign roles, groups, and pool grants.
+- **Groups** - define groups and the roles they carry (needs a concrete tenant scope).
+- **Roles** - define roles and their table permissions (needs a concrete tenant scope).
+
+The **Users** tab lists each user with their assigned roles, groups, and pool grants.
+
+![The Users tab](/img/ui/rbac-users.png)
+
+The **Groups** tab shows each group with its user, role, and pool-grant counts.
+
+![The Groups tab](/img/ui/rbac-groups.png)
+
+The **Roles** tab lists each role with a per-verb count (SELECT / INSERT / UPDATE / DELETE / ALL) of its table permissions, and **+ New role** plus per-role edit and delete actions.
+
+![The Roles tab](/img/ui/rbac-roles.png)
+
+The model these screens edit (the EffectiveSet, verbs, wildcards, the two gates) is described in the [Access control model](/operating/rbac-model); the step-by-step grant flows are on the "Administering access" page.
+
+## Catalog browser
+
+The catalog browser lists the schemas and tables of a database (the DuckLake catalog) and drills into a table for its columns. It is reached contextually from table links rather than the top nav. Use it to confirm what a pool actually exposes, including federated catalogs attached to the database.
+
+![The catalog browser with a schema's tables listed](/img/ui/catalog.png)
+
+## Config (superuser only)
+
+`Config` is a cross-tenant view of the whole deployment, so it is restricted to a superuser admin. It has two parts:
+
+- **Configuration** - the resolved `application.conf` rendered as a table of each key, its `QOD_*` env var, description, and effective value. Sensitive values are masked. This is the live equivalent of the [Configuration reference](/reference/configuration).
+- **Manifest** - export the entire control-plane configuration as YAML (**Download YAML**) and re-import an edited file (**Import**). The semantics, redaction, and apply rules are on the [Manifest backup and restore](/operating/manifest) page.
+
+![The Config page resolved-configuration table](/img/ui/config.png)
