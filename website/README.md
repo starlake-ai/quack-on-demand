@@ -40,3 +40,15 @@ Note: Node 18, 20, or 22 is required (Docusaurus does not support Node 24+ yet).
 sbt genConfigDocs genOpenApi
 cd website && npm ci && npm run build
 ```
+
+## Known constraints
+
+- `package.json` pins `webpack` to `5.97.1` via `overrides`. Webpack 5.100+ tightened the
+  `ProgressPlugin` options schema, which the `webpackbar` progress reporter bundled by
+  Docusaurus 3.7 violates, breaking the build. Remove the pin once Docusaurus ships a
+  `webpackbar` that is compatible with newer webpack.
+- Node 18, 20, or 22 only (`engines` enforces `<24`); Docusaurus 3.7 does not build on
+  Node 24+ yet.
+- The REST API page loads Redoc from `cdn.redoc.ly` at a pinned version. It is the only
+  externally-hosted runtime asset; vendor the bundle under `static/` if an offline build
+  is required.
