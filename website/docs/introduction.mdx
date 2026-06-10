@@ -5,11 +5,12 @@ slug: /
 ---
 
 import ThemedImage from '@theme/ThemedImage';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 
 <div style={{textAlign: 'center', margin: '0.5rem 0 2rem'}}>
   <ThemedImage
     alt="Quack on Demand"
-    sources={{ light: '/img/lockupA-light.svg', dark: '/img/lockupA-dark.svg' }}
+    sources={{ light: useBaseUrl('/img/lockupA-light.svg'), dark: useBaseUrl('/img/lockupA-dark.svg') }}
     style={{ maxWidth: '460px', width: '100%' }}
   />
 </div>
