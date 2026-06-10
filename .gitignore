@@ -74,7 +74,7 @@ ui/vite.config.js
 .claude/
 distrib/
 ducklake/
-docs/
+/docs/
 certs/
 
 datasets/
