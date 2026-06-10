@@ -69,13 +69,15 @@ Each `qodstate_role_permission` row grants one verb on one table triple to a rol
 
 ### Verbs
 
-| Verb | Covers |
+The SQL parser collapses every table touch into one of three access classes - `Read`, `Write`, `Ddl` - and a grant verb is matched against that class:
+
+| Grant verb | Covers (access class) |
 |---|---|
-| `SELECT` | Read queries (SELECT, WITH, VALUES, SHOW, DESCRIBE, EXPLAIN). |
-| `INSERT` | Insert statements (INSERT). |
-| `UPDATE` | Update statements (UPDATE). |
-| `DELETE` | Delete statements (DELETE, TRUNCATE in coarse mode). |
-| `ALL` | All of the above, including DDL. |
+| `SELECT` | `Read` (SELECT, and the read side of subqueries / CTEs / `INSERT ... SELECT`). |
+| `INSERT` / `UPDATE` / `DELETE` | `Write`. These are not distinguished today: holding any one authorizes all writes (INSERT, UPDATE, DELETE, MERGE, UPSERT, TRUNCATE) on the matched tables. |
+| `ALL` | `Read`, `Write`, and `Ddl` (CREATE / DROP / ALTER) on the matched tables. |
+
+Granular DDL verbs (`CREATE` / `DROP` / `ALTER`) are recognized by the matcher if present, but the operator-facing grant vocabulary is `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `ALL`, so in practice DDL is authorized by an `ALL` grant.
 
 ### Wildcards
 
@@ -83,38 +85,42 @@ Each of the three name parts (catalog, schema, table) may be the literal string 
 
 Matching is case-insensitive for literal values and exact for `*`.
 
-### How a grant covers a table reference
+The catalog `*` wildcard is scoped to the session's tenant: it matches only catalogs that belong to the connecting principal's tenant. A tenant admin holding `*.*.* ALL` therefore cannot reach a sibling tenant's catalog. To grant cross-tenant access deliberately, name the other catalog explicitly (for example `otherdb.*.* ALL`), which bypasses the tenant-scoped wildcard via the literal-match path.
 
-A resolved `TableRef` from the SQL parser is covered by a permission row `p` when all three conditions hold:
+### How a grant covers a table access
 
-1. `p.verb` equals the required verb or `ALL` (case-insensitive).
-2. `p.catalogName` is `*` or matches the table's catalog name.
-3. `p.schemaName` is `*` or matches the table's schema name.
-4. `p.tableName` is `*` or matches the table's table name.
+For each statement the SQL parser produces a set of accesses, each a `(table, class)` pair where `class` is `Read`, `Write`, or `Ddl`. An access is covered by a permission row `p` when all of these hold:
 
-If any extracted table reference is not covered, the statement is denied.
+1. `p.verb` covers the access class (see the Verbs table: `ALL` covers any class; `SELECT` covers `Read`; `INSERT`/`UPDATE`/`DELETE` cover `Write`; `CREATE`/`DROP`/`ALTER` cover `Ddl`).
+2. `p.catalogName` matches the access catalog (literal match, or the tenant-scoped `*` wildcard described above).
+3. `p.schemaName` is `*` or matches the access schema.
+4. `p.tableName` is `*` or matches the access table.
+
+If any access in the statement is not covered, the whole statement is denied.
 
 ## Statement coverage
 
-The ACL gate applies different treatment depending on statement kind.
+The parser extracts table accesses from each statement and the gate checks every one. Unqualified table names are filled in from the pool's default catalog and schema before the check.
 
-### SELECT statements
+### Read queries (SELECT)
 
-`SELECT`, `WITH`, `VALUES`, `SHOW`, `DESCRIBE`, and `EXPLAIN` are classified as read queries. The SQL parser (JSqlParser) walks the full AST: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Every resolved table reference is checked against `effective_perms`. Unqualified table names are filled in using the pool's default catalog and schema before the check.
+`SELECT`, `WITH`, and `VALUES` are walked across the full AST: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Every table is a `Read` access and must be covered by a `SELECT` or `ALL` grant.
 
-If any table in the statement is not covered by a `SELECT` or `ALL` grant, the statement is denied.
+### Writes (INSERT / UPDATE / DELETE / MERGE / TRUNCATE)
 
-### DML statements (current behavior)
+The write target is extracted as a `Write` access; any read source (for example the `SELECT` in `INSERT ... SELECT`, or an `UPDATE ... FROM` source) is extracted as a `Read` access. The target must be covered by an `INSERT`/`UPDATE`/`DELETE` (or `ALL`) grant and each source by a `SELECT` (or `ALL`) grant. Because the write verbs collapse to a single `Write` class, granting any one of `INSERT`/`UPDATE`/`DELETE` authorizes all writes on the matched tables.
 
-`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `UPSERT`, `REPLACE`, and `COPY` are classified as DML. The current table extractor only walks `SELECT` AST nodes. DML statements return no extracted table references, so the per-table check finds nothing to deny and passes. In practice, DML is currently allowed for any authenticated tenant-scoped user regardless of their grants.
+### DDL (CREATE / DROP / ALTER)
 
-This is a known limitation. The documented operator path for production use is to grant `*.*.* ALL` to roles that need write access, which makes the intent explicit even before fine-grained DML extraction is added.
+The DDL target is extracted as a `Ddl` access; a `CREATE TABLE ... AS SELECT` also yields a `Read` access for its source. A `Ddl` access is covered by an `ALL` grant (the operator-facing grant vocabulary does not expose a dedicated DDL verb).
 
-### DDL and session-level statements
+### Control-flow statements
 
-`CREATE`, `DROP`, `ALTER`, `TRUNCATE` (when classified as DDL), `ATTACH`, `DETACH`, `COMMENT`, `GRANT`, and `REVOKE` are classified as DDL. `BEGIN`, `START`, `COMMIT`, `END`, `ROLLBACK`, and `ABORT` are classified as session-control kinds. All of these fall into the same branch in the ACL gate: the table extractor does not enumerate their targets, so the gate falls back to a wildcard check. The statement is allowed only if the user's `effective_perms` contains at least one row with `verb=ALL` and all three name parts set to `*`. Any other principal is denied.
+`BEGIN`, `START`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `SET`, `USE`, `SHOW`, and `EXPLAIN` (without an inner DML) carry no table references and are admitted unconditionally - they do not require any grant.
 
-Note: a comment in the source code describes BEGIN/COMMIT/ROLLBACK as short-circuiting to Allowed before the extraction step, but the current code routes them through the same wildcard-ALL branch as DDL. In practice, users that need to issue explicit transaction control statements must hold a `*.*.* ALL` grant, or run with `acl.enabled=false`.
+### Unparseable statements
+
+If a statement fails to parse, it is denied unless the principal holds a `*.*.* ALL` grant (a conservative fallback so an unrecognized statement cannot slip through).
 
 ## The two gates
 
