@@ -433,10 +433,34 @@ export default function PoolSection({ tenant }: { tenant: string }) {
             <form onSubmit={submitScale}>
               <fieldset>
                 <legend>Role distribution</legend>
+                {/* Keying each input by the pool's natural address forces a
+                    remount when the Scale modal opens for a different pool.
+                    Without the remount, WebKit's native spinner arrows do
+                    not always fire a `input` event on a controlled
+                    `<input value={0}>` whose DOM value already matches --
+                    re-mounting clears that stale-equality state so spinner
+                    clicks register as expected. The keys are stable across
+                    re-renders for the same pool, so React preserves focus
+                    and caret position. */}
                 <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-                  <label>WriteOnly <input type="number" min={0} value={scaleWo}   onChange={e => setScaleWo(+e.target.value)}   style={{ width: 72 }} /></label>
-                  <label>ReadOnly  <input type="number" min={0} value={scaleRo}   onChange={e => setScaleRo(+e.target.value)}   style={{ width: 72 }} /></label>
-                  <label>Dual      <input type="number" min={0} value={scaleDual} onChange={e => setScaleDual(+e.target.value)} style={{ width: 72 }} /></label>
+                  <label>WriteOnly <input
+                    key={`scale-wo-${scaling.pool}`}
+                    type="number" min={0} step={1}
+                    value={scaleWo}
+                    onChange={e => setScaleWo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
+                  <label>ReadOnly  <input
+                    key={`scale-ro-${scaling.pool}`}
+                    type="number" min={0} step={1}
+                    value={scaleRo}
+                    onChange={e => setScaleRo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
+                  <label>Dual      <input
+                    key={`scale-dual-${scaling.pool}`}
+                    type="number" min={0} step={1}
+                    value={scaleDual}
+                    onChange={e => setScaleDual(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
                 </div>
               </fieldset>
               {scaleRo + scaleWo + scaleDual < scaling.nodes.length && (

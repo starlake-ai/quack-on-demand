@@ -44,7 +44,10 @@ export default function TenantDetail() {
         ]}
       />
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: '1rem' }}>
-        <h1>{data.name}</h1>
+        <div>
+          <h1 style={{ marginBottom: '0.25rem' }}>{data.name}</h1>
+          <p className="subtle" style={{ margin: 0 }}>Tenant ID: <code>{data.id}</code></p>
+        </div>
         <Link to="/tenants">
           <button type="button" className="link-button">← Back to tenants</button>
         </Link>

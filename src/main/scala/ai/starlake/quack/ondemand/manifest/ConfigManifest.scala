@@ -11,121 +11,124 @@ final case class ExportedFrom(managerVersion: String, hostname: String)
 final case class ManifestRoleDistribution(writeonly: Int, readonly: Int, dual: Int)
 
 final case class ManifestNodeToleration(
-    key:      String,
-    operator: String         = "Equal",
-    value:    Option[String] = None,
-    effect:   Option[String] = None
+    key: String,
+    operator: String = "Equal",
+    value: Option[String] = None,
+    effect: Option[String] = None
 )
 
 final case class ManifestNodePlacement(
-    nodeSelector: Map[String, String]          = Map.empty,
-    tolerations:  List[ManifestNodeToleration] = Nil
+    nodeSelector: Map[String, String] = Map.empty,
+    tolerations: List[ManifestNodeToleration] = Nil
 )
 
 final case class ManifestPoolCohort(
-    placement:    ManifestNodePlacement = ManifestNodePlacement(),
+    placement: ManifestNodePlacement = ManifestNodePlacement(),
     distribution: ManifestRoleDistribution
 )
 
 final case class ManifestFederatedSecret(
-    name:        String,
-    value:       Option[String] = None,
+    name: String,
+    value: Option[String] = None,
     externalRef: Option[String] = None
 )
 
 final case class ManifestFederatedSource(
-    alias:       String,
-    setupSql:    String,
-    description: Option[String]               = None,
-    disabled:    Boolean                      = false,
-    secrets:     List[ManifestFederatedSecret] = Nil
+    alias: String,
+    setupSql: String,
+    description: Option[String] = None,
+    disabled: Boolean = false,
+    secrets: List[ManifestFederatedSecret] = Nil
 )
 
 final case class ManifestTenantDb(
-    name:            String,
-    kind:            String              = "ducklake",
-    metastore:       Map[String, String] = Map.empty,
-    dataPath:        String              = "",
-    objectStore:     Map[String, String] = Map.empty,
-    defaultDatabase: Option[String]      = None,
-    defaultSchema:   Option[String]      = None,
+    name: String,
+    kind: String = "ducklake",
+    metastore: Map[String, String] = Map.empty,
+    dataPath: String = "",
+    objectStore: Map[String, String] = Map.empty,
+    defaultDatabase: Option[String] = None,
+    defaultSchema: Option[String] = None,
     federatedSources: List[ManifestFederatedSource] = Nil
 )
 
 final case class ManifestPool(
-    name:                  String,
-    tenantDb:              String,
-    roleDistribution:      ManifestRoleDistribution,
-    maxConcurrentPerNode:  Int                       = 0,
-    disabled:              Boolean                   = false,
+    name: String,
+    tenantDb: String,
+    roleDistribution: ManifestRoleDistribution,
+    maxConcurrentPerNode: Int = 0,
+    disabled: Boolean = false,
     // Optional placement plan. When empty, the importer creates the
     // pool with no cohorts (single placement-less group). The
     // supervisor ignores cohorts when the runtime backend can't
     // honor placement (e.g. local mode).
-    cohorts:               List[ManifestPoolCohort]  = Nil
+    cohorts: List[ManifestPoolCohort] = Nil
 )
 
 final case class ManifestIdentity(
-    username:     String,
-    externalId:   Option[String] = None,
-    attributes:   Map[String, String] = Map.empty
+    username: String,
+    externalId: Option[String] = None,
+    attributes: Map[String, String] = Map.empty
 )
 
 final case class ManifestTenant(
-    name:         String,
-    disabled:     Boolean             = false,
-    authProvider: String              = "db",
-    authConfig:   Map[String, String] = Map.empty,
-    tenantDbs:    List[ManifestTenantDb] = Nil,
-    pools:        List[ManifestPool]     = Nil,
-    identities:   List[ManifestIdentity] = Nil
+    name: String,
+    disabled: Boolean = false,
+    authProvider: String = "db",
+    authConfig: Map[String, String] = Map.empty,
+    tenantDbs: List[ManifestTenantDb] = Nil,
+    pools: List[ManifestPool] = Nil,
+    identities: List[ManifestIdentity] = Nil
 )
 
 final case class ManifestTablePermission(
-    catalog: String, schema: String, table: String, verb: String
+    catalog: String,
+    schema: String,
+    table: String,
+    verb: String
 )
 
 final case class ManifestRole(
-    tenant:      String,
-    name:        String,
+    tenant: String,
+    name: String,
     description: Option[String] = None,
     permissions: List[ManifestTablePermission] = Nil
 )
 
 final case class ManifestGroup(
-    tenant:      String,
-    name:        String,
+    tenant: String,
+    name: String,
     description: Option[String] = None,
-    roles:       List[String]   = Nil
+    roles: List[String] = Nil
 )
 
 final case class ManifestPoolGrant(pool: Option[String])
 
 final case class ManifestUser(
-    tenant:     Option[String],          // None = superuser
-    username:   String,
-    password:   Option[String] = None,   // omitted on export; bcrypt-or-plaintext on import
-    role:       String         = "user",
-    enabled:    Boolean        = true,
-    roles:      List[String]   = Nil,
-    groups:     List[String]   = Nil,
+    tenant: Option[String], // None = superuser
+    username: String,
+    password: Option[String] = None, // omitted on export; bcrypt-or-plaintext on import
+    role: String = "user",
+    enabled: Boolean = true,
+    roles: List[String] = Nil,
+    groups: List[String] = Nil,
     poolGrants: List[ManifestPoolGrant] = Nil
 )
 
 final case class ConfigManifest(
-    apiVersion:   String,
-    kind:         String,
-    exportedAt:   Instant,
+    apiVersion: String,
+    kind: String,
+    exportedAt: Instant,
     exportedFrom: ExportedFrom,
-    tenants:      List[ManifestTenant] = Nil,
-    roles:        List[ManifestRole]   = Nil,
-    groups:       List[ManifestGroup]  = Nil,
-    users:        List[ManifestUser]   = Nil
+    tenants: List[ManifestTenant] = Nil,
+    roles: List[ManifestRole] = Nil,
+    groups: List[ManifestGroup] = Nil,
+    users: List[ManifestUser] = Nil
 )
 
 object ConfigManifest:
   val ApiVersion: String = "quack-on-demand/v1"
-  val Kind:       String = "ConfigManifest"
+  val Kind: String       = "ConfigManifest"
 
   // Case classes with no defaulted fields keep the derived codec.
   given Codec[ExportedFrom]             = deriveCodec
@@ -209,7 +212,16 @@ object ConfigManifest:
         defaultDatabase  <- c.getOrElse[Option[String]]("defaultDatabase")(None)
         defaultSchema    <- c.getOrElse[Option[String]]("defaultSchema")(None)
         federatedSources <- c.getOrElse[List[ManifestFederatedSource]]("federatedSources")(Nil)
-      yield ManifestTenantDb(name, kind, metastore, dataPath, objectStore, defaultDatabase, defaultSchema, federatedSources)
+      yield ManifestTenantDb(
+        name,
+        kind,
+        metastore,
+        dataPath,
+        objectStore,
+        defaultDatabase,
+        defaultSchema,
+        federatedSources
+      )
     },
     deriveEncoder[ManifestTenantDb]
   )
@@ -305,7 +317,16 @@ object ConfigManifest:
         roles        <- c.getOrElse[List[ManifestRole]]("roles")(Nil)
         groups       <- c.getOrElse[List[ManifestGroup]]("groups")(Nil)
         users        <- c.getOrElse[List[ManifestUser]]("users")(Nil)
-      yield ConfigManifest(apiVersion, kind, exportedAt, exportedFrom, tenants, roles, groups, users)
+      yield ConfigManifest(
+        apiVersion,
+        kind,
+        exportedAt,
+        exportedFrom,
+        tenants,
+        roles,
+        groups,
+        users
+      )
     },
     deriveEncoder[ConfigManifest]
   )

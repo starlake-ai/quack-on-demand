@@ -52,23 +52,23 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
 
   /** DuckDB name resolution for two-part names differs from ANSI SQL.
     *
-    * Per DuckDB docs: "When providing partial qualifications, DuckDB attempts to resolve
-    * the reference as either a catalog or a schema."
+    * Per DuckDB docs: "When providing partial qualifications, DuckDB attempts to resolve the
+    * reference as either a catalog or a schema."
     *
     * For a two-part name `X.Y`:
     *   - DuckDB tries `catalog=X, schema=<default>, table=Y` first (catalog interpretation)
     *   - Then `catalog=<default>, schema=X, table=Y` (schema interpretation)
     *   - If both match, it returns a binder error
     *
-    * Since the ACL parser does not have access to the live catalog to check which
-    * interpretation is valid, we adopt the catalog-first convention: `X.Y` is resolved
-    * as `catalog=X, schema=main, table=Y`. This matches DuckDB's default behavior where
-    * the default schema is always `main`.
+    * Since the ACL parser does not have access to the live catalog to check which interpretation is
+    * valid, we adopt the catalog-first convention: `X.Y` is resolved as
+    * `catalog=X, schema=main, table=Y`. This matches DuckDB's default behavior where the default
+    * schema is always `main`.
     *
     * Three-part names (`X.Y.Z`) and single names (`X`) are handled identically to ANSI.
     *
-    * String-literal file references (e.g., 'file.parquet') should be filtered by the caller
-    * before calling toTableRef. If encountered here, they are treated as regular table names.
+    * String-literal file references (e.g., 'file.parquet') should be filtered by the caller before
+    * calling toTableRef. If encountered here, they are treated as regular table names.
     */
   def toTableRef(table: Table, config: Config): Either[DenyReason, TableRef] =
     val tableName  = table.getUnquotedName
@@ -93,8 +93,8 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
       case (Some(_), None) =>
         AnsiDialectMapper.toTableRef(table, config)
 
-  /** Check whether a JSqlParser Table represents a string-literal file reference.
-    * The caller should use this to filter before calling toTableRef.
+  /** Check whether a JSqlParser Table represents a string-literal file reference. The caller should
+    * use this to filter before calling toTableRef.
     */
   def isFileReference(table: Table): Boolean =
     table.getName != null && table.getName.startsWith("'")

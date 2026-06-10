@@ -61,7 +61,7 @@ class SqlParserDuckDBTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     result.statements.head match {
-      case ext: StatementResult.Extracted => ext.tables shouldBe empty
+      case ext: StatementResult.Extracted => ext.accesses.map(_.table) shouldBe empty
       case _: StatementResult.ParseError  => () // Also acceptable
       case other                          => fail(s"Unexpected result type: $other")
     }
@@ -80,7 +80,7 @@ class SqlParserDuckDBTest extends AnyFunSuite with Matchers {
     result.statements should have size 1
     result.statements.head match {
       case ext: StatementResult.Extracted =>
-        ext.tables shouldBe Set(TableRef("mydb", "main", "orders"))
+        ext.accesses.map(_.table) shouldBe Set(TableRef("mydb", "main", "orders"))
       case _: StatementResult.ParseError =>
         // Known limitation: JSqlParser may not support TABLESAMPLE
         info("TABLESAMPLE not supported by JSqlParser -- ParseError is acceptable")
@@ -96,7 +96,7 @@ class SqlParserDuckDBTest extends AnyFunSuite with Matchers {
     result.statements.head match {
       case ext: StatementResult.Extracted =>
         // Table functions are filtered by TableExtractor
-        ext.tables shouldBe empty
+        ext.accesses.map(_.table) shouldBe empty
       case _: StatementResult.ParseError =>
         // JSqlParser may not parse table functions
         info("read_csv table function not parsed by JSqlParser -- ParseError is acceptable")
@@ -111,7 +111,7 @@ class SqlParserDuckDBTest extends AnyFunSuite with Matchers {
     result.statements should have size 1
     result.statements.head match {
       case ext: StatementResult.Extracted =>
-        ext.tables shouldBe Set(TableRef("mydb", "main", "orders"))
+        ext.accesses.map(_.table) shouldBe Set(TableRef("mydb", "main", "orders"))
       case _: StatementResult.ParseError =>
         // Known limitation: JSqlParser may not support QUALIFY
         info("QUALIFY not supported by JSqlParser -- ParseError is acceptable")

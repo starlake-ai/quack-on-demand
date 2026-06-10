@@ -2,9 +2,8 @@ package ai.starlake.quack.ondemand.rbac
 
 import ai.starlake.quack.ondemand.state._
 
-/** Closure computed for one user at handshake time. Combines the
-  * user's direct edges (fetched from Postgres) with the schema-bounded
-  * slice cached in [[RbacResolver]]:
+/** Closure computed for one user at handshake time. Combines the user's direct edges (fetched from
+  * Postgres) with the schema-bounded slice cached in [[RbacResolver]]:
   *
   * {{{
   *   effective_roles(U)  = direct_roles(U) ∪ ⋃ roles(g)   for g ∈ groups(U)
@@ -12,16 +11,15 @@ import ai.starlake.quack.ondemand.state._
   *   effective_perms(U)  = ⋃ permissions(r)               for r ∈ effective_roles(U)
   * }}}
   *
-  * Phase C will pin one of these onto each FlightSQL
-  * [[ai.starlake.quack.edge.ConnectionContext]]
-  * keyed by peerId so the per-statement ACL gate reads it without
-  * any further joins. Phase B exposes it through the `/user/{id}/effective`
-  * REST surface and reuses it inside the role/group/pool columns
-  * served by `/user/list`. */
+  * Phase C will pin one of these onto each FlightSQL [[ai.starlake.quack.edge.ConnectionContext]]
+  * keyed by peerId so the per-statement ACL gate reads it without any further joins. Phase B
+  * exposes it through the `/user/{id}/effective` REST surface and reuses it inside the
+  * role/group/pool columns served by `/user/list`.
+  */
 final case class EffectiveSet(
-    user:        RbacUser,
-    roles:       List[RbacRole],
-    groups:      List[RbacGroup],
+    user: RbacUser,
+    roles: List[RbacRole],
+    groups: List[RbacGroup],
     permissions: List[RolePermission],
-    poolPerms:   List[PoolPermission]
+    poolPerms: List[PoolPermission]
 )

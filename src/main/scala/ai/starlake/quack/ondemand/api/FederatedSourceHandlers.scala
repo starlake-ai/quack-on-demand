@@ -9,8 +9,10 @@ import java.util.UUID
 
 /** REST handlers for FederatedSource + FederatedSecret rows.
   *
-  * @param fedStore the federation store
-  * @param resolver resolves (tenantName, tenantDbName) to the surrogate tenantDbId, or None if not found
+  * @param fedStore
+  *   the federation store
+  * @param resolver
+  *   resolves (tenantName, tenantDbName) to the surrogate tenantDbId, or None if not found
   */
 final class FederatedSourceHandlers(
     fedStore: FederatedSourceStore,
@@ -23,88 +25,112 @@ final class FederatedSourceHandlers(
 
   // ---- helpers ------------------------------------------------------------
 
-  private def resolveTenantDbId(tenantName: String, tenantDbName: String): Either[(StatusCode, ErrorResponse), String] =
+  private def resolveTenantDbId(
+      tenantName: String,
+      tenantDbName: String
+  ): Either[(StatusCode, ErrorResponse), String] =
     resolver(tenantName, tenantDbName) match
       case Some(id) => Right(id)
       case None     =>
-        Left(StatusCode.NotFound -> ErrorResponse(
-          "not_found",
-          s"tenant-db '$tenantDbName' not found in tenant '$tenantName'"
-        ))
+        Left(
+          StatusCode.NotFound -> ErrorResponse(
+            "not_found",
+            s"tenant-db '$tenantDbName' not found in tenant '$tenantName'"
+          )
+        )
 
   private def toSourceResponse(s: FederatedSource): FederatedSourceResponse =
     FederatedSourceResponse(
-      id          = s.id,
-      tenantDbId  = s.tenantDbId,
-      alias       = s.alias,
-      setupSql    = s.setupSql,
+      id = s.id,
+      tenantDbId = s.tenantDbId,
+      alias = s.alias,
+      setupSql = s.setupSql,
       description = s.description,
-      disabled    = s.disabled
+      disabled = s.disabled
     )
 
   private def toSecretResponse(s: FederatedSecret): FederatedSecretResponse =
     FederatedSecretResponse(
-      id                = s.id,
+      id = s.id,
       federatedSourceId = s.federatedSourceId,
-      name              = s.name,
-      value             = s.value.map(_ => REDACTED),
-      externalRef       = s.externalRef
+      name = s.name,
+      value = s.value.map(_ => REDACTED),
+      externalRef = s.externalRef
     )
 
   // ---- FederatedSource CRUD -----------------------------------------------
 
   def createSource(
-      tenantName:   String,
+      tenantName: String,
       tenantDbName: String,
-      req:          FederatedSourceCreateRequest
+      req: FederatedSourceCreateRequest
   ): Out[FederatedSourceResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           // Try an upsert by alias: if one already exists reuse its id.
           val existing = fedStore.getSource(tenantDbId, req.alias)
-          val id = existing.map(_.id).getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
-          fedStore.upsertSource(FederatedSource(
-            id          = id,
-            tenantDbId  = tenantDbId,
-            alias       = req.alias,
-            setupSql    = req.setupSql,
-            description = req.description,
-            disabled    = req.disabled
-          ))
-          Right(toSourceResponse(
-            fedStore.getSource(tenantDbId, req.alias).getOrElse(
-              FederatedSource(id, tenantDbId, req.alias, req.setupSql, req.description, req.disabled)
+          val id       = existing.map(_.id).getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
+          fedStore.upsertSource(
+            FederatedSource(
+              id = id,
+              tenantDbId = tenantDbId,
+              alias = req.alias,
+              setupSql = req.setupSql,
+              description = req.description,
+              disabled = req.disabled
             )
-          ))
+          )
+          Right(
+            toSourceResponse(
+              fedStore
+                .getSource(tenantDbId, req.alias)
+                .getOrElse(
+                  FederatedSource(
+                    id,
+                    tenantDbId,
+                    req.alias,
+                    req.setupSql,
+                    req.description,
+                    req.disabled
+                  )
+                )
+            )
+          )
     }
 
   def listSources(tenantName: String, tenantDbName: String): Out[FederatedSourceListResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           Right(FederatedSourceListResponse(fedStore.listSources(tenantDbId).map(toSourceResponse)))
     }
 
-  def getSource(tenantName: String, tenantDbName: String, alias: String): Out[FederatedSourceResponse] =
+  def getSource(
+      tenantName: String,
+      tenantDbName: String,
+      alias: String
+  ): Out[FederatedSourceResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           fedStore.getSource(tenantDbId, alias) match
             case Some(s) => Right(toSourceResponse(s))
-            case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
+            case None    =>
+              Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
     }
 
   def deleteSource(tenantName: String, tenantDbName: String, alias: String): Out[Unit] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           fedStore.getSource(tenantDbId, alias) match
-            case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
+            case None =>
+              Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
             case Some(s) =>
               fedStore.deleteSource(s.id)
               Right(())
@@ -112,64 +138,86 @@ final class FederatedSourceHandlers(
 
   // ---- FederatedSecret CRUD -----------------------------------------------
 
-  def listSecrets(tenantName: String, tenantDbName: String, alias: String): Out[FederatedSecretListResponse] =
+  def listSecrets(
+      tenantName: String,
+      tenantDbName: String,
+      alias: String
+  ): Out[FederatedSecretListResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           fedStore.getSource(tenantDbId, alias) match
-            case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
+            case None =>
+              Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
             case Some(s) =>
               Right(FederatedSecretListResponse(fedStore.listSecrets(s.id).map(toSecretResponse)))
     }
 
   def upsertSecret(
-      tenantName:   String,
+      tenantName: String,
       tenantDbName: String,
-      alias:        String,
-      req:          FederatedSecretUpsertRequest
+      alias: String,
+      req: FederatedSecretUpsertRequest
   ): Out[FederatedSecretResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           fedStore.getSource(tenantDbId, alias) match
-            case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
+            case None =>
+              Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
             case Some(s) =>
               // Validate exactly one of value/externalRef is set
               (req.value, req.externalRef) match
                 case (Some(_), Some(_)) =>
-                  Left(StatusCode.BadRequest -> ErrorResponse(
-                    "invalid", "exactly one of value/externalRef must be set"
-                  ))
+                  Left(
+                    StatusCode.BadRequest -> ErrorResponse(
+                      "invalid",
+                      "exactly one of value/externalRef must be set"
+                    )
+                  )
                 case (None, None) =>
-                  Left(StatusCode.BadRequest -> ErrorResponse(
-                    "invalid", "one of value or externalRef must be provided"
-                  ))
+                  Left(
+                    StatusCode.BadRequest -> ErrorResponse(
+                      "invalid",
+                      "one of value or externalRef must be provided"
+                    )
+                  )
                 case _ =>
                   val existing = fedStore.getSecret(s.id, req.name)
-                  val id = existing.map(_.id).getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
+                  val id       =
+                    existing.map(_.id).getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
                   val sec = FederatedSecret(
-                    id                = id,
+                    id = id,
                     federatedSourceId = s.id,
-                    name              = req.name,
-                    value             = req.value,
-                    externalRef       = req.externalRef
+                    name = req.name,
+                    value = req.value,
+                    externalRef = req.externalRef
                   )
                   fedStore.upsertSecret(sec)
                   Right(toSecretResponse(sec))
     }
 
-  def deleteSecret(tenantName: String, tenantDbName: String, alias: String, name: String): Out[Unit] =
+  def deleteSecret(
+      tenantName: String,
+      tenantDbName: String,
+      alias: String,
+      name: String
+  ): Out[Unit] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
-        case Left(e) => Left(e)
+        case Left(e)           => Left(e)
         case Right(tenantDbId) =>
           fedStore.getSource(tenantDbId, alias) match
-            case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
+            case None =>
+              Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
             case Some(s) =>
               fedStore.getSecret(s.id, name) match
-                case None    => Left(StatusCode.NotFound -> ErrorResponse("not_found", s"secret '$name' not found"))
+                case None =>
+                  Left(
+                    StatusCode.NotFound -> ErrorResponse("not_found", s"secret '$name' not found")
+                  )
                 case Some(_) =>
                   fedStore.deleteSecret(s.id, name)
                   Right(())

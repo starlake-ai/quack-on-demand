@@ -4,22 +4,20 @@ import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import cats.effect.IO
 import cats.syntax.all.*
 
-/** Assembles the post-DuckLake setup SQL blob for a single tenant-db's
-  * federated sources. The blob is what `spawn-quack-node.sh` runs in
-  * DuckDB after attaching the default catalog (or instead of, for
-  * `kind = InMemory`).
+/** Assembles the post-DuckLake setup SQL blob for a single tenant-db's federated sources. The blob
+  * is what `spawn-quack-node.sh` runs in DuckDB after attaching the default catalog (or instead of,
+  * for `kind = InMemory`).
   *
   * Two methods:
-  *  - [[build]] returns the resolved blob with secret VALUES inlined.
-  *    This is what gets passed to the child node via `extraSetupSql`.
-  *    NEVER log this output.
-  *  - [[logSafePreview]] returns the same blob but with
-  *    `{{secret.NAME}}` placeholders preserved (the alias placeholder
-  *    IS expanded). Safe to log for diagnostics. */
+  *   - [[build]] returns the resolved blob with secret VALUES inlined. This is what gets passed to
+  *     the child node via `extraSetupSql`. NEVER log this output.
+  *   - [[logSafePreview]] returns the same blob but with `{{secret.NAME}}` placeholders preserved
+  *     (the alias placeholder IS expanded). Safe to log for diagnostics.
+  */
 final class FederationBlobBuilder(
     loadEnabled: String => IO[List[FederatedSource]],
     loadSecrets: String => IO[List[FederatedSecret]],
-    resolver:    SecretResolver
+    resolver: SecretResolver
 ) {
 
   private val PlaceholderRegex = """\{\{[^}]*\}\}""".r
@@ -40,8 +38,8 @@ final class FederationBlobBuilder(
 
   private def renderOne(src: FederatedSource, redactSecrets: Boolean): IO[String] = for {
     secrets <- loadSecrets(src.id)
-    byName  =  secrets.map(s => s.name -> s).toMap
-    body    <- substitute(src, byName, redactSecrets)
+    byName = secrets.map(s => s.name -> s).toMap
+    body <- substitute(src, byName, redactSecrets)
   } yield s"-- BEGIN federation: ${src.alias}\n$body\n-- END federation: ${src.alias}"
 
   private def substitute(
@@ -61,32 +59,39 @@ final class FederationBlobBuilder(
         secretsNeeded.traverse { name =>
           secrets.get(name) match
             case Some(_) => IO.pure(name -> s"{{secret.$name}}")
-            case None    => IO.raiseError(new RuntimeException(
-              s"unresolved secret '$name' in source '${src.alias}'"))
+            case None    =>
+              IO.raiseError(
+                new RuntimeException(s"unresolved secret '$name' in source '${src.alias}'")
+              )
         }
       else
         secretsNeeded.traverse { name =>
           secrets.get(name) match
             case Some(s) => resolver.resolve(s).map(name -> _)
-            case None    => IO.raiseError(new RuntimeException(
-              s"unresolved secret '$name' in source '${src.alias}'"))
+            case None    =>
+              IO.raiseError(
+                new RuntimeException(s"unresolved secret '$name' in source '${src.alias}'")
+              )
         }
 
     for {
-      pairs  <- resolvePairs
-      lookup =  pairs.toMap
-      step2  =  SecretRegex.replaceAllIn(step1, m =>
-                  java.util.regex.Matcher.quoteReplacement(lookup(m.group(1))))
+      pairs <- resolvePairs
+      lookup = pairs.toMap
+      step2  = SecretRegex.replaceAllIn(
+        step1,
+        m => java.util.regex.Matcher.quoteReplacement(lookup(m.group(1)))
+      )
       // In preview mode secret placeholders are intentionally kept; strip
       // them before checking for other strays, but still catch malformed
       // or unknown {{ sequences.
       checkTarget = if redactSecrets then SecretRegex.replaceAllIn(step2, "") else step2
-      _      <- OpenBraceRegex.findFirstIn(checkTarget) match
-                  case Some(stray) =>
-                    val context = PlaceholderRegex.findFirstIn(checkTarget).getOrElse(stray)
-                    IO.raiseError(new RuntimeException(
-                      s"unsubstituted placeholder in source '${src.alias}': $context"))
-                  case None        => IO.unit
+      _ <- OpenBraceRegex.findFirstIn(checkTarget) match
+        case Some(stray) =>
+          val context = PlaceholderRegex.findFirstIn(checkTarget).getOrElse(stray)
+          IO.raiseError(
+            new RuntimeException(s"unsubstituted placeholder in source '${src.alias}': $context")
+          )
+        case None => IO.unit
     } yield step2
   }
 }

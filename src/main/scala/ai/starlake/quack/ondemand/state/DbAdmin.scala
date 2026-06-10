@@ -6,38 +6,41 @@ import java.sql.{Connection, DriverManager}
 
 /** Provisions / decommissions one Postgres database per tenant-db row.
   *
-  * `CREATE DATABASE` cannot run inside a transaction, so all calls open
-  * a fresh auto-commit JDBC connection to an admin database (usually
-  * `postgres`) and execute a single statement. Both methods are
-  * idempotent: they pre-check `pg_database` and skip if the target
-  * state is already in place. */
+  * `CREATE DATABASE` cannot run inside a transaction, so all calls open a fresh auto-commit JDBC
+  * connection to an admin database (usually `postgres`) and execute a single statement. Both
+  * methods are idempotent: they pre-check `pg_database` and skip if the target state is already in
+  * place.
+  */
 trait DbAdmin:
-  /** `Right(())` once the database exists; `Left(msg)` on a Postgres
-    * error we cannot classify as "already in the target state". */
+  /** `Right(())` once the database exists; `Left(msg)` on a Postgres error we cannot classify as
+    * "already in the target state".
+    */
   def createDatabase(name: String): Either[String, Unit]
 
-  /** Drop the database if it exists. Swallowed-by-caller failures (e.g.
-    * still in use by another connection) are surfaced as `Left`. */
+  /** Drop the database if it exists. Swallowed-by-caller failures (e.g. still in use by another
+    * connection) are surfaced as `Left`.
+    */
   def dropDatabase(name: String): Either[String, Unit]
 
 /** Test fixture that never touches a real server. */
 object NoopDbAdmin extends DbAdmin:
   def createDatabase(name: String): Either[String, Unit] = Right(())
-  def dropDatabase(name: String):   Either[String, Unit] = Right(())
+  def dropDatabase(name: String): Either[String, Unit]   = Right(())
 
 /** Production [[DbAdmin]] backed by an admin JDBC connection.
   *
-  * `adminDbName` is the database used to issue `CREATE / DROP DATABASE`
-  * statements (it just needs to be a DB on the same server that we can
-  * connect to). Defaults to `postgres`, which always exists on a stock
-  * Postgres install. */
+  * `adminDbName` is the database used to issue `CREATE / DROP DATABASE` statements (it just needs
+  * to be a DB on the same server that we can connect to). Defaults to `postgres`, which always
+  * exists on a stock Postgres install.
+  */
 final class PostgresDbAdmin(
-    host:        String,
-    port:        String,
-    user:        String,
-    password:    String,
+    host: String,
+    port: String,
+    user: String,
+    password: String,
     adminDbName: String = "postgres"
-) extends DbAdmin with LazyLogging:
+) extends DbAdmin
+    with LazyLogging:
 
   Class.forName("org.postgresql.Driver")
 
@@ -45,8 +48,7 @@ final class PostgresDbAdmin(
 
   def createDatabase(name: String): Either[String, Unit] =
     withAdminConnection { conn =>
-      if exists(conn, name) then
-        logger.info(s"createDatabase: '$name' already exists; skipping")
+      if exists(conn, name) then logger.info(s"createDatabase: '$name' already exists; skipping")
       else
         val st = conn.createStatement()
         try
@@ -57,18 +59,17 @@ final class PostgresDbAdmin(
 
   def dropDatabase(name: String): Either[String, Unit] =
     withAdminConnection { conn =>
-      if !exists(conn, name) then
-        logger.info(s"dropDatabase: '$name' already gone; skipping")
+      if !exists(conn, name) then logger.info(s"dropDatabase: '$name' already gone; skipping")
       else
         val st = conn.createStatement()
         try
           // WITH (FORCE) (PG 13+) terminates any lingering idle backend
           // connection. The non-FORCE form is the fallback for older
           // Postgres -- not the common case for us but worth handling.
-          try
-            st.execute(s"""DROP DATABASE "${escapeIdent(name)}" WITH (FORCE)""")
-          catch case _: org.postgresql.util.PSQLException =>
-            st.execute(s"""DROP DATABASE "${escapeIdent(name)}"""")
+          try st.execute(s"""DROP DATABASE "${escapeIdent(name)}" WITH (FORCE)""")
+          catch
+            case _: org.postgresql.util.PSQLException =>
+              st.execute(s"""DROP DATABASE "${escapeIdent(name)}"""")
           logger.info(s"dropDatabase: dropped '$name'")
         finally st.close()
     }
@@ -78,7 +79,8 @@ final class PostgresDbAdmin(
     try
       ps.setString(1, name)
       val rs = ps.executeQuery()
-      try rs.next() finally rs.close()
+      try rs.next()
+      finally rs.close()
     finally ps.close()
 
   private def withAdminConnection(f: Connection => Unit): Either[String, Unit] =
@@ -97,20 +99,24 @@ final class PostgresDbAdmin(
 
 object PostgresDbAdmin:
 
-  /** Build a [[PostgresDbAdmin]] from the global `defaultMetastore`
-    * map. `adminDbName` defaults to `"postgres"`. */
+  /** Build a [[PostgresDbAdmin]] from the global `defaultMetastore` map. `adminDbName` defaults to
+    * `"postgres"`.
+    */
   def fromDefaultMetastore(
-      meta:        Map[String, String],
+      meta: Map[String, String],
       adminDbName: String = "postgres"
   ): PostgresDbAdmin =
     def required(k: String): String =
-      meta.get(k).filter(_.nonEmpty).getOrElse(
-        sys.error(s"defaultMetastore.$k must be set for PostgresDbAdmin")
-      )
+      meta
+        .get(k)
+        .filter(_.nonEmpty)
+        .getOrElse(
+          sys.error(s"defaultMetastore.$k must be set for PostgresDbAdmin")
+        )
     new PostgresDbAdmin(
-      host        = required("pgHost"),
-      port        = required("pgPort"),
-      user        = required("pgUser"),
-      password    = required("pgPassword"),
+      host = required("pgHost"),
+      port = required("pgPort"),
+      user = required("pgUser"),
+      password = required("pgPassword"),
       adminDbName = adminDbName
     )

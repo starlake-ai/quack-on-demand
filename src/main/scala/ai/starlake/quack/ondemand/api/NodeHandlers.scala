@@ -14,8 +14,9 @@ final class NodeHandlers(
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)
-                         (f: => IO[A]): Out[A] =
+  private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)(
+      f: => IO[A]
+  ): Out[A] =
     sup.get(PoolKey(tenant, tenantDb, pool)).flatMap(_.nodes.find(_.nodeId == nodeId)) match
       case None =>
         IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", "no such node"))))
@@ -33,14 +34,24 @@ final class NodeHandlers(
 
   def setMaxConcurrent(req: SetMaxConcurrentRequest): Out[Unit] =
     if req.max < 0 then
-      IO.pure(Left((StatusCode.BadRequest,
-        ErrorResponse("invalid_max", "max must be >= 0 (0 = unlimited)"))))
+      IO.pure(
+        Left(
+          (StatusCode.BadRequest, ErrorResponse("invalid_max", "max must be >= 0 (0 = unlimited)"))
+        )
+      )
     else
       sup.setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max).map {
         case Some(_) => Right(())
         case None    =>
-          Left((StatusCode.NotFound,
-                ErrorResponse("not_found", s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}")))
+          Left(
+            (
+              StatusCode.NotFound,
+              ErrorResponse(
+                "not_found",
+                s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}"
+              )
+            )
+          )
       }
 
   def quarantineNode(req: NodeOpRequest): Out[Unit] =

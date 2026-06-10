@@ -6,7 +6,7 @@ import scala.collection.concurrent.TrieMap
 
 final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
 
-  private val state    = TrieMap.empty[String, AtomicReference[NodeLoad]]
+  private val state       = TrieMap.empty[String, AtomicReference[NodeLoad]]
   private val percentiles = TrieMap.empty[String, LatencyRing]
 
   private def ref(nodeId: String): AtomicReference[NodeLoad] =
@@ -21,17 +21,18 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def onFinish(nodeId: String, latencyMs: Long): Unit =
     ring(nodeId).record(latencyMs)
     ref(nodeId).updateAndGet { l =>
-      val nextEwma = if l.ewmaMs == 0.0 then latencyMs.toDouble
-                     else (1 - alpha) * l.ewmaMs + alpha * latencyMs
+      val nextEwma =
+        if l.ewmaMs == 0.0 then latencyMs.toDouble
+        else (1 - alpha) * l.ewmaMs + alpha * latencyMs
       l.copy(
-        inFlight    = math.max(0, l.inFlight - 1),
-        ewmaMs      = nextEwma,
+        inFlight = math.max(0, l.inFlight - 1),
+        ewmaMs = nextEwma,
         totalServed = l.totalServed + 1
       )
     }
 
-  /** Snapshot of (p50, p95, p99) for the node. (0,0,0) when no samples
-    * have been recorded yet. */
+  /** Snapshot of (p50, p95, p99) for the node. (0,0,0) when no samples have been recorded yet.
+    */
   def latencyPercentiles(nodeId: String): (Double, Double, Double) =
     percentiles.get(nodeId).map(_.percentiles()).getOrElse((0.0, 0.0, 0.0))
 

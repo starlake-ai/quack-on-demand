@@ -22,12 +22,13 @@ class ResourceOwnerPasswordAuthenticator(
 
   val name: String = s"$providerName-ropc"
 
-  private val httpClient: HttpClient = HttpClient.newBuilder()
+  private val httpClient: HttpClient = HttpClient
+    .newBuilder()
     .connectTimeout(java.time.Duration.ofSeconds(10))
     .build()
 
   override def authenticate(
-      tenant:   Option[String],
+      tenant: Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
@@ -36,8 +37,9 @@ class ResourceOwnerPasswordAuthenticator(
     // the JWT claims on the way back.
     val _ = tenant
     try
-      val body = buildFormBody(username, password)
-      val request = HttpRequest.newBuilder()
+      val body    = buildFormBody(username, password)
+      val request = HttpRequest
+        .newBuilder()
         .uri(URI.create(tokenEndpoint))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -58,14 +60,14 @@ class ResourceOwnerPasswordAuthenticator(
           case Some(accessToken) =>
             // Decode the access token to extract claims
             val signedJWT = SignedJWT.parse(accessToken)
-            val claims = signedJWT.getJWTClaimsSet
+            val claims    = signedJWT.getJWTClaimsSet
 
             val extractedUsername = Option(claims.getStringClaim("preferred_username"))
               .orElse(Option(claims.getStringClaim("email")))
               .orElse(Option(claims.getSubject))
               .getOrElse(username)
 
-            val role = RoleExtractor.extract(claims, roleClaim)
+            val role   = RoleExtractor.extract(claims, roleClaim)
             val groups = RoleExtractor.extractGroups(claims, "groups")
 
             Right(
@@ -87,8 +89,8 @@ class ResourceOwnerPasswordAuthenticator(
     s"grant_type=password&client_id=${enc(clientId)}&client_secret=${enc(clientSecret)}" +
       s"&username=${enc(username)}&password=${enc(password)}"
 
-  /** Simple JSON field extraction without adding a JSON parser dependency.
-    * Handles: {"access_token":"value",...}
+  /** Simple JSON field extraction without adding a JSON parser dependency. Handles:
+    * {"access_token":"value",...}
     */
   private def extractJsonField(json: String, field: String): Option[String] =
     val pattern = s""""$field"\\s*:\\s*"([^"]+)"""".r

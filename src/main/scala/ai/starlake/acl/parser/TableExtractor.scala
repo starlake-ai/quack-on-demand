@@ -10,16 +10,18 @@ import scala.jdk.CollectionConverters.*
 
 /** Extracts all table references from a JSqlParser Select AST.
   *
-  * Walks the AST comprehensively: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING,
-  * set operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Filters out CTE self-references
-  * and string-literal file references (e.g., DuckDB 'file.parquet').
+  * Walks the AST comprehensively: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set
+  * operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Filters out CTE self-references and
+  * string-literal file references (e.g., DuckDB 'file.parquet').
   */
 object TableExtractor:
 
   /** Extract all Table references from a parsed Select statement.
     *
-    * @param select the JSqlParser Select AST node
-    * @return list of Table objects (may contain duplicates; caller deduplicates after qualification)
+    * @param select
+    *   the JSqlParser Select AST node
+    * @return
+    *   list of Table objects (may contain duplicates; caller deduplicates after qualification)
     */
   def extract(select: Select): List[Table] =
     val visitor = new TableExtractorVisitor()
@@ -27,7 +29,7 @@ object TableExtractor:
     visitor.tables.toList
 
 private[parser] class TableExtractorVisitor:
-  val tables: mutable.ListBuffer[Table] = mutable.ListBuffer.empty
+  val tables: mutable.ListBuffer[Table]     = mutable.ListBuffer.empty
   private val cteNames: mutable.Set[String] = mutable.Set.empty
 
   def process(select: Select): Unit =
@@ -54,7 +56,23 @@ private[parser] class TableExtractorVisitor:
       case _: Values               => () // VALUES clause, no tables
       case ls: LateralSubSelect    => visitParenthesedSelect(ls)
       case psel: ParenthesedSelect => visitParenthesedSelect(psel)
-      case _ => () // Other select types, no-op
+      case fq: net.sf.jsqlparser.statement.piped.FromQuery =>
+        // DuckDB / BigQuery FROM-first shorthand: `FROM t [pipe ops...]`.
+        // FromQuery extends Select but does not match any of the legacy
+        // subtypes above; without this arm the table ref would silently
+        // drop and the validator would admit the query unconditionally
+        // (same shape of bug as the legacy DML allow-by-empty-set path).
+        val fromItem = fq.getFromItem
+        if fromItem != null then visitFromItem(fromItem)
+        val joins = fq.getJoins
+        if joins != null then
+          joins.asScala.foreach { j =>
+            val rightItem = j.getRightItem
+            if rightItem != null then visitFromItem(rightItem)
+            val onExpressions = j.getOnExpressions
+            if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
+          }
+      case _                       => () // Other select types, no-op
 
   private def visitPlainSelect(ps: PlainSelect): Unit =
     // FROM clause
@@ -69,8 +87,7 @@ private[parser] class TableExtractorVisitor:
         if rightItem != null then visitFromItem(rightItem)
         // Visit ON expressions for subqueries
         val onExpressions = join.getOnExpressions
-        if onExpressions != null then
-          onExpressions.asScala.foreach(visitExpression)
+        if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
       }
 
     // SELECT items (scalar subqueries)
@@ -99,8 +116,7 @@ private[parser] class TableExtractorVisitor:
 
   private def visitSetOperationList(sol: SetOperationList): Unit =
     val selects = sol.getSelects
-    if selects != null then
-      selects.asScala.foreach(visitSelect)
+    if selects != null then selects.asScala.foreach(visitSelect)
 
   private def visitParenthesedSelect(psel: ParenthesedSelect): Unit =
     // ParenthesedSelect wraps another Select
@@ -116,7 +132,7 @@ private[parser] class TableExtractorVisitor:
         if cteSelect != null then visitSelect(cteSelect)
       }
 
-  private def visitFromItem(fromItem: FromItem): Unit =
+  private[parser] def visitFromItem(fromItem: FromItem): Unit =
     fromItem match
       case table: Table =>
         // Skip CTE self-references and string-literal file references
@@ -127,13 +143,13 @@ private[parser] class TableExtractorVisitor:
           if !isCteName && !isFileRef then tables += table
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
-      case _: TableFunction => () // Silently ignore table functions
-      case _: Values        => () // Silently ignore VALUES
+      case _: TableFunction      => () // Silently ignore table functions
+      case _: Values             => () // Silently ignore VALUES
       case sol: SetOperationList => visitSetOperationList(sol)
       case plain: PlainSelect    => visitPlainSelect(plain)
-      case _ => () // Other FROM item types, no-op
+      case _                     => () // Other FROM item types, no-op
 
-  private def visitExpression(expr: Expression): Unit =
+  private[parser] def visitExpression(expr: Expression): Unit =
     expr match
       case psel: ParenthesedSelect =>
         visitParenthesedSelect(psel)

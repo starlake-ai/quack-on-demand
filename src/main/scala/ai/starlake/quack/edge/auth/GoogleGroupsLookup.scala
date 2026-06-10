@@ -28,24 +28,25 @@ import java.util.{Base64, Date}
 class GoogleGroupsLookup(
     serviceAccountKeyPath: String,
     cacheTtlSeconds: Long = 300
-) extends AutoCloseable, LazyLogging:
+) extends AutoCloseable,
+      LazyLogging:
 
   private case class CachedGroups(groups: Set[String], fetchedAt: Instant)
 
   private val groupsCache = new java.util.concurrent.ConcurrentHashMap[String, CachedGroups]()
 
-  private val httpClient = HttpClient.newBuilder()
+  private val httpClient = HttpClient
+    .newBuilder()
     .connectTimeout(java.time.Duration.ofSeconds(10))
     .build()
 
   private val (clientEmail, privateKey, tokenUri) = loadServiceAccountKey()
 
   @volatile private var cachedAccessToken: String = ""
-  @volatile private var tokenExpiry: Instant = Instant.EPOCH
+  @volatile private var tokenExpiry: Instant      = Instant.EPOCH
 
-  /** Fetch group email addresses for a given user email.
-    * Results are cached per email for cacheTtlSeconds.
-    * Returns an empty set on failure (non-blocking).
+  /** Fetch group email addresses for a given user email. Results are cached per email for
+    * cacheTtlSeconds. Returns an empty set on failure (non-blocking).
     */
   def getGroupsForUser(userEmail: String): Set[String] =
     val key = userEmail.toLowerCase
@@ -61,9 +62,10 @@ class GoogleGroupsLookup(
 
   private def fetchGroups(userEmail: String): Set[String] =
     try
-      val token = getAccessToken()
-      val url = s"https://admin.googleapis.com/admin/directory/v1/groups?userKey=$userEmail"
-      val request = HttpRequest.newBuilder()
+      val token   = getAccessToken()
+      val url     = s"https://admin.googleapis.com/admin/directory/v1/groups?userKey=$userEmail"
+      val request = HttpRequest
+        .newBuilder()
         .uri(URI.create(url))
         .header("Authorization", s"Bearer $token")
         .GET()
@@ -76,7 +78,9 @@ class GoogleGroupsLookup(
         logger.debug(s"Fetched ${groups.size} groups for $userEmail from Google Directory API")
         groups
       else
-        logger.warn(s"Google Directory API returned ${response.statusCode()} for $userEmail: ${response.body()}")
+        logger.warn(
+          s"Google Directory API returned ${response.statusCode()} for $userEmail: ${response.body()}"
+        )
         Set.empty
     catch
       case e: Exception =>
@@ -103,8 +107,10 @@ class GoogleGroupsLookup(
     )
     jwt.sign(new RSASSASigner(privateKey))
 
-    val body = s"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt.serialize()}"
-    val request = HttpRequest.newBuilder()
+    val body =
+      s"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt.serialize()}"
+    val request = HttpRequest
+      .newBuilder()
       .uri(URI.create(tokenUri))
       .header("Content-Type", "application/x-www-form-urlencoded")
       .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -113,7 +119,9 @@ class GoogleGroupsLookup(
 
     val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
     if response.statusCode() != 200 then
-      throw new RuntimeException(s"Token request failed: ${response.statusCode()} ${response.body()}")
+      throw new RuntimeException(
+        s"Token request failed: ${response.statusCode()} ${response.body()}"
+      )
 
     cachedAccessToken = extractJsonField(response.body(), "access_token")
       .getOrElse(throw new RuntimeException("No access_token in response"))
@@ -128,7 +136,8 @@ class GoogleGroupsLookup(
     pattern.findAllMatchIn(json).map(_.group(1).toLowerCase).toSet
 
   private def loadServiceAccountKey(): (String, RSAPrivateKey, String) =
-    val content = new String(Files.readAllBytes(new File(serviceAccountKeyPath).toPath), StandardCharsets.UTF_8)
+    val content =
+      new String(Files.readAllBytes(new File(serviceAccountKeyPath).toPath), StandardCharsets.UTF_8)
 
     val email = extractJsonField(content, "client_email")
       .getOrElse(throw new RuntimeException("client_email not found in service account key"))
@@ -143,8 +152,8 @@ class GoogleGroupsLookup(
       .replace("-----END PRIVATE KEY-----", "")
       .replaceAll("\\s", "")
     val decoded = Base64.getDecoder.decode(stripped)
-    val spec = new PKCS8EncodedKeySpec(decoded)
-    val key = KeyFactory.getInstance("RSA").generatePrivate(spec).asInstanceOf[RSAPrivateKey]
+    val spec    = new PKCS8EncodedKeySpec(decoded)
+    val key     = KeyFactory.getInstance("RSA").generatePrivate(spec).asInstanceOf[RSAPrivateKey]
 
     logger.info(s"Google Directory API service account loaded: $email")
     (email, key, uri)

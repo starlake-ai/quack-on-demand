@@ -7,12 +7,13 @@ import ai.starlake.acl.model.TableRef
 class StatementResultTest extends AnyFunSuite with Matchers {
 
   test("Extracted variant is constructible with correct fields") {
-    val tables = Set(TableRef("db", "schema", "orders"))
+    val t       = TableRef("db", "schema", "orders")
+    val accesses = Set(TableAccess(t, Verb.Read))
     val result: StatementResult.Extracted =
-      StatementResult.Extracted(0, "SELECT * FROM orders", tables)
+      StatementResult.Extracted(0, "SELECT * FROM orders", accesses)
     result.index shouldBe 0
     result.sqlSnippet shouldBe "SELECT * FROM orders"
-    result.tables shouldBe tables
+    result.accesses shouldBe accesses
   }
 
   test("ParseError variant is constructible with correct fields") {
@@ -23,9 +24,9 @@ class StatementResultTest extends AnyFunSuite with Matchers {
     result.message shouldBe "unexpected token"
   }
 
-  test("NonSelect variant is constructible with correct fields") {
-    val result: StatementResult.NonSelect =
-      StatementResult.NonSelect(2, "INSERT INTO t VALUES (1)", "Insert")
+  test("ControlFlow variant is constructible with correct fields") {
+    val result: StatementResult.ControlFlow =
+      StatementResult.ControlFlow(2, "INSERT INTO t VALUES (1)", "Insert")
     result.index shouldBe 2
     result.sqlSnippet shouldBe "INSERT INTO t VALUES (1)"
     result.statementType shouldBe "Insert"
@@ -36,12 +37,12 @@ class StatementResultTest extends AnyFunSuite with Matchers {
       StatementResult.Extracted(0, "sql", Set.empty)
     val parseError: StatementResult =
       StatementResult.ParseError(0, "sql", "msg")
-    val nonSelect: StatementResult =
-      StatementResult.NonSelect(0, "sql", "Insert")
+    val controlFlow: StatementResult =
+      StatementResult.ControlFlow(0, "sql", "Insert")
 
     extracted shouldBe a[StatementResult]
     parseError shouldBe a[StatementResult]
-    nonSelect shouldBe a[StatementResult]
+    controlFlow shouldBe a[StatementResult]
   }
 
   test("ExtractionResult.fromStatements with empty list") {
@@ -56,10 +57,10 @@ class StatementResultTest extends AnyFunSuite with Matchers {
     val t3 = TableRef("db", "s", "products")
 
     val results = List(
-      StatementResult.Extracted(0, "s1", Set(t1, t2)),
+      StatementResult.Extracted(0, "s1", Set(TableAccess(t1, Verb.Read), TableAccess(t2, Verb.Read))),
       StatementResult.ParseError(1, "s2", "error"),
-      StatementResult.Extracted(2, "s3", Set(t2, t3)),
-      StatementResult.NonSelect(3, "s4", "Insert")
+      StatementResult.Extracted(2, "s3", Set(TableAccess(t2, Verb.Read), TableAccess(t3, Verb.Read))),
+      StatementResult.ControlFlow(3, "s4", "Insert")
     )
 
     val extraction = ExtractionResult.fromStatements(results)
@@ -70,8 +71,8 @@ class StatementResultTest extends AnyFunSuite with Matchers {
   test("ExtractionResult.fromStatements deduplicates tables across statements") {
     val t1 = TableRef("db", "s", "orders")
     val results = List(
-      StatementResult.Extracted(0, "s1", Set(t1)),
-      StatementResult.Extracted(1, "s2", Set(t1))
+      StatementResult.Extracted(0, "s1", Set(TableAccess(t1, Verb.Read))),
+      StatementResult.Extracted(1, "s2", Set(TableAccess(t1, Verb.Read)))
     )
 
     val extraction = ExtractionResult.fromStatements(results)

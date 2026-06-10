@@ -11,18 +11,28 @@ final class GroupHandlers(sup: PoolSupervisor, mappers: UserHandlers):
 
   private def resolveTenantId(raw: String): Option[String] =
     val tenants = sup.listTenants()
-    tenants.find(_.id == raw).map(_.id)
+    tenants
+      .find(_.id == raw)
+      .map(_.id)
       .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
 
   def createGroup(req: GroupCreateRequest): Out[GroupResponse] =
     resolveTenantId(req.tenant) match
       case None =>
-        IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"tenant '${req.tenant}' is not registered"))))
+        IO.pure(
+          Left(
+            (
+              StatusCode.NotFound,
+              ErrorResponse("not_found", s"tenant '${req.tenant}' is not registered")
+            )
+          )
+        )
       case Some(tid) =>
         sup.createGroup(tid, req.name, req.description).map {
           case Right(g)  => Right(mappers.toGroupResponse(g))
           case Left(err) =>
-            val code = if err.startsWith("group '") then StatusCode.Conflict else StatusCode.BadRequest
+            val code =
+              if err.startsWith("group '") then StatusCode.Conflict else StatusCode.BadRequest
             Left((code, ErrorResponse("invalid_group", err)))
         }
 

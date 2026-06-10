@@ -5,46 +5,75 @@ import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, Ma
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 import cats.effect.IO
 import io.circe.syntax.*
-import io.circe.yaml.v12.{Printer, parser}
+import io.circe.yaml.v12.{parser, Printer}
 import sttp.model.StatusCode
 
 import java.time.Instant
 
 final class ManifestHandlers(
-    store:          ControlPlaneStore,
-    supervisor:     PoolSupervisor,
+    store: ControlPlaneStore,
+    supervisor: PoolSupervisor,
     managerVersion: String,
-    hostname:       String,
+    hostname: String,
     federatedStore: Option[FederatedSourceStore] = None
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
-  def exportYaml: IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
-    val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname, federatedStore)
-    Right(Yaml.pretty(m.asJson))
+  /** Manifest export / import are cross-tenant operations -- a dump or replay touches every
+    * tenant's pools, roles, groups and users. Restricted to superusers; tenant-scoped UI sessions
+    * are rejected with 403. Static `QOD_API_KEY` callers (no session) are admitted. */
+  private def superuserCheck(apiKey: Option[String])(
+      resolveTenant: String => Option[Option[String]]
+  ): Option[(StatusCode, ErrorResponse)] =
+    apiKey.flatMap(resolveTenant) match
+      case Some(Some(_)) =>
+        Some(
+          StatusCode.Forbidden ->
+            ErrorResponse(
+              "superuser_required",
+              "manifest export/import is restricted to superusers"
+            )
+        )
+      case _ => None
+
+  def exportYaml(apiKey: Option[String])(
+      resolveTenant: String => Option[Option[String]]
+  ): IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
+    superuserCheck(apiKey)(resolveTenant) match
+      case Some(err) => Left(err)
+      case None =>
+        val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname, federatedStore)
+        Right(Yaml.pretty(m.asJson))
   }
 
-  def importYaml(body: String): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
+  def importYaml(body: String, apiKey: Option[String])(
+      resolveTenant: String => Option[Option[String]]
+  ): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
     IO.blocking {
-      parser.parse(body).flatMap(_.as[ConfigManifest]) match
-        case Left(e) =>
-          Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
-        case Right(m) =>
-          ManifestImporter.apply(m, store, federatedStore) match
-            case Left(errs) =>
-              Left(StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; ")))
-            case Right(_) =>
-              // Reload the supervisor's in-memory caches (tenants, tenant-dbs,
-              // pools, RBAC effective sets) from the freshly-written store
-              // snapshot. Without this the REST/UI keeps serving the old
-              // view until the manager is restarted.
-              supervisor.restore()
-              Right(ManifestImportSummary(
-                tenants   = m.tenants.size,
-                tenantDbs = m.tenants.map(_.tenantDbs.size).sum,
-                pools     = m.tenants.map(_.pools.size).sum,
-                roles     = m.roles.size,
-                groups    = m.groups.size,
-                users     = m.users.size
-              ))
+      superuserCheck(apiKey)(resolveTenant) match
+        case Some(err) => Left(err)
+        case None =>
+          parser.parse(body).flatMap(_.as[ConfigManifest]) match
+            case Left(e) =>
+              Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
+            case Right(m) =>
+              ManifestImporter.apply(m, store, federatedStore) match
+                case Left(errs) =>
+                  Left(StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; ")))
+                case Right(_) =>
+                  // Reload the supervisor's in-memory caches (tenants, tenant-dbs,
+                  // pools, RBAC effective sets) from the freshly-written store
+                  // snapshot. Without this the REST/UI keeps serving the old
+                  // view until the manager is restarted.
+                  supervisor.restore()
+                  Right(
+                    ManifestImportSummary(
+                      tenants = m.tenants.size,
+                      tenantDbs = m.tenants.map(_.tenantDbs.size).sum,
+                      pools = m.tenants.map(_.pools.size).sum,
+                      roles = m.roles.size,
+                      groups = m.groups.size,
+                      users = m.users.size
+                    )
+                  )
     }

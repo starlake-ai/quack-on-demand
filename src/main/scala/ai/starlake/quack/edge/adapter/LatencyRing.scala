@@ -1,12 +1,13 @@
 package ai.starlake.quack.edge.adapter
 
-/** Lock-protected ring buffer of recent statement latencies (ms). One per
-  * node. Used by [[NodeLoadTracker]] to expose p50/p95/p99 to the UI
-  * without hauling a full histogram across the wire.
+/** Lock-protected ring buffer of recent statement latencies (ms). One per node. Used by
+  * [[NodeLoadTracker]] to expose p50/p95/p99 to the UI without hauling a full histogram across the
+  * wire.
   *
-  * Capacity defaults to 256 samples - about 2 KiB per node, sorting a
-  * snapshot takes a few µs. Plenty for surface metrics; if you need
-  * higher fidelity later, swap in a t-digest or HDR histogram. */
+  * Capacity defaults to 256 samples - about 2 KiB per node, sorting a snapshot takes a few µs.
+  * Plenty for surface metrics; if you need higher fidelity later, swap in a t-digest or HDR
+  * histogram.
+  */
 final class LatencyRing(capacity: Int = 256):
 
   private val buf    = new Array[Long](capacity)
@@ -20,8 +21,8 @@ final class LatencyRing(capacity: Int = 256):
     if filled < capacity then filled += 1
   }
 
-  /** Snapshot `(p50, p95, p99)` over the current window. Returns
-    * `(0, 0, 0)` while empty. */
+  /** Snapshot `(p50, p95, p99)` over the current window. Returns `(0, 0, 0)` while empty.
+    */
   def percentiles(): (Double, Double, Double) = lock.synchronized {
     if filled == 0 then (0.0, 0.0, 0.0)
     else

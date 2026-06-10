@@ -117,7 +117,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers
     h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1))).unsafeRunSync()
     h.createPool(req(pool = "ops",   size = 1, dist = RoleDistribution(0, 0, 1))).unsafeRunSync()
-    val out = h.listPools().unsafeRunSync()
+    val out = h.listPools(None)(_ => None).unsafeRunSync()
     out.toOption.get.pools.size shouldBe 2
 
   "poolStatus" should "return 404 for unknown pool" in:

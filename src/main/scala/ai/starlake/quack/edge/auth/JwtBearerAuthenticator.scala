@@ -14,8 +14,8 @@ import java.security.interfaces.RSAPublicKey
 import java.security.spec.X509EncodedKeySpec
 import java.util.{Base64, Date}
 
-/** Validates JWT tokens signed with HMAC (shared secret) or RSA (public key).
-  * Used for custom JWT issuers, not OIDC providers (use OidcBearerAuthenticator for those).
+/** Validates JWT tokens signed with HMAC (shared secret) or RSA (public key). Used for custom JWT
+  * issuers, not OIDC providers (use OidcBearerAuthenticator for those).
   */
 class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     extends BearerAuthProvider,
@@ -28,13 +28,14 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     else None
 
   private val rsaVerifier: Option[RSASSAVerifier] =
-    if config.publicKeyPath.nonEmpty then Some(new RSASSAVerifier(loadRSAPublicKey(config.publicKeyPath)))
+    if config.publicKeyPath.nonEmpty then
+      Some(new RSASSAVerifier(loadRSAPublicKey(config.publicKeyPath)))
     else None
 
   override def authenticate(token: String): Either[String, AuthenticatedProfile] =
     try
       val signedJWT = SignedJWT.parse(token)
-      val verified = verifySignature(signedJWT)
+      val verified  = verifySignature(signedJWT)
       if !verified then return Left("JWT signature verification failed")
 
       val claims = signedJWT.getJWTClaimsSet
@@ -53,12 +54,11 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
 
       // Check expiry
       val exp = Option(claims.getExpirationTime)
-      if exp.exists(_.before(new Date())) then
-        return Left("JWT token has expired")
+      if exp.exists(_.before(new Date())) then return Left("JWT token has expired")
 
       val username = extractUsername(claims)
-      val role = RoleExtractor.extract(claims, roleClaim)
-      val groups = RoleExtractor.extractGroups(claims, "groups")
+      val role     = RoleExtractor.extract(claims, roleClaim)
+      val groups   = RoleExtractor.extractGroups(claims, "groups")
 
       Right(
         AuthenticatedProfile(
@@ -89,11 +89,11 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
     }.toMap
 
   private def loadRSAPublicKey(path: String): RSAPublicKey =
-    val pem = new String(Files.readAllBytes(new File(path).toPath))
+    val pem      = new String(Files.readAllBytes(new File(path).toPath))
     val stripped = pem
       .replace("-----BEGIN PUBLIC KEY-----", "")
       .replace("-----END PUBLIC KEY-----", "")
       .replaceAll("\\s", "")
     val decoded = Base64.getDecoder.decode(stripped)
-    val spec = new X509EncodedKeySpec(decoded)
+    val spec    = new X509EncodedKeySpec(decoded)
     KeyFactory.getInstance("RSA").generatePublic(spec).asInstanceOf[RSAPublicKey]
