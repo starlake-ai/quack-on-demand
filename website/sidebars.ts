@@ -16,7 +16,12 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Operating',
-      items: ['operating/deploy'],
+      items: [
+        'operating/deploy-local',
+        'operating/deploy-kubernetes',
+        'operating/tls',
+        'operating/resilience',
+      ],
     },
     {
       type: 'category',
