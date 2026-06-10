@@ -330,7 +330,7 @@ Per-statement enforcement only kicks in when `acl.enabled=true` (`QOD_ACL_ENABLE
 
 ### Caveats
 
-- **Coarse DML/DDL**: the SQL `TableExtractor` only walks SELECT statements today, so per-statement enforcement (when `acl.enabled`) is asymmetric: `SELECT` is checked per table; `INSERT`/`UPDATE`/`DELETE` carry no extracted table refs and currently pass the table-level gate unchecked; `CREATE`/`DROP` and transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`) require a covering wildcard `*.*.* ALL` grant. Per-table DML grants (and finer DDL/transaction handling) need the extractor to walk those statement shapes too.
+- **Per-table DML/DDL enforcement**: the SQL parser walks SELECT, INSERT/UPDATE/DELETE/MERGE/TRUNCATE, and CREATE/DROP/ALTER, extracting each table touch as a `Read`, `Write`, or `Ddl` access; the validator requires a covering grant for every access. The write verbs collapse to a single `Write` class (holding any of `INSERT`/`UPDATE`/`DELETE` authorizes all writes on the matched tables), and DDL is authorized by an `ALL` grant since the operator-facing verb vocabulary is `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`ALL`. Control-flow statements (`BEGIN`/`COMMIT`/`ROLLBACK`/`SET`/`USE`/`SHOW`) carry no table refs and pass unconditionally. The catalog `*` wildcard is scoped to the session's tenant.
 
 ### Curl walkthrough
 
