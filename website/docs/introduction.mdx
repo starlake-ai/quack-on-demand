@@ -1,0 +1,67 @@
+---
+id: introduction
+title: Introduction
+slug: /
+---
+
+import ThemedImage from '@theme/ThemedImage';
+
+<div style={{textAlign: 'center', margin: '0.5rem 0 2rem'}}>
+  <ThemedImage
+    alt="Quack on Demand"
+    sources={{ light: '/img/lockupA-light.svg', dark: '/img/lockupA-dark.svg' }}
+    style={{ maxWidth: '460px', width: '100%' }}
+  />
+</div>
+
+**Quack on Demand** is a multi-tenant [Arrow Flight SQL](https://arrow.apache.org/docs/format/FlightSql.html) gateway for [DuckDB](https://duckdb.org) and [DuckLake](https://ducklake.select). It puts a single, governed, horizontally-scaled SQL endpoint in front of many DuckDB engines that share DuckLake catalogs, so a fast embedded database becomes a service that teams and applications can query together.
+
+## What it does
+
+Clients speak Arrow Flight SQL to one endpoint. The gateway authenticates the connection, authorizes every statement against a role-based access model, classifies it read or write, and routes it to the least-loaded DuckDB node that can serve it. The nodes read and write Parquet through shared DuckLake catalogs, so they present one consistent view and a pool can scale out across many of them.
+
+In other words, it adds the things a single embedded DuckDB does not have on its own: **multi-tenancy, authentication and per-statement access control, horizontal scale, and a stable client endpoint**, without replacing DuckDB as the engine.
+
+## Why it exists
+
+DuckDB is excellent for fast analytics, and DuckLake gives it a durable, object-store-backed catalog. But on their own they are single-process: there is no shared endpoint, no notion of tenants or users, no access control on a query, and no way to spread load across nodes. Teams that want to expose DuckDB/DuckLake data to many users or applications end up rebuilding the same gateway concerns each time. Quack on Demand is that gateway, built once: connection management, identity, authorization, routing, failover, and observability around the engine you already use.
+
+## When to use it
+
+Reach for Quack on Demand when you want to:
+
+- **Serve many users or applications** from shared DuckDB/DuckLake data through one Arrow Flight SQL endpoint, instead of handing out database files.
+- **Enforce access control** on every query: role-based, per-table permissions with tenant isolation, applied before a statement touches a node.
+- **Scale horizontally**: spread read and write traffic across a pool of DuckDB nodes over a single shared catalog, with least-loaded routing and retry on failure.
+- **Isolate tenants**: keep each tenant's databases, users, and compute separate, with its own auth provider.
+- **Federate external sources** (Postgres, S3 / Iceberg, anything DuckDB can attach) behind the same SQL surface and the same access model.
+- **Standardize on Arrow Flight SQL** clients: JDBC, ADBC, ODBC, PyArrow, DBeaver, and Spark all connect the same way.
+
+## When not to use it
+
+It is the wrong tool when:
+
+- **One user or app queries a local DuckDB file.** Use DuckDB directly. The gateway adds operational machinery (a manager, Postgres, pools) that only pays off when you need sharing, isolation, or scale.
+- **You do not need multi-tenancy, access control, or horizontal scale.** If none of the reasons above apply, the gateway is overhead.
+- **You need OLTP semantics or cross-node transactions.** This is an analytical query gateway: transactions pin to a single node, and it is not a substitute for a transactional database.
+- **You need engine features DuckDB does not have.** The gateway executes DuckDB SQL; it routes and governs queries, it does not extend the engine.
+
+## What is inside
+
+| Capability | In short |
+| --- | --- |
+| Multi-tenancy | Tenants own databases (DuckLake catalogs) and pools of DuckDB nodes |
+| Access control | Authentication (database, JWT, OIDC) plus role-based, per-statement table ACL |
+| Routing | Statement classification, least-loaded node selection, transaction pinning, retry-once |
+| Storage | DuckLake catalogs over a filesystem or S3-compatible object store |
+| Federation | Attach external catalogs (Postgres, S3/Iceberg) under the same ACL |
+| Operations | Prometheus / cloud metrics, a config manifest for backup and restore, an admin UI |
+
+## Where to go next
+
+- **[Quickstart](/getting-started/quickstart)** - from zero to your first query.
+- **[Architecture](/concepts/architecture)** - how the pieces fit and how a request flows.
+- **[Connecting clients](/connecting/clients)** - JDBC, ADBC, ODBC, and more.
+- **[Operating](/operating/deploy-local)** - deploy, provision tenants and pools, govern access.
+
+Questions or feedback? Join the [community on Discord](https://discord.gg/xHj9D6Rebp) or open an issue on [GitHub](https://github.com/starlake-ai/quack-on-demand).
