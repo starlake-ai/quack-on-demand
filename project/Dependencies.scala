@@ -6,6 +6,9 @@ object Dependencies {
   val tapirJsonCirce        = "com.softwaremill.sttp.tapir" %% "tapir-json-circe" % Versions.tapir
   val tapirSwaggerUiBundle  = "com.softwaremill.sttp.tapir" %% "tapir-swagger-ui-bundle" % Versions.tapir
   val tapirFiles            = "com.softwaremill.sttp.tapir" %% "tapir-files" % Versions.tapir
+  val tapirOpenapiDocs      = "com.softwaremill.sttp.tapir" %% "tapir-openapi-docs" % Versions.tapir
+
+  val sttpApispecOpenapiCirceYaml = "com.softwaremill.sttp.apispec" %% "openapi-circe-yaml" % Versions.sttpApispec
 
   val http4sEmberServer     = "org.http4s" %% "http4s-ember-server" % Versions.http4s
   val http4sEmberClient     = "org.http4s" %% "http4s-ember-client" % Versions.http4s

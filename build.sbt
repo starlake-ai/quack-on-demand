@@ -151,6 +151,8 @@ lazy val root = (project in file("."))
       Dependencies.tapirJsonCirce,
       Dependencies.tapirSwaggerUiBundle,
       Dependencies.tapirFiles,
+      Dependencies.tapirOpenapiDocs,
+      Dependencies.sttpApispecOpenapiCirceYaml,
       Dependencies.http4sEmberServer,
       Dependencies.http4sEmberClient,
       Dependencies.http4sDsl,
