@@ -25,3 +25,10 @@ class GenConfigDocsSpec extends AnyFunSuite:
     assert(md.contains("## `quack-on-demand.admin`"), "nested admin block should be its own section")
     assert(!md.contains("## `quack-on-demand.port`"), "flat scalar should not get its own per-key heading")
   }
+
+  test("MDX-escapes curly braces in descriptions so Docusaurus does not parse them as JSX") {
+    val md = GenConfigDocs.render
+    // The tenantDb description mentions ${tenant}_${tenantDb}; raw braces would break the MDX build.
+    assert(!md.contains("${tenant}_${tenantDb}"), "raw curly braces must not reach the rendered page")
+    assert(md.contains("&#123;tenant&#125;"), "curly braces in descriptions should be HTML-entity escaped")
+  }

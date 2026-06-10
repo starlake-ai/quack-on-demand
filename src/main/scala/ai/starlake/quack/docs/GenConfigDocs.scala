@@ -38,6 +38,13 @@ object GenConfigDocs:
   private def escape(s: String): String =
     s.replace("|", "\\|").replace("\n", " ")
 
+  /** Like [[escape]] but also neutralizes MDX-significant characters for prose cells that
+    * are NOT wrapped in a code span. Docusaurus parses Markdown as MDX, so a bare `{tenant}`
+    * or `<x>` in a description would be read as a JSX expression/element and break the build.
+    */
+  private def escapeText(s: String): String =
+    escape(s).replace("{", "&#123;").replace("}", "&#125;").replace("<", "&lt;")
+
   def render: String =
     val cfg = ConfigFactory.load()
     val sb  = new StringBuilder
@@ -70,7 +77,7 @@ object GenConfigDocs:
             else s"`${escape(default)}`"
           val sensitive = if e.sensitive then "yes" else ""
           sb.append(
-            s"| `${e.path}` | `${e.envVar}` | $defaultMd | $sensitive | ${escape(e.description)} |\n"
+            s"| `${e.path}` | `${e.envVar}` | $defaultMd | $sensitive | ${escapeText(e.description)} |\n"
           )
         }
         sb.append("\n")
