@@ -16,13 +16,14 @@ import java.sql.{Connection, DriverManager}
   *   )
   * }}}
   *
-  * Upserts a single row keyed on `id = 1`. Matches the file store's semantics
-  * (write the whole blob atomically on every mutation) - Postgres gives us
-  * crash-safety + concurrent-reader visibility for free.
+  * Upserts a single row keyed on `id = 1`. Matches the file store's semantics (write the whole blob
+  * atomically on every mutation) - Postgres gives us crash-safety + concurrent-reader visibility
+  * for free.
   *
-  * All tables in this control-plane share the `slkstate_` prefix so they
-  * coexist cleanly with DuckLake's `__ducklake_*` tables in the same
-  * Postgres database (the global `defaultMetastore` connection). */
+  * All tables in this control-plane share the `slkstate_` prefix so they coexist cleanly with
+  * DuckLake's `__ducklake_*` tables in the same Postgres database (the global `defaultMetastore`
+  * connection).
+  */
 final class PostgresStateStore(
     jdbcUrl: String,
     user: String,
@@ -42,7 +43,8 @@ final class PostgresStateStore(
 
   private def withConn[A](f: Connection => A): A =
     val c = DriverManager.getConnection(jdbcUrl, user, password)
-    try f(c) finally c.close()
+    try f(c)
+    finally c.close()
 
   private def ensureTable(c: Connection): Unit =
     val st = c.createStatement()
@@ -75,7 +77,7 @@ final class PostgresStateStore(
   def save(state: StoredState): Unit = withConn { c =>
     ensureTable(c)
     val json = state.asJson.noSpaces
-    val ps = c.prepareStatement(
+    val ps   = c.prepareStatement(
       s"""INSERT INTO $table (id, content, updated_at) VALUES (1, ?::jsonb, NOW())
          |ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()""".stripMargin
     )
@@ -87,14 +89,17 @@ final class PostgresStateStore(
 
 object PostgresStateStore:
 
-  /** Build a store from the global `defaultMetastore` map. Throws on missing
-    * required keys so the manager fails fast at startup rather than at the
-    * first save. */
+  /** Build a store from the global `defaultMetastore` map. Throws on missing required keys so the
+    * manager fails fast at startup rather than at the first save.
+    */
   def fromDefaultMetastore(meta: Map[String, String]): PostgresStateStore =
     def required(k: String) =
-      meta.get(k).filter(_.nonEmpty).getOrElse(
-        sys.error(s"defaultMetastore.$k must be set when stateStorage=postgres")
-      )
+      meta
+        .get(k)
+        .filter(_.nonEmpty)
+        .getOrElse(
+          sys.error(s"defaultMetastore.$k must be set when stateStorage=postgres")
+        )
     val host = required("pgHost")
     val port = required("pgPort")
     val user = required("pgUser")

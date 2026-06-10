@@ -12,16 +12,14 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
-/** Connection lifecycle errors surfaced by [[QuackProtocol]]. Mirrors the
-  * [[QuackError.Transient]] / [[QuackError.Permanent]] split in
-  * `QuackHttpClient.scala` so Task 7's adapter can map between the two
-  * with a thin `match` clause.
+/** Connection lifecycle errors surfaced by [[QuackProtocol]]. Mirrors the [[QuackError.Transient]]
+  * / [[QuackError.Permanent]] split in `QuackHttpClient.scala` so Task 7's adapter can map between
+  * the two with a thin `match` clause.
   *
-  *   - Transient: retryable. HTTP 5xx, connect refused, read timeout --
-  *     anything that says "try the same call again later".
-  *   - Permanent: not retryable. HTTP 4xx, ERROR_RESPONSE from a sane
-  *     server, unexpected message type -- caller should surface the
-  *     error to the user.
+  *   - Transient: retryable. HTTP 5xx, connect refused, read timeout -- anything that says "try the
+  *     same call again later".
+  *   - Permanent: not retryable. HTTP 4xx, ERROR_RESPONSE from a sane server, unexpected message
+  *     type -- caller should surface the error to the user.
   */
 sealed trait QuackWireError extends RuntimeException
 
@@ -29,29 +27,26 @@ object QuackWireError:
   final case class Transient(msg: String) extends RuntimeException(msg) with QuackWireError
   final case class Permanent(msg: String) extends RuntimeException(msg) with QuackWireError
 
-/** Pluggable POST transport. Tests inject a stub that records the
-  * request body and returns canned response bytes (see
-  * [[QuackProtocolSpec]]); production uses [[QuackProtocol.JdkHttpTransport]]
+/** Pluggable POST transport. Tests inject a stub that records the request body and returns canned
+  * response bytes (see [[QuackProtocolSpec]]); production uses [[QuackProtocol.JdkHttpTransport]]
   * which wraps a [[HttpClient]].
   *
-  * Why an abstraction rather than mocking [[HttpClient]] directly:
-  * Java's `HttpClient` is a sealed-class hierarchy that does not lend
-  * itself to interception without an embedded HTTP server. An injected
-  * `Transport` keeps the state-machine tests dependency-free, which is
-  * what Task 6.4 asks for ("the injectable-producer approach").
+  * Why an abstraction rather than mocking [[HttpClient]] directly: Java's `HttpClient` is a
+  * sealed-class hierarchy that does not lend itself to interception without an embedded HTTP
+  * server. An injected `Transport` keeps the state-machine tests dependency-free, which is what
+  * Task 6.4 asks for ("the injectable-producer approach").
   */
 trait QuackTransport:
-  /** Send `body` as the body of a POST to `uri` with
-    * `Content-Type: application/vnd.duckdb`. Return the response bytes.
+  /** Send `body` as the body of a POST to `uri` with `Content-Type: application/vnd.duckdb`. Return
+    * the response bytes.
     *
-    * Implementations must signal HTTP non-2xx via
-    * [[QuackWireError.Transient]] (5xx) or [[QuackWireError.Permanent]]
-    * (4xx) so the protocol driver can route retries correctly.
+    * Implementations must signal HTTP non-2xx via [[QuackWireError.Transient]] (5xx) or
+    * [[QuackWireError.Permanent]] (4xx) so the protocol driver can route retries correctly.
     */
   def post(uri: URI, body: Array[Byte]): IO[Array[Byte]]
 
-/** Owns Quack connection lifecycle over an injectable [[QuackTransport]]
-  * and produces a lazy chained [[ArrowReader]] for callers.
+/** Owns Quack connection lifecycle over an injectable [[QuackTransport]] and produces a lazy
+  * chained [[ArrowReader]] for callers.
   *
   * Wire-level state machine (per design §6.2):
   * {{{
@@ -66,25 +61,20 @@ trait QuackTransport:
   *     │<── SUCCESS_RESPONSE  ────────────────────────── │
   * }}}
   *
-  * The driver never caches `Connection`s across logical queries (per
-  * design §6.4) -- connection reuse is what gave the upstream race its
-  * legs, and JDK HttpClient already pools the underlying socket.
+  * The driver never caches `Connection`s across logical queries (per design §6.4) -- connection
+  * reuse is what gave the upstream race its legs, and JDK HttpClient already pools the underlying
+  * socket.
   *
-  * End-of-FETCH-loop detection. The wire does NOT carry a
-  * `needs_more_fetch` flag on `FETCH_RESPONSE` -- only on
-  * `PREPARE_RESPONSE`. The upstream `quack_scan.cpp:331` client uses
-  * `fetch_response->MutableResults().empty()` as its terminator
-  * ("server is done, we are done"). We mirror that via
-  * [[QuackNativeBridge.fetchResponseChunkCount]] returning `0`.
+  * End-of-FETCH-loop detection. The wire does NOT carry a `needs_more_fetch` flag on
+  * `FETCH_RESPONSE` -- only on `PREPARE_RESPONSE`. The upstream `quack_scan.cpp:331` client uses
+  * `fetch_response->MutableResults().empty()` as its terminator ("server is done, we are done"). We
+  * mirror that via [[QuackNativeBridge.fetchResponseChunkCount]] returning `0`.
   *
-  * Column-name threading: design option (b). The C++
-  * [[QuackNativeBridge.extractArrowStream]] propagates
-  * `PrepareResponseMessage::Names()` directly into the Arrow C-data
-  * schema for the initial PREPARE_RESPONSE-derived reader, so the
-  * Scala side does not have to rewrap the schema. Subsequent FETCH
-  * batches reuse the same column names because the chained reader
-  * never re-reads the schema after the first child reader hands it
-  * over.
+  * Column-name threading: design option (b). The C++ [[QuackNativeBridge.extractArrowStream]]
+  * propagates `PrepareResponseMessage::Names()` directly into the Arrow C-data schema for the
+  * initial PREPARE_RESPONSE-derived reader, so the Scala side does not have to rewrap the schema.
+  * Subsequent FETCH batches reuse the same column names because the chained reader never re-reads
+  * the schema after the first child reader hands it over.
   */
 final class QuackProtocol(
     transport: QuackTransport,
@@ -92,14 +82,12 @@ final class QuackProtocol(
 ) extends LazyLogging:
 
   /** Opens a Quack connection: POST `CONNECTION_REQUEST(token)`, expect
-    * `CONNECTION_RESPONSE(connId)`. Surfaces `ERROR_RESPONSE` as
-    * [[QuackWireError.Permanent]], any other unexpected message type as
-    * [[QuackWireError.Permanent]].
+    * `CONNECTION_RESPONSE(connId)`. Surfaces `ERROR_RESPONSE` as [[QuackWireError.Permanent]], any
+    * other unexpected message type as [[QuackWireError.Permanent]].
     *
-    * `endpoint` is the upstream Quack endpoint string in the
-    * `quack:host:port` form that
-    * `ai.starlake.quack.ondemand.runtime.LocalQuackBackend` produces.
-    * Translated to `http://host:port/quack` for the actual HTTP POST.
+    * `endpoint` is the upstream Quack endpoint string in the `quack:host:port` form that
+    * `ai.starlake.quack.ondemand.runtime.LocalQuackBackend` produces. Translated to
+    * `http://host:port/quack` for the actual HTTP POST.
     */
   def open(endpoint: String, token: String): IO[Connection] =
     val url     = QuackProtocol.endpointToHttp(endpoint)
@@ -122,9 +110,9 @@ final class QuackProtocol(
 
 object QuackProtocol:
 
-  /** "quack:host:port" -> "http://host:port/quack". The leading `quack:`
-    * scheme is what `LocalQuackBackend` and `KubernetesQuackBackend`
-    * publish; we never see a `quack://` two-slash form on the wire side.
+  /** "quack:host:port" -> "http://host:port/quack". The leading `quack:` scheme is what
+    * `LocalQuackBackend` and `KubernetesQuackBackend` publish; we never see a `quack://` two-slash
+    * form on the wire side.
     */
   def endpointToHttp(s: String): URI =
     require(s != null, "endpoint must not be null")
@@ -132,12 +120,11 @@ object QuackProtocol:
     val hostPort = s.substring("quack:".length).stripSuffix("/")
     URI.create(s"http://$hostPort/quack")
 
-  /** JDK [[HttpClient]]-backed transport. Used in production; tests use
-    * a stub [[QuackTransport]] instead.
+  /** JDK [[HttpClient]]-backed transport. Used in production; tests use a stub [[QuackTransport]]
+    * instead.
     *
-    * `IO.blocking` wraps the synchronous send because the JDK
-    * HttpClient's `send` blocks the calling thread until the full
-    * response body is received. cats-effect routes blocking calls to
+    * `IO.blocking` wraps the synchronous send because the JDK HttpClient's `send` blocks the
+    * calling thread until the full response body is received. cats-effect routes blocking calls to
     * a dedicated thread pool so they do not starve compute fibers.
     */
   final class JdkHttpTransport(http: HttpClient) extends QuackTransport with LazyLogging:
@@ -149,25 +136,22 @@ object QuackProtocol:
         .build()
       val resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray())
       resp.statusCode() match
-        case 200 => resp.body()
+        case 200                         => resp.body()
         case sc if sc >= 500 && sc < 600 =>
           throw QuackWireError.Transient(s"HTTP $sc from Quack node at $uri")
         case sc =>
           throw QuackWireError.Permanent(s"HTTP $sc from Quack node at $uri")
     }
 
-/** Per logical query handle. Construction by [[QuackProtocol.open]]
-  * captures the server-assigned `connectionId`. [[execute]] runs one
-  * SQL statement and returns a streaming [[ArrowReader]]; [[close]]
-  * sends `DISCONNECT_MESSAGE` best-effort.
+/** Per logical query handle. Construction by [[QuackProtocol.open]] captures the server-assigned
+  * `connectionId`. [[execute]] runs one SQL statement and returns a streaming [[ArrowReader]];
+  * [[close]] sends `DISCONNECT_MESSAGE` best-effort.
   *
-  * Concurrency note: `Connection` is one-shot -- call `execute` once,
-  * drain the returned reader to completion (or close it), then `close()`.
-  * Reusing a `Connection` across two `execute` calls is not supported
-  * because the wire's `result_uuid` is bound to the connection by
-  * PREPARE_RESPONSE; a second PREPARE on the same connection would
-  * overwrite that UUID and confuse any half-drained chained reader still
-  * holding the old one.
+  * Concurrency note: `Connection` is one-shot -- call `execute` once, drain the returned reader to
+  * completion (or close it), then `close()`. Reusing a `Connection` across two `execute` calls is
+  * not supported because the wire's `result_uuid` is bound to the connection by PREPARE_RESPONSE; a
+  * second PREPARE on the same connection would overwrite that UUID and confuse any half-drained
+  * chained reader still holding the old one.
   */
 final class Connection private[adapter] (
     transport: QuackTransport,
@@ -176,18 +160,15 @@ final class Connection private[adapter] (
     allocator: BufferAllocator
 ) extends LazyLogging:
 
-  /** Posts a PREPARE_REQUEST for `sql` and returns a streaming
-    * [[ArrowReader]] that chains the initial PREPARE_RESPONSE batches
-    * with subsequent FETCH_RESPONSE batches until the server signals
-    * end-of-stream (empty `results` vector on a FETCH_RESPONSE -- see
-    * upstream `quack_scan.cpp:331`).
+  /** Posts a PREPARE_REQUEST for `sql` and returns a streaming [[ArrowReader]] that chains the
+    * initial PREPARE_RESPONSE batches with subsequent FETCH_RESPONSE batches until the server
+    * signals end-of-stream (empty `results` vector on a FETCH_RESPONSE -- see upstream
+    * `quack_scan.cpp:331`).
     *
-    * The returned reader's `close()` cascades to [[close]] on this
-    * connection, so callers only manage one resource. The reader is
-    * synchronous (Arrow Java's contract); the IO it needs to perform
-    * FETCH round-trips is materialised via the supplied
-    * [[IORuntime]] -- the standard pattern for bridging IO into a
-    * synchronous caller, mirroring what http4s does for its IO ←→
+    * The returned reader's `close()` cascades to [[close]] on this connection, so callers only
+    * manage one resource. The reader is synchronous (Arrow Java's contract); the IO it needs to
+    * perform FETCH round-trips is materialised via the supplied [[IORuntime]] -- the standard
+    * pattern for bridging IO into a synchronous caller, mirroring what http4s does for its IO ←→
     * blocking-API edges.
     */
   def execute(sql: String)(using runtime: IORuntime): IO[ArrowReader] =
@@ -223,10 +204,9 @@ final class Connection private[adapter] (
           )
     }
 
-  /** Best-effort DISCONNECT_MESSAGE. A half-dead node must not crash
-    * the caller's `IO`, so we swallow any transport exception. The
-    * server-side `connectionId` will be cleaned up by the node's own
-    * connection reaper anyway.
+  /** Best-effort DISCONNECT_MESSAGE. A half-dead node must not crash the caller's `IO`, so we
+    * swallow any transport exception. The server-side `connectionId` will be cleaned up by the
+    * node's own connection reaper anyway.
     */
   def close(): IO[Unit] = transport
     .post(url, QuackNativeBridge.serializeDisconnect(connectionId))
@@ -236,36 +216,29 @@ final class Connection private[adapter] (
       ()
     }
 
-  /** Internal hook used by [[ChainedQuackArrowReader]] to fire the next
-    * FETCH_REQUEST. Public-package-private because the reader is in
-    * the same package.
+  /** Internal hook used by [[ChainedQuackArrowReader]] to fire the next FETCH_REQUEST.
+    * Public-package-private because the reader is in the same package.
     */
   private[adapter] def fetch(resultUuid: java.math.BigInteger): IO[Array[Byte]] =
     transport.post(url, QuackNativeBridge.serializeFetchRequest(connectionId, resultUuid))
 
-/** Lazy chained [[ArrowReader]] that pulls batches from the initial
-  * PREPARE_RESPONSE reader, then issues FETCH_REQUEST/FETCH_RESPONSE
-  * round-trips until the server signals end-of-stream (empty `results`
-  * on a FETCH_RESPONSE per upstream `quack_scan.cpp:331`).
+/** Lazy chained [[ArrowReader]] that pulls batches from the initial PREPARE_RESPONSE reader, then
+  * issues FETCH_REQUEST/FETCH_RESPONSE round-trips until the server signals end-of-stream (empty
+  * `results` on a FETCH_RESPONSE per upstream `quack_scan.cpp:331`).
   *
-  * Lifetime contract: this reader owns the `current` child reader plus
-  * the underlying [[Connection]]. `close()` cascades to both, exactly
-  * once (idempotent via [[closed]]).
+  * Lifetime contract: this reader owns the `current` child reader plus the underlying
+  * [[Connection]]. `close()` cascades to both, exactly once (idempotent via [[closed]]).
   *
-  * `getVectorSchemaRoot` and `getDictionaryVectors` delegate to the
-  * current child reader. The parent [[ArrowReader]] base class's
-  * internal `root` and `dictionaries` fields are NEVER initialised by
-  * us (we override every public surface that would call
-  * `ensureInitialized`); the abstract `readSchema` / `closeReadSource`
-  * implementations exist solely to satisfy the abstract-class
-  * signature.
+  * `getVectorSchemaRoot` and `getDictionaryVectors` delegate to the current child reader. The
+  * parent [[ArrowReader]] base class's internal `root` and `dictionaries` fields are NEVER
+  * initialised by us (we override every public surface that would call `ensureInitialized`); the
+  * abstract `readSchema` / `closeReadSource` implementations exist solely to satisfy the
+  * abstract-class signature.
   *
-  * Why this shape rather than a fresh stream wired through
-  * `Data.importArrayStream`: chaining at the C-data level would
-  * require a single `ArrowArrayStream` whose `get_next` lazily fires
-  * FETCH on the network. That mixes IO into a callback the Arrow Java
-  * importer holds on the JVM heap, which is exactly the kind of
-  * tangle we are removing from the embedded-DuckDB path. Owning the
+  * Why this shape rather than a fresh stream wired through `Data.importArrayStream`: chaining at
+  * the C-data level would require a single `ArrowArrayStream` whose `get_next` lazily fires FETCH
+  * on the network. That mixes IO into a callback the Arrow Java importer holds on the JVM heap,
+  * which is exactly the kind of tangle we are removing from the embedded-DuckDB path. Owning the
   * chain in Scala keeps the IO boundary explicit.
   */
 private[adapter] final class ChainedQuackArrowReader(
@@ -346,16 +319,14 @@ private[adapter] final class ChainedQuackArrowReader(
         try closeSync()
         catch case _: Throwable => ()
 
-  /** Never called: we override `getVectorSchemaRoot` so the parent
-    * class's `ensureInitialized` path (which is what invokes
-    * `readSchema`) never runs. Implementation exists solely to satisfy
-    * the abstract-class signature.
+  /** Never called: we override `getVectorSchemaRoot` so the parent class's `ensureInitialized` path
+    * (which is what invokes `readSchema`) never runs. Implementation exists solely to satisfy the
+    * abstract-class signature.
     */
   override protected def readSchema(): org.apache.arrow.vector.types.pojo.Schema =
     currentRef.get().getVectorSchemaRoot.getSchema
 
-  /** Closing of the underlying resources is handled by our `close`
-    * override directly. The parent class only calls this if its own
-    * `initialized` flag is set, which never happens for us.
+  /** Closing of the underlying resources is handled by our `close` override directly. The parent
+    * class only calls this if its own `initialized` flag is set, which never happens for us.
     */
   override protected def closeReadSource(): Unit = ()

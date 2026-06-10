@@ -3,7 +3,7 @@ package ai.starlake.quack.cli
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import io.circe.syntax.*
-import io.circe.yaml.v12.{Printer, parser}
+import io.circe.yaml.v12.{parser, Printer}
 
 import java.io.{InputStream, PrintStream}
 import java.nio.charset.StandardCharsets
@@ -32,6 +32,6 @@ object ManifestCli:
           case Right(_) =>
             System.err.println(
               s"applied: ${m.tenants.size} tenants, ${m.roles.size} roles, " +
-              s"${m.groups.size} groups, ${m.users.size} users"
+                s"${m.groups.size} groups, ${m.users.size} users"
             )
             0

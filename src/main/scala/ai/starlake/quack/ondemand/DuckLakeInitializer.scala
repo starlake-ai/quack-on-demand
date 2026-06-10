@@ -5,15 +5,13 @@ import com.typesafe.scalalogging.LazyLogging
 
 import java.sql.DriverManager
 
-/** Pre-bootstraps a per-tenant-db DuckLake catalog before its first
-  * Quack node spawns.
+/** Pre-bootstraps a per-tenant-db DuckLake catalog before its first Quack node spawns.
   *
-  * **Problem.** When a tenant-db's first pool comes up, the supervisor
-  * fans out N concurrent `spawn-quack-node.sh` calls. Each spawned
-  * `duckdb` process runs `ATTACH ducklake:postgres:...`, which DuckLake
-  * implements as a batch of `CREATE TABLE __ducklake_*` against that
-  * tenant-db's Postgres catalog. Concurrent `CREATE TABLE` of the same
-  * name races on Postgres's `pg_type_typname_nsp_index` uniqueness:
+  * **Problem.** When a tenant-db's first pool comes up, the supervisor fans out N concurrent
+  * `spawn-quack-node.sh` calls. Each spawned `duckdb` process runs `ATTACH ducklake:postgres:...`,
+  * which DuckLake implements as a batch of `CREATE TABLE __ducklake_*` against that tenant-db's
+  * Postgres catalog. Concurrent `CREATE TABLE` of the same name races on Postgres's
+  * `pg_type_typname_nsp_index` uniqueness:
   *
   * {{{
   * ERROR: duplicate key value violates unique constraint
@@ -21,45 +19,41 @@ import java.sql.DriverManager
   * DETAIL: Key (typname, typnamespace)=(ducklake_metadata, 2200) already exists.
   * }}}
   *
-  * The losing node's `ATTACH` fails, the catalog stays unattached on
-  * that session, and every later `USE` / `SELECT` against it errors with
-  * `Catalog "<dbName>" does not exist!`.
+  * The losing node's `ATTACH` fails, the catalog stays unattached on that session, and every later
+  * `USE` / `SELECT` against it errors with `Catalog "<dbName>" does not exist!`.
   *
-  * **Fix.** Call `DuckLakeInitializer.initBlocking(...)` once from
-  * `PoolSupervisor.createTenantDb`, right after the per-tenant-db
-  * Postgres database is provisioned and before any node can spawn against
-  * it. The call opens a one-shot embedded DuckDB connection (via the same
-  * `duckdb_jdbc` driver `QuackHttpClient` already uses on the embedded
-  * path), runs `INSTALL/LOAD ducklake; ATTACH ...;` against that
-  * tenant-db's Postgres, then closes. After this the `ducklake_*` tables
-  * exist; every per-node `ATTACH` from `spawn-quack-node.sh` is then
+  * **Fix.** Call `DuckLakeInitializer.initBlocking(...)` once from `PoolSupervisor.createTenantDb`,
+  * right after the per-tenant-db Postgres database is provisioned and before any node can spawn
+  * against it. The call opens a one-shot embedded DuckDB connection (via the same `duckdb_jdbc`
+  * driver `QuackHttpClient` already uses on the embedded path), runs
+  * `INSTALL/LOAD ducklake; ATTACH ...;` against that tenant-db's Postgres, then closes. After this
+  * the `ducklake_*` tables exist; every per-node `ATTACH` from `spawn-quack-node.sh` is then
   * read-only on the metadata and the pg_type race cannot fire.
   *
-  * The control-plane database (`qod`) is never touched by this code -
-  * it holds `qodstate_*` / `slkstate_*` only.
+  * The control-plane database (`qod`) is never touched by this code - it holds `qodstate_*` /
+  * `slkstate_*` only.
   *
-  * Idempotent on the *same* dataPath: a re-init that matches the
-  * recorded `ducklake_metadata.data_path` is a no-op. Re-init with a
-  * different dataPath is rejected by DuckLake itself.
+  * Idempotent on the *same* dataPath: a re-init that matches the recorded
+  * `ducklake_metadata.data_path` is a no-op. Re-init with a different dataPath is rejected by
+  * DuckLake itself.
   *
-  * Pure JVM - no `duckdb` CLI on the manager host required (the duckdb
-  * JDBC driver ships its own embedded engine), no shell-out, no extra
-  * script in the image.
+  * Pure JVM - no `duckdb` CLI on the manager host required (the duckdb JDBC driver ships its own
+  * embedded engine), no shell-out, no extra script in the image.
   */
 object DuckLakeInitializer extends LazyLogging:
 
-  /** Blocking entry point - intended to be called from inside
-    * `PoolSupervisor.createTenantDb` (already wrapped in
-    * `IO.blocking { ... }`). Skips with a warning if the metastore lacks
-    * the keys needed to reach the tenant-db Postgres - the per-node
-    * ATTACH later on will surface the same misconfiguration loudly. */
+  /** Blocking entry point - intended to be called from inside `PoolSupervisor.createTenantDb`
+    * (already wrapped in `IO.blocking { ... }`). Skips with a warning if the metastore lacks the
+    * keys needed to reach the tenant-db Postgres - the per-node ATTACH later on will surface the
+    * same misconfiguration loudly.
+    */
   def initBlocking(metastore: Map[String, String]): Unit =
-    val dbName     = metastore.getOrElse("dbName", "")
-    val dataPath   = metastore.getOrElse("dataPath", "")
+    val dbName   = metastore.getOrElse("dbName", "")
+    val dataPath = metastore.getOrElse("dataPath", "")
     if !metastore.contains("pgHost") || dbName.isEmpty || dataPath.isEmpty then
       logger.warn(
         s"DuckLake pre-init skipped: metastore missing pgHost/dbName/dataPath " +
-        s"(dbName='$dbName', dataPath='$dataPath', hasPgHost=${metastore.contains("pgHost")})."
+          s"(dbName='$dbName', dataPath='$dataPath', hasPgHost=${metastore.contains("pgHost")})."
       )
     else
       val pgHost     = metastore("pgHost")
@@ -69,18 +63,23 @@ object DuckLakeInitializer extends LazyLogging:
       val schemaName = metastore.getOrElse("schemaName", "main")
       runInit(pgHost, pgPort, pgUser, pgPassword, dbName, schemaName, dataPath)
 
-  /** IO wrapper around [[initBlocking]]. Retained for callers that
-    * already compose `IO` (none today inside the codebase - kept for
-    * symmetry with the rest of the bootstrap chain). */
+  /** IO wrapper around [[initBlocking]]. Retained for callers that already compose `IO` (none today
+    * inside the codebase - kept for symmetry with the rest of the bootstrap chain).
+    */
   def init(metastore: Map[String, String]): IO[Unit] = IO.blocking(initBlocking(metastore))
 
   private def runInit(
-      pgHost: String, pgPort: String, pgUser: String, pgPassword: String,
-      dbName: String, schemaName: String, dataPath: String
+      pgHost: String,
+      pgPort: String,
+      pgUser: String,
+      pgPassword: String,
+      dbName: String,
+      schemaName: String,
+      dataPath: String
   ): Unit =
     logger.info(
       s"DuckLake pre-init: ATTACHing ducklake:postgres://$pgHost:$pgPort/$dbName " +
-      s"(dataPath=$dataPath, schema=$schemaName)"
+        s"(dataPath=$dataPath, schema=$schemaName)"
     )
     Class.forName("org.duckdb.DuckDBDriver")
     Class.forName("org.postgresql.Driver")
@@ -95,9 +94,12 @@ object DuckLakeInitializer extends LazyLogging:
     try
       val lockStmt = pgConn.createStatement()
       try
-        lockStmt.execute(s"SELECT pg_advisory_lock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))")
+        lockStmt.execute(
+          s"SELECT pg_advisory_lock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))"
+        )
       finally
-        try lockStmt.close() catch case _: Throwable => ()
+        try lockStmt.close()
+        catch case _: Throwable => ()
 
       val conn = DriverManager.getConnection("jdbc:duckdb:")
       try
@@ -116,50 +118,58 @@ object DuckLakeInitializer extends LazyLogging:
           // any embedded apostrophes the conventional way.
           val attach =
             s"ATTACH 'ducklake:postgres:host=${escapeSql(pgHost)} port=${escapeSql(pgPort)} " +
-            s"dbname=${escapeSql(dbName)} user=${escapeSql(pgUser)} password=${escapeSql(pgPassword)}' " +
-            s"AS ${quoteIdent(dbName)} (DATA_PATH '${escapeSql(dataPath)}')"
+              s"dbname=${escapeSql(dbName)} user=${escapeSql(pgUser)} password=${escapeSql(pgPassword)}' " +
+              s"AS ${quoteIdent(dbName)} (DATA_PATH '${escapeSql(dataPath)}')"
           stmt.execute(attach)
           stmt.execute(s"USE ${quoteIdent(dbName)}")
           stmt.execute(s"CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schemaName)}")
           logger.info(s"DuckLake pre-init OK: $dbName.$schemaName ready at $dataPath")
         finally
-          try stmt.close() catch case _: Throwable => ()
+          try stmt.close()
+          catch case _: Throwable => ()
       finally
-        try conn.close() catch case _: Throwable => ()
+        try conn.close()
+        catch case _: Throwable => ()
 
       // Release the lock. pg_advisory_lock is session-scoped so closing
       // pgConn below would also release it, but doing it explicitly
       // shrinks the window during which the lock is held.
       val unlockStmt = pgConn.createStatement()
       try
-        unlockStmt.execute(s"SELECT pg_advisory_unlock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))")
+        unlockStmt.execute(
+          s"SELECT pg_advisory_unlock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))"
+        )
       finally
-        try unlockStmt.close() catch case _: Throwable => ()
+        try unlockStmt.close()
+        catch case _: Throwable => ()
     finally
-      try pgConn.close() catch case _: Throwable => ()
+      try pgConn.close()
+      catch case _: Throwable => ()
 
-  /** Emit the SQL needed for httpfs / azure secrets when the data path
-    * lives on object storage. Same shape `spawn-quack-node.sh` produces.
-    * Reads credentials from this process's env; the manager pod / native
-    * jar already exports them for the JVM to see.
+  /** Emit the SQL needed for httpfs / azure secrets when the data path lives on object storage.
+    * Same shape `spawn-quack-node.sh` produces. Reads credentials from this process's env; the
+    * manager pod / native jar already exports them for the JVM to see.
     *
-    * Returns Nil for local-filesystem `dataPath` values - no extension
-    * needed.
+    * Returns Nil for local-filesystem `dataPath` values - no extension needed.
     */
   private def storageSqlFor(dataPath: String): List[String] =
     val lower = dataPath.toLowerCase
     if lower.startsWith("s3://") || lower.startsWith("s3a://") ||
-       lower.startsWith("gs://") || lower.startsWith("r2://") then
+      lower.startsWith("gs://") || lower.startsWith("r2://")
+    then
       val install = "INSTALL httpfs; LOAD httpfs;"
-      val secret = for
+      val secret  = for
         key    <- sys.env.get("QOD_S3_ACCESS_KEY_ID").filter(_.nonEmpty)
         secret <- sys.env.get("QOD_S3_SECRET_ACCESS_KEY").filter(_.nonEmpty)
       yield
-        val ep = sys.env.getOrElse("QOD_S3_ENDPOINT", "")
-          .stripPrefix("http://").stripPrefix("https://").stripSuffix("/")
-        val region   = sys.env.getOrElse("QOD_S3_REGION",   "us-east-1")
+        val ep = sys.env
+          .getOrElse("QOD_S3_ENDPOINT", "")
+          .stripPrefix("http://")
+          .stripPrefix("https://")
+          .stripSuffix("/")
+        val region   = sys.env.getOrElse("QOD_S3_REGION", "us-east-1")
         val urlStyle = sys.env.getOrElse("QOD_S3_URL_STYLE", "path")
-        val useSsl   = sys.env.getOrElse("QOD_S3_USE_SSL",   "true")
+        val useSsl   = sys.env.getOrElse("QOD_S3_USE_SSL", "true")
         s"""CREATE OR REPLACE SECRET quack_s3 (
            |  TYPE s3,
            |  KEY_ID '${escapeSql(key)}',
@@ -171,21 +181,20 @@ object DuckLakeInitializer extends LazyLogging:
            |)""".stripMargin
       List(install) ++ secret.toList
     else if lower.startsWith("az://") || lower.startsWith("azure://") ||
-            lower.startsWith("abfss://") then
+      lower.startsWith("abfss://")
+    then
       val install = "INSTALL azure; LOAD azure;"
-      val secret = sys.env.get("QOD_AZURE_CONNECTION_STRING").filter(_.nonEmpty).map { cs =>
+      val secret  = sys.env.get("QOD_AZURE_CONNECTION_STRING").filter(_.nonEmpty).map { cs =>
         s"""CREATE OR REPLACE SECRET quack_azure (
            |  TYPE azure,
            |  CONNECTION_STRING '${escapeSql(cs)}'
            |)""".stripMargin
       }
       List(install) ++ secret.toList
-    else
-      Nil
+    else Nil
 
   private def proxyHostPort: Option[String] =
-    List("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
-      .iterator
+    List("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy").iterator
       .flatMap(sys.env.get)
       .map(_.trim)
       .find(_.nonEmpty)
@@ -193,5 +202,5 @@ object DuckLakeInitializer extends LazyLogging:
         url.stripPrefix("http://").stripPrefix("https://").stripSuffix("/")
       }
 
-  private def escapeSql(v: String): String = v.replace("'", "''")
+  private def escapeSql(v: String): String  = v.replace("'", "''")
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""

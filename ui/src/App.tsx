@@ -11,7 +11,15 @@ import Users from './pages/Users';
 import Config from './pages/Config';
 
 function Shell() {
-  const { username, role, logout, authEnabled } = useAuth();
+  const { username, role, tenant, logout, authEnabled } = useAuth();
+  // Config (resolved application.conf + manifest export/import) is a
+  // cross-tenant view of the entire deployment, so it's superuser-only.
+  // `tenant === null` flags the session as system-scoped; tenant-bound
+  // admins (when that path lands) are silently dropped from the nav --
+  // the matching backend endpoints also 403 them so URL deep-links don't
+  // leak. `authEnabled === false` is the no-auth dev mode; treat the
+  // synthetic anonymous user as a superuser there.
+  const isSuperuser = !authEnabled || tenant === null;
   return (
     <>
       <nav className="app-nav">
@@ -22,7 +30,7 @@ function Shell() {
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
-        {role === 'admin' && (
+        {role === 'admin' && isSuperuser && (
           <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
         )}
         <span className="spacer" />
@@ -49,7 +57,9 @@ function Shell() {
           <Route path="/users"                                     element={<Users />} />
           <Route path="/catalog"                                   element={<Catalog />} />
           <Route path="/catalog/:tenant/:tenantDb/:schema/:table"  element={<CatalogTableDetail />} />
-          <Route path="/config"                                    element={<Config />} />
+          {isSuperuser && (
+            <Route path="/config"                                  element={<Config />} />
+          )}
         </Routes>
       </main>
     </>

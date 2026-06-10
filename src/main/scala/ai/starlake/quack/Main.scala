@@ -4,13 +4,26 @@ import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
-  AclConfig, AuthenticationConfig, AwsAuthConfig, AzureAuthConfig,
-  DatabaseAuthConfig, GoogleAuthConfig, JwtAuthConfig, KeycloakAuthConfig,
+  AclConfig,
+  AuthenticationConfig,
+  AwsAuthConfig,
+  AzureAuthConfig,
+  DatabaseAuthConfig,
+  GoogleAuthConfig,
+  JwtAuthConfig,
+  KeycloakAuthConfig,
   OAuthConfig
 }
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.model.Names
+import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import ai.starlake.quack.observability.metrics.{
-  MetricsBindings, MetricsConfig, MetricsConfigCodec, MetricsEndpoint, MetricsRegistry, StatementInstruments
+  MetricsBindings,
+  MetricsConfig,
+  MetricsConfigCodec,
+  MetricsEndpoint,
+  MetricsRegistry,
+  StatementInstruments
 }
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
@@ -29,8 +42,13 @@ import ai.starlake.quack.ondemand.federation.{
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
-  ControlPlaneStore, LiquibaseRunner, PostgresControlPlaneStore,
-  PostgresDbAdmin, PostgresStateStore, StateStore, UserStore
+  ControlPlaneStore,
+  LiquibaseRunner,
+  PostgresControlPlaneStore,
+  PostgresDbAdmin,
+  PostgresStateStore,
+  StateStore,
+  UserStore
 }
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.effect.unsafe.implicits.global
@@ -48,22 +66,22 @@ object Main extends IOApp with LazyLogging:
   // AND the edge AuthenticationConfig types (which `derives ConfigReader`
   // at class-definition time - we shadow those defaults here).
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
-  given ProductHint[K8sConfig]              = ProductHint[K8sConfig](camelMapping)
-  given ProductHint[AdminConfig]            = ProductHint[AdminConfig](camelMapping)
-  given ProductHint[RoleDistributionConfig] = ProductHint[RoleDistributionConfig](camelMapping)
-  given ProductHint[BootstrapConfig]        = ProductHint[BootstrapConfig](camelMapping)
-  given ProductHint[FederationConfig]       = ProductHint[FederationConfig](camelMapping)
-  given ProductHint[DefaultMetastoreConfig] = ProductHint[DefaultMetastoreConfig](camelMapping)
-  given ProductHint[ManagerConfig]          = ProductHint[ManagerConfig](camelMapping)
-  given ProductHint[FlightConfig]           = ProductHint[FlightConfig](camelMapping)
-  given ProductHint[DatabaseAuthConfig]   = ProductHint[DatabaseAuthConfig](camelMapping)
-  given ProductHint[KeycloakAuthConfig]   = ProductHint[KeycloakAuthConfig](camelMapping)
-  given ProductHint[GoogleAuthConfig]     = ProductHint[GoogleAuthConfig](camelMapping)
-  given ProductHint[AzureAuthConfig]      = ProductHint[AzureAuthConfig](camelMapping)
-  given ProductHint[AwsAuthConfig]        = ProductHint[AwsAuthConfig](camelMapping)
-  given ProductHint[JwtAuthConfig]        = ProductHint[JwtAuthConfig](camelMapping)
-  given ProductHint[OAuthConfig]          = ProductHint[OAuthConfig](camelMapping)
-  given ProductHint[AuthenticationConfig] = ProductHint[AuthenticationConfig](camelMapping)
+  given ProductHint[K8sConfig]                 = ProductHint[K8sConfig](camelMapping)
+  given ProductHint[AdminConfig]               = ProductHint[AdminConfig](camelMapping)
+  given ProductHint[RoleDistributionConfig]    = ProductHint[RoleDistributionConfig](camelMapping)
+  given ProductHint[BootstrapConfig]           = ProductHint[BootstrapConfig](camelMapping)
+  given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
+  given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
+  given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
+  given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
+  given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
+  given ProductHint[KeycloakAuthConfig]        = ProductHint[KeycloakAuthConfig](camelMapping)
+  given ProductHint[GoogleAuthConfig]          = ProductHint[GoogleAuthConfig](camelMapping)
+  given ProductHint[AzureAuthConfig]           = ProductHint[AzureAuthConfig](camelMapping)
+  given ProductHint[AwsAuthConfig]             = ProductHint[AwsAuthConfig](camelMapping)
+  given ProductHint[JwtAuthConfig]             = ProductHint[JwtAuthConfig](camelMapping)
+  given ProductHint[OAuthConfig]               = ProductHint[OAuthConfig](camelMapping)
+  given ProductHint[AuthenticationConfig]      = ProductHint[AuthenticationConfig](camelMapping)
 
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
@@ -73,14 +91,14 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
-  given ConfigReader[DatabaseAuthConfig]   = deriveReader[DatabaseAuthConfig]
-  given ConfigReader[KeycloakAuthConfig]   = deriveReader[KeycloakAuthConfig]
-  given ConfigReader[GoogleAuthConfig]     = deriveReader[GoogleAuthConfig]
-  given ConfigReader[AzureAuthConfig]      = deriveReader[AzureAuthConfig]
-  given ConfigReader[AwsAuthConfig]        = deriveReader[AwsAuthConfig]
-  given ConfigReader[JwtAuthConfig]        = deriveReader[JwtAuthConfig]
-  given ConfigReader[OAuthConfig]          = deriveReader[OAuthConfig]
-  given ConfigReader[AuthenticationConfig] = deriveReader[AuthenticationConfig]
+  given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
+  given ConfigReader[KeycloakAuthConfig]     = deriveReader[KeycloakAuthConfig]
+  given ConfigReader[GoogleAuthConfig]       = deriveReader[GoogleAuthConfig]
+  given ConfigReader[AzureAuthConfig]        = deriveReader[AzureAuthConfig]
+  given ConfigReader[AwsAuthConfig]          = deriveReader[AwsAuthConfig]
+  given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
+  given ConfigReader[OAuthConfig]            = deriveReader[OAuthConfig]
+  given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 
   def run(args: List[String]): IO[ExitCode] =
@@ -101,11 +119,11 @@ object Main extends IOApp with LazyLogging:
         normalManagerRun
 
   private def normalManagerRun: IO[ExitCode] =
-    val source  = ConfigSource.default
-    val mgrCfg  = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
-    val edgeCfg = source.at("quack-flightsql").loadOrThrow[FlightConfig]
-    val authCfg = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg  = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
+    val source     = ConfigSource.default
+    val mgrCfg     = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
+    val edgeCfg    = source.at("quack-flightsql").loadOrThrow[FlightConfig]
+    val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
+    val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
     val authService = new AuthenticationService(authCfg, authCfg.jwt.secretKey)
@@ -121,7 +139,7 @@ object Main extends IOApp with LazyLogging:
       // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
       LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
       val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val admins = mgrCfg.admin.usernameList
+      val admins    = mgrCfg.admin.usernameList
       if admins.isEmpty then
         logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
       else
@@ -129,10 +147,10 @@ object Main extends IOApp with LazyLogging:
           // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
           // CHECK only forbids empty-string tenants now; NULL alone is fine.
           val out = userStore.upsertUser(
-            tenant    = None,
-            username  = name,
+            tenant = None,
+            username = name,
             plaintext = mgrCfg.admin.password,
-            role      = mgrCfg.admin.role
+            role = mgrCfg.admin.role
           )
           val verb = if out.inserted then "created" else "updated"
           logger.info(
@@ -151,8 +169,14 @@ object Main extends IOApp with LazyLogging:
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
         new KubernetesQuackBackend(
-          k8s, mgrCfg.k8s.namespace, mgrCfg.k8s.image, mgrCfg.k8s.quackPort,
-          mgrCfg.k8s.podLabel, mgrCfg.k8s.startupTimeoutSec, mgrCfg.defaultMetastore.asMap)
+          k8s,
+          mgrCfg.k8s.namespace,
+          mgrCfg.k8s.image,
+          mgrCfg.k8s.quackPort,
+          mgrCfg.k8s.podLabel,
+          mgrCfg.k8s.startupTimeoutSec,
+          mgrCfg.defaultMetastore.asMap
+        )
       case other => sys.error(s"unknown runtime: $other")
 
     // `dispatch` routes per-secret based on the row's shape (value -> Postgres,
@@ -163,11 +187,11 @@ object Main extends IOApp with LazyLogging:
       case "dispatch" | "auto" =>
         new DispatchingSecretResolver(
           postgres = new PostgresSecretResolver,
-          env      = new EnvSecretResolver(),
-          awsSm    = new AwsSecretsManagerResolver,
-          gcpSm    = new GcpSecretsManagerResolver,
-          azureKv  = new AzureSecretsManagerResolver,
-          vault    = new VaultSecretResolver
+          env = new EnvSecretResolver(),
+          awsSm = new AwsSecretsManagerResolver,
+          gcpSm = new GcpSecretsManagerResolver,
+          azureKv = new AzureSecretsManagerResolver,
+          vault = new VaultSecretResolver
         )
       case "postgres" => new PostgresSecretResolver
       case "env"      => new EnvSecretResolver()
@@ -177,16 +201,18 @@ object Main extends IOApp with LazyLogging:
       case "vault"    => new VaultSecretResolver
       case other      => sys.error(s"unknown federation.secretStore: '$other'")
     }
-    logger.info(s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}")
+    logger.info(
+      s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}"
+    )
 
-    val tracker  = new NodeLoadTracker
+    val tracker = new NodeLoadTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // Per-tenant-db Postgres provisioning. The admin connection opens
     // against the `postgres` system DB and issues CREATE/DROP DATABASE
     // for each `qodstate_tenant_db` row the supervisor manages.
-    val dbAdmin  = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val dbAdmin = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
 
     // Shared FederatedSourceStore: used by federationBlobOf (resolves
     // sources + secrets into spawn SQL), by TenantDbHandlers (counts
@@ -195,7 +221,7 @@ object Main extends IOApp with LazyLogging:
     // postgres mode; file mode has no federated-source tables.
     val manifestFedStore: Option[FederatedSourceStore] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val dm = mgrCfg.defaultMetastore
+        val dm      = mgrCfg.defaultMetastore
         val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
         Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
       else None
@@ -207,19 +233,26 @@ object Main extends IOApp with LazyLogging:
         case Some(federatedStore) =>
           val builder = new FederationBlobBuilder(
             loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
-            loadSecrets = sid  => IO.blocking(federatedStore.listSecrets(sid)),
-            resolver    = secretResolver
+            loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
+            resolver = secretResolver
           )
           tdId => builder.build(tdId)
         case None =>
           _ => IO.pure(None)
 
-    val sup      = new PoolSupervisor(backend, tracker, store, mgrCfg.defaultMetastore.asMap, dbAdmin, federationBlobOf)
-    val pools    = new PoolHandlers(sup, tracker)
-    val nodes    = new NodeHandlers(sup, tracker, backend)
-    val tenants  = new TenantHandlers(sup)
+    val sup = new PoolSupervisor(
+      backend,
+      tracker,
+      store,
+      mgrCfg.defaultMetastore.asMap,
+      dbAdmin,
+      federationBlobOf
+    )
+    val pools     = new PoolHandlers(sup, tracker)
+    val nodes     = new NodeHandlers(sup, tracker, backend)
+    val tenants   = new TenantHandlers(sup)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
-    val health   = new HealthHandler(sup)
+    val health    = new HealthHandler(sup)
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
@@ -229,7 +262,8 @@ object Main extends IOApp with LazyLogging:
     // spawn-node.
     val catalogHandlers: Option[CatalogHandlers] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val cache = new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
+        val cache =
+          new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
         def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
           cache.computeIfAbsent(
             (tenant, tenantDb),
@@ -240,18 +274,18 @@ object Main extends IOApp with LazyLogging:
         Some(new CatalogHandlers(reader, kindOf))
       else None
 
-    val sessionTokens     = new SessionTokenStore
-    val authHandlers      = new AuthHandlers(authService, sessionTokens)
-    val stmtHistory       = new ai.starlake.quack.edge.StatementHistoryStore()
-    val historyHandlers   = new StatementHistoryHandlers(stmtHistory)
-    val sessions = new SessionRegistry
-    val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
-    val client   = new QuackHttpClient(
+    val sessionTokens   = new SessionTokenStore
+    val authHandlers    = new AuthHandlers(authService, sessionTokens)
+    val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
+    val historyHandlers = new StatementHistoryHandlers(stmtHistory)
+    val sessions        = new SessionRegistry
+    val arrowAllocator  = new org.apache.arrow.memory.RootAllocator()
+    val client          = new QuackHttpClient(
       arrowAllocator,
-      nativeClient   = mgrCfg.nativeClient,
+      nativeClient = mgrCfg.nativeClient,
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker)
     // SQL ACL validator. Phase C: the only validator is the RBAC-backed
     // PostgresAclValidator, which reads from the cached EffectiveSet
     // pinned on ConnectionContext at handshake time. acl.enabled=false
@@ -271,7 +305,17 @@ object Main extends IOApp with LazyLogging:
         new PostgresAclValidator(
           defaultDatabase = defaultDb,
           defaultSchema   = defaultSchema,
-          dialect         = aclCfg.dialect
+          dialect         = aclCfg.dialect,
+          // Scope wildcard catalog grants to the session's tenant. Maps
+          // qodstate_tenant.id -> the set of tenant_db.name's the tenant
+          // owns; the validator's `catalogMatch` consults this to decide
+          // whether `*.*.*` admits a referenced catalog. Empty set = no
+          // catalog matches via wildcard (fail-closed). Explicit named
+          // grants bypass this and still cross tenants on purpose.
+          tenantCatalogs  = tenantId =>
+            sup.getTenantById(tenantId)
+              .map(t => sup.listTenantDbsByTenant(t.displayName).map(_.name).toSet)
+              .getOrElse(Set.empty)
         )
 
     // Background health probe so transient failures don't permanently mark
@@ -289,7 +333,7 @@ object Main extends IOApp with LazyLogging:
     // probe per node re-runs the (idempotent) CREATE - at most one wasted
     // round-trip per node per restart.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
-    val healthProbe = new HealthProbe(
+    val healthProbe  = new HealthProbe(
       tracker,
       n => {
         val initSql =
@@ -297,8 +341,10 @@ object Main extends IOApp with LazyLogging:
           else
             sup.get(n.poolKey).flatMap { st =>
               st.metastore.get("dbName").filter(_.nonEmpty).map { db =>
-                val schema = st.metastore.get("schemaName")
-                  .filter(_.nonEmpty).getOrElse("main")
+                val schema = st.metastore
+                  .get("schemaName")
+                  .filter(_.nonEmpty)
+                  .getOrElse("main")
                 s"CREATE SCHEMA IF NOT EXISTS $db.$schema"
               }
             }
@@ -345,7 +391,7 @@ object Main extends IOApp with LazyLogging:
         // collapses the `//` after the scheme into a single `/`, which
         // DuckLake then refuses on the next ATTACH because the recorded
         // catalog path no longer matches the operator-supplied URI.
-        val rootDataPath = mgrCfg.defaultMetastore.dataPath
+        val rootDataPath     = mgrCfg.defaultMetastore.dataPath
         val tenantDbDataPath =
           if rootDataPath.isEmpty then ""
           else if rootDataPath.matches("^[a-z][a-z0-9+.\\-]*://.*") then
@@ -362,7 +408,7 @@ object Main extends IOApp with LazyLogging:
             if parent == null then tenantDbName else parent.resolve(tenantDbName).toString
         val tenantDbMetastore = mgrCfg.defaultMetastore.asMap
           .updated("dataPath", tenantDbDataPath)
-          .updated("dbName",   tenantDbName)
+          .updated("dbName", tenantDbName)
 
         val createTenantIO: IO[Unit] =
           if sup.getTenant(bs.tenant).isDefined then
@@ -370,28 +416,42 @@ object Main extends IOApp with LazyLogging:
           else
             // Bootstrap tenant uses the `db` auth provider -- the only
             // provider that needs zero out-of-band config to be useful.
-            sup.createTenant(
-              ai.starlake.quack.model.Tenant(name = bs.tenant, authProvider = "db")
-            ).flatMap {
-              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}' (auth=db)"))
-              case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
-            }
+            sup
+              .createTenant(
+                ai.starlake.quack.model.Tenant(name = bs.tenant, authProvider = "db")
+              )
+              .flatMap {
+                case Right(_) =>
+                  IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}' (auth=db)"))
+                case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
+              }
 
         val createTenantDbIO: IO[Unit] =
           if sup.listTenantDbsByTenant(bs.tenant).exists(_.name == tenantDbName) then
-            IO.delay(logger.info(s"bootstrap: tenant-db '${bs.tenant}/$tenantDbName' already exists; skipping"))
+            IO.delay(
+              logger.info(
+                s"bootstrap: tenant-db '${bs.tenant}/$tenantDbName' already exists; skipping"
+              )
+            )
           else
-            sup.createTenantDb(
-              tenantName  = bs.tenant,
-              suffix      = bs.tenantDb,
-              kind        = ai.starlake.quack.model.TenantDbKind.DuckLake,
-              metastore   = tenantDbMetastore,
-              dataPath    = tenantDbDataPath,
-              objectStore = Map.empty
-            ).flatMap {
-              case Right(_)  => IO.delay(logger.info(s"bootstrap: created tenant-db '${bs.tenant}/$tenantDbName' at $tenantDbDataPath"))
-              case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant-db create failed: $err"))
-            }
+            sup
+              .createTenantDb(
+                tenantName = bs.tenant,
+                suffix = bs.tenantDb,
+                kind = ai.starlake.quack.model.TenantDbKind.DuckLake,
+                metastore = tenantDbMetastore,
+                dataPath = tenantDbDataPath,
+                objectStore = Map.empty
+              )
+              .flatMap {
+                case Right(_) =>
+                  IO.delay(
+                    logger.info(
+                      s"bootstrap: created tenant-db '${bs.tenant}/$tenantDbName' at $tenantDbDataPath"
+                    )
+                  )
+                case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant-db create failed: $err"))
+              }
 
         val createPoolIO: IO[Unit] =
           if sup.get(key).isDefined then
@@ -399,9 +459,12 @@ object Main extends IOApp with LazyLogging:
           else
             sup.createPool(key, dist).attempt.flatMap {
               case Right(nodes) =>
-                IO.delay(logger.info(
-                  s"bootstrap: created pool '$key' with ${nodes.size} node(s) " +
-                  s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"))
+                IO.delay(
+                  logger.info(
+                    s"bootstrap: created pool '$key' with ${nodes.size} node(s) " +
+                      s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"
+                  )
+                )
               case Left(t) =>
                 IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
             }
@@ -419,7 +482,32 @@ object Main extends IOApp with LazyLogging:
         metricsEndpoint: MetricsEndpoint,
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
-      val fsRouter = new FlightSqlRouter(sup, sessions, tracker, adapter, edgeCfg.tenantClaim, aclValidator, stmtHistory, stmtInstruments)
+      // Build the routing classifier from operator config. Defaults live in
+      // application.conf under `quack-on-demand.statementClassifier.*`;
+      // matching `QOD_CLASSIFIER_*` env vars override. Comma-separated.
+      val classifierRoot =
+        com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.statementClassifier")
+      val classifierCfg = StatementClassifierConfig(
+        select   = StatementClassifierConfig.parseCsv(classifierRoot.getString("select")),
+        dml      = StatementClassifierConfig.parseCsv(classifierRoot.getString("dml")),
+        ddl      = StatementClassifierConfig.parseCsv(classifierRoot.getString("ddl")),
+        begin    = StatementClassifierConfig.parseCsv(classifierRoot.getString("begin")),
+        commit   = StatementClassifierConfig.parseCsv(classifierRoot.getString("commit")),
+        rollback = StatementClassifierConfig.parseCsv(classifierRoot.getString("rollback"))
+      )
+      val classifier = new StatementClassifier(classifierCfg)
+
+      val fsRouter = new FlightSqlRouter(
+        sup,
+        sessions,
+        tracker,
+        adapter,
+        edgeCfg.tenantClaim,
+        aclValidator,
+        stmtHistory,
+        stmtInstruments,
+        classifier
+      )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
       // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
@@ -428,14 +516,20 @@ object Main extends IOApp with LazyLogging:
       val edgeIO: IO[FlightEdgeServer] = IO.delay {
         try
           val srv = new FlightEdgeServer(
-            EdgeConfig(edgeCfg.host, edgeCfg.port, edgeCfg.tlsEnabled,
-                       edgeCfg.tlsCertChain, edgeCfg.tlsPrivateKey, edgeCfg.tenantClaim,
-                       edgeCfg.sessionTtlSec),
+            EdgeConfig(
+              edgeCfg.host,
+              edgeCfg.port,
+              edgeCfg.tlsEnabled,
+              edgeCfg.tlsCertChain,
+              edgeCfg.tlsPrivateKey,
+              edgeCfg.tenantClaim,
+              edgeCfg.sessionTtlSec
+            ),
             fsRouter,
             authService,
             (tenant, pool) =>
               sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
-                case None => Left(s"pool '$pool' not found in tenant '$tenant'")
+                case None      => Left(s"pool '$pool' not found in tenant '$tenant'")
                 case Some(key) =>
                   // Tenant kill switch wins over pool kill switch -- a disabled
                   // tenant should report itself, not its pool, to avoid leaking
@@ -449,29 +543,40 @@ object Main extends IOApp with LazyLogging:
                           Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
                         case _ =>
                           Right(key.tenantDb),
+            // Accept either form of the FlightSQL `tenant` connection param.
+            // Surrogate ids (`t-<8 hex>`) and display names are disjoint shapes,
+            // so the `Names.looksLikeTenantId` check picks the right index.
+            // FlightEdgeServer uses the result to normalize the wire value to
+            // a display name (for lookupPool / authorize) AND to recover the id
+            // for the Basic auth chain (which queries qodstate_user.tenant).
+            raw =>
+              if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
+              else sup.getTenant(raw),
             // Phase C handshake authorize: user-scope + pool-access +
             // EffectiveSet. Failures bubble up as PERMISSION_DENIED on
             // the FlightSQL handshake. JWT role + groups claims flow in
             // from FlightEdgeServer.handshake and get union-merged with
             // the user's local membership edges inside the supervisor.
             (tenant, pool, username, jwtRoles, jwtGroups) =>
-              sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups))
+              sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups)
+          )
           srv.start()
           srv
-        catch case t: Throwable =>
-          throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
+        catch
+          case t: Throwable =>
+            throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
 
       // RBAC handlers wire through the supervisor + user store so persistence
       // and the in-memory RbacResolver cache stay in lockstep. The user
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
-      val userStoreForRbac = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val userHandlers     = new UserHandlers(sup, userStoreForRbac)
-      val roleHandlers     = new RoleHandlers(sup, userHandlers)
-      val groupHandlers    = new GroupHandlers(sup, userHandlers)
+      val userStoreForRbac   = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+      val userHandlers       = new UserHandlers(sup, userStoreForRbac)
+      val roleHandlers       = new RoleHandlers(sup, userHandlers)
+      val groupHandlers      = new GroupHandlers(sup, userHandlers)
       val membershipHandlers = new MembershipHandlers(sup, userHandlers)
-      val poolPermHandlers = new PoolPermissionHandlers(sup, userHandlers)
+      val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
@@ -482,24 +587,26 @@ object Main extends IOApp with LazyLogging:
       val liveConfig    = com.typesafe.config.ConfigFactory.load()
       val configEntries = ConfigRegistry.collect(
         ConfigRegistry.rootsFor(
-          managerCls    = classOf[ManagerConfig],
-          flightCls     = classOf[FlightConfig],
-          authCls       = classOf[AuthenticationConfig],
-          aclCls        = classOf[AclConfig],
+          managerCls = classOf[ManagerConfig],
+          flightCls = classOf[FlightConfig],
+          authCls = classOf[AuthenticationConfig],
+          aclCls = classOf[AclConfig],
           validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
-          metricsCls    = classOf[MetricsConfig]
+          metricsCls = classOf[MetricsConfig]
         )
       )
       val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
 
       val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
         if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-          val dm = mgrCfg.defaultMetastore
-          val jdbcUrlForFed = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+          val dm               = mgrCfg.defaultMetastore
+          val jdbcUrlForFed    = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
           val fedHandlersStore = new FederatedSourceStore(jdbcUrlForFed, dm.pgUser, dm.pgPassword)
           val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
             sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
-          Some(new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver))
+          Some(
+            new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver)
+          )
         else None
 
       // manifestFedStore is hoisted above the supervisor build (see top of
@@ -508,19 +615,36 @@ object Main extends IOApp with LazyLogging:
       // FederatedSourceHandlers.
 
       val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
-        store          = store,
-        supervisor     = sup,
+        store = store,
+        supervisor = sup,
         managerVersion = "dev",
-        hostname       = scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
+        hostname =
+          scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
         federatedStore = manifestFedStore
       )
 
       val mgr = new ManagerServer(
-        mgrCfg, edgeCfg, pools, nodes, tenants, tenantDbs, health,
-        authHandlers, sessionTokens, authService.hasProviders,
-        historyHandlers, catalogHandlers, metricsEndpoint,
-        userHandlers, roleHandlers, groupHandlers, membershipHandlers, poolPermHandlers,
-        serverConfigHandlers, manifestHandlers, federatedSourceHandlers
+        mgrCfg,
+        edgeCfg,
+        pools,
+        nodes,
+        tenants,
+        tenantDbs,
+        health,
+        authHandlers,
+        sessionTokens,
+        authService.hasProviders,
+        historyHandlers,
+        catalogHandlers,
+        metricsEndpoint,
+        userHandlers,
+        roleHandlers,
+        groupHandlers,
+        membershipHandlers,
+        poolPermHandlers,
+        serverConfigHandlers,
+        manifestHandlers,
+        federatedSourceHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own
@@ -528,81 +652,95 @@ object Main extends IOApp with LazyLogging:
       // database holds qodstate_* / slkstate_* only and must never carry
       // ducklake_* tables.
       IO.delay(sup.restore()) *>
-      sup.reconcile() *>
-      bootstrapIO *>
-      mgr.serve.use { _ =>
-        logger.info(
-          s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
-          s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}")
-        edgeIO.attempt.flatMap {
-          case Right(edge) =>
-            logger.info("edge FlightSQL started")
-            // Belt-and-braces JVM shutdown hook: when the JVM is told
-            // to exit (SIGTERM in containers; user Ctrl-C at the
-            // terminal) we want every spawned child Quack node killed
-            // before we let the process die, even if cats-effect's own
-            // cancellation finalizer below has not had time to run.
-            // `cleanup()` is idempotent so running it from both places
-            // is safe.
-            val shutdownHook = new Thread(
-              { () =>
-                try edge.stop()
-                catch case _: Throwable => ()
-                try backend.cleanup().unsafeRunSync()
-                catch case _: Throwable => ()
-              },
-              "qod-shutdown-hook"
-            )
-            Runtime.getRuntime.addShutdownHook(shutdownHook)
+        sup.reconcile() *>
+        bootstrapIO *>
+        mgr.serve.use { _ =>
+          logger.info(
+            s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
+              s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
+          )
+          edgeIO.attempt.flatMap {
+            case Right(edge) =>
+              logger.info("edge FlightSQL started")
+              // Belt-and-braces JVM shutdown hook: when the JVM is told
+              // to exit (SIGTERM in containers; user Ctrl-C at the
+              // terminal) we want every spawned child Quack node killed
+              // before we let the process die, even if cats-effect's own
+              // cancellation finalizer below has not had time to run.
+              // `cleanup()` is idempotent so running it from both places
+              // is safe.
+              val shutdownHook = new Thread(
+                { () =>
+                  try edge.stop()
+                  catch case _: Throwable => ()
+                  try backend.cleanup().unsafeRunSync()
+                  catch case _: Throwable => ()
+                },
+                "qod-shutdown-hook"
+              )
+              Runtime.getRuntime.addShutdownHook(shutdownHook)
 
-            // Graceful drain on cancellation: stop accepting new
-            // FlightSQL sessions, poll the load tracker until no node
-            // reports in-flight work (or `drainTimeoutSec` elapses),
-            // then SIGTERM child Quack nodes via `backend.cleanup()`.
-            def waitForDrain: IO[Unit] =
-              val deadlineNs =
-                System.nanoTime() +
-                  scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
-              def tick: IO[Unit] = IO.delay {
-                tracker.snapshotAll.values.map(_.inFlight).sum
-              }.flatMap { inflight =>
-                if inflight <= 0 then IO.unit
-                else if System.nanoTime() >= deadlineNs then
-                  IO.delay(logger.warn(
-                    s"graceful shutdown: $inflight statement(s) still in-flight " +
-                    s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
-                  ))
-                else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
+              // Graceful drain on cancellation: stop accepting new
+              // FlightSQL sessions, poll the load tracker until no node
+              // reports in-flight work (or `drainTimeoutSec` elapses),
+              // then SIGTERM child Quack nodes via `backend.cleanup()`.
+              def waitForDrain: IO[Unit] =
+                val deadlineNs =
+                  System.nanoTime() +
+                    scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
+                def tick: IO[Unit] = IO
+                  .delay {
+                    tracker.snapshotAll.values.map(_.inFlight).sum
+                  }
+                  .flatMap { inflight =>
+                    if inflight <= 0 then IO.unit
+                    else if System.nanoTime() >= deadlineNs then
+                      IO.delay(
+                        logger.warn(
+                          s"graceful shutdown: $inflight statement(s) still in-flight " +
+                            s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
+                        )
+                      )
+                    else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
+                  }
+                tick
+
+              val gracefulShutdown: IO[Unit] =
+                IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
+                  IO.delay(edge.stop()) *>
+                  IO.delay(
+                    logger.info(
+                      s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
+                    )
+                  ) *>
+                  waitForDrain *>
+                  IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
+                  backend.cleanup() *>
+                  IO.delay(logger.info("graceful shutdown: complete"))
+
+              healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
+                IO.never[Unit].guarantee(fiber.cancel *> gracefulShutdown)
               }
-              tick
-
-            val gracefulShutdown: IO[Unit] =
-              IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
-              IO.delay(edge.stop()) *>
-              IO.delay(logger.info(
-                s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
-              )) *>
-              waitForDrain *>
-              IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
-              backend.cleanup() *>
-              IO.delay(logger.info("graceful shutdown: complete"))
-
-            healthProbe.
-              start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
-              IO.never[Unit].guarantee(fiber.cancel *> gracefulShutdown)
-            }
-          case Left(t) =>
-            logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
-            IO.never[Unit]
+            case Left(t) =>
+              logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
+              IO.never[Unit]
+          }
         }
-      }
 
     val program: IO[ExitCode] =
-      MetricsRegistry.resource(metricsCfg).use { metricsReg =>
-        val bindings = new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
-        val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
-        val stmtInstruments = new StatementInstruments(metricsReg.composite)
-        IO.delay(bindings.refresh()) *> runWithMetrics(metricsReg, metricsEndpoint, stmtInstruments)
-      }.as(ExitCode.Success)
+      MetricsRegistry
+        .resource(metricsCfg)
+        .use { metricsReg =>
+          val bindings =
+            new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
+          val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
+          val stmtInstruments = new StatementInstruments(metricsReg.composite)
+          IO.delay(bindings.refresh()) *> runWithMetrics(
+            metricsReg,
+            metricsEndpoint,
+            stmtInstruments
+          )
+        }
+        .as(ExitCode.Success)
 
     program

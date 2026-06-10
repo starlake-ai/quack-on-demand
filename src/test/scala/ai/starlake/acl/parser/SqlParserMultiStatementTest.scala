@@ -26,7 +26,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract(sql, config)
     result.statements should have size 2
     result.statements(0) shouldBe a[StatementResult.Extracted]
-    result.statements(1) shouldBe a[StatementResult.NonSelect]
+    result.statements(1) shouldBe a[StatementResult.Extracted]
   }
 
   test("handle invalid statement among valid ones") {
@@ -99,7 +99,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
       val actualIdx = stmt match {
         case StatementResult.Extracted(idx, _, _, _) => idx
         case StatementResult.ParseError(idx, _, _)   => idx
-        case StatementResult.NonSelect(idx, _, _)    => idx
+        case StatementResult.ControlFlow(idx, _, _)  => idx
       }
       actualIdx shouldBe expectedIdx
     }
@@ -113,7 +113,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val snippet = result.statements.head match {
       case StatementResult.Extracted(_, s, _, _) => s
       case StatementResult.ParseError(_, s, _)   => s
-      case StatementResult.NonSelect(_, s, _)    => s
+      case StatementResult.ControlFlow(_, s, _)  => s
     }
     snippet.length should be <= 203 // 200 + "..."
   }
@@ -125,7 +125,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract("SELECT * FROM orders", noDbConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
-    stmt.tables shouldBe empty
+    stmt.accesses.map(_.table) shouldBe empty
     stmt.qualificationErrors should have size 1
     val error = stmt.qualificationErrors.head.asInstanceOf[DenyReason.UnqualifiedTable]
     error.missingPart shouldBe "database"
@@ -136,7 +136,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract("SELECT * FROM orders", noSchemaConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
-    stmt.tables shouldBe empty
+    stmt.accesses.map(_.table) shouldBe empty
     stmt.qualificationErrors should have size 1
     val error = stmt.qualificationErrors.head.asInstanceOf[DenyReason.UnqualifiedTable]
     error.missingPart shouldBe "schema"
@@ -147,7 +147,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract("SELECT * FROM mydb.myschema.orders", noDefaultsConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
-    stmt.tables shouldBe Set(TableRef("mydb", "myschema", "orders"))
+    stmt.accesses.map(_.table) shouldBe Set(TableRef("mydb", "myschema", "orders"))
     stmt.qualificationErrors shouldBe empty
   }
 }

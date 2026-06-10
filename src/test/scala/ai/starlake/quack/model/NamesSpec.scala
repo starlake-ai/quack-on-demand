@@ -64,3 +64,26 @@ class NamesSpec extends AnyFlatSpec with Matchers:
   it should "reject when the composed name exceeds MaxLength" in:
     val long = "a" * (Names.MaxLength - 4) // 4 = len("acme_")-1: composing pushes past 63
     Names.normalizeTenantDbName("acme", long).isLeft shouldBe true
+
+  "Names.looksLikeTenantId" should "match the surrogate shape minted by PoolSupervisor" in:
+    Names.looksLikeTenantId("t-02d0e86e") shouldBe true
+    Names.looksLikeTenantId("t-00000000") shouldBe true
+    Names.looksLikeTenantId("t-deadbeef") shouldBe true
+
+  it should "reject display names and other shapes" in:
+    Names.looksLikeTenantId("tpch")          shouldBe false  // valid display name, not an id
+    Names.looksLikeTenantId("t_02d0e86e")    shouldBe false  // underscore, not hyphen
+    Names.looksLikeTenantId("t-02D0E86E")    shouldBe false  // uppercase hex not minted
+    Names.looksLikeTenantId("t-02d0e86")     shouldBe false  // 7 hex
+    Names.looksLikeTenantId("t-02d0e86eX")   shouldBe false  // trailing junk
+    Names.looksLikeTenantId("td-02d0e86e")   shouldBe false  // wrong prefix
+    Names.looksLikeTenantId("")              shouldBe false
+    Names.looksLikeTenantId(null)            shouldBe false
+
+  it should "be disjoint from isValid (display-name shape)" in:
+    // Display names exclude hyphen; tenant ids require it. The two spaces never overlap,
+    // so the FlightSQL `tenant` connection param is unambiguous.
+    val ids   = List("t-00000000", "t-02d0e86e", "t-ffffffff")
+    val names = List("tpch", "acme", "_internal", "t1", "tenant1")
+    ids.foreach(s   => withClue(s)(Names.isValid(s)          shouldBe false))
+    names.foreach(s => withClue(s)(Names.looksLikeTenantId(s) shouldBe false))

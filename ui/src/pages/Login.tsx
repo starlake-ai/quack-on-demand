@@ -6,6 +6,7 @@ export default function Login() {
   const { login } = useAuth();
   const [username, setUsername] = useState('admin@localhost.local');
   const [password, setPassword] = useState('');
+  const [tenant,   setTenant]   = useState('');
   const [err, setErr]           = useState<string | null>(null);
   const [busy, setBusy]         = useState(false);
 
@@ -14,7 +15,7 @@ export default function Login() {
     setErr(null);
     setBusy(true);
     try {
-      await login(username, password);
+      await login(username, password, tenant);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       setErr(msg);
@@ -50,11 +51,21 @@ export default function Login() {
             autoComplete="current-password"
           />
         </label>
+        <label>
+          Tenant ID
+          <input
+            value={tenant}
+            onChange={e => setTenant(e.target.value)}
+            placeholder="leave blank for superuser"
+            autoComplete="off"
+          />
+        </label>
         <button type="submit" disabled={busy || !username || !password}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
         <p className="login-hint">
-          Only users with the <code>admin</code> role can access this console.
+          Superusers leave Tenant ID blank. Tenant admins enter their
+          tenant id (visible on the Tenants page, e.g. <code>t-02d0e86e</code>).
         </p>
       </form>
     </div>

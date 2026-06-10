@@ -19,12 +19,12 @@ final class SessionRegistry:
   /** Update session state after a statement executed on `executedOn` node. */
   def onStatement(connectionId: String, kind: StatementKind, executedOn: String): Unit =
     sessions.updateWith(connectionId) {
-      case Some(s) => Some(kind match
-        case StatementKind.Begin    => s.copy(pinnedNodeId = Some(executedOn), txOpen = true)
-        case StatementKind.Commit   => s.copy(pinnedNodeId = None,             txOpen = false)
-        case StatementKind.Rollback => s.copy(pinnedNodeId = None,             txOpen = false)
-        case _                      => s
-      )
+      case Some(s) =>
+        Some(kind match
+          case StatementKind.Begin    => s.copy(pinnedNodeId = Some(executedOn), txOpen = true)
+          case StatementKind.Commit   => s.copy(pinnedNodeId = None, txOpen = false)
+          case StatementKind.Rollback => s.copy(pinnedNodeId = None, txOpen = false)
+          case _                      => s)
       case None => None
     }
 

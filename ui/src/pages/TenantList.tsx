@@ -174,6 +174,9 @@ export default function TenantList() {
               <td>
                 <Link to={`/tenant/${t.name}`}>{t.name}</Link>
                 {t.disabled && <span className="subtle"> (disabled)</span>}
+                <div className="subtle" style={{ fontSize: '0.85em' }}>
+                  <code>{t.id}</code>
+                </div>
               </td>
               <td align="right">{t.pools.length}</td>
               <td align="right">

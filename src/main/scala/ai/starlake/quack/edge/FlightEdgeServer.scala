@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.model.{Names, Tenant}
 import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.flight.*
@@ -20,6 +21,13 @@ final class FlightEdgeServer(
     // tenant/pool disabled kill switches. Runs BEFORE authentication so
     // we can hand TenantSelector a fully-qualified target.
     lookupPool: (String, String) => Either[String, String],
+    // Accept either form of the FlightSQL `tenant` connection param --
+    // the surrogate id (`t-<8 hex>`) or the display name -- and return the
+    // matching tenant. Used to normalize the wire value to a display name
+    // for the downstream lookup/authorize callbacks (which work in
+    // display-name space) AND to recover the id for the Basic auth chain
+    // (which queries `qodstate_user.tenant`, which stores the id).
+    resolveTenant: String => Option[Tenant],
     // Phase C: post-authentication authorize callback. Runs once per
     // handshake after the auth chain validated the credentials. It
     // performs the user-scope and pool-access gates, computes the
@@ -32,10 +40,13 @@ final class FlightEdgeServer(
     // Basic auth / no role claim) and the JWT `groups` claim. Names
     // resolve against qodstate_role.name / qodstate_group.name in the
     // user's tenant; unknown names are silently dropped.
-    authorize: (String, String, String, Set[String], Set[String]) => Either[String, AuthorizedHandshake]
+    authorize: (String, String, String, Set[String], Set[String]) => Either[
+      String,
+      AuthorizedHandshake
+    ]
 ) extends LazyLogging:
 
-  private val allocator = new RootAllocator()
+  private val allocator            = new RootAllocator()
   private var server: FlightServer = null.asInstanceOf[FlightServer]
 
   def start(): Unit =
@@ -61,11 +72,11 @@ final class FlightEdgeServer(
       s"FlightSQL edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}, auth: $authMode)"
     )
 
-  /** Auto-generate a self-signed cert/key pair at the configured paths when
-    * either file is missing. Dev convenience so `useEncryption=true` works
-    * out of the box; production deploys should supply CA-signed material.
-    * Uses the system `openssl` (no JVM crypto deps, no JPMS reflection
-    * headaches under Java 17+). CN + SAN are bound to `localhost`. */
+  /** Auto-generate a self-signed cert/key pair at the configured paths when either file is missing.
+    * Dev convenience so `useEncryption=true` works out of the box; production deploys should supply
+    * CA-signed material. Uses the system `openssl` (no JVM crypto deps, no JPMS reflection
+    * headaches under Java 17+). CN + SAN are bound to `localhost`.
+    */
   private def ensureCertFiles(certPath: String, keyPath: String): Unit =
     val certFile = Path.of(certPath)
     val keyFile  = Path.of(keyPath)
@@ -75,27 +86,38 @@ final class FlightEdgeServer(
       Option(certFile.getParent).foreach(Files.createDirectories(_))
       Option(keyFile.getParent).foreach(Files.createDirectories(_))
       val cmd = List(
-        "openssl", "req", "-x509",
-        "-newkey", "rsa:2048", "-nodes", "-days", "3650",
-        "-keyout", keyPath, "-out", certPath,
-        "-subj", "/CN=localhost",
-        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "3650",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1"
       )
-      val pb = new java.lang.ProcessBuilder(cmd*).redirectErrorStream(true)
-      val proc = pb.start()
+      val pb     = new java.lang.ProcessBuilder(cmd*).redirectErrorStream(true)
+      val proc   = pb.start()
       val output = new String(proc.getInputStream.readAllBytes())
-      val rc = proc.waitFor()
+      val rc     = proc.waitFor()
       if rc != 0 then
         throw new RuntimeException(
           s"openssl failed to generate cert (rc=$rc): $output. " +
-          "Install openssl or supply your own cert/key at the configured paths."
+            "Install openssl or supply your own cert/key at the configured paths."
         )
       val fp = sha256Fingerprint(Files.readAllBytes(certFile))
       logger.warn(
         s"TLS: generated self-signed cert (CN=localhost) at $certPath / $keyPath. " +
-        s"SHA-256 fingerprint: $fp. " +
-        "JDBC clients: jdbc:arrow-flight-sql://localhost:PORT?useEncryption=true&disableCertificateVerification=true " +
-        "(or import the cert into a trust store for verified TLS)."
+          s"SHA-256 fingerprint: $fp. " +
+          "JDBC clients: jdbc:arrow-flight-sql://localhost:PORT?useEncryption=true&disableCertificateVerification=true " +
+          "(or import the cert into a trust store for verified TLS)."
       )
 
   private def sha256Fingerprint(certBytes: Array[Byte]): String =
@@ -104,26 +126,24 @@ final class FlightEdgeServer(
 
   /** Resolve credentials to a peerIdentity and bind the pool context.
     *
-    * FlightSQL session model: on the first handshake (Basic or external Bearer)
-    * we return a `Bearer <peerId>` token in the response headers. The client
-    * then sends that peerId-Bearer on every subsequent RPC, and we look the
-    * peerId up in the ConnectionContext to recover (tenant, pool, user).
+    * FlightSQL session model: on the first handshake (Basic or external Bearer) we return a
+    * `Bearer <peerId>` token in the response headers. The client then sends that peerId-Bearer on
+    * every subsequent RPC, and we look the peerId up in the ConnectionContext to recover (tenant,
+    * pool, user).
     *
     * Credential validation:
-    *   - If `authService.hasProviders` is true, every fresh handshake is
-    *     validated against the configured chain (Database + ROPC for Basic,
-    *     external JWT + OIDC for Bearer). On success we mint a session peerId
-    *     and bind it. The session peerId acts as an opaque session cookie.
-    *   - Otherwise the manager falls back to the v1 "trust the client" path
-    *     (username from Basic header, no credential check). Useful for local
-    *     dev; flagged with a startup warning.
+    *   - If `authService.hasProviders` is true, every fresh handshake is validated against the
+    *     configured chain (Database + ROPC for Basic, external JWT + OIDC for Bearer). On success
+    *     we mint a session peerId and bind it. The session peerId acts as an opaque session cookie.
+    *   - Otherwise the manager falls back to the v1 "trust the client" path (username from Basic
+    *     header, no credential check). Useful for local dev; flagged with a startup warning.
     */
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
         val authHeader = Option(headers.get("Authorization"))
-        val bearer = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
-        val basic = authHeader
+        val bearer     = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+        val basic      = authHeader
           .filter(_.startsWith("Basic "))
           .map(_.stripPrefix("Basic "))
           .map(b64 => new String(java.util.Base64.getDecoder.decode(b64)))
@@ -152,9 +172,10 @@ final class FlightEdgeServer(
           case None =>
             handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr)
 
-      /** Mint a new session peerId. Runs the configured auth chain when one
-        * exists; otherwise trusts the client (legacy v1). On success we resolve
-        * tenant/pool via TenantSelector and bind the connection context. */
+      /** Mint a new session peerId. Runs the configured auth chain when one exists; otherwise
+        * trusts the client (legacy v1). On success we resolve tenant/pool via TenantSelector and
+        * bind the connection context.
+        */
       private def handshake(
           bearer: Option[String],
           basicPair: Option[(String, String)],
@@ -169,14 +190,29 @@ final class FlightEdgeServer(
         // a different principal. The bearer body is decoded without
         // signature verification here; cryptographic verification still
         // happens inside authenticateBearer below.
+        //
+        // Normalize the wire `tenant` to its display name: clients may pass
+        // either the surrogate id (`t-<8 hex>`) or the display name. The
+        // downstream `lookupPool` / `authorize` callbacks operate in
+        // display-name space, so we resolve the id form here. If the id
+        // doesn't resolve to a known tenant we fall through with the raw
+        // value -- the next stage will fail with the usual "pool not found"
+        // error rather than masking the cause.
+        val resolvedTenant: Option[Tenant] = tenantHdr.flatMap(resolveTenant)
+        val tenantNormalized: Option[String] =
+          tenantHdr.map { raw =>
+            if Names.looksLikeTenantId(raw) then
+              resolvedTenant.map(_.displayName).getOrElse(raw)
+            else raw
+          }
         val hdrs = poolHdr.map("pool" -> _).toMap ++
-                   tenantHdr.map("tenant" -> _).toMap
+          tenantNormalized.map("tenant" -> _).toMap
         val preResolved: Either[String, Resolved] = TenantSelector.resolve(
-          bearer         = bearer,
-          headers        = hdrs,
-          username       = basicUsername,
-          tenantClaim    = cfg.tenantClaim,
-          lookupPool     = lookupPool
+          bearer = bearer,
+          headers = hdrs,
+          username = basicUsername,
+          tenantClaim = cfg.tenantClaim,
+          lookupPool = lookupPool
         )
 
         val validation: Either[String, Option[AuthenticatedProfile]] =
@@ -193,9 +229,24 @@ final class FlightEdgeServer(
               case (None, Some((_, p))) =>
                 preResolved match
                   case Right(r) =>
-                    authService.authenticateBasic(
-                      Some(r.poolKey.tenant), r.user, p
-                    ).map(Some(_))
+                    // qodstate_user.tenant stores the surrogate id (`t-...`),
+                    // not the display name. `r.poolKey.tenant` is the
+                    // normalized display name here; resolve it back to the
+                    // id before calling the Basic provider chain. If the
+                    // tenant doesn't exist in our registry, fall back to
+                    // the raw header value -- the DB query will return
+                    // "User not found" with the same shape as today.
+                    val tenantArg = resolvedTenant
+                      .orElse(resolveTenant(r.poolKey.tenant))
+                      .map(_.id)
+                      .getOrElse(r.poolKey.tenant)
+                    authService
+                      .authenticateBasic(
+                        Some(tenantArg),
+                        r.user,
+                        p
+                      )
+                      .map(Some(_))
                   case Left(err) =>
                     Left(s"missing tenant scope for Basic auth: $err")
               case _ =>
@@ -222,11 +273,11 @@ final class FlightEdgeServer(
             // raw Basic username; for Bearer auth the JWT's `sub` claim is
             // only available after authenticateBearer.
             TenantSelector.resolve(
-              bearer         = bearer,
-              headers        = hdrs,
-              username       = resolvedUsername,
-              tenantClaim    = cfg.tenantClaim,
-              lookupPool     = lookupPool
+              bearer = bearer,
+              headers = hdrs,
+              username = resolvedUsername,
+              tenantClaim = cfg.tenantClaim,
+              lookupPool = lookupPool
             ) match
               case Right(resolved) =>
                 // Phase C handshake gates 4 + 5: user-scope + pool-access.
@@ -235,10 +286,16 @@ final class FlightEdgeServer(
                 // without re-querying Postgres. JWT role + groups claims
                 // are passed through so the union-merge with local edges
                 // happens inside `effectiveSetForUser`.
-                val jwtRoles  =
+                val jwtRoles =
                   profileOpt.map(_.role).filter(_.nonEmpty).toSet
                 val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
-                authorize(resolved.poolKey.tenant, resolved.poolKey.pool, resolved.user, jwtRoles, jwtGroups) match
+                authorize(
+                  resolved.poolKey.tenant,
+                  resolved.poolKey.pool,
+                  resolved.user,
+                  jwtRoles,
+                  jwtGroups
+                ) match
                   case Left(err) =>
                     // Arrow Flight's CallStatus has UNAUTHENTICATED but no
                     // dedicated PERMISSION_DENIED until later versions; reuse
@@ -252,23 +309,23 @@ final class FlightEdgeServer(
                     val connId = UUID.randomUUID().toString
                     val _      = profileOpt // role/groups from JWT no longer threaded
                     ConnectionContext.bind(
-                      peer         = peerId,
-                      key          = resolved.poolKey,
+                      peer = peerId,
+                      key = resolved.poolKey,
                       connectionId = connId,
-                      user         = resolved.user,
+                      user = resolved.user,
                       effectiveSet = Some(auth.effectiveSet),
-                      ttlSec       = cfg.sessionTtlSec
+                      ttlSec = cfg.sessionTtlSec
                     )
                     authResult(peerId)
               case Left(err) =>
                 throw CallStatus.UNAUTHENTICATED.withDescription(err).toRuntimeException()
 
-  /** Build an AuthResult that emits the peerId back as a Bearer token so the
-    * client can use it on subsequent calls (this is what makes Basic+token
-    * auth in FlightSQL work). */
+  /** Build an AuthResult that emits the peerId back as a Bearer token so the client can use it on
+    * subsequent calls (this is what makes Basic+token auth in FlightSQL work).
+    */
   private def authResult(peerId: String): CallHeaderAuthenticator.AuthResult =
     new CallHeaderAuthenticator.AuthResult:
-      override def getPeerIdentity(): String = peerId
+      override def getPeerIdentity(): String                            = peerId
       override def appendToOutgoingHeaders(outgoing: CallHeaders): Unit =
         outgoing.insert("authorization", s"Bearer $peerId")
 

@@ -62,7 +62,7 @@ The auth/ACL/session config types and the DuckLake catalog resolver live under [
 - `PostgresAclValidator` when `stateStorage=postgres` - resolves the session's `(tenant, user)` into the cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them), then per statement uses the [ACL SQL parser](src/main/scala/ai/starlake/acl/parser/) to extract table refs and matches them against that set. Superusers (`qodstate_user.tenant IS NULL`) bypass the check.
 - `StatementValidator.allowAll` when `acl.enabled=false`. The file-based `AclStatementValidator` is parser-only after the RBAC cutover - the YAML grant store is unwired.
 
-**DML / DDL grants are coarse-grained today**: `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission - the SQL `TableExtractor` only walks SELECT statements.
+**DML / DDL grants are enforced per-table.** `SqlParser` walks INSERT / UPDATE / DELETE / MERGE / CREATE TABLE / CREATE VIEW / DROP / ALTER / TRUNCATE and emits `TableAccess(table, verb)` tuples with `verb` collapsed to `Read | Write | Ddl`. `PostgresAclValidator` matches each access against the principal's role permissions via a `verbCovers` helper that bridges granular column values (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`CREATE`/`DROP`/`ALTER`/`ALL`) into the collapsed space. A role permission of `verb=ALL` covers anything; `verb=INSERT` covers an INSERT-target `Write` but not a SELECT's `Read`. The DuckDB / BigQuery `FROM t` shorthand (`FromQuery extends Select`) is also walked. Statements with no table refs (COMMIT, ROLLBACK, SET, USE, SHOW) hit the `ControlFlow` arm and are admitted unconditionally.
 
 ## Configuration
 

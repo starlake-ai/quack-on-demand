@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { TenantResponse, UserResponse } from '../api/types';
+import type { PoolResponse, TenantResponse, UserResponse } from '../api/types';
 import EffectivePermsCard from './EffectivePermsCard';
 import { DeleteIcon, EditIcon } from './Icons';
 
@@ -39,6 +40,59 @@ export default function UserSection({
   // Which user's permissions card is currently expanded under their row.
   // Toggled by clicking the username; only one card is open at a time.
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Pool catalog used to turn the "tenant/poolId" grant tokens emitted
+  // by the backend into clickable Links to /pool/:tenant/:tenantDb/:pool,
+  // and to feed the EffectivePermsCard for the Databases / Quack nodes
+  // sections. Fetched once per mount; reload on tenant filter change so
+  // a freshly-created pool shows up without a hard refresh.
+  const [pools, setPools] = useState<PoolResponse[]>([]);
+  useEffect(() => {
+    api.listPools()
+      .then(r => setPools(r.pools))
+      .catch(() => setPools([]));
+  }, []);
+
+  // Index by the surrogate id the backend embeds in poolGrants tokens.
+  const poolById = useMemo(
+    () => new Map(pools.map(p => [p.id, p])),
+    [pools],
+  );
+  // Fallback index by (tenant displayName, pool name) -- some installs
+  // may emit "tenant/poolName" rather than "tenant/poolId"; we accept
+  // either form so the column stays useful through any backend change.
+  const poolByTenantAndName = useMemo(() => {
+    const m = new Map<string, PoolResponse>();
+    pools.forEach(p => m.set(`${p.tenant}/${p.pool}`, p));
+    return m;
+  }, [pools]);
+
+  /** Render one "tenant/poolToken" grant string as a Link. The token
+    * is either a surrogate `p-xxx`, a pool display name, or `*` for
+    * the "every pool in tenant" wildcard. Falls back to plain text
+    * when the catalog hasn't loaded yet or the pool isn't found. */
+  function renderGrant(token: string) {
+    const slash = token.indexOf('/');
+    if (slash < 0) return <code>{token}</code>;
+    const tenantName = token.slice(0, slash);
+    const poolTok    = token.slice(slash + 1);
+    if (poolTok === '*') {
+      return (
+        <Link to={`/tenant/${tenantName}`} title="every pool in this tenant">
+          <code>{tenantName}/*</code>
+        </Link>
+      );
+    }
+    const p =
+      poolById.get(poolTok)
+      ?? poolByTenantAndName.get(`${tenantName}/${poolTok}`);
+    if (!p) return <code>{token}</code>;
+    return (
+      <Link to={`/pool/${p.tenant}/${p.tenantDb}/${p.pool}`}>
+        <code>{p.tenant}/{p.pool}</code>
+      </Link>
+    );
+  }
 
   // New-user form state. `newTenant` is the dropdown selection;
   // it defaults to the page-level filter and can be overridden when
@@ -202,7 +256,16 @@ export default function UserSection({
                   </td>
                   <td>{u.roles.length === 0 ? <span className="subtle">-</span> : u.roles.join(', ')}</td>
                   <td>{u.groups.length === 0 ? <span className="subtle">-</span> : u.groups.join(', ')}</td>
-                  <td>{u.poolGrants.length === 0 ? <span className="subtle">-</span> : u.poolGrants.join(', ')}</td>
+                  <td>
+                    {u.poolGrants.length === 0
+                      ? <span className="subtle">-</span>
+                      : u.poolGrants.map((g, i) => (
+                          <span key={g}>
+                            {i > 0 && ', '}
+                            {renderGrant(g)}
+                          </span>
+                        ))}
+                  </td>
                   <td>{u.enabled ? '✓' : '✗'}</td>
                   <td className="actions">
                     {allowEdit ? (
@@ -233,7 +296,7 @@ export default function UserSection({
               const perms = isExpanded ? [(
                 <tr key={u.id + '-perms'} className="expanded-row">
                   <td colSpan={8}>
-                    <EffectivePermsCard userId={u.id} />
+                    <EffectivePermsCard userId={u.id} tenants={tenants} pools={pools} />
                   </td>
                 </tr>
               )] : [];

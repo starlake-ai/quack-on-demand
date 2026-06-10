@@ -4,12 +4,13 @@ import { api, session, ApiError } from '../api/client';
 interface AuthState {
   username: string | null;
   role: string | null;
+  tenant: string | null;
   loading: boolean;
   // True when the server has no auth providers configured (auth.* all
   // disabled). In that case the UI runs without a login screen and the
   // "user" is a synthetic anonymous principal.
   authEnabled: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, tenant?: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -21,6 +22,7 @@ const ANONYMOUS_ROLE     = 'admin';
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsername] = useState<string | null>(null);
   const [role, setRole]         = useState<string | null>(null);
+  const [tenant, setTenant]     = useState<string | null>(null);
   const [loading, setLoading]   = useState(true);
   const [authEnabled, setAuthEnabled] = useState(true);
 
@@ -36,6 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAuthEnabled(false);
           setUsername(ANONYMOUS_USERNAME);
           setRole(ANONYMOUS_ROLE);
+          setTenant(null);
           setLoading(false);
           return;
         }
@@ -43,7 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const t = session.get();
         if (!t) { setLoading(false); return; }
         api.whoami()
-          .then(w => { setUsername(w.username); setRole(w.role); })
+          .then(w => { setUsername(w.username); setRole(w.role); setTenant(w.tenant ?? null); })
           .catch((e: ApiError) => { if (e.status === 401) session.clear(); })
           .finally(() => setLoading(false));
       })
@@ -54,11 +57,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }, []);
 
-  async function login(u: string, p: string) {
-    const r = await api.login({ username: u, password: p });
+  async function login(u: string, p: string, t?: string) {
+    const r = await api.login({ username: u, password: p, tenant: t?.trim() || undefined });
     session.set(r.token);
     setUsername(r.username);
     setRole(r.role);
+    setTenant(r.tenant ?? null);
   }
 
   async function logout() {
@@ -68,10 +72,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     session.clear();
     setUsername(null);
     setRole(null);
+    setTenant(null);
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, loading, authEnabled, login, logout }}>
+    <AuthContext.Provider value={{ username, role, tenant, loading, authEnabled, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

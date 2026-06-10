@@ -6,14 +6,13 @@ import java.time.Instant
 import java.util.UUID
 import scala.collection.concurrent.TrieMap
 
-/** In-memory session token registry for UI logins. Keys are opaque UUIDs
-  * returned to the browser; values carry the authenticated profile so the
-  * admin-only middleware can decide whether to admit a request without
-  * re-validating credentials on every call.
+/** In-memory session token registry for UI logins. Keys are opaque UUIDs returned to the browser;
+  * values carry the authenticated profile so the admin-only middleware can decide whether to admit
+  * a request without re-validating credentials on every call.
   *
-  * Tokens live in memory - manager restart invalidates all sessions. v1
-  * doesn't expire tokens; the UI logout drops the row and the user is
-  * expected to log in again after a restart. */
+  * Tokens live in memory - manager restart invalidates all sessions. v1 doesn't expire tokens; the
+  * UI logout drops the row and the user is expected to log in again after a restart.
+  */
 final class SessionTokenStore:
 
   final case class Session(profile: AuthenticatedProfile, createdAt: Instant)
@@ -32,3 +31,15 @@ final class SessionTokenStore:
 
   def isAdmin(token: String): Boolean =
     sessions.get(token).exists(_.profile.role.equalsIgnoreCase("admin"))
+
+  /** Resolve the tenant scope of the session that minted this token.
+    *
+    *   - `Some(Some(id))` -- token is valid, principal is tenant-scoped.
+    *   - `Some(None)` -- token is valid, principal is a superuser.
+    *   - `None` -- token is unknown / expired.
+    *
+    * Returning `Option[Option[...]]` lets handlers distinguish "no session" (e.g. static
+    * `X-API-Key` path) from "superuser session" cleanly.
+    */
+  def tenantOf(token: String): Option[Option[String]] =
+    sessions.get(token).map(_.profile.tenant)

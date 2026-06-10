@@ -159,6 +159,7 @@ export interface TenantRequest {
 }
 
 export interface TenantResponse {
+  id: string;
   name: string;
   pools: string[];
   disabled: boolean;
@@ -341,9 +342,9 @@ export interface EffectivePermissionsResponse {
 }
 
 // ----- Auth -----
-export interface LoginRequest  { username: string; password: string; }
-export interface LoginResponse { token: string; username: string; role: string; }
-export interface WhoamiResponse { username: string; role: string; }
+export interface LoginRequest  { username: string; password: string; tenant?: string }
+export interface LoginResponse { token: string; username: string; role: string; tenant?: string | null }
+export interface WhoamiResponse { username: string; role: string; tenant?: string | null }
 
 // ----- Recent statement history -----
 export interface StatementHistoryEntry {
