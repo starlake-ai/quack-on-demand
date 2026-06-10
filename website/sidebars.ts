@@ -1,5 +1,4 @@
 import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
-import restApiSidebar from './docs/reference/rest-api/sidebar';
 
 const sidebars: SidebarsConfig = {
   docs: [
@@ -29,7 +28,7 @@ const sidebars: SidebarsConfig = {
       label: 'Reference',
       items: [
         'reference/configuration',
-        { type: 'category', label: 'REST API', items: restApiSidebar as any },
+        { type: 'link', label: 'REST API', href: 'pathname:///api/' },
         'reference/cli',
         'reference/metrics',
       ],
