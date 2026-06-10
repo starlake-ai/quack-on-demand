@@ -1,5 +1,6 @@
 object Versions {
   val tapir          = "1.11.10"
+  val sttpApispec    = "0.11.3" // openapi-circe-yaml serializer; must match what tapir 1.11.10 pulls transitively
   val http4s         = "0.23.24"
   val circe          = "0.14.10"
   val arrow          = "14.0.1"
