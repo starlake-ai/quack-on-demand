@@ -23,7 +23,6 @@ const config: Config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/starlake-ai/quack-on-demand/tree/main/website/',
-          docItemComponent: '@theme/ApiItem',
         },
         blog: false,
         theme: { customCss: './src/css/custom.css' },
@@ -31,25 +30,6 @@ const config: Config = {
       } satisfies Preset.Options,
     ],
   ],
-
-  plugins: [
-    [
-      'docusaurus-plugin-openapi-docs',
-      {
-        id: 'openapi',
-        docsPluginId: 'classic',
-        config: {
-          rest: {
-            specPath: 'static/openapi.yaml',
-            outputDir: 'docs/reference/rest-api',
-            sidebarOptions: { groupPathsBy: 'tag', categoryLinkSource: 'tag' },
-          },
-        },
-      },
-    ],
-  ],
-
-  themes: ['docusaurus-theme-openapi-docs'],
 
   themeConfig: {
     image: 'img/social-card.png',
@@ -62,7 +42,7 @@ const config: Config = {
       },
       items: [
         { type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs' },
-        { to: '/reference/rest-api', label: 'API', position: 'left' },
+        { to: 'pathname:///api/', label: 'API', position: 'left' },
         { href: 'https://github.com/starlake-ai/quack-on-demand', label: 'GitHub', position: 'right' },
       ],
     },

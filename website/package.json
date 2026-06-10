@@ -5,17 +5,13 @@
   "scripts": {
     "start": "docusaurus start",
     "build": "docusaurus build",
-    "serve": "docusaurus serve",
-    "clean-api-docs": "docusaurus clean-api-docs all",
-    "gen-api-docs": "docusaurus gen-api-docs all"
+    "serve": "docusaurus serve"
   },
   "dependencies": {
     "@docusaurus/core": "3.7.0",
     "@docusaurus/preset-classic": "3.7.0",
     "@mdx-js/react": "^3.0.0",
     "clsx": "^2.1.1",
-    "docusaurus-plugin-openapi-docs": "^4.3.7",
-    "docusaurus-theme-openapi-docs": "^4.3.7",
     "prism-react-renderer": "^2.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -24,6 +20,9 @@
     "@docusaurus/tsconfig": "3.7.0",
     "@docusaurus/types": "3.7.0",
     "typescript": "~5.5.3"
+  },
+  "overrides": {
+    "webpack": "5.97.1"
   },
   "browserslist": {
     "production": [">0.5%", "not dead", "not op_mini all"],
