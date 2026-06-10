@@ -17,10 +17,26 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Operating',
       items: [
-        'operating/deploy-local',
-        'operating/deploy-kubernetes',
-        'operating/tls',
-        'operating/resilience',
+        {
+          type: 'category',
+          label: 'Deployment',
+          items: [
+            'operating/deploy-local',
+            'operating/deploy-kubernetes',
+            'operating/tls',
+            'operating/resilience',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Identity & access',
+          items: [
+            'operating/authentication',
+            'operating/auth-providers',
+            'operating/rbac-model',
+            'operating/rbac-admin',
+          ],
+        },
       ],
     },
     {
