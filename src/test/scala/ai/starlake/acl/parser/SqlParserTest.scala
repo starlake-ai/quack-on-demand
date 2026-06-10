@@ -86,10 +86,12 @@ class SqlParserTest extends AnyFunSuite with Matchers {
 
   // --- Non-SELECT ---
 
-  test("return NonSelect for INSERT") {
+  test("return Extracted with Write for INSERT") {
     val result = SqlParser.extract("INSERT INTO orders VALUES (1)", config)
     result.statements should have size 1
-    result.statements.head shouldBe a[StatementResult.NonSelect]
+    result.statements.head shouldBe a[StatementResult.Extracted]
+    val ext = result.statements.head.asInstanceOf[StatementResult.Extracted]
+    ext.accesses shouldBe Set(TableAccess(TableRef("testdb", "public", "orders"), Verb.Write))
   }
 
   // --- Multi-statement ---
@@ -133,7 +135,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     result.statements.head match {
-      case ext: StatementResult.Extracted => ext.tables shouldBe empty
+      case ext: StatementResult.Extracted => ext.accesses.map(_.table) shouldBe empty
       case _: StatementResult.ParseError  => () // Also acceptable if JSqlParser can't parse it
       case other                          => fail(s"Unexpected result type: $other")
     }
@@ -146,7 +148,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract("SELECT * FROM orders", noDbConfig)
     result.statements should have size 1
     val stmt = result.statements.head.asInstanceOf[StatementResult.Extracted]
-    stmt.tables shouldBe empty
+    stmt.accesses.map(_.table) shouldBe empty
     stmt.qualificationErrors should have size 1
     val error = stmt.qualificationErrors.head.asInstanceOf[DenyReason.UnqualifiedTable]
     error.missingPart shouldBe "database"
@@ -158,7 +160,7 @@ class SqlParserTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extractSingle("SELECT * FROM orders", config)
     result shouldBe a[StatementResult.Extracted]
     val extracted = result.asInstanceOf[StatementResult.Extracted]
-    extracted.tables shouldBe Set(TableRef("testdb", "public", "orders"))
+    extracted.accesses.map(_.table) shouldBe Set(TableRef("testdb", "public", "orders"))
   }
 
   test("extractSingle returns ParseError for invalid SQL") {

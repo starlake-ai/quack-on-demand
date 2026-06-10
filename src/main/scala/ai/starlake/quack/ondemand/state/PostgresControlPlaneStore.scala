@@ -1,8 +1,17 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.{
-  NodePlacement, NodeToleration, Pool, PoolCohort, PoolKey, Role, RoleDistribution,
-  RunningNode, Tenant, TenantDb, TenantDbKind
+  NodePlacement,
+  NodeToleration,
+  Pool,
+  PoolCohort,
+  PoolKey,
+  Role,
+  RoleDistribution,
+  RunningNode,
+  Tenant,
+  TenantDb,
+  TenantDbKind
 }
 import io.circe.parser.parse
 import io.circe.syntax._
@@ -12,13 +21,13 @@ import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, Timest
 import java.time.Instant
 import scala.collection.mutable.ListBuffer
 
-/** Postgres-backed [[ControlPlaneStore]] for the normalized schema
-  * produced by changelog `0001-normalized-schema.yaml`. Assumes the
-  * schema is already in place -- the caller (typically `Main`) runs
-  * [[LiquibaseRunner]] first. */
+/** Postgres-backed [[ControlPlaneStore]] for the normalized schema produced by changelog
+  * `0001-normalized-schema.yaml`. Assumes the schema is already in place -- the caller (typically
+  * `Main`) runs [[LiquibaseRunner]] first.
+  */
 final class PostgresControlPlaneStore(
-    jdbcUrl:  String,
-    user:     String,
+    jdbcUrl: String,
+    user: String,
     password: String
 ) extends ControlPlaneStore:
 
@@ -26,7 +35,8 @@ final class PostgresControlPlaneStore(
 
   private def withConn[A](f: Connection => A): A =
     val c = DriverManager.getConnection(jdbcUrl, user, password)
-    try f(c) finally c.close()
+    try f(c)
+    finally c.close()
 
   // ---------------- Tenant ----------------
 
@@ -52,9 +62,11 @@ final class PostgresControlPlaneStore(
   }
 
   def listTenants(): List[Tenant] = withConn { c =>
-    val rs = c.createStatement().executeQuery(
-      "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name"
-    )
+    val rs = c
+      .createStatement()
+      .executeQuery(
+        "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name"
+      )
     try drain(rs)(readTenant)
     finally rs.close()
   }
@@ -62,8 +74,8 @@ final class PostgresControlPlaneStore(
   def deleteTenant(id: String): Unit = withConn(c => deleteById(c, "qodstate_tenant", "id", id))
 
   def createTenantWithAdminRole(
-      tenant:          Tenant,
-      adminRole:       RbacRole,
+      tenant: Tenant,
+      adminRole: RbacRole,
       adminPermission: RolePermission
   ): Unit = withConn { c =>
     // Single connection + manual commit so the three inserts either all
@@ -113,21 +125,23 @@ final class PostgresControlPlaneStore(
       finally pps.close()
 
       c.commit()
-    catch case t: Throwable =>
-      try c.rollback() catch case _: Throwable => ()
-      throw t
+    catch
+      case t: Throwable =>
+        try c.rollback()
+        catch case _: Throwable => ()
+        throw t
     finally c.setAutoCommit(true)
   }
 
   private def readTenant(rs: ResultSet): Tenant =
     val dn = rs.getString("display_name")
     Tenant(
-      id           = rs.getString("id"),
-      name         = dn,
-      displayName  = dn,
-      disabled     = rs.getBoolean("disabled"),
+      id = rs.getString("id"),
+      name = dn,
+      displayName = dn,
+      disabled = rs.getBoolean("disabled"),
       authProvider = rs.getString("auth_provider"),
-      authConfig   = jsonToMap(rs.getString("auth_config"))
+      authConfig = jsonToMap(rs.getString("auth_config"))
     )
 
   // ---------------- TenantDb ----------------
@@ -183,17 +197,21 @@ final class PostgresControlPlaneStore(
 
   private def readTenantDb(rs: ResultSet): TenantDb =
     TenantDb(
-      id              = rs.getString("id"),
-      tenantId        = rs.getString("tenant_id"),
-      name            = rs.getString("name"),
-      kind            = TenantDbKind.fromWire(rs.getString("kind"))
-                          .fold(err => sys.error(s"qodstate_tenant_db.kind invalid: '${rs.getString("kind")}' ($err)"), identity),
-      metastore       = jsonToMap(rs.getString("metastore_params")),
-      dataPath        = rs.getString("data_path"),
-      objectStore     = jsonToMap(rs.getString("object_store_params")),
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      name = rs.getString("name"),
+      kind = TenantDbKind
+        .fromWire(rs.getString("kind"))
+        .fold(
+          err => sys.error(s"qodstate_tenant_db.kind invalid: '${rs.getString("kind")}' ($err)"),
+          identity
+        ),
+      metastore = jsonToMap(rs.getString("metastore_params")),
+      dataPath = rs.getString("data_path"),
+      objectStore = jsonToMap(rs.getString("object_store_params")),
       defaultDatabase = Option(rs.getString("default_database")),
-      defaultSchema   = Option(rs.getString("default_schema")),
-      disabled        = rs.getBoolean("disabled")
+      defaultSchema = Option(rs.getString("default_schema")),
+      disabled = rs.getBoolean("disabled")
     )
 
   // ---------------- Pool ----------------
@@ -219,15 +237,15 @@ final class PostgresControlPlaneStore(
         |  cohorts                 = EXCLUDED.cohorts""".stripMargin
     )
     try
-      ps.setString(1,  p.id)
-      ps.setString(2,  p.tenantId)
-      ps.setString(3,  p.tenantDbId)
-      ps.setString(4,  p.name)
-      ps.setInt   (5,  p.size)
-      ps.setInt   (6,  p.distribution.writeonly)
-      ps.setInt   (7,  p.distribution.readonly)
-      ps.setInt   (8,  p.distribution.dual)
-      ps.setInt   (9,  p.maxConcurrentPerNode)
+      ps.setString(1, p.id)
+      ps.setString(2, p.tenantId)
+      ps.setString(3, p.tenantDbId)
+      ps.setString(4, p.name)
+      ps.setInt(5, p.size)
+      ps.setInt(6, p.distribution.writeonly)
+      ps.setInt(7, p.distribution.readonly)
+      ps.setInt(8, p.distribution.dual)
+      ps.setInt(9, p.maxConcurrentPerNode)
       p.idleTimeoutSec match
         case Some(v) => ps.setInt(10, v)
         case None    => ps.setNull(10, Types.INTEGER)
@@ -257,20 +275,20 @@ final class PostgresControlPlaneStore(
   private def readPool(rs: ResultSet): Pool =
     val idle = rs.getObject("idle_timeout_sec")
     Pool(
-      id           = rs.getString("id"),
-      tenantId     = rs.getString("tenant_id"),
-      tenantDbId   = rs.getString("tenant_db_id"),
-      name         = rs.getString("name"),
-      size         = rs.getInt("size"),
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      tenantDbId = rs.getString("tenant_db_id"),
+      name = rs.getString("name"),
+      size = rs.getInt("size"),
       distribution = RoleDistribution(
         writeonly = rs.getInt("dist_writeonly"),
-        readonly  = rs.getInt("dist_readonly"),
-        dual      = rs.getInt("dist_dual")
+        readonly = rs.getInt("dist_readonly"),
+        dual = rs.getInt("dist_dual")
       ),
       maxConcurrentPerNode = rs.getInt("max_concurrent_per_node"),
-      idleTimeoutSec       = Option(idle).map(_.asInstanceOf[Number].intValue),
-      disabled             = rs.getBoolean("disabled"),
-      cohorts              = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts"))
+      idleTimeoutSec = Option(idle).map(_.asInstanceOf[Number].intValue),
+      disabled = rs.getBoolean("disabled"),
+      cohorts = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts"))
     )
 
   // ---------------- Node ----------------
@@ -297,13 +315,18 @@ final class PostgresControlPlaneStore(
       ps.setString(1, n.nodeId)
       ps.setString(2, poolId)
       ps.setString(3, n.host)
-      ps.setInt   (4, n.port)
+      ps.setInt(4, n.port)
       ps.setString(5, n.token)
       ps.setString(6, n.role.toString)
-      n.pid     match { case Some(v) => ps.setLong(7, v) ; case None => ps.setNull(7, Types.BIGINT) }
-      n.podName match { case Some(v) => ps.setString(8, v); case None => ps.setNull(8, Types.VARCHAR) }
+      n.pid match { case Some(v) => ps.setLong(7, v); case None => ps.setNull(7, Types.BIGINT) }
+      n.podName match {
+        case Some(v) => ps.setString(8, v); case None => ps.setNull(8, Types.VARCHAR)
+      }
       ps.setTimestamp(9, Timestamp.from(n.startedAt))
-      n.lastSeen match { case Some(v) => ps.setTimestamp(10, Timestamp.from(v)); case None => ps.setNull(10, Types.TIMESTAMP) }
+      n.lastSeen match {
+        case Some(v) => ps.setTimestamp(10, Timestamp.from(v));
+        case None    => ps.setNull(10, Types.TIMESTAMP)
+      }
       ps.setInt(11, n.maxConcurrent)
       ps.executeUpdate()
     finally ps.close()
@@ -334,21 +357,21 @@ final class PostgresControlPlaneStore(
 
   private def readNode(rs: ResultSet): RunningNode =
     RunningNode(
-      nodeId    = rs.getString("node_id"),
-      poolKey   = PoolKey(
+      nodeId = rs.getString("node_id"),
+      poolKey = PoolKey(
         rs.getString("tenant_name"),
         rs.getString("tenant_db_name"),
         rs.getString("pool_name")
       ),
-      role      = Role.valueOf(rs.getString("role")),
-      host      = rs.getString("host"),
-      port      = rs.getInt("port"),
-      token     = rs.getString("token"),
-      pid       = Option(rs.getObject("pid")).map(_.asInstanceOf[Number].longValue),
-      podName   = Option(rs.getString("pod_name")),
+      role = Role.valueOf(rs.getString("role")),
+      host = rs.getString("host"),
+      port = rs.getInt("port"),
+      token = rs.getString("token"),
+      pid = Option(rs.getObject("pid")).map(_.asInstanceOf[Number].longValue),
+      podName = Option(rs.getString("pod_name")),
       startedAt = rs.getTimestamp("started_at").toInstant,
       maxConcurrent = rs.getInt("max_concurrent"),
-      lastSeen      = Option(rs.getTimestamp("last_seen")).map(_.toInstant)
+      lastSeen = Option(rs.getTimestamp("last_seen")).map(_.toInstant)
     )
 
   // ---------------- RBAC: users ----------------
@@ -400,10 +423,10 @@ final class PostgresControlPlaneStore(
   }
 
   def upsertUserWithHash(
-      tenant:       Option[String],
-      username:     String,
+      tenant: Option[String],
+      username: String,
       passwordHash: String,
-      role:         String
+      role: String
   ): String = withConn { c =>
     // Look up the existing id first so the upsert can preserve it
     // (mirrors [[UserStore.upsertUser]]). The partial unique indexes
@@ -547,10 +570,10 @@ final class PostgresControlPlaneStore(
 
   private def readRbacUser(rs: ResultSet): RbacUser =
     RbacUser(
-      id        = rs.getString("id"),
-      tenant    = Option(rs.getString("tenant")),
-      username  = rs.getString("username"),
-      role      = rs.getString("role"),
+      id = rs.getString("id"),
+      tenant = Option(rs.getString("tenant")),
+      username = rs.getString("username"),
+      role = rs.getString("role"),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
       updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
     )
@@ -622,11 +645,11 @@ final class PostgresControlPlaneStore(
 
   private def readRole(rs: ResultSet): RbacRole =
     RbacRole(
-      id          = rs.getString("id"),
-      tenantId    = rs.getString("tenant_id"),
-      name        = rs.getString("name"),
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      name = rs.getString("name"),
       description = Option(rs.getString("description")),
-      createdAt   = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
     )
 
   // ---------------- RBAC: role permissions ----------------
@@ -669,19 +692,20 @@ final class PostgresControlPlaneStore(
 
   def listRolePermissionsForRoles(roleIds: Set[String]): List[RolePermission] =
     if roleIds.isEmpty then Nil
-    else withConn { c =>
-      val placeholders = roleIds.toList.map(_ => "?").mkString(",")
-      val ps = c.prepareStatement(
-        s"""SELECT id, role_id, catalog_name, schema_name, table_name, verb, granted_at
+    else
+      withConn { c =>
+        val placeholders = roleIds.toList.map(_ => "?").mkString(",")
+        val ps           = c.prepareStatement(
+          s"""SELECT id, role_id, catalog_name, schema_name, table_name, verb, granted_at
            |FROM qodstate_role_permission WHERE role_id IN ($placeholders)""".stripMargin
-      )
-      try
-        roleIds.zipWithIndex.foreach { (id, i) => ps.setString(i + 1, id) }
-        val rs = ps.executeQuery()
-        try drain(rs)(readRolePermission)
-        finally rs.close()
-      finally ps.close()
-    }
+        )
+        try
+          roleIds.zipWithIndex.foreach((id, i) => ps.setString(i + 1, id))
+          val rs = ps.executeQuery()
+          try drain(rs)(readRolePermission)
+          finally rs.close()
+        finally ps.close()
+      }
 
   def deleteRolePermission(id: String): Boolean = withConn { c =>
     val ps = c.prepareStatement("DELETE FROM qodstate_role_permission WHERE id = ?")
@@ -693,13 +717,13 @@ final class PostgresControlPlaneStore(
 
   private def readRolePermission(rs: ResultSet): RolePermission =
     RolePermission(
-      id          = rs.getString("id"),
-      roleId      = rs.getString("role_id"),
+      id = rs.getString("id"),
+      roleId = rs.getString("role_id"),
       catalogName = rs.getString("catalog_name"),
-      schemaName  = rs.getString("schema_name"),
-      tableName   = rs.getString("table_name"),
-      verb        = rs.getString("verb"),
-      grantedAt   = Option(rs.getTimestamp("granted_at")).map(_.toInstant)
+      schemaName = rs.getString("schema_name"),
+      tableName = rs.getString("table_name"),
+      verb = rs.getString("verb"),
+      grantedAt = Option(rs.getTimestamp("granted_at")).map(_.toInstant)
     )
 
   // ---------------- RBAC: groups ----------------
@@ -766,9 +790,9 @@ final class PostgresControlPlaneStore(
 
   private def readGroup(rs: ResultSet): RbacGroup =
     RbacGroup(
-      id          = rs.getString("id"),
-      tenantId    = rs.getString("tenant_id"),
-      name        = rs.getString("name"),
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      name = rs.getString("name"),
       description = Option(rs.getString("description"))
     )
 
@@ -821,8 +845,12 @@ final class PostgresControlPlaneStore(
   }
 
   private def insertEdge(
-      c: Connection, table: String, leftCol: String, rightCol: String,
-      left: String, right: String
+      c: Connection,
+      table: String,
+      leftCol: String,
+      rightCol: String,
+      left: String,
+      right: String
   ): Unit =
     // ON CONFLICT DO NOTHING so add-member is idempotent (matches the
     // REST surface's expectation of 204 even on a duplicate add).
@@ -836,8 +864,12 @@ final class PostgresControlPlaneStore(
     finally ps.close()
 
   private def deleteEdge(
-      c: Connection, table: String, leftCol: String, rightCol: String,
-      left: String, right: String
+      c: Connection,
+      table: String,
+      leftCol: String,
+      rightCol: String,
+      left: String,
+      right: String
   ): Boolean =
     val ps = c.prepareStatement(s"DELETE FROM $table WHERE $leftCol = ? AND $rightCol = ?")
     try
@@ -847,7 +879,11 @@ final class PostgresControlPlaneStore(
     finally ps.close()
 
   private def listEdgeRight(
-      c: Connection, table: String, filterCol: String, returnCol: String, filter: String
+      c: Connection,
+      table: String,
+      filterCol: String,
+      returnCol: String,
+      filter: String
   ): List[String] =
     val ps = c.prepareStatement(s"SELECT $returnCol FROM $table WHERE $filterCol = ?")
     try
@@ -890,8 +926,8 @@ final class PostgresControlPlaneStore(
 
   def listPoolPermissions(
       tenantId: Option[String] = None,
-      userId:   Option[String] = None,
-      groupId:  Option[String] = None
+      userId: Option[String] = None,
+      groupId: Option[String] = None
   ): List[PoolPermission] = withConn { c =>
     // Build the WHERE dynamically so callers can mix filters; an unset
     // option contributes no predicate. Always ORDER BY id for stable
@@ -899,15 +935,15 @@ final class PostgresControlPlaneStore(
     val clauses = scala.collection.mutable.ListBuffer.empty[String]
     val binds   = scala.collection.mutable.ListBuffer.empty[String]
     tenantId.foreach { t => clauses += "tenant_id = ?"; binds += t }
-    userId  .foreach { u => clauses += "user_id   = ?"; binds += u }
-    groupId .foreach { g => clauses += "group_id  = ?"; binds += g }
+    userId.foreach { u => clauses += "user_id   = ?"; binds += u }
+    groupId.foreach { g => clauses += "group_id  = ?"; binds += g }
     val where = if clauses.isEmpty then "" else clauses.mkString(" WHERE ", " AND ", "")
-    val ps = c.prepareStatement(
+    val ps    = c.prepareStatement(
       s"""SELECT id, tenant_id, pool_id, user_id, group_id, granted_at
          |FROM qodstate_pool_permission$where ORDER BY id""".stripMargin
     )
     try
-      binds.zipWithIndex.foreach { (v, i) => ps.setString(i + 1, v) }
+      binds.zipWithIndex.foreach((v, i) => ps.setString(i + 1, v))
       val rs = ps.executeQuery()
       try drain(rs)(readPoolPermission)
       finally rs.close()
@@ -922,63 +958,67 @@ final class PostgresControlPlaneStore(
 
   def listPoolPermissionsByUsers(userIds: List[String]): Map[String, List[PoolPermission]] =
     if userIds.isEmpty then Map.empty
-    else withConn { c =>
-      val placeholders = userIds.map(_ => "?").mkString(",")
-      val ps = c.prepareStatement(
-        s"""SELECT id, tenant_id, pool_id, user_id, group_id, granted_at
+    else
+      withConn { c =>
+        val placeholders = userIds.map(_ => "?").mkString(",")
+        val ps           = c.prepareStatement(
+          s"""SELECT id, tenant_id, pool_id, user_id, group_id, granted_at
            |FROM qodstate_pool_permission WHERE user_id IN ($placeholders)""".stripMargin
-      )
-      try
-        userIds.zipWithIndex.foreach { (id, i) => ps.setString(i + 1, id) }
-        val rs = ps.executeQuery()
+        )
         try
-          val buf = scala.collection.mutable.Map.empty[String, scala.collection.mutable.ListBuffer[PoolPermission]]
-          while rs.next() do
-            val pp = readPoolPermission(rs)
-            pp.userId.foreach { u =>
-              buf.getOrElseUpdate(u, scala.collection.mutable.ListBuffer.empty) += pp
-            }
-          buf.view.mapValues(_.toList).toMap
-        finally rs.close()
-      finally ps.close()
-    }
+          userIds.zipWithIndex.foreach((id, i) => ps.setString(i + 1, id))
+          val rs = ps.executeQuery()
+          try
+            val buf = scala.collection.mutable.Map
+              .empty[String, scala.collection.mutable.ListBuffer[PoolPermission]]
+            while rs.next() do
+              val pp = readPoolPermission(rs)
+              pp.userId.foreach { u =>
+                buf.getOrElseUpdate(u, scala.collection.mutable.ListBuffer.empty) += pp
+              }
+            buf.view.mapValues(_.toList).toMap
+          finally rs.close()
+        finally ps.close()
+      }
 
-  /** Group-by-left helper: bulk-fetch the rightCol values for a list
-    * of leftCol keys in one round-trip. Used by the user-list path to
-    * avoid the N+1 read of user-role + user-group edges. */
+  /** Group-by-left helper: bulk-fetch the rightCol values for a list of leftCol keys in one
+    * round-trip. Used by the user-list path to avoid the N+1 read of user-role + user-group edges.
+    */
   private def bulkEdgeByLeft(
-      ids:      List[String],
-      table:    String,
-      leftCol:  String,
+      ids: List[String],
+      table: String,
+      leftCol: String,
       rightCol: String
   ): Map[String, Set[String]] =
     if ids.isEmpty then Map.empty
-    else withConn { c =>
-      val placeholders = ids.map(_ => "?").mkString(",")
-      val ps = c.prepareStatement(
-        s"SELECT $leftCol, $rightCol FROM $table WHERE $leftCol IN ($placeholders)"
-      )
-      try
-        ids.zipWithIndex.foreach { (id, i) => ps.setString(i + 1, id) }
-        val rs = ps.executeQuery()
+    else
+      withConn { c =>
+        val placeholders = ids.map(_ => "?").mkString(",")
+        val ps           = c.prepareStatement(
+          s"SELECT $leftCol, $rightCol FROM $table WHERE $leftCol IN ($placeholders)"
+        )
         try
-          val buf = scala.collection.mutable.Map.empty[String, scala.collection.mutable.Set[String]]
-          while rs.next() do
-            val k = rs.getString(1)
-            val v = rs.getString(2)
-            buf.getOrElseUpdate(k, scala.collection.mutable.Set.empty) += v
-          buf.view.mapValues(_.toSet).toMap
-        finally rs.close()
-      finally ps.close()
-    }
+          ids.zipWithIndex.foreach((id, i) => ps.setString(i + 1, id))
+          val rs = ps.executeQuery()
+          try
+            val buf =
+              scala.collection.mutable.Map.empty[String, scala.collection.mutable.Set[String]]
+            while rs.next() do
+              val k = rs.getString(1)
+              val v = rs.getString(2)
+              buf.getOrElseUpdate(k, scala.collection.mutable.Set.empty) += v
+            buf.view.mapValues(_.toSet).toMap
+          finally rs.close()
+        finally ps.close()
+      }
 
   private def readPoolPermission(rs: ResultSet): PoolPermission =
     PoolPermission(
-      id        = rs.getString("id"),
-      tenantId  = rs.getString("tenant_id"),
-      poolId    = Option(rs.getString("pool_id")),
-      userId    = Option(rs.getString("user_id")),
-      groupId   = Option(rs.getString("group_id")),
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      poolId = Option(rs.getString("pool_id")),
+      userId = Option(rs.getString("user_id")),
+      groupId = Option(rs.getString("group_id")),
       grantedAt = Option(rs.getTimestamp("granted_at")).map(_.toInstant)
     )
 
@@ -986,10 +1026,23 @@ final class PostgresControlPlaneStore(
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
     ControlPlaneSnapshot(
-      tenants   = selectAll(c, "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name", readTenant),
-      tenantDbs = selectAll(c, "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema FROM qodstate_tenant_db ORDER BY name", readTenantDb),
-      pools     = selectAll(c, "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts FROM qodstate_pool ORDER BY name", readPool),
-      nodes     = selectAll(c,
+      tenants = selectAll(
+        c,
+        "SELECT id, display_name, disabled, auth_provider, auth_config FROM qodstate_tenant ORDER BY display_name",
+        readTenant
+      ),
+      tenantDbs = selectAll(
+        c,
+        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema FROM qodstate_tenant_db ORDER BY name",
+        readTenantDb
+      ),
+      pools = selectAll(
+        c,
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts FROM qodstate_pool ORDER BY name",
+        readPool
+      ),
+      nodes = selectAll(
+        c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
           |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
           |       t.display_name AS tenant_name,
@@ -1002,14 +1055,46 @@ final class PostgresControlPlaneStore(
           |ORDER BY n.node_id""".stripMargin,
         readNode
       ),
-      users           = selectAll(c, "SELECT id, tenant, username, role, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username", readRbacUser),
-      roles           = selectAll(c, "SELECT id, tenant_id, name, description, created_at FROM qodstate_role ORDER BY tenant_id, name", readRole),
-      rolePermissions = selectAll(c, "SELECT id, role_id, catalog_name, schema_name, table_name, verb, granted_at FROM qodstate_role_permission ORDER BY role_id, catalog_name, schema_name, table_name, verb", readRolePermission),
-      groups          = selectAll(c, "SELECT id, tenant_id, name, description FROM qodstate_group ORDER BY tenant_id, name", readGroup),
-      userGroups      = selectAll(c, "SELECT user_id, group_id FROM qodstate_user_group  ORDER BY user_id, group_id", rs => UserGroupEdge(rs.getString(1), rs.getString(2))),
-      userRoles       = selectAll(c, "SELECT user_id, role_id  FROM qodstate_user_role   ORDER BY user_id, role_id",  rs => UserRoleEdge (rs.getString(1), rs.getString(2))),
-      groupRoles      = selectAll(c, "SELECT group_id, role_id FROM qodstate_group_role  ORDER BY group_id, role_id", rs => GroupRoleEdge(rs.getString(1), rs.getString(2))),
-      poolPermissions = selectAll(c, "SELECT id, tenant_id, pool_id, user_id, group_id, granted_at FROM qodstate_pool_permission ORDER BY id", readPoolPermission)
+      users = selectAll(
+        c,
+        "SELECT id, tenant, username, role, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
+        readRbacUser
+      ),
+      roles = selectAll(
+        c,
+        "SELECT id, tenant_id, name, description, created_at FROM qodstate_role ORDER BY tenant_id, name",
+        readRole
+      ),
+      rolePermissions = selectAll(
+        c,
+        "SELECT id, role_id, catalog_name, schema_name, table_name, verb, granted_at FROM qodstate_role_permission ORDER BY role_id, catalog_name, schema_name, table_name, verb",
+        readRolePermission
+      ),
+      groups = selectAll(
+        c,
+        "SELECT id, tenant_id, name, description FROM qodstate_group ORDER BY tenant_id, name",
+        readGroup
+      ),
+      userGroups = selectAll(
+        c,
+        "SELECT user_id, group_id FROM qodstate_user_group  ORDER BY user_id, group_id",
+        rs => UserGroupEdge(rs.getString(1), rs.getString(2))
+      ),
+      userRoles = selectAll(
+        c,
+        "SELECT user_id, role_id  FROM qodstate_user_role   ORDER BY user_id, role_id",
+        rs => UserRoleEdge(rs.getString(1), rs.getString(2))
+      ),
+      groupRoles = selectAll(
+        c,
+        "SELECT group_id, role_id FROM qodstate_group_role  ORDER BY group_id, role_id",
+        rs => GroupRoleEdge(rs.getString(1), rs.getString(2))
+      ),
+      poolPermissions = selectAll(
+        c,
+        "SELECT id, tenant_id, pool_id, user_id, group_id, granted_at FROM qodstate_pool_permission ORDER BY id",
+        readPoolPermission
+      )
     )
   }
 
@@ -1019,7 +1104,8 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(sql)
     try
       val rs = ps.executeQuery()
-      try drain(rs)(read) finally rs.close()
+      try drain(rs)(read)
+      finally rs.close()
     finally ps.close()
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
@@ -1040,8 +1126,7 @@ final class PostgresControlPlaneStore(
 
   private def jsonToMap(raw: String): Map[String, String] =
     if raw == null || raw.isEmpty then Map.empty
-    else
-      parse(raw).flatMap(_.as[Map[String, String]]).getOrElse(Map.empty)
+    else parse(raw).flatMap(_.as[Map[String, String]]).getOrElse(Map.empty)
 
   private def setNullable(ps: PreparedStatement, idx: Int, v: Option[String]): Unit =
     v match
@@ -1052,9 +1137,12 @@ object PostgresControlPlaneStore:
 
   def fromDefaultMetastore(meta: Map[String, String]): PostgresControlPlaneStore =
     def required(k: String): String =
-      meta.get(k).filter(_.nonEmpty).getOrElse(
-        sys.error(s"defaultMetastore.$k must be set for PostgresControlPlaneStore")
-      )
+      meta
+        .get(k)
+        .filter(_.nonEmpty)
+        .getOrElse(
+          sys.error(s"defaultMetastore.$k must be set for PostgresControlPlaneStore")
+        )
     val host = required("pgHost")
     val port = required("pgPort")
     val user = required("pgUser")
@@ -1072,14 +1160,18 @@ object PostgresControlPlaneStore:
     val arr = Json.fromValues(cohorts.map { c =>
       Json.obj(
         "placement" -> Json.obj(
-          "nodeSelector" -> Json.fromFields(c.placement.nodeSelector.map((k, v) => k -> Json.fromString(v))),
-          "tolerations"  -> Json.fromValues(c.placement.tolerations.map { t =>
-            Json.fromFields(List(
-              Some("key"      -> Json.fromString(t.key)),
-              Some("operator" -> Json.fromString(t.operator)),
-              t.value.map(v => "value" -> Json.fromString(v)),
-              t.effect.map(e => "effect" -> Json.fromString(e))
-            ).flatten)
+          "nodeSelector" -> Json.fromFields(
+            c.placement.nodeSelector.map((k, v) => k -> Json.fromString(v))
+          ),
+          "tolerations" -> Json.fromValues(c.placement.tolerations.map { t =>
+            Json.fromFields(
+              List(
+                Some("key"      -> Json.fromString(t.key)),
+                Some("operator" -> Json.fromString(t.operator)),
+                t.value.map(v => "value" -> Json.fromString(v)),
+                t.effect.map(e => "effect" -> Json.fromString(e))
+              ).flatten
+            )
           })
         ),
         "distribution" -> Json.obj(
@@ -1093,26 +1185,32 @@ object PostgresControlPlaneStore:
 
   def cohortsFromJson(raw: String): List[PoolCohort] =
     if raw == null || raw.isEmpty then Nil
-    else parse(raw).toOption.flatMap(_.asArray).getOrElse(Vector.empty).toList.flatMap { j =>
-      val cur = j.hcursor
-      val placement = cur.downField("placement")
-      val ns = placement.downField("nodeSelector").as[Map[String, String]].getOrElse(Map.empty)
-      val tols = placement.downField("tolerations").focus
-        .flatMap(_.asArray).getOrElse(Vector.empty).toList.flatMap { tj =>
-          val tc = tj.hcursor
-          tc.downField("key").as[String].toOption.map { key =>
-            NodeToleration(
-              key      = key,
-              operator = tc.downField("operator").as[String].getOrElse("Equal"),
-              value    = tc.downField("value").as[String].toOption,
-              effect   = tc.downField("effect").as[String].toOption
-            )
+    else
+      parse(raw).toOption.flatMap(_.asArray).getOrElse(Vector.empty).toList.flatMap { j =>
+        val cur       = j.hcursor
+        val placement = cur.downField("placement")
+        val ns   = placement.downField("nodeSelector").as[Map[String, String]].getOrElse(Map.empty)
+        val tols = placement
+          .downField("tolerations")
+          .focus
+          .flatMap(_.asArray)
+          .getOrElse(Vector.empty)
+          .toList
+          .flatMap { tj =>
+            val tc = tj.hcursor
+            tc.downField("key").as[String].toOption.map { key =>
+              NodeToleration(
+                key = key,
+                operator = tc.downField("operator").as[String].getOrElse("Equal"),
+                value = tc.downField("value").as[String].toOption,
+                effect = tc.downField("effect").as[String].toOption
+              )
+            }
           }
-        }
-      val dist = cur.downField("distribution")
-      for
-        w <- dist.downField("writeonly").as[Int].toOption
-        r <- dist.downField("readonly").as[Int].toOption
-        d <- dist.downField("dual").as[Int].toOption
-      yield PoolCohort(NodePlacement(ns, tols), RoleDistribution(w, r, d))
-    }
+        val dist = cur.downField("distribution")
+        for
+          w <- dist.downField("writeonly").as[Int].toOption
+          r <- dist.downField("readonly").as[Int].toOption
+          d <- dist.downField("dual").as[Int].toOption
+        yield PoolCohort(NodePlacement(ns, tols), RoleDistribution(w, r, d))
+      }

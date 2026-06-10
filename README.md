@@ -7,7 +7,7 @@
 
 # Quack on Demand
 
-[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](guides/RESILIENCE.md)
+[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](https://starlake-ai.github.io/quack-on-demand/operating/resilience)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
@@ -26,7 +26,7 @@ DuckDB's [Quack](https://duckdb.org/docs/current/core_extensions/quack) protocol
 
 **Beta.** Quack on Demand is in active use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg via DuckDB extensions, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are all considered stable.
 
-The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process. [`RESILIENCE.md`](guides/RESILIENCE.md) documents the failure-and-recovery matrix in full so operators can decide where it fits. Roadmap work toward a multi-manager mode is tracked on the GitHub issues board.
+The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process. [`RESILIENCE.md`](https://starlake-ai.github.io/quack-on-demand/operating/resilience) documents the failure-and-recovery matrix in full so operators can decide where it fits. Roadmap work toward a multi-manager mode is tracked on the GitHub issues board.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
@@ -44,7 +44,9 @@ The gateway is a **single-instance manager** by design: safely restartable, but 
 - [Community](#community)
 - [Contributing](#contributing)
 
-Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](guides/RUNNING.md) (deployment paths + operator notes) - [`API.md`](guides/API.md) (REST API reference) - [`RESILIENCE.md`](guides/RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
+**Documentation:** https://starlake-ai.github.io/quack-on-demand/ (full guides, configuration reference, and REST API).
+
+Companion files: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart) (zero-to-first-query) - [`RUNNING.md`](guides/RUNNING.md) (deployment paths + operator notes) - [`API.md`](guides/API.md) (REST API reference) - [Resilience](https://starlake-ai.github.io/quack-on-demand/operating/resilience) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
 
 ---
 
@@ -65,7 +67,7 @@ Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) -
 
 ## Quick start
 
-Zero to first query in under 5 minutes ? Clone this repo first then see **[`QUICKSTART.md`](guides/QUICKSTART.md)** for the step-by-step. 
+Zero to first query in under 5 minutes ? Clone this repo first then see **[Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart)** for the step-by-step. 
 
 The short version:
 
@@ -115,7 +117,7 @@ Queries failed:   0
 Latency  p50:     ~60 ms
 ```
 
-`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [`QUICKSTART.md`](guides/QUICKSTART.md#4-run-a-custom-sql---30-seconds) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
+`Queries failed: 0` is the success signal. `[FlightSQL] missing tenant scope for Basic auth` means a custom client connected without `tenant`/`pool` routing headers; see [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart) for the JDBC URL / ODBC string / ADBC db_kwargs shape. `UNAUTHENTICATED` (other variants) usually means the `.env` credentials don't match what the manager seeded; TLS errors mean a `grpc://` vs `grpc+tls://` mismatch.
 
 **FlightSQL JDBC:**
   `jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales`
@@ -173,7 +175,7 @@ Everything else - native run, Docker against an external Postgres, TPC-H seeding
 
 - **React admin console** at `http://lcoalhost:20900/ui/` - tenant CRUD (with Databases · Pools · Auth provider tabs), pool CRUD, a dedicated **/users page** (Users · Groups · Roles · Identities tabs) with a per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), admin-role gated
 - **Observability built in** - Prometheus scrape endpoint at `/metrics`, or push to AWS CloudWatch / Azure Monitor / GCP Cloud Monitoring (one sink at a time, picked via `metrics.sink`). Ships with a Grafana 10.x dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
-- **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](guides/RESILIENCE.md)
+- **Self-healing on restart** - when the manager comes back up, the registry restored from the normalized `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` tables is reconciled against the runtime backend: each child's recorded PID is checked, its port is probed, and any node that no longer answers is respawned before the Flight SQL edge starts accepting traffic. Full failure-and-recovery matrix in [`RESILIENCE.md`](https://starlake-ai.github.io/quack-on-demand/operating/resilience)
 - **Every config key is overridable** via a `QOD_*` env var
 
 ---
@@ -328,7 +330,7 @@ Per-statement enforcement only kicks in when `acl.enabled=true` (`QOD_ACL_ENABLE
 
 ### Caveats
 
-- **Coarse DML/DDL**: the SQL `TableExtractor` only walks SELECT statements today, so `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the extractor to walk those statement shapes too.
+- **Per-table DML/DDL enforcement**: the SQL parser walks SELECT, INSERT/UPDATE/DELETE/MERGE/TRUNCATE, and CREATE/DROP/ALTER, extracting each table touch as a `Read`, `Write`, or `Ddl` access; the validator requires a covering grant for every access. The write verbs collapse to a single `Write` class (holding any of `INSERT`/`UPDATE`/`DELETE` authorizes all writes on the matched tables), and DDL is authorized by an `ALL` grant since the operator-facing verb vocabulary is `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`ALL`. Control-flow statements (`BEGIN`/`COMMIT`/`ROLLBACK`/`SET`/`USE`/`SHOW`) carry no table refs and pass unconditionally. The catalog `*` wildcard is scoped to the session's tenant.
 
 ### Curl walkthrough
 

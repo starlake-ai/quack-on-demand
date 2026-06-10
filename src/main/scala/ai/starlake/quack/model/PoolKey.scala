@@ -1,10 +1,10 @@
 package ai.starlake.quack.model
 
-/** Three-part naistural addressing key. Pools are owned by a tenant-db,
-  * so two pools with the same `pool` name under different tenant-dbs
-  * of the same tenant are distinct -- the per-`(tenantDb_id, name)`
-  * UNIQUE on `qodstate_pool` enforces it. Segments are lowercased on
-  * input to keep equality case-insensitive. */
+/** Three-part naistural addressing key. Pools are owned by a tenant-db, so two pools with the same
+  * `pool` name under different tenant-dbs of the same tenant are distinct -- the per-`(tenantDb_id,
+  * name)` UNIQUE on `qodstate_pool` enforces it. Segments are lowercased on input to keep equality
+  * case-insensitive.
+  */
 final case class PoolKey private (tenant: String, tenantDb: String, pool: String):
   override def toString: String = s"$tenant/$tenantDb/$pool"
 

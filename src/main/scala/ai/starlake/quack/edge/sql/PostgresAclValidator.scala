@@ -1,39 +1,44 @@
 package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.Config
-import ai.starlake.acl.parser.{SqlParser, StatementResult}
-import ai.starlake.quack.model.StatementKind
+import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
-import ai.starlake.quack.route.StatementClassifier
 import com.typesafe.scalalogging.LazyLogging
 
-/** Per-statement ACL gate backed by the cached
-  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] pinned on
-  * [[ai.starlake.quack.edge.ConnectionContext]] at handshake time. Reads
-  * a tenant-scoped principal's table permissions in-memory; superusers
-  * (`effectiveSet.user.tenant.isEmpty`) bypass.
+/** Per-statement ACL gate backed by the cached [[ai.starlake.quack.ondemand.rbac.EffectiveSet]]
+  * pinned on [[ai.starlake.quack.edge.ConnectionContext]] at handshake time. Reads a tenant-scoped
+  * principal's table permissions in-memory; superusers (`effectiveSet.user.tenant.isEmpty`) bypass.
   *
   * Decision rule per statement:
-  *   1. No `effectiveSet` on the validation context  -> deny (the
-  *      handshake never bound an RBAC principal, so we err on the safe
-  *      side).
-  *   2. Superuser principal                          -> allow.
-  *   3. Classify the statement (SELECT / INSERT / UPDATE / DELETE / DDL).
-  *      DDL still requires a wildcard ALL grant -- DDL grants are out of
-  *      scope for this iteration.
-  *   4. For SELECT/INSERT/UPDATE/DELETE: extract the table refs and
-  *      require each one to be covered by a [[RolePermission]] row whose
-  *      verb is the matching DML verb OR `ALL`, and whose
-  *      (catalog, schema, table) match (literal or `*` wildcard).
+  *   1. No `effectiveSet` on the validation context -> deny (the handshake never bound an RBAC
+  *      principal, so we err on the safe side).
+  *   2. Superuser principal -> allow.
+  *   3. Parse the statement with [[SqlParser.extract]] to enumerate every `(table, verb)` tuple.
+  *      Parse errors short-circuit to Denied unless the principal holds an unrestricted ALL grant.
+  *   4. `ControlFlow` statements (COMMIT, ROLLBACK, SET, ...) carry no table refs and are admitted
+  *      unconditionally.
+  *   5. For each `TableAccess(table, verb)` check that at least one [[RolePermission]] in the
+  *      effective set covers it: `verbCovers(p.verb, verb)` AND wildcard-or-literal match on
+  *      catalog / schema / table.
   *
-  * Catalog/schema defaults: when a referenced table is unqualified, the
-  * SQL parser fills them in from the pool's metastore via
-  * [[ValidationContext.defaultDatabase]] / `defaultSchema`. */
+  * Catalog/schema defaults: when a referenced table is unqualified, the SQL parser fills them in
+  * from the pool's metastore via [[ValidationContext.defaultDatabase]] / `defaultSchema`.
+  */
+/** `tenantCatalogs(tenantId)` returns the catalog names (= tenant-db names)
+  * the given tenant owns. Used to scope wildcard catalog grants (`*.*.* ALL`)
+  * so a tenant admin cannot wildcard-match a sibling tenant's catalog. An
+  * empty set or an unknown tenant id collapses to "no catalogs admissible
+  * via wildcard for this session"; explicit (non-wildcard) catalog grants
+  * are honored regardless of the session's tenant. Default is a no-op
+  * lookup that returns `Set.empty`, which makes wildcard catalog matches
+  * fail-closed: callers that don't wire a real lookup get the safer
+  * behavior. */
 final class PostgresAclValidator(
-    defaultDatabase: String = "",
-    defaultSchema:   String = "main",
-    dialect:         String = "duckdb"
+    defaultDatabase: String                 = "",
+    defaultSchema:   String                 = "main",
+    dialect:         String                 = "duckdb",
+    tenantCatalogs:  String => Set[String]  = _ => Set.empty
 ) extends StatementValidator,
       LazyLogging:
 
@@ -64,81 +69,113 @@ final class PostgresAclValidator(
 
   private def validateForPrincipal(
       context: ValidationContext,
-      eff:     EffectiveSet
+      eff: EffectiveSet
   ): ValidationResult =
-    val kind = StatementClassifier.classify(context.statement)
-    val required = requiredVerbFor(kind)
+    val extraction = SqlParser.extract(context.statement, parserConfigFor(context))
 
-    required match
-      case None =>
-        // DDL or unknown. Today this requires an unrestricted `*.*.* ALL`
-        // grant since the parser doesn't enumerate DDL targets. The spec
-        // calls this out as a follow-up (DDL grants as a first-class
-        // operator concern).
-        if hasWildcardAll(eff) then
-          logger.info(s"ACL: wildcard ALL covers ${kind} for user=${context.username}")
-          Allowed
-        else
-          val msg = s"DDL/unknown statement requires wildcard ALL grant"
-          logger.warn(s"ACL DENIED: user=${context.username}: $msg")
-          Denied(msg)
+    // Parse errors short-circuit to Denied unless the principal holds an
+    // unrestricted ALL grant (preserves prior behavior).
+    val parseErrors = extraction.statements.collect {
+      case StatementResult.ParseError(_, snippet, msg) => s"parse error: $msg ($snippet)"
+    }
+    if parseErrors.nonEmpty then
+      if hasWildcardAll(eff) then
+        logger.info(s"ACL: wildcard ALL covers unparseable statement for user=${context.username}")
+        return Allowed
+      else
+        val msg = parseErrors.mkString("; ")
+        logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+        return Denied(msg)
 
-      case Some(verb) =>
-        val extraction = SqlParser.extract(context.statement, parserConfigFor(context))
-        val unparsed = extraction.statements.collect {
-          case StatementResult.ParseError(_, snippet, msg) => s"parse error: $msg ($snippet)"
-        }
-        if unparsed.nonEmpty then
-          if hasWildcardAll(eff) then
-            logger.info(s"ACL: wildcard ALL covers unparseable statement for user=${context.username}")
-            Allowed
-          else
-            val msg = unparsed.mkString("; ")
-            logger.warn(s"ACL DENIED: user=${context.username}: $msg")
-            Denied(msg)
-        else
-          val unauthorized = extraction.allTables.filterNot { t =>
-            eff.permissions.exists(p =>
-              (p.verb.equalsIgnoreCase(verb) || p.verb.equalsIgnoreCase("ALL")) &&
-                wildcardMatch(p.catalogName, t.database) &&
-                wildcardMatch(p.schemaName,  t.schema) &&
-                wildcardMatch(p.tableName,   t.table)
-            )
-          }
-          if unauthorized.isEmpty then
-            logger.info(
-              s"ACL ALLOWED: user=${context.username} " +
-                s"roles=${eff.roles.map(_.name).mkString(",")} " +
-                s"tables=${extraction.allTables.map(_.canonical).mkString(",")}"
-            )
-            Allowed
-          else
-            val principal = if eff.user.tenant.isEmpty then "superuser"
-                            else s"user:${context.username}"
-            val msg = s"$principal lacks $verb on ${unauthorized.map(_.canonical).mkString(", ")}"
-            logger.warn(s"ACL DENIED: $msg")
-            Denied(msg)
+    // Collect all (table, verb) tuples from every Extracted statement.
+    // ControlFlow statements (COMMIT, ROLLBACK, SET, ...) carry no accesses
+    // and contribute nothing.
+    val accesses: Set[TableAccess] = extraction.statements.collect {
+      case StatementResult.Extracted(_, _, a, _) => a
+    }.flatten.toSet
 
-  /** Map a [[StatementKind]] to the SQL verb that a grant must cover.
-    * Select -> SELECT, Dml -> INSERT (any one INSERT/UPDATE/DELETE grant
-    * suffices since the classifier doesn't distinguish them today; the
-    * ALL wildcard is the documented operator path either way). Begin /
-    * Commit / Rollback / Other are session-level statements that don't
-    * carry table refs and short-circuit to Allowed upstream of the
-    * extraction step. */
-  private def requiredVerbFor(kind: StatementKind): Option[String] =
-    kind match
-      case StatementKind.Select => Some("SELECT")
-      case StatementKind.Dml    => Some("INSERT")
-      case _                    => None
+    // Empty access set means the statement was pure ControlFlow (or every
+    // arm yielded zero refs). Admit unconditionally -- there is nothing to
+    // authorize.
+    if accesses.isEmpty then
+      logger.info(s"ACL ALLOWED: user=${context.username} no table refs")
+      return Allowed
+
+    // Pre-compute the catalogs admissible via wildcard for this session.
+    // Used below to scope `*` catalog matches to the user's tenant; an
+    // explicit (non-wildcard) catalog grant still bypasses this check, so
+    // operators can deliberately grant cross-tenant access by naming a
+    // sibling tenant's catalog.
+    val sessionCatalogs: Set[String] =
+      eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty)
+
+    val unauthorized = accesses.filterNot { ta =>
+      eff.permissions.exists(p =>
+        verbCovers(p.verb, ta.verb) &&
+          catalogMatch(p.catalogName, ta.table.database, sessionCatalogs) &&
+          wildcardMatch(p.schemaName, ta.table.schema) &&
+          wildcardMatch(p.tableName, ta.table.table)
+      )
+    }
+
+    if unauthorized.isEmpty then
+      logger.info(
+        s"ACL ALLOWED: user=${context.username} " +
+          s"roles=${eff.roles.map(_.name).mkString(",")} " +
+          s"accesses=${accesses.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")}"
+      )
+      Allowed
+    else
+      val principal =
+        if eff.user.tenant.isEmpty then "superuser"
+        else s"user:${context.username}"
+      val msg =
+        s"$principal lacks grants on ${unauthorized.map(a => s"${a.table.canonical}:${a.verb}").mkString(", ")}"
+      logger.warn(s"ACL DENIED: $msg")
+      Denied(msg)
+
+  /** Whether a role-permission verb covers a parser-emitted access verb.
+    * Maps granular column values (SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/
+    * ALTER/TRUNCATE/ALL) into the collapsed (Read/Write/Ddl) space.
+    */
+  private def verbCovers(grantVerb: String, access: Verb): Boolean =
+    val gu = grantVerb.toUpperCase
+    if gu == "ALL" then true
+    else
+      access match
+        case Verb.Read  => gu == "SELECT" || gu == "READ"
+        case Verb.Write =>
+          gu == "INSERT" || gu == "UPDATE" || gu == "DELETE" ||
+            gu == "WRITE" || gu == "TRUNCATE"
+        case Verb.Ddl => gu == "CREATE" || gu == "DROP" || gu == "ALTER" || gu == "DDL"
 
   private def wildcardMatch(grant: String, ref: String): Boolean =
     grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
+
+  /** Catalog-specific wildcard match: the literal-equal arm behaves like
+    * `wildcardMatch`, but the `*` arm additionally requires the referenced
+    * catalog to be in the session's allowed-catalog set. This closes the
+    * cross-tenant wildcard leak (a tenant admin with `*.*.* ALL` could
+    * otherwise SELECT from a sibling tenant's catalog -- see project
+    * memory `project-catalog-wildcard-cross-tenant`).
+    *
+    * An empty `sessionCatalogs` means no catalog matches via wildcard for
+    * this session. Operators who want a tenant admin to retain cross-tenant
+    * read access can still grant an explicit catalog (`otherdb.*.* ALL`),
+    * which bypasses the wildcard arm via the literal-equal check below. */
+  private def catalogMatch(
+      grant:           String,
+      ref:             String,
+      sessionCatalogs: Set[String]
+  ): Boolean =
+    if grant == RolePermission.Wildcard then
+      sessionCatalogs.exists(_.equalsIgnoreCase(ref))
+    else grant.equalsIgnoreCase(ref)
 
   private def hasWildcardAll(eff: EffectiveSet): Boolean =
     eff.permissions.exists(p =>
       p.verb.equalsIgnoreCase("ALL") &&
         p.catalogName == RolePermission.Wildcard &&
-        p.schemaName  == RolePermission.Wildcard &&
-        p.tableName   == RolePermission.Wildcard
+        p.schemaName == RolePermission.Wildcard &&
+        p.tableName == RolePermission.Wildcard
     )

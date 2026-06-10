@@ -6,17 +6,17 @@ import io.circe.generic.semiauto.deriveCodec
 import io.circe.syntax._
 
 final case class NodeTolerationDto(
-    key:      String,
-    operator: String         = "Equal",
-    value:    Option[String] = None,
-    effect:   Option[String] = None
+    key: String,
+    operator: String = "Equal",
+    value: Option[String] = None,
+    effect: Option[String] = None
 )
 final case class NodePlacementDto(
-    nodeSelector: Map[String, String]      = Map.empty,
-    tolerations:  List[NodeTolerationDto]  = Nil
+    nodeSelector: Map[String, String] = Map.empty,
+    tolerations: List[NodeTolerationDto] = Nil
 )
 final case class PoolCohortDto(
-    placement:    NodePlacementDto = NodePlacementDto(),
+    placement: NodePlacementDto = NodePlacementDto(),
     distribution: RoleDistribution
 )
 
@@ -25,8 +25,8 @@ object PoolCohortDto:
     PoolCohortDto(
       placement = NodePlacementDto(
         nodeSelector = c.placement.nodeSelector,
-        tolerations  = c.placement.tolerations.map(t =>
-          NodeTolerationDto(t.key, t.operator, t.value, t.effect))
+        tolerations =
+          c.placement.tolerations.map(t => NodeTolerationDto(t.key, t.operator, t.value, t.effect))
       ),
       distribution = c.distribution
     )
@@ -34,8 +34,8 @@ object PoolCohortDto:
     PoolCohort(
       placement = NodePlacement(
         nodeSelector = d.placement.nodeSelector,
-        tolerations  = d.placement.tolerations.map(t =>
-          NodeToleration(t.key, t.operator, t.value, t.effect))
+        tolerations =
+          d.placement.tolerations.map(t => NodeToleration(t.key, t.operator, t.value, t.effect))
       ),
       distribution = d.distribution
     )
@@ -87,10 +87,11 @@ final case class PoolResponse(
     pool: String,
     nodes: List[NodeInfo],
     status: String,
-    metastore: Map[String, String] = Map.empty,  // effective metastore inherited from the tenant-db, password redacted
-    disabled: Boolean = false,                   // when true, the edge rejects fresh handshakes targeting this pool
-    id: String = "",                             // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
-    cohorts: List[PoolCohortDto] = Nil           // persisted placement plan, empty when none was supplied
+    metastore: Map[String, String] =
+      Map.empty, // effective metastore inherited from the tenant-db, password redacted
+    disabled: Boolean = false, // when true, the edge rejects fresh handshakes targeting this pool
+    id: String = "", // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
+    cohorts: List[PoolCohortDto] = Nil // persisted placement plan, empty when none was supplied
 )
 
 final case class ScalePoolRequest(
@@ -102,16 +103,21 @@ final case class ScalePoolRequest(
     force: Boolean = false
 )
 
-final case class StopPoolRequest(tenant: String, tenantDb: String, pool: String, force: Boolean = false)
+final case class StopPoolRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    force: Boolean = false
+)
 
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
 final case class ClientConfigResponse(
-    flightSqlHost: String,    // may be "0.0.0.0" - UI should substitute window.location.hostname
+    flightSqlHost: String, // may be "0.0.0.0" - UI should substitute window.location.hostname
     flightSqlPort: Int,
     flightSqlTls: Boolean,
-    tenantClaim: String,       // JWT claim name the edge uses
+    tenantClaim: String, // JWT claim name the edge uses
     // True iff any basic / bearer auth provider is configured. When false,
     // the UI skips the login screen entirely (there's no credential
     // backend to validate against; `/api/auth/login` would 503).
@@ -122,10 +128,10 @@ final case class ClientConfigResponse(
     placementSupported: Boolean = false
 )
 
-/** One row of the admin UI Config page: a single scalar from
-  * `application.conf` with its env-var override and a short
-  * description. `value` is masked (`"(set)"` / `"(unset)"`) when
-  * `sensitive` is true. */
+/** One row of the admin UI Config page: a single scalar from `application.conf` with its env-var
+  * override and a short description. `value` is masked (`"(set)"` / `"(unset)"`) when `sensitive`
+  * is true.
+  */
 final case class ConfigEntryView(
     path: String,
     envVar: String,
@@ -138,81 +144,99 @@ final case class ConfigEntryView(
 final case class ConfigListResponse(entries: List[ConfigEntryView])
 
 final case class ManifestImportSummary(
-    tenants:   Int,
+    tenants: Int,
     tenantDbs: Int,
-    pools:     Int,
-    roles:     Int,
-    groups:    Int,
-    users:     Int
+    pools: Int,
+    roles: Int,
+    groups: Int,
+    users: Int
 )
 
-final case class SetRoleRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, role: String)
-final case class SetMaxConcurrentRequest(tenant: String, tenantDb: String, pool: String, nodeId: String, max: Int)
+final case class SetRoleRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    nodeId: String,
+    role: String
+)
+final case class SetMaxConcurrentRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    nodeId: String,
+    max: Int
+)
 final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
 
 final case class ErrorResponse(error: String, message: String)
 
 final case class TenantRequest(
-    name:         String,
+    name: String,
     // Auth provider for every user in this tenant. One of
     // {db, keycloak, google, azure, aws}; defaults to `db` so existing
     // wire callers and the bootstrap path keep working.
-    authProvider: String              = "db",
+    authProvider: String = "db",
     // Provider-specific config. Empty for `db`; for OIDC providers
     // expect `issuer` (full URL) plus one of `realm` / `hd` /
     // `tenantId` / `userPoolId`.
-    authConfig:   Map[String, String] = Map.empty
+    authConfig: Map[String, String] = Map.empty
 )
 final case class TenantResponse(
     name: String,
+    id: String,
     // Pool natural keys under this tenant, formatted as `tenantDb/pool`
     // (the tenant prefix is implicit). Storage configuration lives on
     // `qodstate_tenant_db` rows, not here.
-    pools:        List[String],
-    disabled:     Boolean             = false,
-    authProvider: String              = "db",
-    authConfig:   Map[String, String] = Map.empty
+    pools: List[String],
+    disabled: Boolean = false,
+    authProvider: String = "db",
+    authConfig: Map[String, String] = Map.empty
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
 final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
 final case class SetTenantAuthRequest(
-    name:         String,
+    name: String,
     authProvider: String,
-    authConfig:   Map[String, String] = Map.empty
+    authConfig: Map[String, String] = Map.empty
 )
-final case class SetPoolDisabledRequest(tenant: String, tenantDb: String, pool: String, disabled: Boolean)
+final case class SetPoolDisabledRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    disabled: Boolean
+)
 
 // ----- Tenant databases (qodstate_tenant_db) -----------------------------
 // One row per `(tenant, name)` -- the name being composed
 // `${tenant}_${suffix}` and used verbatim as the actual Postgres
 // database name on the shared server.
 final case class TenantDbRequest(
-    tenant:          String,
+    tenant: String,
     // Suffix typed by the user; the supervisor composes the full
     // database name as `${tenant}_${suffix}` (idempotent if the caller
     // already passed the full form).
-    name:            String,
-    kind:            String              = "ducklake",   // wire value: ducklake | duckdb-file | memory
-    metastore:       Map[String, String] = Map.empty,
-    dataPath:        String              = "",
-    objectStore:     Map[String, String] = Map.empty,
-    defaultDatabase: Option[String]      = None,
-    defaultSchema:   Option[String]      = None
+    name: String,
+    kind: String = "ducklake", // wire value: ducklake | duckdb-file | memory
+    metastore: Map[String, String] = Map.empty,
+    dataPath: String = "",
+    objectStore: Map[String, String] = Map.empty,
+    defaultDatabase: Option[String] = None,
+    defaultSchema: Option[String] = None
 )
 final case class TenantDbResponse(
-    id:                   String,
-    tenant:               String,
-    name:                 String,
-    kind:                 String,                            // wire value
-    metastore:            Map[String, String],
-    dataPath:             String,
-    objectStore:          Map[String, String] = Map.empty,
-    defaultDatabase:      Option[String]      = None,
-    defaultSchema:        Option[String]      = None,
-    disabled:             Boolean             = false,
-    federatedSourceCount: Int                 = 0
+    id: String,
+    tenant: String,
+    name: String,
+    kind: String, // wire value
+    metastore: Map[String, String],
+    dataPath: String,
+    objectStore: Map[String, String] = Map.empty,
+    defaultDatabase: Option[String] = None,
+    defaultSchema: Option[String] = None,
+    disabled: Boolean = false,
+    federatedSourceCount: Int = 0
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
@@ -220,35 +244,35 @@ final case class TenantDbOpRequest(tenant: String, name: String)
 // ----- Federation -----
 
 final case class FederatedSourceCreateRequest(
-    alias:       String,
-    setupSql:    String,
+    alias: String,
+    setupSql: String,
     description: Option[String] = None,
-    disabled:    Boolean        = false
+    disabled: Boolean = false
 )
 
 final case class FederatedSourceResponse(
-    id:          String,
-    tenantDbId:  String,
-    alias:       String,
-    setupSql:    String,
+    id: String,
+    tenantDbId: String,
+    alias: String,
+    setupSql: String,
     description: Option[String] = None,
-    disabled:    Boolean        = false
+    disabled: Boolean = false
 )
 
 final case class FederatedSourceListResponse(sources: List[FederatedSourceResponse])
 
 final case class FederatedSecretUpsertRequest(
-    name:        String,
-    value:       Option[String] = None,    // postgres-resolver backed
-    externalRef: Option[String] = None     // external-resolver backed
+    name: String,
+    value: Option[String] = None,      // postgres-resolver backed
+    externalRef: Option[String] = None // external-resolver backed
 )
 
 final case class FederatedSecretResponse(
-    id:                String,
+    id: String,
     federatedSourceId: String,
-    name:              String,
-    value:             Option[String],     // ALWAYS redacted in response: "***REDACTED***" if originally non-null
-    externalRef:       Option[String]
+    name: String,
+    value: Option[String], // ALWAYS redacted in response: "***REDACTED***" if originally non-null
+    externalRef: Option[String]
 )
 
 final case class FederatedSecretListResponse(secrets: List[FederatedSecretResponse])
@@ -259,134 +283,152 @@ final case class FederationImportSummary(
 )
 
 // ----- UI login -----
-final case class LoginRequest(username: String, password: String)
-final case class LoginResponse(token: String, username: String, role: String)
-final case class WhoamiResponse(username: String, role: String)
+/** `tenant` is the optional tenant id (e.g. `t-02d0e86e`). Leave it `None`/blank for a system-admin
+  * login (`qodstate_user.tenant IS NULL`). Tenant-scoped users (`qodstate_user.tenant = ?`) must
+  * send their tenant id.
+  */
+final case class LoginRequest(
+    username: String,
+    password: String,
+    tenant: Option[String] = None
+)
+final case class LoginResponse(
+    token: String,
+    username: String,
+    role: String,
+    tenant: Option[String] = None
+)
+final case class WhoamiResponse(
+    username: String,
+    role: String,
+    tenant: Option[String] = None
+)
 
 // ----- Recent statement history -----
 final case class StatementHistoryEntry(
-    ts:         String,        // ISO-8601 UTC
-    user:       String,
-    tenant:     String,
-    pool:       String,
-    nodeId:     String,
-    sql:        String,
+    ts: String, // ISO-8601 UTC
+    user: String,
+    tenant: String,
+    pool: String,
+    nodeId: String,
+    sql: String,
     durationMs: Long,
-    status:     String,        // ok | denied | transient | permanent | no-node | no-pool | pin-lost
-    error:      Option[String]
+    status: String, // ok | denied | transient | permanent | no-node | no-pool | pin-lost
+    error: Option[String]
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
 // ----- RBAC: users -------------------------------------------------------
 
 final case class UserCreateRequest(
-    tenant:   Option[String],         // None = superuser
+    tenant: Option[String], // None = superuser
     username: String,
     password: String,
-    role:     String = "user"
+    role: String = "user"
 )
 final case class UserUpdateRequest(
-    id:       String,
-    tenant:   Option[String] = None,  // None = leave unchanged
-    password: Option[String] = None,  // None = no rotation
-    role:     Option[String] = None
+    id: String,
+    tenant: Option[String] = None,   // None = leave unchanged
+    password: Option[String] = None, // None = no rotation
+    role: Option[String] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(
-    id:       String,
-    tenant:   Option[String],
+    id: String,
+    tenant: Option[String],
     username: String,
-    role:     String,
-    enabled:  Boolean = true,
-    roles:    List[String] = Nil,     // role NAMES (not ids), tenant-scoped
-    groups:   List[String] = Nil,     // group NAMES
-    poolGrants: List[String] = Nil    // human label "tenant/pool" or "tenant/*"
+    role: String,
+    enabled: Boolean = true,
+    roles: List[String] = Nil,     // role NAMES (not ids), tenant-scoped
+    groups: List[String] = Nil,    // group NAMES
+    poolGrants: List[String] = Nil // human label "tenant/pool" or "tenant/*"
 )
 final case class UserListResponse(users: List[UserResponse])
 
-/** GET /user/{id}/effective response. Permits the UI to show what a
-  * given user can actually do without spelunking through roles/groups. */
+/** GET /user/{id}/effective response. Permits the UI to show what a given user can actually do
+  * without spelunking through roles/groups.
+  */
 final case class EffectivePermissionsResponse(
-    user:       UserResponse,
-    roles:      List[RoleResponse],
-    groups:     List[GroupResponse],
-    pools:      List[PoolPermissionResponse],
+    user: UserResponse,
+    roles: List[RoleResponse],
+    groups: List[GroupResponse],
+    pools: List[PoolPermissionResponse],
     tablePerms: List[RolePermissionResponse]
 )
 
 // ----- RBAC: roles -------------------------------------------------------
 
 final case class RoleCreateRequest(
-    tenant:      String,
-    name:        String,
+    tenant: String,
+    name: String,
     description: Option[String] = None
 )
 final case class RoleDeleteRequest(id: String)
 final case class RoleResponse(
-    id:          String,
-    tenantId:    String,
-    name:        String,
+    id: String,
+    tenantId: String,
+    name: String,
     description: Option[String],
-    createdAt:   String
+    createdAt: String
 )
 final case class RoleListResponse(roles: List[RoleResponse])
 
 final case class RolePermissionGrantRequest(
-    roleId:  String,
+    roleId: String,
     catalog: String = "*",
-    schema:  String = "*",
-    table:   String = "*",
-    verb:    String                   // SELECT | INSERT | UPDATE | DELETE | ALL
+    schema: String = "*",
+    table: String = "*",
+    verb: String // SELECT | INSERT | UPDATE | DELETE | ALL
 )
 final case class RolePermissionRevokeRequest(id: String)
 final case class RolePermissionResponse(
-    id:          String,
-    roleId:      String,
+    id: String,
+    roleId: String,
     catalogName: String,
-    schemaName:  String,
-    tableName:   String,
-    verb:        String,
-    grantedAt:   String
+    schemaName: String,
+    tableName: String,
+    verb: String,
+    grantedAt: String
 )
 final case class RolePermissionListResponse(permissions: List[RolePermissionResponse])
 
 // ----- RBAC: groups ------------------------------------------------------
 
 final case class GroupCreateRequest(
-    tenant:      String,
-    name:        String,
+    tenant: String,
+    name: String,
     description: Option[String] = None
 )
 final case class GroupDeleteRequest(id: String)
 final case class GroupResponse(
-    id:          String,
-    tenantId:    String,
-    name:        String,
+    id: String,
+    tenantId: String,
+    name: String,
     description: Option[String]
 )
 final case class GroupListResponse(groups: List[GroupResponse])
 
 // ----- RBAC: memberships -------------------------------------------------
 
-final case class UserRoleMembershipRequest (userId: String, roleId:  String)
+final case class UserRoleMembershipRequest(userId: String, roleId: String)
 final case class UserGroupMembershipRequest(userId: String, groupId: String)
 final case class GroupRoleMembershipRequest(groupId: String, roleId: String)
 
 // ----- RBAC: pool permissions --------------------------------------------
 
 final case class PoolPermissionGrantRequest(
-    tenant:  String,
-    poolId:  Option[String] = None,   // None = all pools in tenant
-    userId:  Option[String] = None,
-    groupId: Option[String] = None    // exactly one of userId / groupId must be set
+    tenant: String,
+    poolId: Option[String] = None, // None = all pools in tenant
+    userId: Option[String] = None,
+    groupId: Option[String] = None // exactly one of userId / groupId must be set
 )
 final case class PoolPermissionRevokeRequest(id: String)
 final case class PoolPermissionResponse(
-    id:        String,
-    tenantId:  String,
-    poolId:    Option[String],
-    userId:    Option[String],
-    groupId:   Option[String],
+    id: String,
+    tenantId: String,
+    poolId: Option[String],
+    userId: Option[String],
+    groupId: Option[String],
     grantedAt: String
 )
 final case class PoolPermissionListResponse(permissions: List[PoolPermissionResponse])
@@ -400,11 +442,11 @@ final case class CatalogSchemaEntry(
 final case class CatalogTableEntry(
     schema: String,
     name: String,
-    rowCount: Long,         // best-effort; -1 when DuckLake stats are missing
-    dataFileCount: Int,     // count of __ducklake_data_file rows
-    folder: Option[String]  // parent dir of the table's parquet files, derived
-                            // from a sample ducklake_data_file.path. None when
-                            // no committed data file exists yet.
+    rowCount: Long,        // best-effort; -1 when DuckLake stats are missing
+    dataFileCount: Int,    // count of __ducklake_data_file rows
+    folder: Option[String] // parent dir of the table's parquet files, derived
+    // from a sample ducklake_data_file.path. None when
+    // no committed data file exists yet.
 )
 
 final case class CatalogColumnEntry(
@@ -416,7 +458,7 @@ final case class CatalogColumnEntry(
 )
 
 final case class CatalogDataFileEntry(
-    path: String,           // absolute file path or s3:// URL
+    path: String, // absolute file path or s3:// URL
     sizeBytes: Long,
     rowCount: Long,
     snapshotId: Long
@@ -429,7 +471,7 @@ final case class CatalogTableDetailResponse(
 )
 
 object Dtos:
-  given Codec[RoleDistribution]  = deriveCodec
+  given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
   // a round-trip through the wire (circe 0.14 deriveCodec is strict).
   given Codec[NodeTolerationDto] = Codec.from(
@@ -442,12 +484,14 @@ object Dtos:
       yield NodeTolerationDto(key, operator, value, effect)
     },
     Encoder.instance { t =>
-      Json.fromJsonObject(JsonObject(
-        "key"      -> t.key.asJson,
-        "operator" -> t.operator.asJson,
-        "value"    -> t.value.asJson,
-        "effect"   -> t.effect.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "key"      -> t.key.asJson,
+          "operator" -> t.operator.asJson,
+          "value"    -> t.value.asJson,
+          "effect"   -> t.effect.asJson
+        )
+      )
     }
   )
   given Codec[NodePlacementDto] = Codec.from(
@@ -458,10 +502,12 @@ object Dtos:
       yield NodePlacementDto(nodeSelector, tolerations)
     },
     Encoder.instance { p =>
-      Json.fromJsonObject(JsonObject(
-        "nodeSelector" -> p.nodeSelector.asJson,
-        "tolerations"  -> p.tolerations.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "nodeSelector" -> p.nodeSelector.asJson,
+          "tolerations"  -> p.tolerations.asJson
+        )
+      )
     }
   )
   given Codec[PoolCohortDto] = Codec.from(
@@ -472,10 +518,12 @@ object Dtos:
       yield PoolCohortDto(placement, distribution)
     },
     Encoder.instance { p =>
-      Json.fromJsonObject(JsonObject(
-        "placement"    -> p.placement.asJson,
-        "distribution" -> p.distribution.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "placement"    -> p.placement.asJson,
+          "distribution" -> p.distribution.asJson
+        )
+      )
     }
   )
   // Custom codec for CreatePoolRequest so that optional fields with case-class
@@ -492,23 +540,35 @@ object Dtos:
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
         cohorts              <- c.getOrElse[List[PoolCohortDto]]("cohorts")(Nil)
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
-      yield CreatePoolRequest(tenant, tenantDb, pool, size, roleDistribution, idleTimeoutSec, maxConcurrentPerNode, cohorts, disabled)
+      yield CreatePoolRequest(
+        tenant,
+        tenantDb,
+        pool,
+        size,
+        roleDistribution,
+        idleTimeoutSec,
+        maxConcurrentPerNode,
+        cohorts,
+        disabled
+      )
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "tenant"               -> r.tenant.asJson,
-        "tenantDb"             -> r.tenantDb.asJson,
-        "pool"                 -> r.pool.asJson,
-        "size"                 -> r.size.asJson,
-        "roleDistribution"     -> r.roleDistribution.asJson,
-        "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
-        "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
-        "cohorts"              -> r.cohorts.asJson,
-        "disabled"             -> r.disabled.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"               -> r.tenant.asJson,
+          "tenantDb"             -> r.tenantDb.asJson,
+          "pool"                 -> r.pool.asJson,
+          "size"                 -> r.size.asJson,
+          "roleDistribution"     -> r.roleDistribution.asJson,
+          "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
+          "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
+          "cohorts"              -> r.cohorts.asJson,
+          "disabled"             -> r.disabled.asJson
+        )
+      )
     }
   )
-  given Codec[ScalePoolRequest]  = Codec.from(
+  given Codec[ScalePoolRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
         tenant           <- c.get[String]("tenant")
@@ -520,14 +580,16 @@ object Dtos:
       yield ScalePoolRequest(tenant, tenantDb, pool, targetSize, roleDistribution, force)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "tenant"           -> r.tenant.asJson,
-        "tenantDb"         -> r.tenantDb.asJson,
-        "pool"             -> r.pool.asJson,
-        "targetSize"       -> r.targetSize.asJson,
-        "roleDistribution" -> r.roleDistribution.asJson,
-        "force"            -> r.force.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"           -> r.tenant.asJson,
+          "tenantDb"         -> r.tenantDb.asJson,
+          "pool"             -> r.pool.asJson,
+          "targetSize"       -> r.targetSize.asJson,
+          "roleDistribution" -> r.roleDistribution.asJson,
+          "force"            -> r.force.asJson
+        )
+      )
     }
   )
   given Codec[StopPoolRequest] = Codec.from(
@@ -540,12 +602,14 @@ object Dtos:
       yield StopPoolRequest(tenant, tenantDb, pool, force)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "tenant"   -> r.tenant.asJson,
-        "tenantDb" -> r.tenantDb.asJson,
-        "pool"     -> r.pool.asJson,
-        "force"    -> r.force.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"   -> r.tenant.asJson,
+          "tenantDb" -> r.tenantDb.asJson,
+          "pool"     -> r.pool.asJson,
+          "force"    -> r.force.asJson
+        )
+      )
     }
   )
   // Custom codec for NodeInfo so all metric fields default to zero / true
@@ -566,9 +630,21 @@ object Dtos:
         p99Ms         <- c.getOrElse[Double]("p99Ms")(0.0)
         healthy       <- c.getOrElse[Boolean]("healthy")(true)
         draining      <- c.getOrElse[Boolean]("draining")(false)
-      yield NodeInfo(nodeId, role, host, port, maxConcurrent,
-                     inFlight, totalServed, avgDurationMs, p50Ms, p95Ms, p99Ms,
-                     healthy, draining)
+      yield NodeInfo(
+        nodeId,
+        role,
+        host,
+        port,
+        maxConcurrent,
+        inFlight,
+        totalServed,
+        avgDurationMs,
+        p50Ms,
+        p95Ms,
+        p99Ms,
+        healthy,
+        draining
+      )
     },
     Encoder.instance { n =>
       Json.fromJsonObject(
@@ -590,7 +666,7 @@ object Dtos:
       )
     }
   )
-  given Codec[PoolResponse] = deriveCodec
+  given Codec[PoolResponse]            = deriveCodec
   given Codec[PoolListResponse]        = deriveCodec
   given Codec[HealthResponse]          = deriveCodec
   given Codec[SetRoleRequest]          = deriveCodec
@@ -608,11 +684,13 @@ object Dtos:
       yield TenantRequest(name, authProvider, authConfig)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "name"         -> r.name.asJson,
-        "authProvider" -> r.authProvider.asJson,
-        "authConfig"   -> r.authConfig.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "name"         -> r.name.asJson,
+          "authProvider" -> r.authProvider.asJson,
+          "authConfig"   -> r.authConfig.asJson
+        )
+      )
     }
   )
   given Codec[TenantResponse]           = deriveCodec
@@ -629,18 +707,20 @@ object Dtos:
       yield SetTenantAuthRequest(name, authProvider, authConfig)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "name"         -> r.name.asJson,
-        "authProvider" -> r.authProvider.asJson,
-        "authConfig"   -> r.authConfig.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "name"         -> r.name.asJson,
+          "authProvider" -> r.authProvider.asJson,
+          "authConfig"   -> r.authConfig.asJson
+        )
+      )
     }
   )
-  given Codec[SetPoolDisabledRequest]   = deriveCodec
-  given Codec[ClientConfigResponse] = deriveCodec
-  given Codec[ConfigEntryView]      = deriveCodec
-  given Codec[ConfigListResponse]   = deriveCodec
-  given Codec[ManifestImportSummary] = deriveCodec
+  given Codec[SetPoolDisabledRequest] = deriveCodec
+  given Codec[ClientConfigResponse]   = deriveCodec
+  given Codec[ConfigEntryView]        = deriveCodec
+  given Codec[ConfigListResponse]     = deriveCodec
+  given Codec[ManifestImportSummary]  = deriveCodec
 
   // Hand-rolled decoder so omitted optional fields fall back to the
   // case-class defaults (deriveCodec ignores Scala defaults and treats
@@ -657,7 +737,16 @@ object Dtos:
         objectStore     <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
         defaultDatabase <- c.getOrElse[Option[String]]("defaultDatabase")(None)
         defaultSchema   <- c.getOrElse[Option[String]]("defaultSchema")(None)
-      yield TenantDbRequest(tenant, name, kind, metastore, dataPath, objectStore, defaultDatabase, defaultSchema)
+      yield TenantDbRequest(
+        tenant,
+        name,
+        kind,
+        metastore,
+        dataPath,
+        objectStore,
+        defaultDatabase,
+        defaultSchema
+      )
     },
     io.circe.generic.semiauto.deriveEncoder[TenantDbRequest]
   )
@@ -665,9 +754,9 @@ object Dtos:
   given Codec[TenantDbListResponse] = deriveCodec
   given Codec[TenantDbOpRequest]    = deriveCodec
 
-  given Codec[LoginRequest]         = deriveCodec
-  given Codec[LoginResponse]        = deriveCodec
-  given Codec[WhoamiResponse]       = deriveCodec
+  given Codec[LoginRequest]             = deriveCodec
+  given Codec[LoginResponse]            = deriveCodec
+  given Codec[WhoamiResponse]           = deriveCodec
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
 
@@ -684,63 +773,67 @@ object Dtos:
       yield UserCreateRequest(tenant, username, password, role)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "tenant"   -> r.tenant.asJson,
-        "username" -> r.username.asJson,
-        "password" -> r.password.asJson,
-        "role"     -> r.role.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"   -> r.tenant.asJson,
+          "username" -> r.username.asJson,
+          "password" -> r.password.asJson,
+          "role"     -> r.role.asJson
+        )
+      )
     }
   )
-  given Codec[UserUpdateRequest]            = deriveCodec
-  given Codec[UserDeleteRequest]            = deriveCodec
-  given Codec[UserResponse]                 = deriveCodec
-  given Codec[UserListResponse]             = deriveCodec
+  given Codec[UserUpdateRequest] = deriveCodec
+  given Codec[UserDeleteRequest] = deriveCodec
+  given Codec[UserResponse]      = deriveCodec
+  given Codec[UserListResponse]  = deriveCodec
 
   // RBAC: roles
-  given Codec[RoleCreateRequest]            = deriveCodec
-  given Codec[RoleDeleteRequest]            = deriveCodec
-  given Codec[RoleResponse]                 = deriveCodec
-  given Codec[RoleListResponse]             = deriveCodec
-  given Codec[RolePermissionGrantRequest]   = Codec.from(
+  given Codec[RoleCreateRequest]          = deriveCodec
+  given Codec[RoleDeleteRequest]          = deriveCodec
+  given Codec[RoleResponse]               = deriveCodec
+  given Codec[RoleListResponse]           = deriveCodec
+  given Codec[RolePermissionGrantRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
         roleId  <- c.get[String]("roleId")
         catalog <- c.getOrElse[String]("catalog")("*")
-        schema  <- c.getOrElse[String]("schema") ("*")
-        table   <- c.getOrElse[String]("table")  ("*")
+        schema  <- c.getOrElse[String]("schema")("*")
+        table   <- c.getOrElse[String]("table")("*")
         verb    <- c.get[String]("verb")
       yield RolePermissionGrantRequest(roleId, catalog, schema, table, verb)
     },
     Encoder.instance { r =>
-      Json.fromJsonObject(JsonObject(
-        "roleId"  -> r.roleId.asJson,
-        "catalog" -> r.catalog.asJson,
-        "schema"  -> r.schema.asJson,
-        "table"   -> r.table.asJson,
-        "verb"    -> r.verb.asJson
-      ))
+      Json.fromJsonObject(
+        JsonObject(
+          "roleId"  -> r.roleId.asJson,
+          "catalog" -> r.catalog.asJson,
+          "schema"  -> r.schema.asJson,
+          "table"   -> r.table.asJson,
+          "verb"    -> r.verb.asJson
+        )
+      )
     }
   )
-  given Codec[RolePermissionRevokeRequest]  = deriveCodec
-  given Codec[RolePermissionResponse]       = deriveCodec
-  given Codec[RolePermissionListResponse]   = deriveCodec
+  given Codec[RolePermissionRevokeRequest] = deriveCodec
+  given Codec[RolePermissionResponse]      = deriveCodec
+  given Codec[RolePermissionListResponse]  = deriveCodec
 
   // RBAC: groups
-  given Codec[GroupCreateRequest]           = deriveCodec
-  given Codec[GroupDeleteRequest]           = deriveCodec
-  given Codec[GroupResponse]                = deriveCodec
-  given Codec[GroupListResponse]            = deriveCodec
+  given Codec[GroupCreateRequest] = deriveCodec
+  given Codec[GroupDeleteRequest] = deriveCodec
+  given Codec[GroupResponse]      = deriveCodec
+  given Codec[GroupListResponse]  = deriveCodec
 
-  given Codec[UserRoleMembershipRequest]    = deriveCodec
-  given Codec[UserGroupMembershipRequest]   = deriveCodec
-  given Codec[GroupRoleMembershipRequest]   = deriveCodec
+  given Codec[UserRoleMembershipRequest]  = deriveCodec
+  given Codec[UserGroupMembershipRequest] = deriveCodec
+  given Codec[GroupRoleMembershipRequest] = deriveCodec
 
   // RBAC: pool permissions
-  given Codec[PoolPermissionGrantRequest]   = deriveCodec
-  given Codec[PoolPermissionRevokeRequest]  = deriveCodec
-  given Codec[PoolPermissionResponse]       = deriveCodec
-  given Codec[PoolPermissionListResponse]   = deriveCodec
+  given Codec[PoolPermissionGrantRequest]  = deriveCodec
+  given Codec[PoolPermissionRevokeRequest] = deriveCodec
+  given Codec[PoolPermissionResponse]      = deriveCodec
+  given Codec[PoolPermissionListResponse]  = deriveCodec
 
   given Codec[EffectivePermissionsResponse] = deriveCodec
 
@@ -767,9 +860,9 @@ object Dtos:
     },
     io.circe.generic.semiauto.deriveEncoder[FederatedSourceCreateRequest]
   )
-  given Codec[FederatedSourceResponse]       = deriveCodec
-  given Codec[FederatedSourceListResponse]   = deriveCodec
-  given Codec[FederatedSecretUpsertRequest]  = deriveCodec
-  given Codec[FederatedSecretResponse]       = deriveCodec
-  given Codec[FederatedSecretListResponse]   = deriveCodec
-  given Codec[FederationImportSummary]       = deriveCodec
+  given Codec[FederatedSourceResponse]      = deriveCodec
+  given Codec[FederatedSourceListResponse]  = deriveCodec
+  given Codec[FederatedSecretUpsertRequest] = deriveCodec
+  given Codec[FederatedSecretResponse]      = deriveCodec
+  given Codec[FederatedSecretListResponse]  = deriveCodec
+  given Codec[FederationImportSummary]      = deriveCodec

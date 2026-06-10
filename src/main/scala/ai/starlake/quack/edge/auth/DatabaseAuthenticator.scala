@@ -7,23 +7,18 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
 import java.sql.Types
 
-/** Authenticates `(tenant, username, password)` against the
-  * `qodstate_user` table on the control-plane Postgres. The `pool`
-  * parameter is kept on the [[BasicAuthProvider]] signature for
-  * back-compat with the auth chain but is no longer used here -- pool
-  * access is enforced at the FlightSQL handshake via
-  * [[ai.starlake.quack.ondemand.state.PoolPermission]], not in the
-  * password lookup.
+/** Authenticates `(tenant, username, password)` against the `qodstate_user` table on the
+  * control-plane Postgres. The `pool` parameter is kept on the [[BasicAuthProvider]] signature for
+  * back-compat with the auth chain but is no longer used here -- pool access is enforced at the
+  * FlightSQL handshake via [[ai.starlake.quack.ondemand.state.PoolPermission]], not in the password
+  * lookup.
   *
-  * The query MUST return two columns `(password_hash, role)` and accept
-  * two placeholders in order: `tenant`, `username`. `tenant` is bound
-  * as SQL NULL for the manager UI / REST login.
+  * The query MUST return two columns `(password_hash, role)` and accept two placeholders in order:
+  * `tenant`, `username`. `tenant` is bound as SQL NULL for the manager UI / REST login.
   *
-  * Default query in `application.conf` treats a row with `tenant IS
-  * NULL` as a wildcard matching any caller, so the bootstrap superuser
-  * works on both the manager UI and any FlightSQL tenant. A
-  * tenant-scoped row `(tenant, username)` wins over the wildcard NULL
-  * row when both exist:
+  * Default query in `application.conf` treats a row with `tenant IS NULL` as a wildcard matching
+  * any caller, so the bootstrap superuser works on both the manager UI and any FlightSQL tenant. A
+  * tenant-scoped row `(tenant, username)` wins over the wildcard NULL row when both exist:
   * {{{
   *   SELECT password_hash, role FROM qodstate_user
   *   WHERE (tenant IS NULL OR tenant = ?)
@@ -51,7 +46,7 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
   private val query: String = config.query
 
   override def authenticate(
-      tenant:   Option[String],
+      tenant: Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
@@ -67,7 +62,7 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
           val rs = ps.executeQuery()
           if rs.next() then
             val storedHash = rs.getString(1)
-            val role = Option(rs.getString(2)).getOrElse("user")
+            val role       = Option(rs.getString(2)).getOrElse("user")
             if BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
               Right(
                 AuthenticatedProfile(
@@ -75,7 +70,8 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
                   role = role,
                   groups = Set(role),
                   claims = Map("sub" -> username, "role" -> role, "auth_method" -> "database"),
-                  authMethod = "database"
+                  authMethod = "database",
+                  tenant = tenant
                 )
               )
             else Left("Invalid password")

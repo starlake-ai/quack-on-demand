@@ -9,10 +9,10 @@ import io.circe.syntax._
 import java.nio.file.{Files, Path, StandardCopyOption}
 import java.time.Instant
 
-/** Persistence layer for tenant + pool definitions. Implementations atomically
-  * read and write the whole [[StoredState]] blob - the supervisor calls
-  * `save` on every mutation, so partial-write recovery is the implementation's
-  * responsibility. */
+/** Persistence layer for tenant + pool definitions. Implementations atomically read and write the
+  * whole [[StoredState]] blob - the supervisor calls `save` on every mutation, so partial-write
+  * recovery is the implementation's responsibility.
+  */
 trait StateStore:
   def load(): StoredState
   def save(state: StoredState): Unit
@@ -41,7 +41,8 @@ final class FileStateStore(path: Path) extends StateStore:
 object StateStore:
 
   /** Default factory keeps the file-based store reachable as `StateStore(path)`
-    * - preserves the call shape that tests and earlier Main code rely on. */
+    *   - preserves the call shape that tests and earlier Main code rely on.
+    */
   def apply(path: Path): StateStore = new FileStateStore(path)
 
   given Codec[Role] = Codec.from(

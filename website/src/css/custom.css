@@ -1,0 +1,22 @@
+/* Light mode: a dark green so links and accents stay legible on white. */
+:root {
+  --ifm-color-primary: #15803d;
+  --ifm-color-primary-dark: #137334;
+  --ifm-color-primary-darker: #126c31;
+  --ifm-color-primary-darkest: #0f5928;
+  --ifm-color-primary-light: #178d46;
+  --ifm-color-primary-lighter: #199749;
+  --ifm-color-primary-lightest: #1eb558;
+  --ifm-code-font-size: 95%;
+}
+
+/* Dark mode: a brighter green that reads well on dark backgrounds. */
+[data-theme='dark'] {
+  --ifm-color-primary: #3fb950;
+  --ifm-color-primary-dark: #38a648;
+  --ifm-color-primary-darker: #359d44;
+  --ifm-color-primary-darkest: #2b8138;
+  --ifm-color-primary-light: #4ac05a;
+  --ifm-color-primary-lighter: #54c463;
+  --ifm-color-primary-lightest: #6fce7b;
+}

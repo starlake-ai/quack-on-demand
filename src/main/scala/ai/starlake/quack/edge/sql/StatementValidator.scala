@@ -12,7 +12,7 @@ case class ValidationContext(
     // fills these in to produce a fully-qualified TableRef. Falls back
     // to the validator's construction-time defaults when None.
     defaultDatabase: Option[String] = None,
-    defaultSchema:   Option[String] = None,
+    defaultSchema: Option[String] = None,
     // The closure of (roles, groups, permissions, pool grants)
     // computed once at handshake. PostgresAclValidator reads
     // `effectiveSet.permissions` instead of querying
@@ -24,7 +24,7 @@ case class ValidationContext(
 )
 
 sealed trait ValidationResult
-case object Allowed extends ValidationResult
+case object Allowed               extends ValidationResult
 case class Denied(reason: String) extends ValidationResult
 
 trait StatementValidator:

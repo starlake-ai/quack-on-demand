@@ -55,7 +55,7 @@ OCI publication to a public registry is a planned follow-up.
 
 | Object | Purpose |
 |---|---|
-| `Deployment` | The manager pod. Default `replicas: 1` (see guides/RESILIENCE.md and #11). |
+| `Deployment` | The manager pod. Default `replicas: 1` (see the Resilience guide at https://starlake-ai.github.io/quack-on-demand/operating/resilience and #11). |
 | `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `ServiceAccount` | Bound to the `Role` below. |

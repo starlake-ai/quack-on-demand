@@ -9,7 +9,7 @@ import com.comcast.ip4s.{Host, Port}
 import com.typesafe.scalalogging.LazyLogging
 import org.http4s.{HttpRoutes, Response, StaticFile, Status}
 import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.server.{Router, staticcontent}
+import org.http4s.server.{staticcontent, Router}
 import org.typelevel.ci.CIString
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
@@ -31,14 +31,14 @@ final class ManagerServer(
     // Phase B: RBAC handlers. All mounted unconditionally -- the
     // legacy ACL endpoints (above) are still mounted alongside until
     // Phase C drops them.
-    users:           UserHandlers,
-    roles:           RoleHandlers,
-    groups:          GroupHandlers,
-    memberships:     MembershipHandlers,
+    users: UserHandlers,
+    roles: RoleHandlers,
+    groups: GroupHandlers,
+    memberships: MembershipHandlers,
     poolPermissions: PoolPermissionHandlers,
-    serverConfig:        ConfigHandlers,
-    manifest:            ManifestHandlers,
-    federatedSources:    Option[FederatedSourceHandlers] = None
+    serverConfig: ConfigHandlers,
+    manifest: ManifestHandlers,
+    federatedSources: Option[FederatedSourceHandlers] = None
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -46,17 +46,16 @@ final class ManagerServer(
     path == "/api/auth/login" || path == "/api/config/client"
 
   /** Gate on the api namespace. Two modes:
-    *   - **`cfg.apiKey` unset** (default zero-config): the namespace is
-    *     open. A startup warning fires so operators know the manager is
-    *     exposed; this is the documented dev default. To lock it down,
-    *     set `QOD_API_KEY` (or use the UI which mints session
-    *     tokens via /api/auth/login).
-    *   - **`cfg.apiKey` set**: every `/api/...` request must carry an
-    *     `X-API-Key` header matching either the static key OR a known
-    *     admin UI session token.
+    *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
+    *     fires so operators know the manager is exposed; this is the documented dev default. To
+    *     lock it down, set `QOD_API_KEY` (or use the UI which mints session tokens via
+    *     /api/auth/login).
+    *   - **`cfg.apiKey` set**: every `/api/...` request must carry an `X-API-Key` header matching
+    *     either the static key OR a known admin UI session token.
     *
-    * Always-open paths: `/api/auth/login`, `/api/config/client`,
-    * `/health`, and everything outside `/api/...` (incl. `/ui/...`). */
+    * Always-open paths: `/api/auth/login`, `/api/config/client`, `/health`, and everything outside
+    * `/api/...` (incl. `/ui/...`).
+    */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     // Treat an empty string the same as unset. Compose / k8s configs
     // routinely pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=`
@@ -66,16 +65,15 @@ final class ManagerServer(
       case None =>
         logger.warn(
           "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
-          "UI login flow) before exposing the manager beyond localhost.")
+            "UI login flow) before exposing the manager beyond localhost."
+        )
         routes
       case Some(expected) =>
         logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
         Kleisli { req =>
           val path = req.uri.path.toString
-          if !path.startsWith("/api/") && path != "/api" then
-            routes(req)
-          else if isPublicApi(path) then
-            routes(req)
+          if !path.startsWith("/api/") && path != "/api" then routes(req)
+          else if isPublicApi(path) then routes(req)
           else
             val provided = req.headers
               .get(CIString("X-API-Key"))
@@ -120,52 +118,65 @@ final class ManagerServer(
       RbacEndpoints.createUser.serverLogic(users.createUser),
       RbacEndpoints.updateUser.serverLogic(users.updateUser),
       RbacEndpoints.deleteUser.serverLogic(users.deleteUser),
-      RbacEndpoints.listUsers .serverLogic(users.listUsers),
+      RbacEndpoints.listUsers.serverLogic { case (t, key) =>
+        users.listUsers(t, key)(sessions.tenantOf)
+      },
       RbacEndpoints.effectivePermissions.serverLogic(users.effective),
-
       RbacEndpoints.createRole.serverLogic(roles.createRole),
       RbacEndpoints.deleteRole.serverLogic(roles.deleteRole),
-      RbacEndpoints.listRoles .serverLogic(roles.listRoles),
-      RbacEndpoints.grantRolePermission .serverLogic(roles.grantPermission),
+      RbacEndpoints.listRoles.serverLogic(roles.listRoles),
+      RbacEndpoints.grantRolePermission.serverLogic(roles.grantPermission),
       RbacEndpoints.revokeRolePermission.serverLogic(roles.revokePermission),
-      RbacEndpoints.listRolePermissions .serverLogic(roles.listPermissions),
-
+      RbacEndpoints.listRolePermissions.serverLogic(roles.listPermissions),
       RbacEndpoints.createGroup.serverLogic(groups.createGroup),
       RbacEndpoints.deleteGroup.serverLogic(groups.deleteGroup),
-      RbacEndpoints.listGroups .serverLogic(groups.listGroups),
-
-      RbacEndpoints.addUserRoleMembership    .serverLogic(memberships.addUserRole),
-      RbacEndpoints.removeUserRoleMembership .serverLogic(memberships.removeUserRole),
-      RbacEndpoints.addUserGroupMembership   .serverLogic(memberships.addUserGroup),
+      RbacEndpoints.listGroups.serverLogic(groups.listGroups),
+      RbacEndpoints.addUserRoleMembership.serverLogic(memberships.addUserRole),
+      RbacEndpoints.removeUserRoleMembership.serverLogic(memberships.removeUserRole),
+      RbacEndpoints.addUserGroupMembership.serverLogic(memberships.addUserGroup),
       RbacEndpoints.removeUserGroupMembership.serverLogic(memberships.removeUserGroup),
-      RbacEndpoints.addGroupRoleMembership   .serverLogic(memberships.addGroupRole),
+      RbacEndpoints.addGroupRoleMembership.serverLogic(memberships.addGroupRole),
       RbacEndpoints.removeGroupRoleMembership.serverLogic(memberships.removeGroupRole),
-      RbacEndpoints.listGroupRoleMembership  .serverLogic(memberships.listGroupRoles),
-
-      RbacEndpoints.grantPoolPermission .serverLogic(poolPermissions.grant),
+      RbacEndpoints.listGroupRoleMembership.serverLogic(memberships.listGroupRoles),
+      RbacEndpoints.grantPoolPermission.serverLogic(poolPermissions.grant),
       RbacEndpoints.revokePoolPermission.serverLogic(poolPermissions.revoke),
-      RbacEndpoints.listPoolPermissions .serverLogic { case (t, u, g) => poolPermissions.list(t, u, g) }
+      RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g) =>
+        poolPermissions.list(t, u, g)
+      }
     )
 
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
 
-    val federatedSourceEndpoints: List[ServerEndpoint[Any, IO]] = federatedSources.toList.flatMap { h =>
-      List[ServerEndpoint[Any, IO]](
-        Endpoints.createFederatedSource.serverLogic { case (t, td, req) => h.createSource(t, td, req) },
-        Endpoints.listFederatedSources.serverLogic  { case (t, td)       => h.listSources(t, td) },
-        Endpoints.getFederatedSource.serverLogic    { case (t, td, alias) => h.getSource(t, td, alias) },
-        Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias) => h.deleteSource(t, td, alias) },
-        Endpoints.listFederatedSecrets.serverLogic  { case (t, td, alias) => h.listSecrets(t, td, alias) },
-        Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req) => h.upsertSecret(t, td, alias, req) },
-        Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) => h.deleteSecret(t, td, alias, name) }
-      )
-    }
+    val federatedSourceEndpoints: List[ServerEndpoint[Any, IO]] =
+      federatedSources.toList.flatMap { h =>
+        List[ServerEndpoint[Any, IO]](
+          Endpoints.createFederatedSource.serverLogic { case (t, td, req) =>
+            h.createSource(t, td, req)
+          },
+          Endpoints.listFederatedSources.serverLogic { case (t, td) => h.listSources(t, td) },
+          Endpoints.getFederatedSource.serverLogic { case (t, td, alias) =>
+            h.getSource(t, td, alias)
+          },
+          Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias) =>
+            h.deleteSource(t, td, alias)
+          },
+          Endpoints.listFederatedSecrets.serverLogic { case (t, td, alias) =>
+            h.listSecrets(t, td, alias)
+          },
+          Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req) =>
+            h.upsertSecret(t, td, alias, req)
+          },
+          Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) =>
+            h.deleteSecret(t, td, alias, name)
+          }
+        )
+      }
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       Endpoints.createPool.serverLogic(pools.createPool),
       Endpoints.scalePool.serverLogic(pools.scalePool),
       Endpoints.stopPool.serverLogic(pools.stopPool),
-      Endpoints.listPools.serverLogic(_ => pools.listPools()),
+      Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.tenantOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
       Endpoints.setPoolDisabled.serverLogic(pools.setPoolDisabled),
       Endpoints.setRole.serverLogic(nodes.setRole),
@@ -173,27 +184,33 @@ final class ManagerServer(
       Endpoints.quarantineNode.serverLogic(nodes.quarantineNode),
       Endpoints.restartNode.serverLogic(nodes.restartNode),
       Endpoints.createTenant.serverLogic(tenants.createTenant),
-      Endpoints.listTenants.serverLogic(_ => tenants.listTenants()),
+      Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.tenantOf)),
       Endpoints.deleteTenant.serverLogic(tenants.deleteTenant),
       Endpoints.setTenantDisabled.serverLogic(tenants.setTenantDisabled),
-      Endpoints.setTenantAuth    .serverLogic(tenants.setTenantAuth),
+      Endpoints.setTenantAuth.serverLogic(tenants.setTenantAuth),
       Endpoints.createTenantDb.serverLogic(tenantDbs.createTenantDb),
       Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
       Endpoints.deleteTenantDb.serverLogic(tenantDbs.deleteTenantDb),
       Endpoints.health.serverLogic(_ => health.health),
-      Endpoints.clientConfig.serverLogic(_ => IO.pure(Right(
-        ClientConfigResponse(
-          flightSqlHost      = edgeCfg.host,
-          flightSqlPort      = edgeCfg.port,
-          flightSqlTls       = edgeCfg.tlsEnabled,
-          tenantClaim        = edgeCfg.tenantClaim,
-          authEnabled        = authEnabled,
-          placementSupported = pools.supportsPlacement
+      Endpoints.clientConfig.serverLogic(_ =>
+        IO.pure(
+          Right(
+            ClientConfigResponse(
+              flightSqlHost = edgeCfg.host,
+              flightSqlPort = edgeCfg.port,
+              flightSqlTls = edgeCfg.tlsEnabled,
+              tenantClaim = edgeCfg.tenantClaim,
+              authEnabled = authEnabled,
+              placementSupported = pools.supportsPlacement
+            )
+          )
         )
-      ))),
-      Endpoints.serverConfig.serverLogic(_ => serverConfig.list),
-      Endpoints.manifestExport.serverLogic(_ => manifest.exportYaml),
-      Endpoints.manifestImport.serverLogic(body => manifest.importYaml(body))
+      ),
+      Endpoints.serverConfig.serverLogic(apiKey => serverConfig.list(apiKey)(sessions.tenantOf)),
+      Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.tenantOf)),
+      Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
+        manifest.importYaml(body, apiKey)(sessions.tenantOf)
+      }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
@@ -206,12 +223,14 @@ final class ManagerServer(
     // bare /ui/ directory request, and React Router routes like /ui/create) gets
     // index.html so the SPA can take over routing.
     val spaFallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
-      StaticFile.fromResource[IO]("/ui/index.html", Some(req))
+      StaticFile
+        .fromResource[IO]("/ui/index.html", Some(req))
         .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
     }
     val uiRoutes = Router("/ui" -> (uiAssets <+> spaFallback))
 
-    EmberServerBuilder.default[IO]
+    EmberServerBuilder
+      .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withHttpApp((apiKeyGuard(apiRoutes) <+> uiRoutes).orNotFound)

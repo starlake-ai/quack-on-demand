@@ -12,14 +12,12 @@ import java.util.concurrent.{ConcurrentHashMap, Executors}
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** Lightweight HTTP server that handles the OAuth authorization code flow
-  * for browser-based ADBC/CLI clients.
+/** Lightweight HTTP server that handles the OAuth authorization code flow for browser-based
+  * ADBC/CLI clients.
   *
-  * Endpoints:
-  *   GET /oauth/initiate         - start a session, return UUID + auth URL
-  *   GET /oauth/start?session=X  - browser redirect to IdP
-  *   GET /oauth/callback         - IdP redirects here with authorization code
-  *   GET /oauth/token/{uuid}     - poll for completed token
+  * Endpoints: GET /oauth/initiate - start a session, return UUID + auth URL GET
+  * /oauth/start?session=X - browser redirect to IdP GET /oauth/callback - IdP redirects here with
+  * authorization code GET /oauth/token/{uuid} - poll for completed token
   */
 class OAuthHttpServer(
     oauthConfig: OAuthConfig,
@@ -36,9 +34,10 @@ class OAuthHttpServer(
       var error: Option[String] = None
   )
 
-  private val sessions = new ConcurrentHashMap[String, PendingSession]()
+  private val sessions       = new ConcurrentHashMap[String, PendingSession]()
   private val sessionsByHash = new ConcurrentHashMap[String, PendingSession]()
-  private val httpClient = HttpClient.newBuilder()
+  private val httpClient     = HttpClient
+    .newBuilder()
     .connectTimeout(java.time.Duration.ofSeconds(10))
     .build()
 
@@ -47,8 +46,9 @@ class OAuthHttpServer(
     resolveIdpEndpoints()
 
   private val redirectUri: String =
-    val base = if oauthConfig.baseUrl.nonEmpty then oauthConfig.baseUrl
-    else s"http://localhost:${oauthConfig.port}"
+    val base =
+      if oauthConfig.baseUrl.nonEmpty then oauthConfig.baseUrl
+      else s"http://localhost:${oauthConfig.port}"
     s"$base/oauth/callback"
 
   val baseUrl: String =
@@ -76,15 +76,15 @@ class OAuthHttpServer(
 
   private val initiateHandler: HttpHandler = (exchange: HttpExchange) =>
     try
-      val uuid = UUID.randomUUID().toString
-      val hash = hmacSha256(secretKey, uuid)
+      val uuid    = UUID.randomUUID().toString
+      val hash    = hmacSha256(secretKey, uuid)
       val session = PendingSession(uuid, hash, System.currentTimeMillis())
       sessions.put(uuid, session)
       sessionsByHash.put(hash, session)
       cleanupExpiredSessions()
 
       val authUrl = buildAuthorizationUrl(hash)
-      val json = s"""{"session_uuid":"$uuid","auth_url":"$authUrl"}"""
+      val json    = s"""{"session_uuid":"$uuid","auth_url":"$authUrl"}"""
       sendJson(exchange, 200, json)
     catch
       case e: Exception =>
@@ -110,23 +110,25 @@ class OAuthHttpServer(
   private val callbackHandler: HttpHandler = (exchange: HttpExchange) =>
     try
       val params = parseQuery(exchange.getRequestURI.getQuery)
-      val code = params.getOrElse("code", "")
-      val state = params.getOrElse("state", "")
+      val code   = params.getOrElse("code", "")
+      val state  = params.getOrElse("state", "")
 
       if code.isEmpty || state.isEmpty then
         val error = params.getOrElse("error", "missing code or state")
         sendHtml(exchange, 400, s"<h2>Authentication failed</h2><p>$error</p>")
       else
         val session = sessionsByHash.get(state)
-        if session == null then
-          sendHtml(exchange, 404, "<h2>Session expired or not found</h2>")
+        if session == null then sendHtml(exchange, 404, "<h2>Session expired or not found</h2>")
         else
           // Exchange authorization code for tokens
           exchangeCodeForToken(code) match
             case Right(idToken) =>
               session.idToken = Some(idToken)
-              sendHtml(exchange, 200,
-                "<h2>Authentication successful</h2><p>You can close this window and return to your application.</p>")
+              sendHtml(
+                exchange,
+                200,
+                "<h2>Authentication successful</h2><p>You can close this window and return to your application.</p>"
+              )
             case Left(error) =>
               session.error = Some(error)
               sendHtml(exchange, 400, s"<h2>Authentication failed</h2><p>$error</p>")
@@ -137,8 +139,8 @@ class OAuthHttpServer(
 
   private val tokenHandler: HttpHandler = (exchange: HttpExchange) =>
     try
-      val path = exchange.getRequestURI.getPath
-      val uuid = path.stripPrefix("/oauth/token/")
+      val path    = exchange.getRequestURI.getPath
+      val uuid    = path.stripPrefix("/oauth/token/")
       val session = sessions.get(uuid)
       if session == null then
         sendJson(exchange, 404, """{"status":"error","error":"Session not found"}""")
@@ -152,8 +154,7 @@ class OAuthHttpServer(
         sessions.remove(uuid)
         sessionsByHash.remove(session.hash)
         sendJson(exchange, 200, s"""{"status":"complete","token":"$token"}""")
-      else
-        sendJson(exchange, 200, """{"status":"pending"}""")
+      else sendJson(exchange, 200, """{"status":"pending"}""")
     catch
       case e: Exception =>
         logger.error("Error in /oauth/token", e)
@@ -170,14 +171,15 @@ class OAuthHttpServer(
       s"&state=${enc(state)}"
 
   private def exchangeCodeForToken(code: String): Either[String, String] =
-    val enc = (s: String) => URLEncoder.encode(s, StandardCharsets.UTF_8)
+    val enc  = (s: String) => URLEncoder.encode(s, StandardCharsets.UTF_8)
     val body = s"grant_type=authorization_code" +
       s"&code=${enc(code)}" +
       s"&redirect_uri=${enc(redirectUri)}" +
       s"&client_id=${enc(idpClientId)}" +
       s"&client_secret=${enc(idpClientSecret)}"
 
-    val request = HttpRequest.newBuilder()
+    val request = HttpRequest
+      .newBuilder()
       .uri(URI.create(tokenEndpoint))
       .header("Content-Type", "application/x-www-form-urlencoded")
       .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -196,16 +198,25 @@ class OAuthHttpServer(
 
   private def resolveIdpEndpoints(): (String, String, String, String) =
     if authConfig.keycloak.enabled then
-      val base = s"${authConfig.keycloak.baseUrl}/realms/${authConfig.keycloak.realm}/protocol/openid-connect"
-      (s"$base/auth", s"$base/token", authConfig.keycloak.clientId, authConfig.keycloak.clientSecret)
+      val base =
+        s"${authConfig.keycloak.baseUrl}/realms/${authConfig.keycloak.realm}/protocol/openid-connect"
+      (
+        s"$base/auth",
+        s"$base/token",
+        authConfig.keycloak.clientId,
+        authConfig.keycloak.clientSecret
+      )
     else if authConfig.google.enabled then
-      ("https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token",
-        authConfig.google.clientId, authConfig.google.clientSecret)
+      (
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        "https://oauth2.googleapis.com/token",
+        authConfig.google.clientId,
+        authConfig.google.clientSecret
+      )
     else if authConfig.azure.enabled then
       val base = s"https://login.microsoftonline.com/${authConfig.azure.tenantId}/oauth2/v2.0"
       (s"$base/authorize", s"$base/token", authConfig.azure.clientId, authConfig.azure.clientSecret)
-    else
-      throw new IllegalStateException("OAuth enabled but no OIDC provider configured")
+    else throw new IllegalStateException("OAuth enabled but no OIDC provider configured")
 
   private def hmacSha256(key: String, data: String): String =
     val mac = Mac.getInstance("HmacSHA256")
@@ -224,12 +235,18 @@ class OAuthHttpServer(
   private def parseQuery(query: String): Map[String, String] =
     if query == null || query.isEmpty then Map.empty
     else
-      query.split("&").flatMap { pair =>
-        pair.split("=", 2) match
-          case Array(k, v) => Some(java.net.URLDecoder.decode(k, StandardCharsets.UTF_8) ->
-            java.net.URLDecoder.decode(v, StandardCharsets.UTF_8))
-          case _ => None
-      }.toMap
+      query
+        .split("&")
+        .flatMap { pair =>
+          pair.split("=", 2) match
+            case Array(k, v) =>
+              Some(
+                java.net.URLDecoder.decode(k, StandardCharsets.UTF_8) ->
+                  java.net.URLDecoder.decode(v, StandardCharsets.UTF_8)
+              )
+            case _ => None
+        }
+        .toMap
 
   private def sendJson(exchange: HttpExchange, code: Int, json: String): Unit =
     val bytes = json.getBytes(StandardCharsets.UTF_8)

@@ -3,13 +3,14 @@ package ai.starlake.quack.edge.auth
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import com.typesafe.scalalogging.LazyLogging
 
-/** Central authentication orchestrator. Builds chains of authenticators from config
-  * and tries them in order for each authentication request.
+/** Central authentication orchestrator. Builds chains of authenticators from config and tries them
+  * in order for each authentication request.
   */
 class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
-    extends AutoCloseable, LazyLogging:
+    extends AutoCloseable,
+      LazyLogging:
 
-  private val basicProviders: List[BasicAuthProvider] = buildBasicChain()
+  private val basicProviders: List[BasicAuthProvider]   = buildBasicChain()
   private val bearerProviders: List[BearerAuthProvider] = buildBearerChain()
 
   logger.info(
@@ -32,20 +33,19 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
 
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
-  /** Authenticate `(tenant, username, password)` against the basic
-    * chain. `tenant` is `None` for the system-admin login path
-    * (manager UI/REST) and `Some(_)` for a tenant-scoped FlightSQL
-    * principal. The database provider filters its lookup by the
-    * `(tenant, username)` partial unique index on `qodstate_user`;
-    * OIDC ROPC providers ignore the scope. */
+  /** Authenticate `(tenant, username, password)` against the basic chain. `tenant` is `None` for
+    * the system-admin login path (manager UI/REST) and `Some(_)` for a tenant-scoped FlightSQL
+    * principal. The database provider filters its lookup by the `(tenant, username)` partial unique
+    * index on `qodstate_user`; OIDC ROPC providers ignore the scope.
+    */
   def authenticateBasic(
-      tenant:   Option[String],
+      tenant: Option[String],
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
     if basicProviders.isEmpty then Left("No basic auth providers configured")
     else
-      val scope = tenant.getOrElse("system")
+      val scope  = tenant.getOrElse("system")
       val errors = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
@@ -103,8 +103,10 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
       val tokenEndpoint =
         s"${config.keycloak.baseUrl}/realms/${config.keycloak.realm}/protocol/openid-connect/token"
       providers += new ResourceOwnerPasswordAuthenticator(
-        "keycloak", tokenEndpoint,
-        config.keycloak.clientId, config.keycloak.clientSecret,
+        "keycloak",
+        tokenEndpoint,
+        config.keycloak.clientId,
+        config.keycloak.clientSecret,
         config.roleClaim
       )
     // Google does not support ROPC (grant_type=password) - no basic auth provider for Google.
@@ -113,8 +115,10 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
       val tokenEndpoint =
         s"https://login.microsoftonline.com/${config.azure.tenantId}/oauth2/v2.0/token"
       providers += new ResourceOwnerPasswordAuthenticator(
-        "azure", tokenEndpoint,
-        config.azure.clientId, config.azure.clientSecret,
+        "azure",
+        tokenEndpoint,
+        config.azure.clientId,
+        config.azure.clientSecret,
         config.roleClaim
       )
     providers.result()

@@ -7,10 +7,18 @@
 #                metadata lives inside each tenant-db.
 #   - quack    : the manager (REST + UI + FlightSQL edge) built from ./Dockerfile
 #
-# All persistent state is bind-mounted onto the host:
-#   ./pgdata   -> postgres data dir   (`qod` + every tenant-db)
-#   ./ducklake -> DuckLake data files (parquet / etc., one subdir per tenant-db)
-#   ./certs    -> self-signed TLS cert + key (auto-generated on first boot)
+# All persistent state is bind-mounted onto the host. Each host path
+# defaults to a repo-relative folder but accepts an EXTERNAL override (env
+# var, absolute or relative) so the data can live off the repo on a
+# dedicated disk / NFS mount:
+#   ./pgdata          -> postgres data dir   (`qod` + every tenant-db)   [PGDATA_DIR]
+#   ./ducklake        -> DuckLake data files (parquet, one subdir per db) [DUCKLAKE_DIR]
+#   ./certs           -> self-signed TLS cert + key (auto-gen first boot)  [CERTS_DIR]
+#   ./seaweedfs       -> SeaweedFS object data (seaweedfs profile)     [SEAWEEDFS_DIR]
+#   ./seaweedfs-config-> SeaweedFS S3 creds   (seaweedfs profile) [SEAWEEDFS_CONFIG_DIR]
+#
+# NOTE: `NUKE=1 scripts/run-docker-compose.sh` only wipes the repo-relative
+# defaults; external folders you point these vars at are left untouched.
 #
 # Settings live in `.env` (or env vars at compose time) - see .env.example.
 # Bring everything up with:
@@ -31,7 +39,10 @@ services:
       # the metastore. Comment out for a tighter container-only network.
       - "${PG_PORT:-5432}:5432"
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      # Host path defaults to ./pgdata (repo-relative) but can point at an
+      # EXTERNAL folder - e.g. PGDATA_DIR=/data/qod/pgdata - so the metastore
+      # lives off the repo on a dedicated disk. Absolute or relative both work.
+      - ${PGDATA_DIR:-./pgdata}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DBNAME:-qod}"]
       interval: 5s
@@ -171,8 +182,11 @@ services:
       - net.ipv6.conf.default.disable_ipv6=1
 
     volumes:
-      - ./ducklake:/app/ducklake
-      - ./certs:/app/certs
+      # DuckLake parquet + TLS certs. Host paths default to ./ducklake and
+      # ./certs (repo-relative) but accept EXTERNAL folders via DUCKLAKE_DIR /
+      # CERTS_DIR (e.g. DUCKLAKE_DIR=/data/qod/ducklake). Absolute or relative.
+      - ${DUCKLAKE_DIR:-./ducklake}:/app/ducklake
+      - ${CERTS_DIR:-./certs}:/app/certs
 
   # ----- Optional: SeaweedFS as an in-compose S3 backend -----
   #
@@ -202,7 +216,7 @@ services:
       S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
       S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
     volumes:
-      - ./seaweedfs-config:/etc/seaweedfs
+      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
     # $$VAR escapes compose's variable substitution so the in-container shell
     # resolves the env vars set above; bare $VAR would be expanded by compose
     # against .env and arrive empty.
@@ -247,8 +261,10 @@ services:
       - "${SEAWEEDFS_VOLUME_PORT:-8080}:8080"
       - "${SEAWEEDFS_FILER_PORT:-8888}:8888"
     volumes:
-      - ./seaweedfs:/data
-      - ./seaweedfs-config:/etc/seaweedfs
+      # SeaweedFS object data + config. Externalize with SEAWEEDFS_DIR /
+      # SEAWEEDFS_CONFIG_DIR (default ./seaweedfs, ./seaweedfs-config).
+      - ${SEAWEEDFS_DIR:-./seaweedfs}:/data
+      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
     healthcheck:
       # /status returns JSON on the master once volume + filer + s3 are up.
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null"]
@@ -274,7 +290,7 @@ services:
       S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
       S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
     volumes:
-      - ./seaweedfs-config:/etc/seaweedfs
+      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
     entrypoint: ["/bin/sh", "-c"]
     # $$VAR escapes compose's variable substitution so the in-container shell
     # resolves the env vars set under `environment:` above. A single $VAR

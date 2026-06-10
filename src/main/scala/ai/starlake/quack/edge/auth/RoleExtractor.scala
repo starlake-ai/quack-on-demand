@@ -30,7 +30,8 @@ object RoleExtractor:
 
   /** Extract role from a flat string claims map. */
   def extractFromMap(claims: Map[String, String], roleClaim: String): String =
-    claims.get(roleClaim)
+    claims
+      .get(roleClaim)
       .orElse(claims.get("roles"))
       .orElse(claims.get("cognito:groups"))
       .getOrElse("user")
@@ -74,8 +75,10 @@ object RoleExtractor:
     try
       Option(claims.getJSONObjectClaim("realm_access"))
         .flatMap { ra =>
-          Option(ra.get("roles")).collect { case list: java.util.List[?] =>
-            list.asScala.collect { case s: String => s: String }.toSet[String]
-          }.filter(_.nonEmpty)
+          Option(ra.get("roles"))
+            .collect { case list: java.util.List[?] =>
+              list.asScala.collect { case s: String => s: String }.toSet[String]
+            }
+            .filter(_.nonEmpty)
         }
     catch case _: Exception => None

@@ -10,14 +10,13 @@ import scala.jdk.CollectionConverters._
 
 /** Kubernetes-backed quack node runtime.
   *
-  * Creates one Pod + one Service per node. Labels carry pool key, role and
-  * `maxConcurrent` so an orphan-discovery pass can reconstruct
-  * [[ai.starlake.quack.model.RunningNode]]
-  * after a manager restart.
+  * Creates one Pod + one Service per node. Labels carry pool key, role and `maxConcurrent` so an
+  * orphan-discovery pass can reconstruct [[ai.starlake.quack.model.RunningNode]] after a manager
+  * restart.
   *
-  * v1 limitation: the per-node token is held only in-memory. After a manager
-  * restart, discovered pods come back with an empty token; a follow-up task
-  * could persist it in a K8s Secret named after the pod.
+  * v1 limitation: the per-node token is held only in-memory. After a manager restart, discovered
+  * pods come back with an empty token; a follow-up task could persist it in a K8s Secret named
+  * after the pod.
   */
 final class KubernetesQuackBackend(
     client: KubernetesClient,
@@ -27,8 +26,7 @@ final class KubernetesQuackBackend(
     podLabel: String,
     startupTimeoutSec: Int,
     defaultMetastore: Map[String, String] = Map.empty,
-    readPodReady: Pod => Boolean = pod =>
-      Option(pod.getStatus).map(_.getPhase).contains("Running"),
+    readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
     readEnv: String => Option[String] = name => Option(System.getenv(name))
 ) extends QuackBackend:
 
@@ -174,7 +172,7 @@ final class KubernetesQuackBackend(
     val token = LocalQuackBackend.randomToken()
     tokens.put(spec.nodeId, token)
 
-    val pod = buildPod(spec, token)
+    val pod     = buildPod(spec, token)
     val created = client.pods.inNamespace(namespace).resource(pod).create()
     waitReady(created)
 
@@ -182,14 +180,14 @@ final class KubernetesQuackBackend(
     client.services.inNamespace(namespace).resource(svc).create()
 
     RunningNode(
-      nodeId    = spec.nodeId,
-      poolKey   = spec.poolKey,
-      role      = spec.role,
-      host      = s"${spec.nodeId}.$namespace.svc.cluster.local",
-      port      = quackPort,
-      token     = token,
-      pid       = None,
-      podName   = Some(spec.nodeId),
+      nodeId = spec.nodeId,
+      poolKey = spec.poolKey,
+      role = spec.role,
+      host = s"${spec.nodeId}.$namespace.svc.cluster.local",
+      port = quackPort,
+      token = token,
+      pid = None,
+      podName = Some(spec.nodeId),
       startedAt = Instant.now(),
       maxConcurrent = spec.maxConcurrent
     )
@@ -197,7 +195,7 @@ final class KubernetesQuackBackend(
 
   private def waitReady(p: Pod): Unit =
     val deadline = System.currentTimeMillis() + startupTimeoutSec * 1000L
-    var ready = false
+    var ready    = false
     while !ready && System.currentTimeMillis() < deadline do
       val latest = client.pods.inNamespace(namespace).withName(p.getMetadata.getName).get()
       if latest != null && readPodReady(latest) then ready = true
@@ -233,14 +231,14 @@ final class KubernetesQuackBackend(
         roleS    <- labels.get("quack-role")
         role     <- Role.parse(roleS).toOption
       yield RunningNode(
-        nodeId    = p.getMetadata.getName,
-        poolKey   = PoolKey(tenant, tenantDb, pool),
-        role      = role,
-        host      = s"${p.getMetadata.getName}.$namespace.svc.cluster.local",
-        port      = quackPort,
-        token     = tokens.getOrElse(p.getMetadata.getName, ""),
-        pid       = None,
-        podName   = Some(p.getMetadata.getName),
+        nodeId = p.getMetadata.getName,
+        poolKey = PoolKey(tenant, tenantDb, pool),
+        role = role,
+        host = s"${p.getMetadata.getName}.$namespace.svc.cluster.local",
+        port = quackPort,
+        token = tokens.getOrElse(p.getMetadata.getName, ""),
+        pid = None,
+        podName = Some(p.getMetadata.getName),
         startedAt = Instant.now(),
         maxConcurrent = labels.get("quack-max-concurrent").flatMap(_.toIntOption).getOrElse(0)
       )
@@ -252,10 +250,10 @@ final class KubernetesQuackBackend(
 end KubernetesQuackBackend
 
 object KubernetesQuackBackend:
-  /** Object-store credential env vars the manager's pod env is allowed to
-    * forward into spawned node pods. Mirrors what `LocalQuackBackend` gets
-    * for free through `ProcessBuilder` env inheritance. Keep in sync with
-    * the `QOD_*` keys read by `scripts/spawn-quack-node.sh`. */
+  /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
+    * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.
+    * Keep in sync with the `QOD_*` keys read by `scripts/spawn-quack-node.sh`.
+    */
   val cloudCredEnvVars: Seq[String] = Seq(
     "QOD_S3_ENDPOINT",
     "QOD_S3_ACCESS_KEY_ID",

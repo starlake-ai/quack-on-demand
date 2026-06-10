@@ -7,12 +7,11 @@ import io.micrometer.core.instrument.{MeterRegistry, MultiGauge, Tags}
 
 import scala.jdk.CollectionConverters._
 
-/** Wires NodeLoadTracker / PoolSupervisor / SessionRegistry into the
-  * Micrometer registry as read-on-scrape gauges. `refresh()` is called
-  * from MetricsEndpoint before each scrape (and once at startup); each
-  * call updates the row set of every MultiGauge so dynamic membership
-  * (createPool / scale / stopPool) is reflected automatically without
-  * leaving stale series behind. */
+/** Wires NodeLoadTracker / PoolSupervisor / SessionRegistry into the Micrometer registry as
+  * read-on-scrape gauges. `refresh()` is called from MetricsEndpoint before each scrape (and once
+  * at startup); each call updates the row set of every MultiGauge so dynamic membership (createPool
+  * / scale / stopPool) is reflected automatically without leaving stale series behind.
+  */
 final class MetricsBindings(
     registry: MeterRegistry,
     tracker: NodeLoadTracker,

@@ -62,7 +62,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
 
   "ConfigHandlers.list" should "never leak sensitive values; render plain ones as-is" in {
     val cfg = ConfigFactory.load()
-    val views = new ConfigHandlers(cfg, liveEntries).list.unsafeRunSync()
+    val views = new ConfigHandlers(cfg, liveEntries).list(None)(_ => None).unsafeRunSync()
       .toOption.get.entries
     val byPath = views.map(v => v.path -> v).toMap
 
@@ -78,7 +78,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "render missing optional values as '(unset)'" in {
     val cfg = ConfigFactory.load()
-    val views = new ConfigHandlers(cfg, liveEntries).list.unsafeRunSync()
+    val views = new ConfigHandlers(cfg, liveEntries).list(None)(_ => None).unsafeRunSync()
       .toOption.get.entries
     val byPath = views.map(v => v.path -> v).toMap
 
