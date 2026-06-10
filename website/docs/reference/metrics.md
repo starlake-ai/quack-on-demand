@@ -1,5 +1,5 @@
 ---
-id: reference/metrics
+id: metrics
 title: Metrics
 ---
 

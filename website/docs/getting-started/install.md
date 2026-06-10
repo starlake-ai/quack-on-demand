@@ -1,5 +1,5 @@
 ---
-id: getting-started/install
+id: install
 title: Installation
 ---
 
