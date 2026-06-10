@@ -51,6 +51,9 @@ ThisBuild / developers := List(
   )
 )
 
+lazy val genOpenApi    = taskKey[Unit]("Generate website/static/openapi.yaml from the Tapir endpoints")
+lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configuration.md from ConfigRegistry")
+
 // ----- libquackwire (Maven Central) -----------------------------------------
 // JNI shim native binaries published as classifier-per-platform jars.
 //
@@ -273,5 +276,15 @@ lazy val root = (project in file("."))
       setNextVersion,
       commitNextVersion,
       pushChanges
-    )
+    ),
+    genOpenApi := Def.taskDyn {
+      val v = version.value
+      (Compile / runMain).toTask(
+        s" ai.starlake.quack.docs.GenOpenApi website/static/openapi.yaml $v"
+      )
+    }.value,
+    genConfigDocs := Def.taskDyn {
+      (Compile / runMain)
+        .toTask(" ai.starlake.quack.docs.GenConfigDocs website/docs/reference/configuration.md")
+    }.value
   )
