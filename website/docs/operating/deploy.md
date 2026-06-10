@@ -1,5 +1,5 @@
 ---
-id: operating/deploy
+id: deploy
 title: Deployment
 ---
 

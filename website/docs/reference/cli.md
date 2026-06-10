@@ -1,5 +1,5 @@
 ---
-id: reference/cli
+id: cli
 title: CLI
 ---
 

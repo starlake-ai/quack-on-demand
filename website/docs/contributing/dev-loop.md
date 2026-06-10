@@ -1,5 +1,5 @@
 ---
-id: contributing/dev-loop
+id: dev-loop
 title: Development loop
 ---
 

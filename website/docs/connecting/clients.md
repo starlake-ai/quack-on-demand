@@ -1,5 +1,5 @@
 ---
-id: connecting/clients
+id: clients
 title: Connecting clients
 ---
 

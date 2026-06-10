@@ -1,5 +1,5 @@
 ---
-id: concepts/architecture
+id: architecture
 title: Architecture
 ---
 
