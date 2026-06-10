@@ -12,10 +12,10 @@ final class HealthProbe(
     interval: FiniteDuration
 ) extends LazyLogging:
 
-  /** Starts a background fiber that, every `interval`, queries `nodes()` and
-    * pings each, pushing the result into the tracker. Errors from `pingFn`
-    * are caught so a single bad node doesn't kill the loop. Returns the
-    * fiber so callers can cancel during shutdown / scale-down. */
+  /** Starts a background fiber that, every `interval`, queries `nodes()` and pings each, pushing
+    * the result into the tracker. Errors from `pingFn` are caught so a single bad node doesn't kill
+    * the loop. Returns the fiber so callers can cancel during shutdown / scale-down.
+    */
   def start(nodes: () => List[RunningNode]): IO[Fiber[IO, Throwable, Unit]] =
     val tick: IO[Unit] =
       IO.delay(nodes()).flatMap { ns =>
@@ -25,7 +25,7 @@ final class HealthProbe(
             case Right(ok) =>
               logger.debug(s"HealthProbe ${n.nodeId} -> healthy=$ok")
               tracker.setHealthy(n.nodeId, ok)
-            case Left(t)   =>
+            case Left(t) =>
               logger.warn(s"HealthProbe ${n.nodeId} pingFn threw: ${t.getMessage}")
               tracker.setHealthy(n.nodeId, false)
           }

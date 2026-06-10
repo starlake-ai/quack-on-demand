@@ -13,10 +13,10 @@ import org.apache.arrow.vector.types.pojo.{Field, Schema}
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 
-/** Minimal FlightSqlProducer that forwards SQL to the [[FlightSqlRouter]].
-  * The router talks to the chosen Quack node through DuckDB's `quack_query`
-  * extension and hands us back an [[org.apache.arrow.vector.ipc.ArrowReader]]
-  * that we stream batch-by-batch to the Flight client. */
+/** Minimal FlightSqlProducer that forwards SQL to the [[FlightSqlRouter]]. The router talks to the
+  * chosen Quack node through DuckDB's `quack_query` extension and hands us back an
+  * [[org.apache.arrow.vector.ipc.ArrowReader]] that we stream batch-by-batch to the Flight client.
+  */
 final class FlightProducerImpl(
     router: FlightSqlRouter,
     tenantClaim: String
@@ -25,16 +25,14 @@ final class FlightProducerImpl(
 
   private val allocator: BufferAllocator = new RootAllocator()
 
-  /** Cache of prepare-time QueryResult instances keyed by handle. Arrow JDBC
-    * (and DBeaver) requires `dataset_schema` to be populated in
-    * ActionCreatePreparedStatementResult to dispatch as a query rather than an
-    * update - so we have to know the schema at prepare time. We pre-execute
-    * the SQL through the router on prepare, cache the resulting
-    * [[QueryResult]], serialize its schema into `dataset_schema`, then replay
-    * the cached reader from getStreamPreparedStatement. Caller closes on
-    * getStream completion; closePreparedStatement is a safety net for handles
-    * that the client opens but never executes. v1 doesn't support parameter
-    * bindings. */
+  /** Cache of prepare-time QueryResult instances keyed by handle. Arrow JDBC (and DBeaver) requires
+    * `dataset_schema` to be populated in ActionCreatePreparedStatementResult to dispatch as a query
+    * rather than an update - so we have to know the schema at prepare time. We pre-execute the SQL
+    * through the router on prepare, cache the resulting [[QueryResult]], serialize its schema into
+    * `dataset_schema`, then replay the cached reader from getStreamPreparedStatement. Caller closes
+    * on getStream completion; closePreparedStatement is a safety net for handles that the client
+    * opens but never executes. v1 doesn't support parameter bindings.
+    */
   private val preparedStatements =
     scala.collection.concurrent.TrieMap.empty[String, QueryResult]
 
@@ -70,7 +68,8 @@ final class FlightProducerImpl(
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(handle, result)
             val schemaBytes = serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
-            val resp = FlightSql.ActionCreatePreparedStatementResult.newBuilder()
+            val resp        = FlightSql.ActionCreatePreparedStatementResult
+              .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
               .setDatasetSchema(schemaBytes)
               .build()
@@ -111,7 +110,7 @@ final class FlightProducerImpl(
       throw CallStatus.INVALID_ARGUMENT
         .withDescription(s"no such prepared statement: $handle")
         .toRuntimeException()
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket   = new Ticket(ProtoAny.pack(command).toByteArray)
     val endpoint = new FlightEndpoint(ticket)
     new FlightInfo(null, descriptor, Collections.singletonList(endpoint), -1L, -1L)
 
@@ -159,7 +158,13 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamCatalogs(
       context: FlightProducer.CallContext,
@@ -180,20 +185,26 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamSchemas(
       command: FlightSql.CommandGetDbSchemas,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    val catalog = if command.hasCatalog then Some(command.getCatalog) else None
+    val catalog       = if command.hasCatalog then Some(command.getCatalog) else None
     val schemaPattern =
       if command.hasDbSchemaFilterPattern then Some(command.getDbSchemaFilterPattern) else None
     val filters = (
       catalog.map(c => s"catalog_name = '${quote(c)}'") ::
-      schemaPattern.map(p => s"schema_name LIKE '${quote(p)}'") ::
-      Some("schema_name NOT IN ('information_schema', 'pg_catalog')") :: Nil
+        schemaPattern.map(p => s"schema_name LIKE '${quote(p)}'") ::
+        Some("schema_name NOT IN ('information_schema', 'pg_catalog')") :: Nil
     ).flatten.mkString(" AND ")
     runStatement(
       s"""SELECT catalog_name, schema_name AS db_schema_name
@@ -210,23 +221,29 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamTables(
       command: FlightSql.CommandGetTables,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    val catalog = if command.hasCatalog then Some(command.getCatalog) else None
+    val catalog       = if command.hasCatalog then Some(command.getCatalog) else None
     val schemaPattern =
       if command.hasDbSchemaFilterPattern then Some(command.getDbSchemaFilterPattern) else None
     val tablePattern =
       if command.hasTableNameFilterPattern then Some(command.getTableNameFilterPattern) else None
     val filters = (
       catalog.map(c => s"table_catalog = '${quote(c)}'") ::
-      schemaPattern.map(p => s"table_schema LIKE '${quote(p)}'") ::
-      tablePattern.map(p => s"table_name LIKE '${quote(p)}'") ::
-      Some("table_schema NOT IN ('information_schema', 'pg_catalog')") :: Nil
+        schemaPattern.map(p => s"table_schema LIKE '${quote(p)}'") ::
+        tablePattern.map(p => s"table_name LIKE '${quote(p)}'") ::
+        Some("table_schema NOT IN ('information_schema', 'pg_catalog')") :: Nil
     ).flatten.mkString(" AND ")
     val listSql =
       s"""SELECT
@@ -237,18 +254,16 @@ final class FlightProducerImpl(
          |FROM information_schema.tables
          |WHERE $filters
          |ORDER BY 1, 2, 3""".stripMargin
-    if !command.getIncludeSchema then
-      runStatement(listSql, context, listener)
-    else
-      streamTablesWithSchema(listSql, context, listener)
+    if !command.getIncludeSchema then runStatement(listSql, context, listener)
+    else streamTablesWithSchema(listSql, context, listener)
 
-  /** include_schema=true variant of getStreamTables. DBeaver and the Arrow
-    * Flight SQL JDBC driver call this to populate column metadata: each row
-    * carries the table's Arrow schema as IPC-serialized bytes in a fifth
-    * `table_schema` column. We fetch the table list through the router,
-    * then probe each table with `SELECT * ... LIMIT 0` to capture its schema,
-    * and emit a single VectorSchemaRoot built locally (not streamed from
-    * Quack - the per-table-schema shape isn't expressible as one SQL). */
+  /** include_schema=true variant of getStreamTables. DBeaver and the Arrow Flight SQL JDBC driver
+    * call this to populate column metadata: each row carries the table's Arrow schema as
+    * IPC-serialized bytes in a fifth `table_schema` column. We fetch the table list through the
+    * router, then probe each table with `SELECT * ... LIMIT 0` to capture its schema, and emit a
+    * single VectorSchemaRoot built locally (not streamed from Quack - the per-table-schema shape
+    * isn't expressible as one SQL).
+    */
   private def streamTablesWithSchema(
       listSql: String,
       context: FlightProducer.CallContext,
@@ -261,7 +276,7 @@ final class FlightProducerImpl(
       ConnectionContext.userFor(peer)
     ) match
       case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff = ConnectionContext.effectiveSetFor(peer)
+        val eff           = ConnectionContext.effectiveSetFor(peer)
         val tablesAttempt = scala.util.Try(
           router.execute(connId, user, poolKey, listSql, eff).unsafeRunSync()
         )
@@ -269,12 +284,14 @@ final class FlightProducerImpl(
           case scala.util.Failure(t) =>
             logger.error(s"streamTablesWithSchema list failed: ${t.getMessage}", t)
             listener.error(
-              CallStatus.INTERNAL.withDescription(s"router threw: ${t.getMessage}").toRuntimeException()
+              CallStatus.INTERNAL
+                .withDescription(s"router threw: ${t.getMessage}")
+                .toRuntimeException()
             )
           case scala.util.Success(Left(msg)) =>
             listener.error(CallStatus.INTERNAL.withDescription(msg).toRuntimeException())
           case scala.util.Success(Right(listResult)) =>
-            val rows = collectRowsAndClose(listResult)
+            val rows        = collectRowsAndClose(listResult)
             val withSchemas = rows.map { case (cat, sch, name, typ) =>
               val schemaBytes = probeTableSchema(connId, user, poolKey, cat, sch, name, eff)
               (cat, sch, name, typ, schemaBytes)
@@ -292,27 +309,34 @@ final class FlightProducerImpl(
       result: QueryResult
   ): List[(String, String, String, String)] =
     try
-      val buf = scala.collection.mutable.ListBuffer.empty[(String, String, String, String)]
-      val root = result.rows.getVectorSchemaRoot
-      val catVec  = root.getVector("catalog_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
-      val schVec  = root.getVector("db_schema_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val buf    = scala.collection.mutable.ListBuffer.empty[(String, String, String, String)]
+      val root   = result.rows.getVectorSchemaRoot
+      val catVec =
+        root.getVector("catalog_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val schVec =
+        root.getVector("db_schema_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
       val nameVec = root.getVector("table_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
       val typVec  = root.getVector("table_type").asInstanceOf[org.apache.arrow.vector.VarCharVector]
       while result.rows.loadNextBatch() do
         var i = 0
         while i < root.getRowCount do
-          val cat  = if catVec.isNull(i)  then "" else new String(catVec.get(i),  StandardCharsets.UTF_8)
-          val sch  = if schVec.isNull(i)  then "" else new String(schVec.get(i),  StandardCharsets.UTF_8)
-          val name = if nameVec.isNull(i) then "" else new String(nameVec.get(i), StandardCharsets.UTF_8)
-          val typ  = if typVec.isNull(i)  then "" else new String(typVec.get(i),  StandardCharsets.UTF_8)
+          val cat =
+            if catVec.isNull(i) then "" else new String(catVec.get(i), StandardCharsets.UTF_8)
+          val sch =
+            if schVec.isNull(i) then "" else new String(schVec.get(i), StandardCharsets.UTF_8)
+          val name =
+            if nameVec.isNull(i) then "" else new String(nameVec.get(i), StandardCharsets.UTF_8)
+          val typ =
+            if typVec.isNull(i) then "" else new String(typVec.get(i), StandardCharsets.UTF_8)
           buf += ((cat, sch, name, typ))
           i += 1
       buf.toList
     finally result.close()
 
-  /** Probe a single table's Arrow schema via `SELECT * FROM cat.schema.name LIMIT 0`.
-    * Returns the IPC-serialized Schema bytes, or empty bytes on failure (so one
-    * bad table doesn't break the whole metadata response). */
+  /** Probe a single table's Arrow schema via `SELECT * FROM cat.schema.name LIMIT 0`. Returns the
+    * IPC-serialized Schema bytes, or empty bytes on failure (so one bad table doesn't break the
+    * whole metadata response).
+    */
   private def probeTableSchema(
       connId: String,
       user: String,
@@ -322,7 +346,8 @@ final class FlightProducerImpl(
       name: String,
       effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] = None
   ): Array[Byte] =
-    val ident = s""""${cat.replace("\"", "\"\"")}"."${sch.replace("\"", "\"\"")}"."${name.replace("\"", "\"\"")}""""
+    val ident = s""""${cat.replace("\"", "\"\"")}"."${sch
+        .replace("\"", "\"\"")}"."${name.replace("\"", "\"\"")}""""
     val probe = s"SELECT * FROM $ident LIMIT 0"
     scala.util.Try(router.execute(connId, user, poolKey, probe, effectiveSet).unsafeRunSync()) match
       case scala.util.Success(Right(qr)) =>
@@ -330,9 +355,11 @@ final class FlightProducerImpl(
           // Drain one batch so the IPC schema message is fully parsed.
           qr.rows.loadNextBatch()
           val schema = qr.rows.getVectorSchemaRoot.getSchema
-          val baos = new java.io.ByteArrayOutputStream()
+          val baos   = new java.io.ByteArrayOutputStream()
           org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(
-            new org.apache.arrow.vector.ipc.WriteChannel(java.nio.channels.Channels.newChannel(baos)),
+            new org.apache.arrow.vector.ipc.WriteChannel(
+              java.nio.channels.Channels.newChannel(baos)
+            ),
             schema
           )
           baos.toByteArray
@@ -346,32 +373,35 @@ final class FlightProducerImpl(
         Array.emptyByteArray
 
   /** Build a single-batch VectorSchemaRoot conforming to the Flight SQL
-    * `GetTables(include_schema=true)` schema, fill it, and stream to listener. */
+    * `GetTables(include_schema=true)` schema, fill it, and stream to listener.
+    */
   private def emitTablesWithSchema(
       rows: List[(String, String, String, String, Array[Byte])],
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     import org.apache.arrow.vector.types.pojo.{ArrowType, FieldType}
     import org.apache.arrow.vector.{VarBinaryVector, VarCharVector}
-    val utf8     = new ArrowType.Utf8()
-    val binary   = new ArrowType.Binary()
-    val nullable = FieldType.nullable(utf8)
-    val notNull  = new FieldType(false, utf8, null)
+    val utf8       = new ArrowType.Utf8()
+    val binary     = new ArrowType.Binary()
+    val nullable   = FieldType.nullable(utf8)
+    val notNull    = new FieldType(false, utf8, null)
     val binNotNull = new FieldType(false, binary, null)
-    val schema = new Schema(java.util.Arrays.asList(
-      new Field("catalog_name",   nullable,   null),
-      new Field("db_schema_name", nullable,   null),
-      new Field("table_name",     notNull,    null),
-      new Field("table_type",     notNull,    null),
-      new Field("table_schema",   binNotNull, null)
-    ))
+    val schema     = new Schema(
+      java.util.Arrays.asList(
+        new Field("catalog_name", nullable, null),
+        new Field("db_schema_name", nullable, null),
+        new Field("table_name", notNull, null),
+        new Field("table_type", notNull, null),
+        new Field("table_schema", binNotNull, null)
+      )
+    )
     val root = VectorSchemaRoot.create(schema, allocator)
     try
       root.allocateNew()
-      val catVec  = root.getVector("catalog_name").asInstanceOf[VarCharVector]
-      val schVec  = root.getVector("db_schema_name").asInstanceOf[VarCharVector]
-      val nameVec = root.getVector("table_name").asInstanceOf[VarCharVector]
-      val typVec  = root.getVector("table_type").asInstanceOf[VarCharVector]
+      val catVec    = root.getVector("catalog_name").asInstanceOf[VarCharVector]
+      val schVec    = root.getVector("db_schema_name").asInstanceOf[VarCharVector]
+      val nameVec   = root.getVector("table_name").asInstanceOf[VarCharVector]
+      val typVec    = root.getVector("table_type").asInstanceOf[VarCharVector]
       val schemaVec = root.getVector("table_schema").asInstanceOf[VarBinaryVector]
       rows.zipWithIndex.foreach { case ((cat, sch, name, typ, bytes), i) =>
         if cat.isEmpty then catVec.setNull(i)
@@ -394,7 +424,13 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamTableTypes(
       context: FlightProducer.CallContext,
@@ -433,14 +469,23 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamPrimaryKeys(
       command: FlightSql.CommandGetPrimaryKeys,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_PRIMARY_KEYS_SCHEMA, listener)
+    emitEmpty(
+      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_PRIMARY_KEYS_SCHEMA,
+      listener
+    )
 
   override def getFlightInfoImportedKeys(
       command: FlightSql.CommandGetImportedKeys,
@@ -448,14 +493,23 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamImportedKeys(
       command: FlightSql.CommandGetImportedKeys,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_IMPORTED_KEYS_SCHEMA, listener)
+    emitEmpty(
+      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_IMPORTED_KEYS_SCHEMA,
+      listener
+    )
 
   override def getFlightInfoExportedKeys(
       command: FlightSql.CommandGetExportedKeys,
@@ -463,14 +517,23 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamExportedKeys(
       command: FlightSql.CommandGetExportedKeys,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_EXPORTED_KEYS_SCHEMA, listener)
+    emitEmpty(
+      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_EXPORTED_KEYS_SCHEMA,
+      listener
+    )
 
   override def getFlightInfoCrossReference(
       command: FlightSql.CommandGetCrossReference,
@@ -478,14 +541,23 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(null, descriptor, Collections.singletonList(new FlightEndpoint(ticket)), -1L, -1L)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
 
   override def getStreamCrossReference(
       command: FlightSql.CommandGetCrossReference,
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_CROSS_REFERENCE_SCHEMA, listener)
+    emitEmpty(
+      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_CROSS_REFERENCE_SCHEMA,
+      listener
+    )
 
   override def getFlightInfoStatement(
       command: FlightSql.CommandStatementQuery,
@@ -497,7 +569,8 @@ final class FlightProducerImpl(
     // NoOpFlightSqlProducer.getStream parses ticket.getBytes() as Any and
     // dispatches to getStreamStatement only when the unwrapped message is
     // TicketStatementQuery. Raw SQL bytes will silently fail dispatch.
-    val tsq = FlightSql.TicketStatementQuery.newBuilder()
+    val tsq = FlightSql.TicketStatementQuery
+      .newBuilder()
       .setStatementHandle(ByteString.copyFromUtf8(command.getQuery))
       .build()
     val ticket = new Ticket(ProtoAny.pack(tsq).toByteArray)
@@ -523,9 +596,10 @@ final class FlightProducerImpl(
     val sql = ticket.getStatementHandle.toStringUtf8
     runStatement(sql, context, listener)
 
-  /** Shared body of getStreamStatement / getStreamPreparedStatement. Resolves
-    * the per-peer context (tenant/pool/connection), forwards the SQL through
-    * the router and streams the resulting Arrow batches to the Flight client. */
+  /** Shared body of getStreamStatement / getStreamPreparedStatement. Resolves the per-peer context
+    * (tenant/pool/connection), forwards the SQL through the router and streams the resulting Arrow
+    * batches to the Flight client.
+    */
   private def runStatement(
       sql: String,
       context: FlightProducer.CallContext,
@@ -539,13 +613,16 @@ final class FlightProducerImpl(
     ) match
       case (Some(poolKey), Some(connId), Some(user)) =>
         logger.debug(s"runStatement pool=$poolKey sql='$sql'")
-        val eff = ConnectionContext.effectiveSetFor(peer)
-        val outcome = scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
+        val eff     = ConnectionContext.effectiveSetFor(peer)
+        val outcome =
+          scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
         outcome match
           case scala.util.Failure(t) =>
             logger.error(s"router.execute threw: ${t.getMessage}", t)
             listener.error(
-              CallStatus.INTERNAL.withDescription(s"router threw: ${t.getMessage}").toRuntimeException()
+              CallStatus.INTERNAL
+                .withDescription(s"router threw: ${t.getMessage}")
+                .toRuntimeException()
             )
           case scala.util.Success(Right(result)) =>
             try streamArrow(result.rows, listener)
@@ -571,9 +648,10 @@ final class FlightProducerImpl(
             .toRuntimeException()
         )
 
-  /** Read batches from `reader` and push them to the Flight `listener`.
-    * Reuses `reader.getVectorSchemaRoot()` directly - the listener flushes
-    * the current state of the root on each `putNext()`. */
+  /** Read batches from `reader` and push them to the Flight `listener`. Reuses
+    * `reader.getVectorSchemaRoot()` directly - the listener flushes the current state of the root
+    * on each `putNext()`.
+    */
   private def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
       listener: FlightProducer.ServerStreamListener

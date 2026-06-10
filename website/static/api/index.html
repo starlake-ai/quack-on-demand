@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Quack on Demand REST API</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Quack on Demand manager REST API reference" />
+    <link rel="icon" href="../img/favicon.ico" />
+    <style>
+      body { margin: 0; padding: 0; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Renders the code-generated openapi.yaml (produced by `sbt genOpenApi`) with Redoc.
+      This is a plain static page served outside Docusaurus's SSG pipeline, so it avoids
+      the React-context issues that the in-Docusaurus OpenAPI renderers hit, while still
+      consuming the same generated spec - so the reference cannot drift from the code.
+      spec-url is relative to this file: /quack-on-demand/api/ -> /quack-on-demand/openapi.yaml
+    -->
+    <redoc spec-url="../openapi.yaml" theme='{"colors":{"primary":{"main":"#15803d"}}}'></redoc>
+    <!-- Pinned (not `latest`) so a future Redoc release cannot silently change rendering. -->
+    <script src="https://cdn.redoc.ly/redoc/v2.5.0/bundles/redoc.standalone.js"></script>
+  </body>
+</html>

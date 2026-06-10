@@ -74,7 +74,6 @@ ui/vite.config.js
 .claude/
 distrib/
 ducklake/
-docs/
 certs/
 
 datasets/
@@ -106,3 +105,12 @@ libquackwire/binaries/
 # libraryDependencies handle that). Any binaries that land here would
 # be stale relative to the published Maven coord; ignore them.
 src/main/resources/native/
+
+# Docs site (Docusaurus). The build, dependency, and generated-reference
+# outputs are produced by `sbt genConfigDocs genOpenApi` + `npm run build`
+# in CI, so they are never committed (kept in sync with the code, not the tree).
+website/node_modules/
+website/build/
+website/.docusaurus/
+website/static/openapi.yaml
+website/docs/reference/configuration.md

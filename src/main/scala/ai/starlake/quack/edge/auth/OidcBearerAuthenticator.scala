@@ -10,11 +10,11 @@ import com.typesafe.scalalogging.LazyLogging
 import java.net.URL
 import java.util.Date
 
-/** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito)
-  * by verifying signatures against the provider's JWKS endpoint.
+/** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito) by
+  * verifying signatures against the provider's JWKS endpoint.
   *
-  * Uses Nimbus JOSE+JWT's DefaultJWTProcessor with RemoteJWKSet which automatically
-  * caches and refreshes JWK sets for key rotation support.
+  * Uses Nimbus JOSE+JWT's DefaultJWTProcessor with RemoteJWKSet which automatically caches and
+  * refreshes JWK sets for key rotation support.
   */
 class OidcBearerAuthenticator(
     val providerName: String,
@@ -65,16 +65,15 @@ class OidcBearerAuthenticator(
 
       // Check expiry
       val exp = Option(claims.getExpirationTime)
-      if exp.exists(_.before(new Date())) then
-        return Left(s"$providerName: token has expired")
+      if exp.exists(_.before(new Date())) then return Left(s"$providerName: token has expired")
 
       val username = extractUsername(claims)
-      val role = RoleExtractor.extract(claims, roleClaim)
-      var groups = RoleExtractor.extractGroups(claims, "groups")
+      val role     = RoleExtractor.extract(claims, roleClaim)
+      var groups   = RoleExtractor.extractGroups(claims, "groups")
 
       // Enrich groups from external lookup (e.g., Google Directory API)
       groupsLookup.foreach { lookup =>
-        val email = Option(claims.getStringClaim("email")).getOrElse(username)
+        val email          = Option(claims.getStringClaim("email")).getOrElse(username)
         val externalGroups = lookup(email)
         if externalGroups.nonEmpty then
           logger.debug(s"Enriched groups for $email from $providerName directory: $externalGroups")

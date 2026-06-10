@@ -2,24 +2,25 @@ package ai.starlake.quack.edge
 
 import java.time.Instant
 
-/** A single statement execution event captured by the router. Kept lean
-  * so the in-memory ring buffer doesn't bloat. `sql` is truncated at
-  * 500 chars before storage to bound memory under bursty workloads. */
+/** A single statement execution event captured by the router. Kept lean so the in-memory ring
+  * buffer doesn't bloat. `sql` is truncated at 500 chars before storage to bound memory under
+  * bursty workloads.
+  */
 final case class StatementRecord(
-    ts:         Instant,
-    user:       String,
-    tenant:     String,
-    pool:       String,
-    nodeId:     String,
-    sql:        String,
+    ts: Instant,
+    user: String,
+    tenant: String,
+    pool: String,
+    nodeId: String,
+    sql: String,
     durationMs: Long,
-    status:     String,           // "ok" | "denied" | "transient" | "permanent" | "no-node"
-    error:      Option[String]
+    status: String, // "ok" | "denied" | "transient" | "permanent" | "no-node"
+    error: Option[String]
 )
 
-/** Bounded ring buffer of recent statement executions. Lock-protected
-  * append + snapshot. Default capacity ~ 256 records (≈ tens of KiB on
-  * average; bounded by `sqlPreviewChars` per record). */
+/** Bounded ring buffer of recent statement executions. Lock-protected append + snapshot. Default
+  * capacity ~ 256 records (≈ tens of KiB on average; bounded by `sqlPreviewChars` per record).
+  */
 final class StatementHistoryStore(capacity: Int = 256, sqlPreviewChars: Int = 500):
 
   private val buf    = new Array[StatementRecord](capacity)
@@ -41,8 +42,8 @@ final class StatementHistoryStore(capacity: Int = 256, sqlPreviewChars: Int = 50
     if filled == 0 then Nil
     else
       // Walk backwards from the most-recently-written slot.
-      val out = scala.collection.mutable.ListBuffer.empty[StatementRecord]
-      var i = (idx - 1 + capacity) % capacity
+      val out       = scala.collection.mutable.ListBuffer.empty[StatementRecord]
+      var i         = (idx - 1 + capacity) % capacity
       var remaining = math.min(limit, filled)
       while remaining > 0 do
         out += buf(i)

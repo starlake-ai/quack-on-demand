@@ -2,8 +2,16 @@
 package ai.starlake.quack.ondemand.manifest
 
 import ai.starlake.quack.model.{
-  FederatedSecret, FederatedSource, NodePlacement, NodeToleration, Pool, PoolCohort,
-  RoleDistribution, Tenant, TenantDb, TenantDbKind
+  FederatedSecret,
+  FederatedSource,
+  NodePlacement,
+  NodeToleration,
+  Pool,
+  PoolCohort,
+  RoleDistribution,
+  Tenant,
+  TenantDb,
+  TenantDbKind
 }
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
@@ -38,18 +46,19 @@ object ManifestImporter:
 
     // Dup detection
     def dup[A, K](xs: List[A], key: A => K, label: String): Unit =
-      xs.groupBy(key).collect { case (k, vs) if vs.size > 1 =>
-        errs += s"duplicate $label: $k"
+      xs.groupBy(key).collect {
+        case (k, vs) if vs.size > 1 =>
+          errs += s"duplicate $label: $k"
       }
-    dup(m.tenants,        _.name,                       "tenant name")
-    dup(m.roles,          r => (r.tenant, r.name),      "role (tenant, name)")
-    dup(m.groups,         g => (g.tenant, g.name),      "group (tenant, name)")
-    dup(m.users,          u => (u.tenant, u.username),  "user (tenant, username)")
+    dup(m.tenants, _.name, "tenant name")
+    dup(m.roles, r => (r.tenant, r.name), "role (tenant, name)")
+    dup(m.groups, g => (g.tenant, g.name), "group (tenant, name)")
+    dup(m.users, u => (u.tenant, u.username), "user (tenant, username)")
 
     // Per-tenant nested duplicates
     m.tenants.foreach { t =>
       dup(t.tenantDbs, _.name, s"tenant-db within ${t.name}")
-      dup(t.pools,     _.name, s"pool within ${t.name}")
+      dup(t.pools, _.name, s"pool within ${t.name}")
     }
 
     // Cross-references
@@ -58,7 +67,7 @@ object ManifestImporter:
         if !knownTenants.contains(tn) then
           errs += s"user '${u.username}': tenant '$tn' not in YAML or DB"
       }
-      val rolesInTenant = m.roles.filter(_.tenant == u.tenant.getOrElse("")).map(_.name).toSet
+      val rolesInTenant  = m.roles.filter(_.tenant == u.tenant.getOrElse("")).map(_.name).toSet
       val groupsInTenant = m.groups.filter(_.tenant == u.tenant.getOrElse("")).map(_.name).toSet
       u.roles.foreach { r =>
         if !rolesInTenant.contains(r) then
@@ -109,29 +118,26 @@ object ManifestImporter:
   // apply
   // ------------------------------------------------------------------
 
-  /** Apply a manifest against `store`. Validation runs first; on success
-    * the per-resource replace pipeline executes. Returns `Right(())` on
-    * success; `Left(errors)` on a validation or apply failure.
+  /** Apply a manifest against `store`. Validation runs first; on success the per-resource replace
+    * pipeline executes. Returns `Right(())` on success; `Left(errors)` on a validation or apply
+    * failure.
     *
-    * Per-resource semantics: resources that appear in the YAML get
-    * upserted; sibling rows that no longer appear under a parent that IS
-    * in the YAML get deleted (delete-then-upsert). The importer never
-    * drops a Postgres database -- only the `qodstate_*` registry rows
-    * are removed.
+    * Per-resource semantics: resources that appear in the YAML get upserted; sibling rows that no
+    * longer appear under a parent that IS in the YAML get deleted (delete-then-upsert). The
+    * importer never drops a Postgres database -- only the `qodstate_*` registry rows are removed.
     *
-    * Passwords: a user with `password` set has it bcrypt-ed (or kept
-    * verbatim if it already looks like a hash); a user with no
-    * `password` field reuses the existing hash captured at the start
+    * Passwords: a user with `password` set has it bcrypt-ed (or kept verbatim if it already looks
+    * like a hash); a user with no `password` field reuses the existing hash captured at the start
     * (snapshot); a brand-new user without a password is an error.
     *
-    * @param federatedStore when present, federated sources and secrets
-    *   nested inside each tenant-db are upserted using the same
-    *   replace-by-alias + reuse-on-redacted semantics as the dedicated
-    *   federation YAML endpoint. Pass None in file-mode or tests that
-    *   do not exercise federation. */
+    * @param federatedStore
+    *   when present, federated sources and secrets nested inside each tenant-db are upserted using
+    *   the same replace-by-alias + reuse-on-redacted semantics as the dedicated federation YAML
+    *   endpoint. Pass None in file-mode or tests that do not exercise federation.
+    */
   def apply(
-      m:              ConfigManifest,
-      store:          ControlPlaneStore,
+      m: ConfigManifest,
+      store: ControlPlaneStore,
       federatedStore: Option[FederatedSourceStore] = None
   ): ValidationResult =
     validate(m, store).flatMap { _ =>
@@ -149,27 +155,31 @@ object ManifestImporter:
       m.tenants.foreach { mt =>
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
           val newId = s"t-${UUID.randomUUID().toString.take(8)}"
-          store.upsertTenant(Tenant(
-            id           = newId,
-            name         = mt.name,
-            displayName  = mt.name,
-            disabled     = mt.disabled,
-            authProvider = mt.authProvider,
-            authConfig   = mt.authConfig
-          ))
+          store.upsertTenant(
+            Tenant(
+              id = newId,
+              name = mt.name,
+              displayName = mt.name,
+              disabled = mt.disabled,
+              authProvider = mt.authProvider,
+              authConfig = mt.authConfig
+            )
+          )
           newId
         }
 
         // Existing tenant: refresh top-level fields.
         if tenantIdFor(store, mt.name).contains(tenantId) then
-          store.upsertTenant(Tenant(
-            id           = tenantId,
-            name         = mt.name,
-            displayName  = mt.name,
-            disabled     = mt.disabled,
-            authProvider = mt.authProvider,
-            authConfig   = mt.authConfig
-          ))
+          store.upsertTenant(
+            Tenant(
+              id = tenantId,
+              name = mt.name,
+              displayName = mt.name,
+              disabled = mt.disabled,
+              authProvider = mt.authProvider,
+              authConfig = mt.authConfig
+            )
+          )
 
         // ---- TenantDbs: delete-then-upsert.
         val keepDbNames = mt.tenantDbs.map(_.name).toSet
@@ -182,18 +192,20 @@ object ManifestImporter:
               errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
             case Right(dbKind) =>
               val existing = store.listTenantDbs(tenantId).find(_.name == mtd.name)
-              val tdId     = existing.map(_.id).getOrElse(s"td-${UUID.randomUUID().toString.take(8)}")
-              store.upsertTenantDb(TenantDb(
-                id              = tdId,
-                tenantId        = tenantId,
-                name            = mtd.name,
-                kind            = dbKind,
-                metastore       = mtd.metastore,
-                dataPath        = mtd.dataPath,
-                objectStore     = mtd.objectStore,
-                defaultDatabase = mtd.defaultDatabase,
-                defaultSchema   = mtd.defaultSchema
-              ))
+              val tdId = existing.map(_.id).getOrElse(s"td-${UUID.randomUUID().toString.take(8)}")
+              store.upsertTenantDb(
+                TenantDb(
+                  id = tdId,
+                  tenantId = tenantId,
+                  name = mtd.name,
+                  kind = dbKind,
+                  metastore = mtd.metastore,
+                  dataPath = mtd.dataPath,
+                  objectStore = mtd.objectStore,
+                  defaultDatabase = mtd.defaultDatabase,
+                  defaultSchema = mtd.defaultSchema
+                )
+              )
               applyFederatedSources(federatedStore, mtd, tdId, errs)
         }
 
@@ -218,34 +230,37 @@ object ManifestImporter:
             val poolId   = existing.map(_.id).getOrElse(s"p-${UUID.randomUUID().toString.take(8)}")
             val dist     = RoleDistribution(
               writeonly = mp.roleDistribution.writeonly,
-              readonly  = mp.roleDistribution.readonly,
-              dual      = mp.roleDistribution.dual
+              readonly = mp.roleDistribution.readonly,
+              dual = mp.roleDistribution.dual
             )
             val cohorts = mp.cohorts.map { mc =>
               PoolCohort(
-                placement    = NodePlacement(
+                placement = NodePlacement(
                   nodeSelector = mc.placement.nodeSelector,
-                  tolerations  = mc.placement.tolerations.map(t =>
-                    NodeToleration(t.key, t.operator, t.value, t.effect))
+                  tolerations = mc.placement.tolerations.map(t =>
+                    NodeToleration(t.key, t.operator, t.value, t.effect)
+                  )
                 ),
                 distribution = RoleDistribution(
                   writeonly = mc.distribution.writeonly,
-                  readonly  = mc.distribution.readonly,
-                  dual      = mc.distribution.dual
+                  readonly = mc.distribution.readonly,
+                  dual = mc.distribution.dual
                 )
               )
             }
-            store.upsertPool(Pool(
-              id                   = poolId,
-              tenantId             = tenantId,
-              tenantDbId           = dbId,
-              name                 = mp.name,
-              size                 = dist.total,
-              distribution         = dist,
-              maxConcurrentPerNode = mp.maxConcurrentPerNode,
-              disabled             = mp.disabled,
-              cohorts              = cohorts
-            ))
+            store.upsertPool(
+              Pool(
+                id = poolId,
+                tenantId = tenantId,
+                tenantDbId = dbId,
+                name = mp.name,
+                size = dist.total,
+                distribution = dist,
+                maxConcurrentPerNode = mp.maxConcurrentPerNode,
+                disabled = mp.disabled,
+                cohorts = cohorts
+              )
+            )
         }
       }
 
@@ -259,23 +274,27 @@ object ManifestImporter:
           case Some(tenantId) =>
             val existing = store.listRoles(tenantId).find(_.name == mr.name)
             val roleId   = existing.map(_.id).getOrElse(s"r-${UUID.randomUUID().toString.take(8)}")
-            store.upsertRole(RbacRole(
-              id          = roleId,
-              tenantId    = tenantId,
-              name        = mr.name,
-              description = mr.description.filter(_.nonEmpty)
-            ))
+            store.upsertRole(
+              RbacRole(
+                id = roleId,
+                tenantId = tenantId,
+                name = mr.name,
+                description = mr.description.filter(_.nonEmpty)
+              )
+            )
             // Replace permissions: delete every existing then re-insert.
             store.listRolePermissions(roleId).foreach(p => store.deleteRolePermission(p.id))
             mr.permissions.foreach { perm =>
-              store.insertRolePermission(RolePermission(
-                id          = s"rp-${UUID.randomUUID().toString.take(8)}",
-                roleId      = roleId,
-                catalogName = perm.catalog,
-                schemaName  = perm.schema,
-                tableName   = perm.table,
-                verb        = perm.verb
-              ))
+              store.insertRolePermission(
+                RolePermission(
+                  id = s"rp-${UUID.randomUUID().toString.take(8)}",
+                  roleId = roleId,
+                  catalogName = perm.catalog,
+                  schemaName = perm.schema,
+                  tableName = perm.table,
+                  verb = perm.verb
+                )
+              )
             }
       }
 
@@ -287,12 +306,14 @@ object ManifestImporter:
           case Some(tenantId) =>
             val existing = store.listGroups(tenantId).find(_.name == mg.name)
             val groupId  = existing.map(_.id).getOrElse(s"g-${UUID.randomUUID().toString.take(8)}")
-            store.upsertGroup(RbacGroup(
-              id          = groupId,
-              tenantId    = tenantId,
-              name        = mg.name,
-              description = mg.description.filter(_.nonEmpty)
-            ))
+            store.upsertGroup(
+              RbacGroup(
+                id = groupId,
+                tenantId = tenantId,
+                name = mg.name,
+                description = mg.description.filter(_.nonEmpty)
+              )
+            )
             val tenantRoles = store.listRoles(tenantId)
             val keepRoleIds = mg.roles.flatMap(rn => tenantRoles.find(_.name == rn).map(_.id)).toSet
             store.listRolesForGroup(groupId).foreach { rid =>
@@ -319,7 +340,7 @@ object ManifestImporter:
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
 
             // --- User roles
-            val tenantRoles = tenantId.map(store.listRoles).getOrElse(Nil)
+            val tenantRoles   = tenantId.map(store.listRoles).getOrElse(Nil)
             val keepUserRoles = mu.roles.flatMap { rn =>
               tenantRoles.find(_.name == rn).map(_.id)
             }.toSet
@@ -329,7 +350,7 @@ object ManifestImporter:
             keepUserRoles.foreach(rid => store.addUserRole(userId, rid))
 
             // --- User groups
-            val tenantGroups = tenantId.map(store.listGroups).getOrElse(Nil)
+            val tenantGroups   = tenantId.map(store.listGroups).getOrElse(Nil)
             val keepUserGroups = mu.groups.flatMap { gn =>
               tenantGroups.find(_.name == gn).map(_.id)
             }.toSet
@@ -345,54 +366,61 @@ object ManifestImporter:
             mu.poolGrants.foreach { mpg =>
               val poolId: Option[String] = mpg.pool.flatMap { pn =>
                 tenantId.flatMap { tid =>
-                  store.listTenantDbs(tid).flatMap(d => store.listPools(d.id)).find(_.name == pn).map(_.id)
+                  store
+                    .listTenantDbs(tid)
+                    .flatMap(d => store.listPools(d.id))
+                    .find(_.name == pn)
+                    .map(_.id)
                 }
               }
-              store.insertPoolPermission(PoolPermission(
-                id       = s"pp-${UUID.randomUUID().toString.take(8)}",
-                tenantId = tenantId.getOrElse(""),
-                poolId   = poolId,
-                userId   = Some(userId),
-                groupId  = None
-              ))
+              store.insertPoolPermission(
+                PoolPermission(
+                  id = s"pp-${UUID.randomUUID().toString.take(8)}",
+                  tenantId = tenantId.getOrElse(""),
+                  poolId = poolId,
+                  userId = Some(userId),
+                  groupId = None
+                )
+              )
             }
       }
 
       if errs.isEmpty then Right(()) else Left(errs.toList)
     }
 
-  /** Resolve a tenant identifier from its YAML-facing name. Matches on
-    * `displayName` first (the user-facing label persisted on
-    * `qodstate_tenant.display_name`), then falls back to `Tenant.name`
-    * for fixtures that only populate one of the two. */
+  /** Resolve a tenant identifier from its YAML-facing name. Matches on `displayName` first (the
+    * user-facing label persisted on `qodstate_tenant.display_name`), then falls back to
+    * `Tenant.name` for fixtures that only populate one of the two.
+    */
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
     store.listTenants().find(t => t.displayName == name || t.name == name).map(_.id)
 
-  /** Apply federated sources from a manifest tenant-db into the federated
-    * source store. Replace-by-alias semantics: sources not present in the
-    * manifest are deleted; each present source is upserted. Secrets follow
-    * the same delete-then-upsert pattern with reuse of existing values when
-    * the manifest carries "***REDACTED***". */
+  /** Apply federated sources from a manifest tenant-db into the federated source store.
+    * Replace-by-alias semantics: sources not present in the manifest are deleted; each present
+    * source is upserted. Secrets follow the same delete-then-upsert pattern with reuse of existing
+    * values when the manifest carries "***REDACTED***".
+    */
   private def applyFederatedSources(
       federatedStore: Option[FederatedSourceStore],
-      mtd:            ManifestTenantDb,
-      tdId:           String,
-      errs:           scala.collection.mutable.ListBuffer[String]
+      mtd: ManifestTenantDb,
+      tdId: String,
+      errs: scala.collection.mutable.ListBuffer[String]
   ): Unit =
     if federatedStore.isDefined && mtd.federatedSources.nonEmpty then
       val fs = federatedStore.get
 
       // Reject duplicate aliases in payload.
       mtd.federatedSources.groupBy(_.alias).foreach { case (a, vs) =>
-        if vs.size > 1 then
-          errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
+        if vs.size > 1 then errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
       }
 
       // Load existing for value-reuse keyed by (alias, secretName).
       val existing: Map[(String, String), FederatedSecret] =
-        fs.listSources(tdId).flatMap { src =>
-          fs.listSecrets(src.id).map(sec => (src.alias, sec.name) -> sec)
-        }.toMap
+        fs.listSources(tdId)
+          .flatMap { src =>
+            fs.listSecrets(src.id).map(sec => (src.alias, sec.name) -> sec)
+          }
+          .toMap
 
       // Delete sources not in the incoming payload.
       val incomingAliases = mtd.federatedSources.map(_.alias).toSet
@@ -402,18 +430,22 @@ object ManifestImporter:
 
       // Upsert each source and its secrets.
       mtd.federatedSources.foreach { msrc =>
-        val srcId = existing.collectFirst {
-          case ((alias, _), sec) if alias == msrc.alias => sec.federatedSourceId
-        }.getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
+        val srcId = existing
+          .collectFirst {
+            case ((alias, _), sec) if alias == msrc.alias => sec.federatedSourceId
+          }
+          .getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
 
-        fs.upsertSource(FederatedSource(
-          id         = srcId,
-          tenantDbId = tdId,
-          alias      = msrc.alias,
-          setupSql   = msrc.setupSql,
-          description = msrc.description,
-          disabled   = msrc.disabled
-        ))
+        fs.upsertSource(
+          FederatedSource(
+            id = srcId,
+            tenantDbId = tdId,
+            alias = msrc.alias,
+            setupSql = msrc.setupSql,
+            description = msrc.description,
+            disabled = msrc.disabled
+          )
+        )
 
         val incomingSecretNames = msrc.secrets.map(_.name).toSet
         fs.listSecrets(srcId)
@@ -426,21 +458,25 @@ object ManifestImporter:
               case (Some("***REDACTED***"), None) | (None, None) =>
                 existing.get((msrc.alias, msec.name)) match
                   case Some(old) => (old.value, old.externalRef)
-                  case None =>
+                  case None      =>
                     errs += s"tenant-db '${mtd.name}' source '${msrc.alias}' secret '${msec.name}': " +
-                            "no existing value to reuse; provide value or externalRef"
+                      "no existing value to reuse; provide value or externalRef"
                     (None, None)
               case (v, ref) => (v, ref)
 
           if resolved._1.isDefined || resolved._2.isDefined then
-            val secId = existing.get((msrc.alias, msec.name)).map(_.id)
+            val secId = existing
+              .get((msrc.alias, msec.name))
+              .map(_.id)
               .getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
-            fs.upsertSecret(FederatedSecret(
-              id                = secId,
-              federatedSourceId = srcId,
-              name              = msec.name,
-              value             = resolved._1,
-              externalRef       = resolved._2
-            ))
+            fs.upsertSecret(
+              FederatedSecret(
+                id = secId,
+                federatedSourceId = srcId,
+                name = msec.name,
+                value = resolved._1,
+                externalRef = resolved._2
+              )
+            )
         }
       }

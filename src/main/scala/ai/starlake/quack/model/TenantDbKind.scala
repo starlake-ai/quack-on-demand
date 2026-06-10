@@ -1,7 +1,8 @@
 package ai.starlake.quack.model
 
-/** The shape of the "default catalog" for a tenant-db. Federation tables
-  * sit alongside this default; this enum decides what the default is. */
+/** The shape of the "default catalog" for a tenant-db. Federation tables sit alongside this
+  * default; this enum decides what the default is.
+  */
 sealed trait TenantDbKind {
   def wireValue: String
 }

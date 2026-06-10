@@ -5,13 +5,13 @@ import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import java.sql.{Connection, DriverManager, ResultSet}
 import scala.collection.mutable.ListBuffer
 
-/** Postgres-backed CRUD against `qodstate_federated_source` and
-  * `qodstate_federated_secret`. Cascade-delete on source -> secret is
-  * enforced by the FK constraint, so deleting a source automatically
-  * wipes its secrets. */
+/** Postgres-backed CRUD against `qodstate_federated_source` and `qodstate_federated_secret`.
+  * Cascade-delete on source -> secret is enforced by the FK constraint, so deleting a source
+  * automatically wipes its secrets.
+  */
 class FederatedSourceStore(
-    jdbcUrl:  String,
-    user:     String,
+    jdbcUrl: String,
+    user: String,
     password: String
 ):
 
@@ -19,7 +19,8 @@ class FederatedSourceStore(
 
   private def withConn[A](f: Connection => A): A =
     val c = DriverManager.getConnection(jdbcUrl, user, password)
-    try f(c) finally c.close()
+    try f(c)
+    finally c.close()
 
   // ---------------- FederatedSource ----------------
 
@@ -69,16 +70,22 @@ class FederatedSourceStore(
   }
 
   def listSources(tenantDbId: String): List[FederatedSource] = withConn { c =>
-    queryWithTd(c, tenantDbId,
+    queryWithTd(
+      c,
+      tenantDbId,
       """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
-        |FROM qodstate_federated_source WHERE tenant_db_id = ? ORDER BY alias""".stripMargin)
+        |FROM qodstate_federated_source WHERE tenant_db_id = ? ORDER BY alias""".stripMargin
+    )
   }
 
   def listEnabledSources(tenantDbId: String): List[FederatedSource] = withConn { c =>
-    queryWithTd(c, tenantDbId,
+    queryWithTd(
+      c,
+      tenantDbId,
       """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
         |FROM qodstate_federated_source
-        |WHERE tenant_db_id = ? AND disabled = false ORDER BY alias""".stripMargin)
+        |WHERE tenant_db_id = ? AND disabled = false ORDER BY alias""".stripMargin
+    )
   }
 
   private def queryWithTd(c: Connection, tenantDbId: String, sql: String): List[FederatedSource] =
@@ -86,7 +93,8 @@ class FederatedSourceStore(
     try
       ps.setString(1, tenantDbId)
       val rs = ps.executeQuery()
-      try drain(rs)(readSource) finally rs.close()
+      try drain(rs)(readSource)
+      finally rs.close()
     finally ps.close()
 
   // ---------------- FederatedSecret ----------------
@@ -147,7 +155,8 @@ class FederatedSourceStore(
     try
       ps.setString(1, sourceId)
       val rs = ps.executeQuery()
-      try drain(rs)(readSecret) finally rs.close()
+      try drain(rs)(readSecret)
+      finally rs.close()
     finally ps.close()
   }
 
@@ -155,23 +164,23 @@ class FederatedSourceStore(
 
   private def readSource(rs: ResultSet): FederatedSource =
     FederatedSource(
-      id          = rs.getString("id"),
-      tenantDbId  = rs.getString("tenant_db_id"),
-      alias       = rs.getString("alias"),
-      setupSql    = rs.getString("setup_sql"),
+      id = rs.getString("id"),
+      tenantDbId = rs.getString("tenant_db_id"),
+      alias = rs.getString("alias"),
+      setupSql = rs.getString("setup_sql"),
       description = Option(rs.getString("description")),
-      disabled    = rs.getBoolean("disabled"),
-      createdAt   = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+      disabled = rs.getBoolean("disabled"),
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
     )
 
   private def readSecret(rs: ResultSet): FederatedSecret =
     FederatedSecret(
-      id                = rs.getString("id"),
+      id = rs.getString("id"),
       federatedSourceId = rs.getString("federated_source_id"),
-      name              = rs.getString("name"),
-      value             = Option(rs.getString("value")),
-      externalRef       = Option(rs.getString("external_ref")),
-      createdAt         = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+      name = rs.getString("name"),
+      value = Option(rs.getString("value")),
+      externalRef = Option(rs.getString("external_ref")),
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
     )
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
