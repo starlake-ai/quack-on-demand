@@ -11,7 +11,14 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Concepts',
-      items: ['concepts/architecture'],
+      items: [
+        'concepts/architecture',
+        'concepts/tenancy',
+        'concepts/routing',
+        'concepts/sessions-transactions',
+        'concepts/catalogs',
+        'concepts/state-storage',
+      ],
     },
     {
       type: 'category',
@@ -22,9 +29,19 @@ const sidebars: SidebarsConfig = {
           label: 'Deployment',
           items: [
             'operating/deploy-local',
+            'operating/deploy-docker',
             'operating/deploy-kubernetes',
             'operating/tls',
             'operating/resilience',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Provisioning',
+          items: [
+            'operating/tenants-databases',
+            'operating/pools-cohorts',
+            'operating/federation',
           ],
         },
         {
@@ -37,12 +54,19 @@ const sidebars: SidebarsConfig = {
             'operating/rbac-admin',
           ],
         },
+        'operating/observability',
+        'operating/manifest',
+        'operating/admin-ui',
       ],
     },
     {
       type: 'category',
       label: 'Connecting',
-      items: ['connecting/clients'],
+      items: [
+        'connecting/clients',
+        'connecting/authenticating',
+        'connecting/sql',
+      ],
     },
     {
       type: 'category',
@@ -57,7 +81,11 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Contributing',
-      items: ['contributing/dev-loop'],
+      items: [
+        'contributing/dev-loop',
+        'contributing/architecture-map',
+        'contributing/extending',
+      ],
     },
   ],
 };
