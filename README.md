@@ -330,7 +330,7 @@ Per-statement enforcement only kicks in when `acl.enabled=true` (`QOD_ACL_ENABLE
 
 ### Caveats
 
-- **Coarse DML/DDL**: the SQL `TableExtractor` only walks SELECT statements today, so `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the extractor to walk those statement shapes too.
+- **Coarse DML/DDL**: the SQL `TableExtractor` only walks SELECT statements today, so per-statement enforcement (when `acl.enabled`) is asymmetric: `SELECT` is checked per table; `INSERT`/`UPDATE`/`DELETE` carry no extracted table refs and currently pass the table-level gate unchecked; `CREATE`/`DROP` and transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`) require a covering wildcard `*.*.* ALL` grant. Per-table DML grants (and finer DDL/transaction handling) need the extractor to walk those statement shapes too.
 
 ### Curl walkthrough
 
