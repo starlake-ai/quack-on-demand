@@ -1,0 +1,65 @@
+name: Docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'src/main/scala/ai/starlake/quack/docs/**'
+      - 'src/main/scala/ai/starlake/quack/ondemand/api/**'
+      - 'src/main/resources/application.conf'
+      - 'project/**'
+      - 'build.sbt'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Generate reference docs from code
+        run: sbt genConfigDocs genOpenApi
+
+      - name: Build site
+        working-directory: website
+        env:
+          QOD_DOCS_GA_ID: G-GVETLHFVL9
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
