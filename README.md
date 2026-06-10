@@ -44,6 +44,8 @@ The gateway is a **single-instance manager** by design: safely restartable, but 
 - [Community](#community)
 - [Contributing](#contributing)
 
+**Documentation:** https://starlake-ai.github.io/quack-on-demand/ (full guides, configuration reference, and REST API).
+
 Companion files: [`QUICKSTART.md`](guides/QUICKSTART.md) (zero-to-first-query) - [`RUNNING.md`](guides/RUNNING.md) (deployment paths + operator notes) - [`API.md`](guides/API.md) (REST API reference) - [`RESILIENCE.md`](guides/RESILIENCE.md) (failure / recovery matrix) - [`CONTRIBUTING.md`](CONTRIBUTING.md) (dev loop)
 
 ---
