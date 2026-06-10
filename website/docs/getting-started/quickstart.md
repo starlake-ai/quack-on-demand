@@ -7,45 +7,69 @@ Boot the gateway, connect a client, and run your first SQL query against a live 
 
 ## Prerequisites
 
-- **JDK 21 or later.** The gateway uses Arrow Flight, which requires Java 21+.
-- **Postgres 16 or later,** reachable at `localhost:5432` (the default). The control-plane schema and all tenant catalogs live here.
-- **Ports 20900 and 31338 free** on the host. The manager binds the admin REST/UI on 20900 and the FlightSQL edge on 31338.
+- **Docker Compose path (Option A):** just Docker. The stack ships its own Postgres, so you need nothing else installed.
+- **Jar path (Option B):** **JDK 21 or later** (Arrow Flight requires Java 21+) and a **Postgres 16 or later** reachable at `localhost:5432` (the default) for the control-plane schema and tenant catalogs.
+- **Ports 20900 and 31338 free** on the host (admin REST/UI on 20900, FlightSQL edge on 31338), for either path.
 
-For installation details and alternative deployment paths (Docker, Kubernetes), see the [Installation guide](/getting-started/install).
+For alternative deployment paths (Kubernetes) and the full environment-variable model, see the [Installation guide](/getting-started/install).
 
 ## Boot the manager
 
-From the root of a cloned repository:
+### Option A: Docker Compose (no prerequisites)
+
+The quickest start: only Docker is required. From the root of a cloned repository:
+
+```bash
+./scripts/run-docker-compose.sh
+```
+
+This pulls the published `starlakeai/quack-on-demand` image plus a bundled `postgres:16-alpine`, brings the whole stack up, and waits for the manager to become ready - no local JDK or Postgres needed. Stop it with:
+
+```bash
+./scripts/stop-docker-compose.sh
+```
+
+### Option B: From the jar
+
+If you have JDK 21+ and a reachable Postgres:
 
 ```bash
 ./scripts/run-jar.sh
 ```
 
-On first run the script downloads the latest release jar from Maven Central, probes Postgres, creates the control-plane database (`qod`), then starts the JVM. When Postgres is unreachable the script warns and aborts; start Postgres first or set `QOD_STATE_STORAGE=file` for a stateless local run.
+On first run the script downloads the latest release jar from Maven Central, probes Postgres, creates the control-plane database (`qod`), then starts the JVM. When Postgres is unreachable the script warns and aborts; start Postgres first or use the Docker Compose path above. Stop it with `./scripts/stop-jar.sh` (SIGTERM, then SIGKILL after 10 seconds).
 
-What comes up after a successful boot:
+### What comes up
+
+Either path brings up the same surface:
 
 - Admin REST + UI on `http://localhost:20900`
 - Arrow FlightSQL edge on `localhost:31338` (TLS on, self-signed cert auto-generated under `certs/`)
-- Two admin accounts are seeded - `admin` and `admin@localhost.local` - both with password `admin`
+- Two admin accounts seeded - `admin` and `admin@localhost.local` - both with password `admin`
 - Bootstrap tenant `tpch`, tenant-db `tpch1`, pool `sales` created (idempotent on restart)
 
-**Useful boot flags:**
+### Boot flags
+
+The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they combine:
 
 | Flag | Effect |
 |---|---|
-| `BUILD=1 ./scripts/run-jar.sh` | Build from local source with `sbt assembly` instead of downloading |
-| `LOAD_TPCH=N ./scripts/run-jar.sh` | Seed TPC-H at scale factor N before the JVM starts (e.g. `LOAD_TPCH=1` is about 6 M lineitem rows, `LOAD_TPCH=10` is about 60 M). Requires the `duckdb` CLI on PATH. |
-| `QOD_VERSION=latest-snapshot ./scripts/run-jar.sh` | Download the latest snapshot jar instead of the latest release |
-| `NUKE=1 ./scripts/run-jar.sh` | Wipe local Postgres DB, parquet data, and certs before booting. **Irreversible.** |
+| `LOAD_TPCH=N` | Seed TPC-H at scale factor N before startup (`LOAD_TPCH=1` is about 6 M lineitem rows, `LOAD_TPCH=10` about 60 M). The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. |
+| `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
+| `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
+| `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
 
-To stop the manager and all child Quack nodes:
+For a clean, freshly seeded environment in one shot, combine them - this wipes any previous state and boots with a scale-factor-1 TPC-H dataset:
 
 ```bash
-./scripts/stop-jar.sh
+NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 ```
 
-The stop script sends SIGTERM for a graceful shutdown and escalates to SIGKILL after 10 seconds if the process is still listening.
+The jar path takes the same combination:
+
+```bash
+NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+```
 
 ## Open the admin console
 
