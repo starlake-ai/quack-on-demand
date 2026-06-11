@@ -44,36 +44,36 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
   "quarantineNode" should "mark the node unhealthy" in:
     val (sup, tracker, h) = fixture
     val nodeId = sup.list().head.nodes.head.nodeId
-    h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId)).unsafeRunSync() shouldBe Right(())
+    h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) => None).unsafeRunSync() shouldBe Right(())
     tracker.snapshot(nodeId).healthy shouldBe false
 
   it should "return NotFound for unknown node" in:
     val (sup, _, h) = fixture
-    val out = h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", "nope")).unsafeRunSync()
+    val out = h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   "setRole" should "reject unknown role" in:
     val (sup, _, h) = fixture
     val nodeId = sup.list().head.nodes.head.nodeId
-    val out = h.setRole(SetRoleRequest("acme", "acme_default", "sales", nodeId, "NOPE")).unsafeRunSync()
+    val out = h.setRole(SetRoleRequest("acme", "acme_default", "sales", nodeId, "NOPE"), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
 
   "setMaxConcurrent" should "update an existing node" in:
     val (sup, _, h) = fixture
     val nodeId = sup.list().head.nodes.head.nodeId
-    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, 7)).unsafeRunSync()
+    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, 7), None)((_: String) => None).unsafeRunSync()
     out shouldBe Right(())
     sup.get(PoolKey("acme", "acme_default", "sales")).get.nodes.find(_.nodeId == nodeId).get.maxConcurrent shouldBe 7
 
   it should "reject negative max" in:
     val (sup, _, h) = fixture
     val nodeId = sup.list().head.nodes.head.nodeId
-    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, -1)).unsafeRunSync()
+    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, -1), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
 
   it should "return NotFound for unknown node" in:
     val (sup, _, h) = fixture
-    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", "nope", 5)).unsafeRunSync()
+    val out = h.setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", "nope", 5), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   "health" should "report counts" in:
