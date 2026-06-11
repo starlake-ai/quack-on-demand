@@ -25,16 +25,26 @@ final class FlightProducerImpl(
 
   private val allocator: BufferAllocator = new RootAllocator()
 
-  /** Cache of prepare-time QueryResult instances keyed by handle. Arrow JDBC (and DBeaver) requires
-    * `dataset_schema` to be populated in ActionCreatePreparedStatementResult to dispatch as a query
-    * rather than an update - so we have to know the schema at prepare time. We pre-execute the SQL
-    * through the router on prepare, cache the resulting [[QueryResult]], serialize its schema into
-    * `dataset_schema`, then replay the cached reader from getStreamPreparedStatement. Caller closes
-    * on getStream completion; closePreparedStatement is a safety net for handles that the client
-    * opens but never executes. v1 doesn't support parameter bindings.
+  /** Per-handle execution context, captured at Prepare time and replayed on every
+    * `getStreamPreparedStatement` so the same handle can drive many Executes (as the Arrow Flight
+    * SQL spec requires). Arrow JDBC / DBeaver / ADBC all reuse a Prepare handle across multiple
+    * ExecuteQuery calls until they explicitly call ClosePreparedStatement.
+    *
+    * We don't cache the materialized Arrow batches: a `VectorSchemaRoot` is consumed by the first
+    * stream and the underlying [[QueryResult.rows]] cannot be replayed. So we re-execute the SQL
+    * through the router on every Execute. One Prepare = one extra round-trip vs. caching, but the
+    * client gets correct multi-Execute semantics.
     */
+  private final case class PreparedExec(
+      sql: String,
+      connId: String,
+      user: String,
+      poolKey: ai.starlake.quack.model.PoolKey,
+      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet]
+  )
+
   private val preparedStatements =
-    scala.collection.concurrent.TrieMap.empty[String, QueryResult]
+    scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
 
   /** Serialize an Arrow schema as a single IPC `Schema` message. */
   private def serializeSchema(schema: org.apache.arrow.vector.types.pojo.Schema): ByteString =
@@ -63,12 +73,17 @@ final class FlightProducerImpl(
     ) match
       case (Some(poolKey), Some(connId), Some(user)) =>
         val eff = ConnectionContext.effectiveSetFor(peer)
+        // Pre-execute so we can populate `dataset_schema` (Arrow JDBC + DBeaver
+        // dispatch as query vs. update based on its presence). We drop the
+        // materialized rows immediately and re-execute on each Execute.
         scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()) match
           case scala.util.Success(Right(result)) =>
-            val handle = java.util.UUID.randomUUID().toString
-            preparedStatements.put(handle, result)
-            val schemaBytes = serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
-            val resp        = FlightSql.ActionCreatePreparedStatementResult
+            val handle      = java.util.UUID.randomUUID().toString
+            val schemaBytes =
+              try serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
+              finally result.close()
+            preparedStatements.put(handle, PreparedExec(sql, connId, user, poolKey, eff))
+            val resp = FlightSql.ActionCreatePreparedStatementResult
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
               .setDatasetSchema(schemaBytes)
@@ -97,7 +112,7 @@ final class FlightProducerImpl(
       listener: FlightProducer.StreamListener[Result]
   ): Unit =
     val handle = request.getPreparedStatementHandle.toStringUtf8
-    preparedStatements.remove(handle).foreach(_.close())
+    preparedStatements.remove(handle)
     listener.onCompleted()
 
   override def getFlightInfoPreparedStatement(
@@ -120,27 +135,43 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val handle = command.getPreparedStatementHandle.toStringUtf8
-    // Remove + use: prepared-statement results are single-use. The client must
-    // call createPreparedStatement again for a re-run (closePreparedStatement
-    // is the safety net for cancelled handles).
-    preparedStatements.remove(handle) match
+    // Re-execute on every Execute so the handle stays valid until the client
+    // sends ClosePreparedStatement -- the spec contract Arrow JDBC / DBeaver /
+    // ADBC rely on. We re-use the (connId, user, poolKey, EffectiveSet)
+    // captured at Prepare time so an ACL change mid-session does not let a
+    // stale handle bypass the new policy; it still binds to the pool the
+    // client was authorized for at Prepare.
+    preparedStatements.get(handle) match
       case None =>
         listener.error(
           CallStatus.INVALID_ARGUMENT
             .withDescription(s"no such prepared statement: $handle")
             .toRuntimeException()
         )
-      case Some(result) =>
-        try streamArrow(result.rows, listener)
-        catch
-          case t: Throwable =>
-            logger.error(s"failed streaming Arrow batches: ${t.getMessage}", t)
+      case Some(p) =>
+        scala.util.Try(
+          router.execute(p.connId, p.user, p.poolKey, p.sql, p.effectiveSet).unsafeRunSync()
+        ) match
+          case scala.util.Success(Right(result)) =>
+            try streamArrow(result.rows, listener)
+            catch
+              case t: Throwable =>
+                logger.error(s"failed streaming Arrow batches: ${t.getMessage}", t)
+                listener.error(
+                  CallStatus.INTERNAL
+                    .withDescription(s"stream failure: ${t.getMessage}")
+                    .toRuntimeException()
+                )
+            finally result.close()
+          case scala.util.Success(Left(msg)) =>
             listener.error(
-              CallStatus.INTERNAL
-                .withDescription(s"stream failure: ${t.getMessage}")
-                .toRuntimeException()
+              CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
             )
-        finally result.close()
+          case scala.util.Failure(t) =>
+            logger.error(s"getStreamPreparedStatement re-execute threw: ${t.getMessage}", t)
+            listener.error(
+              CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException()
+            )
 
   // -----------------------------------------------------------------
   //  Metadata endpoints - DBeaver / JDBC clients walk these to populate
