@@ -46,13 +46,14 @@ function Hero() {
         <div className={styles.heroCopy}>
           <span className={styles.kicker}>Arrow Flight SQL gateway</span>
           <h1 className={styles.title}>
-            DuckDB and DuckLake,
+            Multi-tenant, federated DuckDB,
             <br />
-            <span className={styles.titleAccent}>as a governed service.</span>
+            <span className={styles.titleAccent}>client-server by Quack.</span>
           </h1>
           <p className={styles.subtitle}>
-            Quack on Demand puts one multi-tenant, access-controlled, horizontally-scaled
-            SQL endpoint in front of many DuckDB engines sharing DuckLake catalogs.
+            Quack on Demand turns embedded DuckDB into a client-server engine. One Arrow
+            Flight SQL endpoint fronts a pool of Quack nodes, with tenant isolation,
+            per-query access control, and federation to external sources.
           </p>
           <div className={styles.ctaRow}>
             <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
