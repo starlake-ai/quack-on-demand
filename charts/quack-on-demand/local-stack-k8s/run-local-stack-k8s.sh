@@ -30,8 +30,9 @@
 #                                                   (default 0)
 #   NUKE             "1" deletes the namespace before reinstalling.
 #                                                   (default 0)
-#   LOAD_TPCH        scale factor (positive integer) for TPC-H seed.
-#                    Unset = skip. Runs inside the manager pod, no
+#   LOAD_TPC         scale factor (positive integer) for TPC demo seed.
+#                    Unset = skip. Seeds both acme_tpch (TPC-H) and
+#                    globex_tpcds (TPC-DS) inside the manager pod; no
 #                    host duckdb required.
 #
 # Requires: kind, kubectl, helm, docker.
@@ -45,7 +46,7 @@ NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
-LOAD_TPCH="${LOAD_TPCH:-}"
+LOAD_TPC="${LOAD_TPC:-}"
 MGR_HUB_IMAGE="${MGR_HUB_IMAGE:-starlakeai/quack-on-demand:latest-snapshot}"
 NODE_HUB_IMAGE="${NODE_HUB_IMAGE:-starlakeai/quack-on-demand-node:latest-snapshot}"
 
@@ -181,9 +182,14 @@ kubectl -n "$NAMESPACE" rollout status deploy/qod-landing --timeout=60s
 
 # ---- 4. helm install -----------------------------------------------------
 echo "[4/5] helm install $RELEASE..."
+HELM_EXTRA_ARGS=()
+if [[ -n "$LOAD_TPC" ]]; then
+  HELM_EXTRA_ARGS+=(--set loadTpc.enabled=true)
+fi
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   -f "$SCRIPT_DIR/values-local-stack.yaml" \
+  "${HELM_EXTRA_ARGS[@]}" \
   --wait --timeout=300s
 
 # ---- 4b. Traefik ingress -------------------------------------------------
@@ -221,52 +227,59 @@ helm upgrade --install traefik traefik \
 
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/ingress.yaml"
 
-# ---- 5. optional TPC-H seed ---------------------------------------------
+# ---- 5. optional TPC demo seed ------------------------------------------
 #
-# Runs inside the manager pod via the bundled /app/scripts/load-tpch-dbgen.sh.
+# Runs inside the manager pod via the bundled loader scripts.
 # The pod has cluster DNS so it reaches `postgres` + `seaweedfs` directly;
 # no host duckdb, no port-forward orchestration.
-if [[ -n "$LOAD_TPCH" ]]; then
-  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
-    echo "[5/5] WARN: LOAD_TPCH='$LOAD_TPCH' is not a positive integer; skipping seed." >&2
+# Two databases are seeded: acme_tpch (TPC-H) and globex_tpcds (TPC-DS).
+if [[ -n "$LOAD_TPC" ]]; then
+  if ! [[ "$LOAD_TPC" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPC" -lt 1 ]]; then
+    echo "[5/5] WARN: LOAD_TPC='$LOAD_TPC' is not a positive integer; skipping seed." >&2
   else
-    echo "[5/5] seeding TPC-H SF=$LOAD_TPCH inside the manager pod..."
+    echo "[5/5] seeding TPC demo SF=$LOAD_TPC inside the manager pod..."
+
     MGR_DEPLOY=$(kubectl -n "$NAMESPACE" get deploy \
       -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
       -o jsonpath='{.items[0].metadata.name}')
-    # DATA_PATH must point at the per-tenant-db prefix the manager
-    # registered with DuckLake -- NOT the root `qod-test`. Manager derives
-    # it as `parent(rootDataPath)/${tenant}_${tenantDb}`; mirror that here.
-    TENANT_DB_NAME="${TPCH_DB:-tpch_tpch1}"
-    SEED_DATA_PATH="s3://qod-ducklake/$TENANT_DB_NAME"
+
+    # Locate the in-cluster Postgres pod so we can pre-create the catalog DBs.
+    PG_POD=$(kubectl -n "$NAMESPACE" get pod \
+      -l "app=postgres" \
+      -o jsonpath='{.items[0].metadata.name}')
+
+    # Pre-create both tenant databases (idempotent).
+    echo "[5/5] pre-creating acme_tpch and globex_tpcds databases in Postgres..."
+    kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
+      psql -U postgres -c \
+        "SELECT 'CREATE DATABASE acme_tpch' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='acme_tpch')\gexec"
+    kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
+      psql -U postgres -c \
+        "SELECT 'CREATE DATABASE globex_tpcds' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='globex_tpcds')\gexec"
+
+    # --- TPC-H loader: acme_tpch.tpch1 ---
+    echo "[5/5] running TPC-H loader (acme_tpch.tpch1, SF=$LOAD_TPC)..."
     kubectl -n "$NAMESPACE" exec "deploy/$MGR_DEPLOY" -- \
       env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
-          DB_NAME="$TENANT_DB_NAME" SCHEMA_NAME="${TPCH_SCHEMA:-tpch1}" \
-          SF="$LOAD_TPCH" \
-          DATA_PATH="$SEED_DATA_PATH" \
+          DB_NAME=acme_tpch SCHEMA_NAME=tpch1 \
+          SF="$LOAD_TPC" \
+          DATA_PATH="s3://qod-ducklake/acme_tpch" \
           QOD_S3_ENDPOINT="http://seaweedfs:8333" \
           QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
           QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
       /app/scripts/load-tpch-dbgen.sh
 
-    # Register a SECOND tenant-db (kind=memory) + a federated source
-    # pointing at the seeded Postgres database. Reaches the manager
-    # through the Traefik ingress on :20900. The setupSql uses the
-    # in-cluster Postgres hostname `postgres` because the quack node
-    # (which evaluates the SQL) runs inside the cluster.
-    echo "[5/5] registering memory tenant-db + federated source pointing at '$TENANT_DB_NAME'..."
-    REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-    MANAGER_URL="http://localhost:${INGRESS_PORT:-20900}" \
-    MANAGER_API_KEY="${QOD_API_KEY:-}" \
-    WAIT_TIMEOUT_SEC=60 \
-    BS_TENANT="tpch" \
-    FED_TENANTDB="${FED_TENANTDB:-fed}" \
-    FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
-    PG_HOST="postgres" PG_PORT="5432" \
-    PG_USER="postgres" PG_PASS="azizam" \
-    TARGET_DB="$TENANT_DB_NAME" \
-      "$REPO_ROOT/scripts/register-tpch-federation.sh" || \
-      echo "[5/5] WARN: federation registration failed; TPC-H seed itself succeeded" >&2
+    # --- TPC-DS loader: globex_tpcds.tpcds1 ---
+    echo "[5/5] running TPC-DS loader (globex_tpcds.tpcds1, SF=$LOAD_TPC)..."
+    kubectl -n "$NAMESPACE" exec "deploy/$MGR_DEPLOY" -- \
+      env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
+          DB_NAME=globex_tpcds SCHEMA_NAME=tpcds1 \
+          SF="$LOAD_TPC" \
+          DATA_PATH="s3://qod-ducklake/globex_tpcds" \
+          QOD_S3_ENDPOINT="http://seaweedfs:8333" \
+          QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
+          QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
+      /app/scripts/load-tpcds-dbgen.sh
   fi
 fi
 

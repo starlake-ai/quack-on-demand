@@ -29,7 +29,7 @@ Quack on Demand has been installed.
 
   JDBC URL template (replace <user>/<password>):
 
-    jdbc:arrow-flight-sql://localhost:{{ .Values.service.flightsql.port }}?useEncryption={{ .Values.flightsql.tls.enabled }}{{- if .Values.flightsql.tls.enabled }}&disableCertificateVerification=true{{- end }}&user=<user>&password=<password>&tenant={{ .Values.bootstrap.tenant }}&pool={{ .Values.bootstrap.pool }}
+    jdbc:arrow-flight-sql://localhost:{{ .Values.service.flightsql.port }}?useEncryption={{ .Values.flightsql.tls.enabled }}{{- if .Values.flightsql.tls.enabled }}&disableCertificateVerification=true{{- end }}&user=<user>&password=<password>&tenant=<tenant>&pool=<pool>
 
 # Watch the Quack node pods the manager spawns
 

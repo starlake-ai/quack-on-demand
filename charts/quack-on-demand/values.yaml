@@ -255,20 +255,14 @@ auth:
 metrics:
   sink: prometheus
 
-# --- Bootstrap tenant / pool ------------------------------------------------
-# Idempotent at startup. Disable when tenants are managed externally.
-bootstrap:
-  enabled: true
-  tenant: tpch
-  # Suffix appended to `tenant` to form the per-tenant DuckLake catalog
-  # database. With the defaults below the chart provisions a Postgres
-  # database named `tpch_tpch1` next to the control-plane `qod`.
-  tenantDb: tpch1
-  pool: sales
-  roleDistribution:
-    writeonly: 1
-    readonly: 1
-    dual: 1
+# --- Demo bootstrap -------------------------------------------------------
+# Setting loadTpc.enabled=true seeds the bundled demo manifest (acme +
+# globex tenants, full RO/RW/DDL/ALL verb matrix, group-attached role
+# chains). The image already contains the YAML at the classpath root, so
+# no file mount is needed. The loaders are NOT run from the chart; use
+# the local-stack-k8s harness for that.
+loadTpc:
+  enabled: false
 
 # --- Arbitrary env-var passthrough ------------------------------------------
 # Anything under `env` lands as an env var on the manager pod, taking

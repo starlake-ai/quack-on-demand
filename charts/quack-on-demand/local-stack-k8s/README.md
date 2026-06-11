@@ -8,7 +8,7 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 - `kubectl`
 - `helm` 3.12+
 - `docker`
-- `duckdb` CLI on `$PATH` (only required when seeding via `LOAD_TPCH`; otherwise skip)
+- `duckdb` CLI on `$PATH` (only required when seeding via `LOAD_TPC`; otherwise skip)
 - ~8 GB free RAM (the manager image + Quack node image + Postgres + SeaweedFS + kind nodes)
 
 ## One command
@@ -75,7 +75,7 @@ flowchart TB
     subgraph host["Host machine"]
         client["FlightSQL client<br/>(JDBC / ODBC / ADBC)"]
         browser["Browser<br/>(admin UI)"]
-        loadtpch["scripts/load-tpch-dbgen.sh<br/>(host duckdb, only when LOAD_TPCH=N)"]
+        loadtpc["load-tpch-dbgen.sh + load-tpcds-dbgen.sh<br/>(in-pod, only when LOAD_TPC=N)"]
     end
 
     subgraph kind["kind cluster &quot;qod-test&quot; · namespace qod"]
@@ -154,11 +154,11 @@ The pieces, one per row of the diagram:
 | `RELEASE` | `qod` | helm release name |
 | `BUILD` | `0` | `0` reuses local `:local`-tagged images (falling back to `:latest-snapshot` from Docker Hub if absent); `1` runs `docker build` first. Same convention as `scripts/run-jar.sh`. |
 | `NUKE` | `0` | `1` deletes the namespace before reinstalling — wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
-| `LOAD_TPCH` | unset | TPC-H seed. Unset = skip; positive integer = scale factor (`LOAD_TPCH=1` ≈ 6M lineitem rows, `LOAD_TPCH=10` ≈ 60M). Seeds TPC-H into the in-cluster Postgres + SeaweedFS before the manager boots — same `scripts/load-tpch-dbgen.sh` flow `run-jar.sh` uses. Requires `duckdb` on the host. |
+| `LOAD_TPC` | unset | Demo seed. Unset = skip; positive integer = scale factor. Seeds both acme_tpch (TPC-H, `LOAD_TPC=1` approx 6M lineitem rows) and globex_tpcds (TPC-DS, `LOAD_TPC=1` approx 2.8M store_sales rows) inside the manager pod via the bundled loader scripts. No host duckdb required. |
 
 ```bash
-# Fresh boot from a clean Postgres + TPC-H SF=1 seeded:
-NUKE=1 LOAD_TPCH=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+# Fresh boot from a clean Postgres + TPC demo SF=1 seeded:
+NUKE=1 LOAD_TPC=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Just nuke and reinstall without seeding:
 NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
