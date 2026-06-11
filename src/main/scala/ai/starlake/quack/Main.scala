@@ -27,6 +27,7 @@ import ai.starlake.quack.observability.metrics.{
 }
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -71,6 +72,8 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[RoleDistributionConfig]    = ProductHint[RoleDistributionConfig](camelMapping)
   given ProductHint[BootstrapConfig]           = ProductHint[BootstrapConfig](camelMapping)
   given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
+  given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
+  given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
@@ -88,6 +91,8 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[RoleDistributionConfig] = deriveReader[RoleDistributionConfig]
   given ConfigReader[BootstrapConfig]        = deriveReader[BootstrapConfig]
   given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
+  given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
+  given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
@@ -274,8 +279,21 @@ object Main extends IOApp with LazyLogging:
         Some(new CatalogHandlers(reader, kindOf))
       else None
 
-    val sessionTokens   = new SessionTokenStore
-    val authHandlers    = new AuthHandlers(authService, sessionTokens)
+    val sessionTokens  = new SessionTokenStore
+    val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
+    val authUserStore: Option[UserStore] =
+      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
+        Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
+      else None
+    val grantsForIdentity: GrantsLookup =
+      (identity, email) =>
+        authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
+    val authHandlers = new AuthHandlers(
+      authService       = authService,
+      tokens            = sessionTokens,
+      identitySource    = identitySource,
+      grantsForIdentity = grantsForIdentity
+    )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory)
     val sessions        = new SessionRegistry

@@ -1,21 +1,28 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
+import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
 import sttp.model.StatusCode
 
-/** REST endpoints that drive the UI's login lifecycle.
+/** REST endpoints driving the UI's login lifecycle.
   *
-  * `/api/auth/login` validates `(username, password)` against the configured AuthenticationService
-  * chain (DB + ROPC providers). On success it mints an opaque session token, registers it with the
-  * SessionTokenStore, and returns it to the browser. The browser stores the token in localStorage
-  * and sends it as `X-API-Key` on subsequent calls - the manager's middleware then admits the
-  * request when the token resolves to a profile with role=admin.
+  * Authentication (who you are) goes through `AuthenticationService.authenticateBasic`.
+  * Authorization (what you may do) depends on `identitySource`:
+  *   - `Db`: the authenticating profile IS the grant. Single-tenant or superuser.
+  *   - `Oidc`: the JWT's `role` and any tenant claim are discarded; `grantsForIdentity` is consulted
+  *     with the JWT's `preferred_username` (and `email` as fallback).
   *
-  * Only admin users can mint a token. Other roles get 403 here so the UI never gets to render with
-  * insufficient privileges.
+  * Either path collapses to a [[SessionScope]] carrying `superuser` and `manageableTenants`. Empty
+  * grants => `403 not_provisioned`; no admin grant => `403 admin_required` (the UI is admin-only).
   */
-final class AuthHandlers(authService: AuthenticationService, tokens: SessionTokenStore):
+final class AuthHandlers(
+    authService: AuthenticationService,
+    tokens: SessionTokenStore,
+    identitySource: ManagementIdentitySource,
+    grantsForIdentity: GrantsLookup
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -38,26 +45,62 @@ final class AuthHandlers(authService: AuthenticationService, tokens: SessionToke
         )
       )
     else
-      // `req.tenant` is the tenant id ("t-...") the operator typed at login.
-      // `None` keeps the legacy system-admin lookup; `Some(id)` switches to
-      // a tenant-scoped row in qodstate_user.
       val scope = req.tenant.map(_.trim).filter(_.nonEmpty)
       authService.authenticateBasic(scope, req.username, req.password) match
         case Left(err) =>
           Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))
-        case Right(profile) if !profile.role.equalsIgnoreCase("admin") =>
-          Left(
-            (
-              StatusCode.Forbidden,
-              ErrorResponse(
-                "admin_required",
-                s"user '${profile.username}' has role '${profile.role}'; admin required for UI"
+        case Right(profile) =>
+          val grants = identitySource match
+            case ManagementIdentitySource.Db =>
+              // The DB authenticator already encoded the (tenant, role) the operator
+              // provisioned in `qodstate_user`. Collapse it into a one-element grant
+              // set so the rest of the pipeline is uniform.
+              List(UserGrant(profile.tenant, profile.role))
+            case ManagementIdentitySource.Oidc =>
+              // Discard JWT role + tenant. The qodstate_user row is authoritative for
+              // management-plane authorization.
+              grantsForIdentity(profile.username, profile.claims.get("email"))
+
+          val superuser = grants.exists(g =>
+            g.tenant.isEmpty && g.role.equalsIgnoreCase("admin")
+          )
+          val manageableTenants: Set[String] = grants.collect {
+            case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
+          }.toSet
+
+          if grants.isEmpty then
+            Left(
+              (
+                StatusCode.Forbidden,
+                ErrorResponse(
+                  "not_provisioned",
+                  s"user '${profile.username}' authenticated but has no qodstate_user grant"
+                )
               )
             )
-          )
-        case Right(profile) =>
-          val token = tokens.mint(profile)
-          Right(LoginResponse(token, profile.username, profile.role, profile.tenant))
+          else if !superuser && manageableTenants.isEmpty then
+            Left(
+              (
+                StatusCode.Forbidden,
+                ErrorResponse(
+                  "admin_required",
+                  s"user '${profile.username}' has no admin grant; manager UI is admin-only"
+                )
+              )
+            )
+          else
+            val sessionScope = SessionScope(superuser, manageableTenants)
+            val token        = tokens.mintWithScope(profile, sessionScope)
+            Right(
+              LoginResponse(
+                token             = token,
+                username          = profile.username,
+                role              = "admin",
+                tenant            = None,
+                superuser         = superuser,
+                manageableTenants = manageableTenants.toList.sorted
+              )
+            )
   }
 
   def logout(token: String): Out[Unit] = IO.delay {
@@ -67,8 +110,17 @@ final class AuthHandlers(authService: AuthenticationService, tokens: SessionToke
 
   def whoami(token: String): Out[WhoamiResponse] = IO.delay {
     tokens.get(token) match
-      case Some(s) => Right(WhoamiResponse(s.profile.username, s.profile.role, s.profile.tenant))
-      case None    =>
+      case Some(s) =>
+        Right(
+          WhoamiResponse(
+            username          = s.profile.username,
+            role              = s.profile.role,
+            tenant            = s.profile.tenant,
+            superuser         = s.scope.superuser,
+            manageableTenants = s.scope.manageableTenants.toList.sorted
+          )
+        )
+      case None =>
         Left(
           (StatusCode.Unauthorized, ErrorResponse("expired", "session token unknown or expired"))
         )

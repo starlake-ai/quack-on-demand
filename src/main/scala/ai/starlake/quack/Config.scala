@@ -93,6 +93,25 @@ final case class FederationConfig(
     secretStore: String
 )
 
+final case class ManagementAuthConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_SOURCE",
+      description =
+        "Management-plane identity source: 'db' (qodstate_user as identity+authz) or 'oidc' (IdP for identity, qodstate_user for role+tenants)."
+    )
+    identitySource: String,
+    @field @ConfigField(
+      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_CLAIM",
+      description =
+        "JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback)."
+    )
+    identityClaim: String
+)
+
+final case class ManagerAuthConfig(
+    management: ManagementAuthConfig
+)
+
 final case class BootstrapConfig(
     @field @ConfigField(
       envVar = "QOD_BOOTSTRAP_ENABLED",
@@ -244,7 +263,8 @@ final case class ManagerConfig(
     admin: AdminConfig,
     k8s: K8sConfig,
     bootstrap: BootstrapConfig,
-    federation: FederationConfig
+    federation: FederationConfig,
+    auth: ManagerAuthConfig
 )
 
 final case class FlightConfig(
