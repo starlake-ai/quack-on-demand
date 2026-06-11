@@ -131,6 +131,29 @@ final class PoolSupervisor(
     // mutations are mirrored incrementally by the methods below.
     rbacResolver.replace(snap)
 
+  /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db. Runs in a single
+    * controlled session per tenant-db so concurrent node ATTACHes do not race on the
+    * `ducklake_metadata` CREATE TABLE in Postgres. Idempotent.
+    *
+    * Intended to run after [[restore]] (so the tenant-dbs cache is populated) and BEFORE
+    * [[reconcile]] (so newly spawned nodes find a fully-initialized catalog). The deleted
+    * programmatic bootstrap used to call this from `createTenantDb`; the YAML import path
+    * persists tenant-dbs directly via `ManifestImporter` and skips that hook, so a fresh
+    * boot needs a dedicated init pass.
+    */
+  def ensureDuckLakeInitialized(): IO[Unit] = IO.blocking {
+    tenantDbs.values.toList.foreach { td =>
+      if td.kind == TenantDbKind.DuckLake then
+        try DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
+        catch
+          case t: Throwable =>
+            logger.warn(
+              s"ensureDuckLakeInitialized: '${td.name}' pre-init raised ${t.getClass.getSimpleName}: " +
+                s"${t.getMessage}. First pool spawn will retry."
+            )
+    }
+  }
+
   /** Re-check every persisted node; respawn dead ones. */
   def reconcile(): IO[Unit] = IO.defer {
     logger.info(
