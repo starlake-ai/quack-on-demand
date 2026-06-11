@@ -27,6 +27,7 @@ import ai.starlake.quack.observability.metrics.{
 }
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
 import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.federation.{
@@ -58,7 +59,6 @@ import pureconfig._
 import pureconfig.generic.ProductHint
 import pureconfig.generic.semiauto.deriveReader
 
-import java.nio.file.Path
 
 object Main extends IOApp with LazyLogging:
 
@@ -69,8 +69,6 @@ object Main extends IOApp with LazyLogging:
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
   given ProductHint[K8sConfig]                 = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]               = ProductHint[AdminConfig](camelMapping)
-  given ProductHint[RoleDistributionConfig]    = ProductHint[RoleDistributionConfig](camelMapping)
-  given ProductHint[BootstrapConfig]           = ProductHint[BootstrapConfig](camelMapping)
   given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
@@ -88,8 +86,6 @@ object Main extends IOApp with LazyLogging:
 
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
-  given ConfigReader[RoleDistributionConfig] = deriveReader[RoleDistributionConfig]
-  given ConfigReader[BootstrapConfig]        = deriveReader[BootstrapConfig]
   given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
   given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
@@ -394,126 +390,6 @@ object Main extends IOApp with LazyLogging:
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds
     )
 
-    // Auto-create the bootstrap tenant + pool on every boot. Idempotent: a
-    // restart with the same config is a no-op. Disabled via
-    // quack-on-demand.bootstrap.enabled=false (e.g. when tenants are
-    // managed externally and the manager must not create them itself).
-    val bootstrapIO: IO[Unit] = IO.defer {
-      val bs = mgrCfg.bootstrap
-      if !bs.enabled then
-        logger.info("bootstrap: disabled (quack-on-demand.bootstrap.enabled=false)")
-        IO.unit
-      else
-        // Compose the tenant-db name up-front so it can serve both the
-        // explicit `createTenantDb` call AND the per-tenant-db dataPath
-        // derivation.
-        val tenantDbName = ai.starlake.quack.model.Names
-          .normalizeTenantDbName(bs.tenant, bs.tenantDb)
-          .fold(err => sys.error(s"bootstrap: invalid tenant/tenantDb: $err"), identity)
-
-        val key  = ai.starlake.quack.model.PoolKey(bs.tenant, tenantDbName, bs.pool)
-        val dist = ai.starlake.quack.model.RoleDistribution(
-          bs.roleDistribution.writeonly,
-          bs.roleDistribution.readonly,
-          bs.roleDistribution.dual
-        )
-
-        // Each tenant-db owns its own on-disk data path. Derive it by
-        // replacing the last path component of the global default
-        // `dataPath` with the composed tenant-db name -- e.g.
-        // `/Users/.../ducklake/tpch` + `tpch_tpch1` -> `/Users/.../ducklake/tpch_tpch1`.
-        //
-        // Object-store URIs (s3:// / gs:// / az:// / abfss:// / ...) must
-        // be handled string-wise: `java.nio.file.Paths.get("s3://...")`
-        // collapses the `//` after the scheme into a single `/`, which
-        // DuckLake then refuses on the next ATTACH because the recorded
-        // catalog path no longer matches the operator-supplied URI.
-        val rootDataPath     = mgrCfg.defaultMetastore.dataPath
-        val tenantDbDataPath =
-          if rootDataPath.isEmpty then ""
-          else if rootDataPath.matches("^[a-z][a-z0-9+.\\-]*://.*") then
-            // Strip the trailing path component, replace with tenant-db name.
-            val trimmed = rootDataPath.stripSuffix("/")
-            val slash   = trimmed.lastIndexOf('/')
-            // `slash` always lands in or past the `://`; never less than the
-            // scheme separator index, so the substring is safe.
-            if slash < 0 then s"$trimmed/$tenantDbName"
-            else s"${trimmed.substring(0, slash)}/$tenantDbName"
-          else
-            val p      = java.nio.file.Paths.get(rootDataPath)
-            val parent = p.getParent
-            if parent == null then tenantDbName else parent.resolve(tenantDbName).toString
-        val tenantDbMetastore = mgrCfg.defaultMetastore.asMap
-          .updated("dataPath", tenantDbDataPath)
-          .updated("dbName", tenantDbName)
-
-        val createTenantIO: IO[Unit] =
-          if sup.getTenant(bs.tenant).isDefined then
-            IO.delay(logger.info(s"bootstrap: tenant '${bs.tenant}' already exists; skipping"))
-          else
-            // Bootstrap tenant uses the `db` auth provider -- the only
-            // provider that needs zero out-of-band config to be useful.
-            sup
-              .createTenant(
-                ai.starlake.quack.model.Tenant(name = bs.tenant, authProvider = "db")
-              )
-              .flatMap {
-                case Right(_) =>
-                  IO.delay(logger.info(s"bootstrap: created tenant '${bs.tenant}' (auth=db)"))
-                case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant create failed: $err"))
-              }
-
-        val createTenantDbIO: IO[Unit] =
-          if sup.listTenantDbsByTenant(bs.tenant).exists(_.name == tenantDbName) then
-            IO.delay(
-              logger.info(
-                s"bootstrap: tenant-db '${bs.tenant}/$tenantDbName' already exists; skipping"
-              )
-            )
-          else
-            sup
-              .createTenantDb(
-                tenantName = bs.tenant,
-                suffix = bs.tenantDb,
-                kind = ai.starlake.quack.model.TenantDbKind.DuckLake,
-                metastore = tenantDbMetastore,
-                dataPath = tenantDbDataPath,
-                objectStore = Map.empty
-              )
-              .flatMap {
-                case Right(_) =>
-                  IO.delay(
-                    logger.info(
-                      s"bootstrap: created tenant-db '${bs.tenant}/$tenantDbName' at $tenantDbDataPath"
-                    )
-                  )
-                case Left(err) => IO.delay(logger.warn(s"bootstrap: tenant-db create failed: $err"))
-              }
-
-        val createPoolIO: IO[Unit] =
-          if sup.get(key).isDefined then
-            IO.delay(logger.info(s"bootstrap: pool '$key' already exists; skipping"))
-          else
-            sup.createPool(key, dist).attempt.flatMap {
-              case Right(nodes) =>
-                IO.delay(
-                  logger.info(
-                    s"bootstrap: created pool '$key' with ${nodes.size} node(s) " +
-                      s"(writeonly=${dist.writeonly}, readonly=${dist.readonly}, dual=${dist.dual})"
-                  )
-                )
-              case Left(t) =>
-                IO.delay(logger.warn(s"bootstrap: pool create failed: ${t.getMessage}"))
-            }
-
-        // Per-tenant auth model: the bootstrap tenant uses provider=db,
-        // identity is implicit in `qodstate_user.username`. No identity
-        // table to seed any more -- superuser admins (tenant=NULL)
-        // bypass the per-statement ACL gate; tenant-scoped admins
-        // authenticate through the qodstate_user partial unique index.
-        createTenantIO *> createTenantDbIO *> createPoolIO
-    }
-
     def runWithMetrics(
         metricsReg: MetricsRegistry,
         metricsEndpoint: MetricsEndpoint,
@@ -688,7 +564,13 @@ object Main extends IOApp with LazyLogging:
       // ducklake_* tables.
       IO.delay(sup.restore()) *>
         sup.reconcile() *>
-        bootstrapIO *>
+        DemoBootstrapHook.run(
+          env      = sys.env.get,
+          readFile = path => scala.util.Using(
+            scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
+          )(_.getLines().mkString("\n")),
+          store    = store
+        ) *>
         mgr.serve.use { _ =>
           logger.info(
             s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +

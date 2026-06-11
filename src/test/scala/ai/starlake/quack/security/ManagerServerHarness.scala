@@ -73,13 +73,6 @@ object ManagerServerHarness:
       startupTimeoutSec  = 60,
       podLabel           = "app=quack-node"
     ),
-    bootstrap  = BootstrapConfig(
-      enabled           = false,
-      tenant            = "demo",
-      tenantDb          = "demo",
-      pool              = "default",
-      roleDistribution  = RoleDistributionConfig(writeonly = 0, readonly = 0, dual = 1)
-    ),
     federation = FederationConfig(secretStore = "env"),
     auth       = ManagerAuthConfig(
       management = ManagementAuthConfig(identitySource = "db", identityClaim = "preferred_username")

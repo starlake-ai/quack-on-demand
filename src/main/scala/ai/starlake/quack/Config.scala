@@ -66,24 +66,6 @@ final case class AdminConfig(
   def usernameList: List[String] =
     username.split(",").iterator.map(_.trim).filter(_.nonEmpty).toList
 
-final case class RoleDistributionConfig(
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_WRITEONLY",
-      description = "Number of WRITEONLY nodes in the bootstrap pool."
-    )
-    writeonly: Int,
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_READONLY",
-      description = "Number of READONLY nodes in the bootstrap pool."
-    )
-    readonly: Int,
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_DUAL",
-      description = "Number of DUAL nodes in the bootstrap pool."
-    )
-    dual: Int
-)
-
 final case class FederationConfig(
     @field @ConfigField(
       envVar = "QOD_FEDERATION_SECRET_STORE",
@@ -110,30 +92,6 @@ final case class ManagementAuthConfig(
 
 final case class ManagerAuthConfig(
     management: ManagementAuthConfig
-)
-
-final case class BootstrapConfig(
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_ENABLED",
-      description = "Auto-create starter tenant + pool on boot. Idempotent."
-    )
-    enabled: Boolean,
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_TENANT",
-      description = "Tenant name seeded at boot."
-    )
-    tenant: String,
-    // Tenant-db suffix; the actual Postgres database created on boot is
-    // composed by `Names.normalizeTenantDbName(tenant, tenantDb)` --
-    // i.e. `${tenant}_${tenantDb}` after lowercasing.
-    @field @ConfigField(
-      envVar = "QOD_BOOTSTRAP_TENANTDB",
-      description = "Tenant-db suffix; actual DB is ${tenant}_${tenantDb}."
-    )
-    tenantDb: String,
-    @field @ConfigField(envVar = "QOD_BOOTSTRAP_POOL", description = "Pool name seeded at boot.")
-    pool: String,
-    roleDistribution: RoleDistributionConfig
 )
 
 /** Typed view of the `quack-on-demand.defaultMetastore` block. Every scalar maps to an env-var
@@ -262,7 +220,6 @@ final case class ManagerConfig(
     defaultMetastore: DefaultMetastoreConfig,
     admin: AdminConfig,
     k8s: K8sConfig,
-    bootstrap: BootstrapConfig,
     federation: FederationConfig,
     auth: ManagerAuthConfig
 )
