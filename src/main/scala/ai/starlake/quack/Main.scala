@@ -562,15 +562,20 @@ object Main extends IOApp with LazyLogging:
       // Postgres database has been provisioned. The control-plane
       // database holds qodstate_* / slkstate_* only and must never carry
       // ducklake_* tables.
-      IO.delay(sup.restore()) *>
+      // Order matters: the bootstrap hook may insert tenants/pools/users
+      // into the store. We must run it BEFORE restore() so the supervisor's
+      // in-memory cache reflects the imported state; reconcile() then sees
+      // those pools and can spawn nodes. Inverting the order leaves the
+      // REST/UI reading from an empty cache after a fresh boot.
+      DemoBootstrapHook.run(
+        env      = sys.env.get,
+        readFile = path => scala.util.Using(
+          scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
+        )(_.getLines().mkString("\n")),
+        store    = store
+      ) *>
+        IO.delay(sup.restore()) *>
         sup.reconcile() *>
-        DemoBootstrapHook.run(
-          env      = sys.env.get,
-          readFile = path => scala.util.Using(
-            scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
-          )(_.getLines().mkString("\n")),
-          store    = store
-        ) *>
         mgr.serve.use { _ =>
           logger.info(
             s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
