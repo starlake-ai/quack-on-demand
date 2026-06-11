@@ -155,6 +155,42 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Allowed
   }
 
+  it should "SELECT from the federated acme_pg via cross_tenant_analyst role" in {
+    validator.validate(
+      ctx(
+        "SELECT * FROM acme_pg.tpch1.customer",
+        effective("carol", Some("globex")),
+        defaultCatalog = "globex_tpcds",
+        defaultSchema  = "tpcds1"
+      )
+    ) shouldBe Allowed
+  }
+
+  it should "be denied SELECT on a federated table she has no grant for" in {
+    validator.validate(
+      ctx(
+        "SELECT * FROM acme_pg.tpch1.lineitem",
+        effective("carol", Some("globex")),
+        defaultCatalog = "globex_tpcds",
+        defaultSchema  = "tpcds1"
+      )
+    ) shouldBe a [Denied]
+  }
+
+  "globex-admin (tenant_admin)" should "be denied federated SELECT (wildcard not in tenantCatalogs)" in {
+    // tenantCatalogs returns only the tenant's own tenant-dbs, not the
+    // federated catalog aliases registered on those tenant-dbs. So
+    // *.*.* ALL does NOT reach `acme_pg` without an explicit named grant.
+    validator.validate(
+      ctx(
+        "SELECT * FROM acme_pg.tpch1.customer",
+        effective("globex-admin", Some("globex")),
+        defaultCatalog = "globex_tpcds",
+        defaultSchema  = "tpcds1"
+      )
+    ) shouldBe a [Denied]
+  }
+
   "root (superuser)" should "SELECT in any catalog" in {
     validator.validate(
       ctx("SELECT * FROM globex_tpcds.tpcds1.store_sales", effective("root", None))

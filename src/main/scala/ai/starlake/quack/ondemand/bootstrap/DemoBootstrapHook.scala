@@ -2,7 +2,7 @@
 package ai.starlake.quack.ondemand.bootstrap
 
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestImporter}
-import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 import cats.effect.IO
 import io.circe.yaml.v12.parser
 import org.slf4j.LoggerFactory
@@ -26,14 +26,19 @@ object DemoBootstrapHook:
 
   /** Runs the hook. Always succeeds: failure paths log and return Unit.
     *
-    * @param env      env-var reader (e.g. `sys.env.get`)
-    * @param readFile file reader returning the manifest YAML body
-    * @param store    control-plane store to apply the manifest to
+    * @param env       env-var reader (e.g. `sys.env.get`)
+    * @param readFile  file reader returning the manifest YAML body
+    * @param store     control-plane store to apply the manifest to
+    * @param fedStore  optional federated-source store; when provided, any
+    *                  federatedSources in the manifest are persisted too.
+    *                  Pass None to silently drop federation entries (the
+    *                  unit-test path uses this).
     */
   def run(
       env: String => Option[String],
       readFile: String => Try[String],
-      store: ControlPlaneStore
+      store: ControlPlaneStore,
+      fedStore: Option[FederatedSourceStore] = None
   ): IO[Unit] = IO.blocking {
     env(EnvKey) match
       case None =>
@@ -47,12 +52,13 @@ object DemoBootstrapHook:
               case Left(parseErr) =>
                 logger.warn(s"bootstrap: failed to parse manifest '$path': ${parseErr.getMessage}")
               case Right(manifest) =>
-                applyIfFresh(manifest, store, path)
+                applyIfFresh(manifest, store, fedStore, path)
   }
 
   private def applyIfFresh(
       manifest: ConfigManifest,
       store: ControlPlaneStore,
+      fedStore: Option[FederatedSourceStore],
       path: String
   ): Unit =
     val existing   = store.listTenants().map(_.name).toSet
@@ -63,12 +69,14 @@ object DemoBootstrapHook:
           s"skipping import of '$path'"
       )
     else
-      ManifestImporter.apply(manifest, store) match
+      ManifestImporter.apply(manifest, store, fedStore) match
         case Left(errs) =>
           errs.foreach(e => logger.warn(s"bootstrap: import error: $e"))
         case Right(()) =>
+          val fedCount = manifest.tenants.flatMap(_.tenantDbs).map(_.federatedSources.size).sum
           logger.info(
             s"bootstrap: imported manifest from '$path' " +
               s"(tenants=${manifest.tenants.size}, roles=${manifest.roles.size}, " +
-              s"groups=${manifest.groups.size}, users=${manifest.users.size})"
+              s"groups=${manifest.groups.size}, users=${manifest.users.size}, " +
+              s"federatedSources=$fedCount)"
           )

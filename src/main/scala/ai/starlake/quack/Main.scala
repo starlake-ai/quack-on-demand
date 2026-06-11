@@ -585,7 +585,8 @@ object Main extends IOApp with LazyLogging:
             scala.util.Using(
               scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
             )(_.getLines().mkString("\n")),
-        store    = store
+        store    = store,
+        fedStore = manifestFedStore
       ) *>
         IO.delay(sup.restore()) *>
         sup.reconcile() *>
