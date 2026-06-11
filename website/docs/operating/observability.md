@@ -27,13 +27,13 @@ scrape_configs:
 
 ### Local stack via the observability profile
 
-The compose stack bundles Prometheus and Grafana behind the `observability` profile. Bring up the manager, Postgres, Prometheus, and Grafana in one command, with TPC-H seeded so the dashboard has live data:
+The compose stack bundles Prometheus and Grafana behind the `observability` profile. Bring up the manager, Postgres, Prometheus, and Grafana in one command, with demo data seeded so the dashboard has live data:
 
 ```bash
-LOAD_TPCH=1 PROFILES=observability ./scripts/run-docker-compose.sh
+LOAD_TPC=1 PROFILES=observability ./scripts/run-docker-compose.sh
 
 # Clean slate
-NUKE=1 LOAD_TPCH=1 PROFILES=observability ./scripts/run-docker-compose.sh
+NUKE=1 LOAD_TPC=1 PROFILES=observability ./scripts/run-docker-compose.sh
 ```
 
 Prometheus scrapes the manager container directly over the compose network. Grafana is preprovisioned with the Prometheus datasource and the bundled dashboard, so it renders without manual setup. The boot output prints the URLs:
