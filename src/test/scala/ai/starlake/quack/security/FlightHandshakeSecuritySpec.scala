@@ -2,6 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.auth.AuthScope
 import ai.starlake.quack.model.{NodeSpec, Pool, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -79,7 +80,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       // Wire form "acme" (display name) is normalised to TenantId upstream;
       // the actual call that hits the provider is:
       val result = svc.authenticateBasic(
-        Some(SecurityFixtures.TenantId),
+        AuthScope.Tenant(SecurityFixtures.TenantId),
         SecurityFixtures.AliceUsername,
         SecurityFixtures.AlicePassword
       )
@@ -94,7 +95,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       val fix = SecurityFixtures.freshStore()
       val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
       val result = svc.authenticateBasic(
-        Some(SecurityFixtures.TenantId),
+        AuthScope.Tenant(SecurityFixtures.TenantId),
         SecurityFixtures.AliceUsername,
         SecurityFixtures.AlicePassword
       )
@@ -109,7 +110,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val fix = SecurityFixtures.freshStore()
     val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
-      Some(SecurityFixtures.TenantId),
+      AuthScope.Tenant(SecurityFixtures.TenantId),
       SecurityFixtures.AliceUsername,
       "wrong"
     )
@@ -122,7 +123,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val fix = SecurityFixtures.freshStore()
     val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
-      Some(SecurityFixtures.TenantId),
+      AuthScope.Tenant(SecurityFixtures.TenantId),
       "noone",
       "x"
     )
@@ -134,7 +135,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val fix = SecurityFixtures.freshStore()
     val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
-      None,
+      AuthScope.System,
       SecurityFixtures.RootUsername,
       SecurityFixtures.RootPassword
     )
@@ -147,7 +148,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val fix = SecurityFixtures.freshStore()
     val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = false)
     val result = svc.authenticateBasic(
-      Some(SecurityFixtures.TenantId),
+      AuthScope.Tenant(SecurityFixtures.TenantId),
       SecurityFixtures.AliceUsername,
       SecurityFixtures.AlicePassword
     )

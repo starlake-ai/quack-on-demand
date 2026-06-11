@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/InMemoryAuthService.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, BasicAuthProvider}
+import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, AuthScope, BasicAuthProvider}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -28,11 +28,12 @@ object InMemoryAuthService:
   val emptyAuthConfig: AuthenticationConfig = AuthenticationConfig(
     roleClaim = "role",
     database = DatabaseAuthConfig(
-      enabled  = false,
-      jdbcUrl  = "",
-      username = "",
-      password = "",
-      query    = ""
+      enabled     = false,
+      jdbcUrl     = "",
+      username    = "",
+      password    = "",
+      systemQuery = "",
+      tenantQuery = ""
     ),
     keycloak = KeycloakAuthConfig(
       enabled      = false,
@@ -86,10 +87,11 @@ object InMemoryAuthService:
     val name = "in-memory"
 
     def authenticate(
-        tenant:   Option[String],
+        scope:    AuthScope,
         username: String,
         password: String
     ): Either[String, AuthenticatedProfile] =
+      val tenant = scope.tenantId
       store.getPasswordHash(tenant, username) match
         case None =>
           Left(s"user '$username' not found")
@@ -128,9 +130,9 @@ object InMemoryAuthService:
     override val hasProviders: Boolean = providersEnabled
 
     override def authenticateBasic(
-        tenant:   Option[String],
+        scope:    AuthScope,
         username: String,
         password: String
     ): Either[String, AuthenticatedProfile] =
       if !providersEnabled then Left("No basic auth providers configured")
-      else provider.authenticate(tenant, username, password)
+      else provider.authenticate(scope, username, password)

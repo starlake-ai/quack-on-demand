@@ -117,7 +117,6 @@ final case class ClientConfigResponse(
     flightSqlHost: String, // may be "0.0.0.0" - UI should substitute window.location.hostname
     flightSqlPort: Int,
     flightSqlTls: Boolean,
-    tenantClaim: String, // JWT claim name the edge uses
     // True iff any basic / bearer auth provider is configured. When false,
     // the UI skips the login screen entirely (there's no credential
     // backend to validate against; `/api/auth/login` would 503).

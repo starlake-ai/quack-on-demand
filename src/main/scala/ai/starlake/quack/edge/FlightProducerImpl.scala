@@ -18,8 +18,7 @@ import java.util.Collections
   * [[org.apache.arrow.vector.ipc.ArrowReader]] that we stream batch-by-batch to the Flight client.
   */
 final class FlightProducerImpl(
-    router: FlightSqlRouter,
-    tenantClaim: String
+    router: FlightSqlRouter
 ) extends NoOpFlightSqlProducer
     with LazyLogging:
 

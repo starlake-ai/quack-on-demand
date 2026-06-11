@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/OidcAuthChainSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.edge.auth.{AuthenticationService, OidcBearerAuthenticator}
+import ai.starlake.quack.edge.auth.{AuthenticationService, AuthScope, OidcBearerAuthenticator}
 import ai.starlake.quack.edge.config.*
 import com.github.tomakehurst.wiremock.client.WireMock.*
 import com.nimbusds.jose.crypto.RSASSASigner
@@ -45,11 +45,12 @@ class OidcAuthChainSpec extends AnyFlatSpec with Matchers:
     AuthenticationConfig(
       roleClaim = RoleClaim,
       database  = DatabaseAuthConfig(
-        enabled  = false,
-        jdbcUrl  = "",
-        username = "",
-        password = "",
-        query    = ""
+        enabled     = false,
+        jdbcUrl     = "",
+        username    = "",
+        password    = "",
+        systemQuery = "",
+        tenantQuery = ""
       ),
       keycloak  = KeycloakAuthConfig(
         enabled      = true,
@@ -270,7 +271,7 @@ class OidcAuthChainSpec extends AnyFlatSpec with Matchers:
     addKeycloakStubs(mock)
     val svc = new AuthenticationService(keycloakConfig(mock.baseUrl), "")
     try
-      val result = svc.authenticateBasic(Some("acme"), "oidcuser", "oidcpw")
+      val result = svc.authenticateBasic(AuthScope.Tenant("acme"), "oidcuser", "oidcpw")
       result shouldBe a[Right[?, ?]]
       val profile = result.toOption.get
       profile.username shouldBe "oidcuser"
@@ -285,7 +286,7 @@ class OidcAuthChainSpec extends AnyFlatSpec with Matchers:
     addKeycloakStubs(mock)
     val svc = new AuthenticationService(keycloakConfig(mock.baseUrl), "")
     try
-      val result = svc.authenticateBasic(Some("acme"), "oidcuser", "wrongpw")
+      val result = svc.authenticateBasic(AuthScope.Tenant("acme"), "oidcuser", "wrongpw")
       result shouldBe a[Left[?, ?]]
     finally
       svc.close()

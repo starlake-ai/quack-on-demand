@@ -5,6 +5,17 @@ title: Authentication
 
 The FlightSQL edge authenticates every client connection before routing any query. This page explains how the authentication chain works, how clients pass credentials, how roles and groups are extracted from tokens, and how sessions are cached.
 
+## Auth realm: tenant vs. system
+
+The caller picks the realm at the wire:
+
+- **Tenant realm** (default) — manager UI login with a tenant filled in, or FlightSQL handshake with `?tenant=X&pool=Y` and no superuser flag. Credentials are validated against tenant `X`'s configured provider (`qodstate_tenant.authConfig`). The matching `qodstate_user` row must have `tenant = X`.
+- **System realm** — manager UI login with the tenant field left blank, or FlightSQL handshake with `?superuser=true`. Credentials are validated against the manager's global providers (`quack-flightsql.auth.*`). The matching `qodstate_user` row must have `tenant IS NULL`.
+
+The two realms are strictly separated: a system credential cannot authenticate a tenant-scoped login, and vice versa. The DB authenticator uses two distinct queries (`auth.database.systemQuery` and `auth.database.tenantQuery`) instead of an `OR (tenant IS NULL OR tenant = ?)` fallback.
+
+For the FlightSQL edge the `superuser=true` URL flag is the only signal that picks the system realm — the `tenant` and `pool` URL params are still required for query routing, but they no longer also pick the realm. A system superuser addresses a specific tenant's pool for query routing while authenticating against the global config.
+
 ## How authentication works
 
 The edge maintains two independent provider chains: one for **Basic** credentials and one for **Bearer** tokens. On each new handshake the edge tries providers in the configured order and takes the result from the first provider that accepts the credentials.
@@ -48,12 +59,7 @@ For ADBC or any raw Flight client, pass the same headers directly in the call me
 
 ### Bearer auth (JWT or OIDC token)
 
-Pass the token in the `Authorization: Bearer <token>` header. The `pool` header is always required. For `tenant`, the edge checks in this order:
-
-1. An explicit `tenant` call header (always wins).
-2. The JWT claim named by `tenantClaim` (default `tenant`, override with `PROXY_TENANT_CLAIM`).
-
-If neither is present the handshake is rejected with a missing-tenant error.
+Pass the token in the `Authorization: Bearer <token>` header. The `tenant` and `pool` headers are always required — JWT claims are never trusted for routing; the URL is authoritative. If either header is missing the handshake is rejected.
 
 The authenticated username is taken from the JWT `sub` claim. For JDBC:
 
@@ -61,6 +67,13 @@ The authenticated username is taken from the JWT `sub` claim. For JDBC:
 jdbc:arrow-flight-sql://host:31338/?tenant=tpch&pool=sales
 token=<bearer-token>
 useEncryption=true
+```
+
+A system superuser passes `superuser=true` alongside the routing target:
+
+```
+jdbc:arrow-flight-sql://host:31338/?tenant=tpch&pool=sales&superuser=true
+token=<bearer-token>
 ```
 
 ## Roles and groups from tokens
@@ -119,6 +132,8 @@ A management session carries two pieces of authorization state:
 
 The UI exposes both via `/api/auth/login` and `/api/auth/whoami` so a multi-tenant admin sees a per-screen tenant switcher rather than picking one tenant at login time.
 
+To log in as a superuser on the UI, leave the **Tenant ID** field blank on the login form. Filling it in routes the login through the tenant realm instead. There is no separate "superuser" checkbox; the empty tenant field is the signal. The REST `/api/auth/login` endpoint follows the same rule: omitting `tenant` (or sending it as an empty / whitespace-only string) selects the system realm.
+
 A per-request guard rejects management calls that target a tenant outside `manageableTenants` (URL path, query, or body) with `403 tenant_forbidden`. Endpoints that affect cross-tenant state (`config/server`, `manifest/export`, `manifest/import`, `tenant/create`) additionally require `superuser` and return `403 superuser_required` to multi-tenant admins.
 
 ### Authentication matrix
@@ -128,10 +143,15 @@ A per-request guard rejects management calls that target a tenant outside `manag
 | true | no | db | DB Basic only (Bearer rejected) | DB Basic only | role + tenant from the DB row |
 | true | no | oidc | DB Basic only | impossible: no OIDC provider to call, login always fails | n/a |
 | true | yes | db | DB Basic; OIDC ROPC; OIDC Bearer | DB Basic; then OIDC ROPC. First match wins. JWT role claim can mint admin. | role + tenant from the authenticating profile |
-| true | yes | oidc | DB Basic; OIDC ROPC; OIDC Bearer (edge unchanged) | OIDC ROPC only (DB authenticator skipped on mgmt) | qodstate_user grant lookup; JWT role/tenant discarded |
+| true | yes | oidc | DB Basic; OIDC ROPC; OIDC Bearer | DB Basic tried first; then OIDC ROPC. First match wins. | qodstate_user grant lookup keyed on the verified `preferred_username` / `email`; JWT role/tenant discarded |
 | false | no | any | nothing enabled; all requests rejected | nothing enabled; all requests rejected | n/a |
 | false | yes | db | OIDC ROPC; OIDC Bearer | OIDC ROPC only | role + tenant from the OIDC-authenticated profile; JWT role claim can mint admin |
 | false | yes | oidc | OIDC ROPC; OIDC Bearer | OIDC ROPC only | qodstate_user grant lookup; JWT role/tenant discarded |
+
+Two cross-cutting refinements that the column structure above does not show:
+
+- **Per-tenant Google client (edge only).** When a tenant configures its own `clientId` / `clientSecretRef` on `qodstate_tenant.authConfig`, the OIDC Bearer entry for that tenant's handshakes validates tokens against the tenant's own Google client instead of the manager-wide one. Other providers and the chain shape are unchanged.
+- **Realm-aware DB lookup (edge + mgmt).** The DB authenticator uses `systemQuery` (matching `tenant IS NULL`) for system-realm logins — UI form with empty Tenant field, or FlightSQL handshake with `?superuser=true` — and `tenantQuery` (matching `tenant = ?`) for tenant-realm logins. Same chain placement, different row.
 
 Recommended combinations:
 
@@ -140,6 +160,19 @@ Recommended combinations:
 - Production with IdP and DB break-glass for edge clients: `database.enabled=true`, OIDC enabled, `identitySource=oidc`. JDBC clients can still hit FlightSQL with DB credentials, but management login is forced through the IdP.
 
 The combination `identitySource=db` with OIDC enabled trusts whatever role claim the IdP issues; only use it when the IdP and the role mapping are fully under your control.
+
+## Per-tenant OIDC client override (Google)
+
+By default every Google OIDC tenant validates tokens against the single `quack-flightsql.auth.google.*` block — one `clientId` / `clientSecret` for the whole manager. Tenants on Google can OPT IN to a dedicated OAuth client by setting the per-tenant `clientId` + `clientSecretRef` fields on the tenant's auth provider in the UI (or via `setTenantAuth` in the REST API):
+
+- `clientId` — the tenant's Google OAuth client ID (e.g. `<tenant>.apps.googleusercontent.com`).
+- `clientSecretRef` — a **reference** to the secret, never a literal value. Today only `env:NAME` is supported (e.g. `env:GOOGLE_CS_TPCH`); cloud-backed prefixes (`aws-sm:`, `gcp-sm:`, `azure-kv:`, `vault:`) are reserved.
+
+When set, the edge substitutes the per-tenant authenticator into the bearer chain for that tenant's handshakes; for every other tenant the global Google authenticator is used as before. The `setTenantAuth` REST endpoint invalidates the cached per-tenant entry so the next handshake re-reads `qodstate_tenant.authConfig`.
+
+Tenants that have NOT set `clientId` keep using the global block — adoption is incremental. Other selectors (`issuer`, `hd` for Google Workspace domain) keep working in both modes.
+
+This mechanism is currently Google-only. Keycloak / Azure / AWS still share a single per-manager OAuth client.
 
 ## Running without providers (development only)
 

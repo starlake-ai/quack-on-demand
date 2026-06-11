@@ -76,7 +76,9 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
 
   const fields = PROVIDER_FIELDS[editing ? provider : tenant.authProvider];
   const activeConfig = editing ? config : tenant.authConfig;
-  const formReady = fields.every(f => (config[f.key] ?? '').trim().length > 0);
+  const formReady = fields.every(
+    f => f.optional || (config[f.key] ?? '').trim().length > 0
+  );
 
   return (
     <div className="card">
@@ -157,7 +159,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                       value={config[f.key] ?? ''}
                       onChange={ev => setConfigField(f.key, ev.target.value)}
                       placeholder={f.placeholder}
-                      required
+                      required={!f.optional}
                     />
                   </label>
                 ))

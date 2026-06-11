@@ -11,7 +11,14 @@ See [/reference/configuration](/reference/configuration) for the complete list o
 
 ## Database (built-in)
 
-Validates username and password against the `qodstate_user` table in the control-plane Postgres using bcrypt. Enabled by default so the bootstrap admin works out of the box. A row whose `tenant` column is `NULL` is a superuser and matches any tenant context; a tenant-scoped row wins over the wildcard when both exist for the same username.
+Validates username and password against the `qodstate_user` table in the control-plane Postgres using bcrypt. Enabled by default so the bootstrap admin works out of the box.
+
+The authenticator runs one of two queries, picked by the caller-declared auth realm:
+
+- `systemQuery` — used when the caller asked for the **system** realm (manager UI login with empty tenant; FlightSQL handshake with `?superuser=true`). Matches the row with `tenant IS NULL` — the bootstrap admin / system superuser.
+- `tenantQuery` — used when the caller asked for the **tenant** realm. Matches the row with `tenant = ?`.
+
+There is no fallback between the two: a system credential cannot authenticate a tenant-scoped login and vice versa.
 
 ```bash
 QOD_AUTH_DB_ENABLED=true            # default true; set false to disable entirely
@@ -21,16 +28,21 @@ QOD_AUTH_DB_JDBC_URL=jdbc:postgresql://host:5432/qod
 QOD_AUTH_DB_USER=postgres
 QOD_AUTH_DB_PASSWORD=secret
 
-# Custom lookup query (must return columns: password_hash, role;
-# placeholders in order: tenant, username)
-QOD_AUTH_DB_QUERY="SELECT password_hash, role FROM qodstate_user \
-  WHERE (tenant IS NULL OR tenant = ?) AND username = ? \
-  ORDER BY (tenant IS NOT NULL) DESC LIMIT 1"
+# Custom lookup queries
+# - systemQuery placeholders in order: username
+# - tenantQuery placeholders in order: tenant, username
+# Both must return columns: password_hash, role
+QOD_AUTH_DB_SYSTEM_QUERY="SELECT password_hash, role FROM qodstate_user \
+  WHERE tenant IS NULL AND username = ? LIMIT 1"
+QOD_AUTH_DB_TENANT_QUERY="SELECT password_hash, role FROM qodstate_user \
+  WHERE tenant = ? AND username = ? LIMIT 1"
 ```
 
 Rotate the bootstrap admin password by changing `QOD_ADMIN_PASSWORD` and restarting; the row is re-hashed on every boot.
 
 On the management plane (REST/UI), DB credentials are accepted when `auth.management.identitySource=db` (the default). Setting it to `oidc` skips the DB authenticator on the management login even with this provider enabled; the edge keeps using it.
+
+> **Upgrading from a single-query deployment**: the old `QOD_AUTH_DB_QUERY` setting is gone, along with the `(tenant IS NULL OR tenant = ?)` wildcard fallback. Pre-existing JDBC URLs that used the bootstrap admin (`admin@localhost.local`) against tenants must now add `?superuser=true` to the URL. There is no migration on the `qodstate_user` table itself.
 
 ---
 
@@ -86,6 +98,21 @@ QOD_AUTH_GOOGLE_GROUPS_CACHE_TTL_SEC=300   # default 300 s
 ```
 
 The service account key JSON must contain `client_email`, `private_key`, and `token_uri`. The account needs domain-wide delegation with the `https://www.googleapis.com/auth/admin.directory.group.readonly` scope. Group results are cached per user for `QOD_AUTH_GOOGLE_GROUPS_CACHE_TTL_SEC` seconds.
+
+### Per-tenant Google OAuth clients
+
+The HOCON block above defines a **single** Google OAuth client used by every Google tenant by default. To give a tenant its own client (separate consent screen, separate `clientId`, independent revocation blast radius), set per-tenant fields on the tenant's auth provider in the admin UI or via `setTenantAuth`:
+
+| Field | Value |
+|---|---|
+| `clientId` | The tenant's Google OAuth client ID, e.g. `<tenant>.apps.googleusercontent.com` |
+| `clientSecretRef` | A reference to the secret, NOT the literal value. Today only `env:NAME` is supported (e.g. `env:GOOGLE_CS_TPCH`) |
+
+When BOTH are set, the edge builds a per-tenant `OidcBearerAuthenticator` and substitutes it into the bearer chain for that tenant's handshakes. Tenants that leave the fields blank keep using the global block.
+
+The `clientSecret` is never stored in the tenant row. Only the reference (`env:NAME`) is persisted, and the env var must be set on the manager process at boot. Mutations via `setTenantAuth` automatically invalidate the cached per-tenant authenticator.
+
+This mechanism is currently Google-only; Keycloak / Azure / AWS still share a single per-manager OAuth client.
 
 ---
 

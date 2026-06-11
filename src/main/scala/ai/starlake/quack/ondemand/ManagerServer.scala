@@ -247,7 +247,6 @@ final class ManagerServer(
               flightSqlHost = edgeCfg.host,
               flightSqlPort = edgeCfg.port,
               flightSqlTls = edgeCfg.tlsEnabled,
-              tenantClaim = edgeCfg.tenantClaim,
               authEnabled = authEnabled,
               placementSupported = pools.supportsPlacement
             )

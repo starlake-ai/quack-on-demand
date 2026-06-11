@@ -116,7 +116,6 @@ export interface ClientConfigResponse {
   flightSqlHost: string;     // "0.0.0.0" / "" -> UI substitutes window.location.hostname
   flightSqlPort: number;
   flightSqlTls: boolean;
-  tenantClaim: string;
   // When false, no auth providers are configured server-side and the UI
   // skips the login screen entirely. The REST API may still require an
   // X-API-Key - that's a separate gate.

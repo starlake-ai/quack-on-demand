@@ -40,9 +40,14 @@ Add the matching `QOD_RUNTIME_TYPE` value and any backend-specific config keys t
 Authentication is split by credential shape into two interfaces in `ai.starlake.quack.edge.auth`:
 
 ```scala
+sealed trait AuthScope
+object AuthScope:
+  case object System extends AuthScope          // empty tenant / ?superuser=true
+  final case class Tenant(id: String) extends AuthScope
+
 trait BasicAuthProvider extends AutoCloseable:
   def name: String
-  def authenticate(tenant: Option[String], username: String, password: String)
+  def authenticate(scope: AuthScope, username: String, password: String)
       : Either[String, AuthenticatedProfile]
 
 trait BearerAuthProvider extends AutoCloseable:
@@ -52,11 +57,14 @@ trait BearerAuthProvider extends AutoCloseable:
 
 Pick `BasicAuthProvider` for a username/password backend (the database authenticator and OIDC resource-owner-password flow implement this) or `BearerAuthProvider` for a token backend (JWT and OIDC bearer implement this). `authenticate` returns an `AuthenticatedProfile` on success or a `Left` reason on rejection.
 
-`AuthenticationService` builds an ordered chain of each kind from config (`buildBasicChain` / `buildBearerChain`) and tries them in order until one accepts. To add a provider:
+The `AuthScope` argument is the caller-declared realm. It's `System` for management-plane logins with no tenant and FlightSQL handshakes carrying `?superuser=true`; it's `Tenant(id)` for everything else. A database-style provider uses the scope to pick which `qodstate_user` row to read; OIDC ROPC providers ignore the scope because the OIDC server is authoritative.
 
-1. Implement the appropriate trait. For the tenant argument: a database-style provider scopes its lookup by `(tenant, username)`; OIDC providers ignore it because the OIDC server is authoritative.
+`AuthenticationService` builds an ordered chain of each kind from config (`buildBasicChain` / `buildBearerChain`) and tries them in order until one accepts. For Bearer, `bearerChainFor(scope)` consults the optional `TenantOidcRegistry` and may substitute a per-tenant authenticator into the chain (Google today; the pattern extends to Keycloak / Azure / AWS). To add a provider:
+
+1. Implement the appropriate trait.
 2. If your provider extracts roles or groups from a token, route them through `RoleExtractor` so they map into the RBAC graph the same way the built-in providers do.
 3. Add the provider to the relevant chain builder in `AuthenticationService`, gated by a config flag, and add that flag plus its settings to `application.conf` under `quack-flightsql.auth` (with `QOD_*` overrides).
+4. For per-tenant overrides (a tenant has its own client credentials), extend `TenantOidcRegistry` with a typed lookup that reads from `qodstate_tenant.authConfig` and call `bearerChainFor` to splice it in. Secrets must be referenced via `SecretRefResolver` (e.g. `env:NAME`), never stored as literals on the tenant row.
 
 Because providers are tried in order and the first acceptance wins, ordering in the chain builder is the precedence. A provider that throws should instead return a `Left` so the chain can fall through to the next one.
 

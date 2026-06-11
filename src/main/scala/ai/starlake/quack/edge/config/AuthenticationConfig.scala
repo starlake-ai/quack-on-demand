@@ -28,11 +28,17 @@ case class DatabaseAuthConfig(
     )
     password: String,
     @field @ConfigField(
-      envVar = "QOD_AUTH_DB_QUERY",
+      envVar = "QOD_AUTH_DB_SYSTEM_QUERY",
       description =
-        "SQL template returning (password_hash, role); accepts three ? placeholders for tenant, pool, username."
+        "SQL template for AuthScope.System (empty tenant / superuser=true). Returns (password_hash, role) and accepts one ? placeholder for username; matches WHERE tenant IS NULL."
     )
-    query: String
+    systemQuery: String,
+    @field @ConfigField(
+      envVar = "QOD_AUTH_DB_TENANT_QUERY",
+      description =
+        "SQL template for AuthScope.Tenant. Returns (password_hash, role) and accepts two ? placeholders in order: tenant, username."
+    )
+    tenantQuery: String
 ) derives ConfigReader
 
 case class KeycloakAuthConfig(

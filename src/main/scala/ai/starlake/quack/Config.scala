@@ -288,11 +288,6 @@ final case class FlightConfig(
     )
     tlsPrivateKey: String,
     @field @ConfigField(
-      envVar = "PROXY_TENANT_CLAIM",
-      description = "JWT claim that carries the tenant identifier for routing."
-    )
-    tenantClaim: String,
-    @field @ConfigField(
       envVar = "QOD_SESSION_TTL_SEC",
       description = "Edge session TTL in seconds before a fresh handshake is forced."
     )

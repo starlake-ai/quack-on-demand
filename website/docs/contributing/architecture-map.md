@@ -40,7 +40,8 @@ The routing core (`FlightSqlRouter`, `Router`, `StatementClassifier`, `RoleMatch
 |---|---|
 | `ai.starlake.quack` (`Main.scala`) | Wiring: load config, pick the state store, build the auth service and ACL validator, select the runtime backend, mount endpoints. |
 | `ai.starlake.quack.edge` | The FlightSQL edge: `FlightEdgeServer`, `FlightProducerImpl`, `FlightSqlRouter`, sessions, the Quack HTTP adapter. |
-| `ai.starlake.quack.edge.auth` | Authentication providers (database, JWT, OIDC, OAuth) and role extraction. |
+| `ai.starlake.quack.edge.auth` | Authentication providers (database, JWT, OIDC, OAuth), `AuthScope` realm tagging, `TenantOidcRegistry` for per-tenant OAuth client overrides, role extraction. |
+| `ai.starlake.quack.secrets` | `SecretRefResolver` -- shared `env:` / `aws-sm:` / etc. reference resolution used by per-tenant OIDC `clientSecretRef` (and reusable elsewhere). |
 | `ai.starlake.quack.edge.config` / `edge.catalog` | Auth/ACL/session config types and the DuckLake catalog resolver. |
 | `ai.starlake.quack.route` | The routing core: `Router`, `RoleMatcher`, `StatementClassifier`. |
 | `ai.starlake.quack.ondemand` | The control plane: `ManagerServer`, `PoolSupervisor`, the REST handlers, state stores, RBAC, manifest, runtime backends. |

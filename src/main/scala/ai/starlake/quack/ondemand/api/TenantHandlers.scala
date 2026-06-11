@@ -1,12 +1,21 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.edge.auth.TenantOidcRegistry
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
 import sttp.model.StatusCode
 
-final class TenantHandlers(sup: PoolSupervisor):
+/** `onAuthChanged` is called after every successful `setTenantAuth` so the edge's
+  * [[TenantOidcRegistry]] can drop its cached per-tenant authenticator and rebuild from the
+  * updated `qodstate_tenant.authConfig` on the next handshake. Optional so unit tests that don't
+  * need the registry can pass a no-op.
+  */
+final class TenantHandlers(
+    sup: PoolSupervisor,
+    onAuthChanged: String => Unit = _ => ()
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -121,7 +130,9 @@ final class TenantHandlers(sup: PoolSupervisor):
       case Some(err) => IO.pure(Left(err))
       case None =>
         sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
-          case Right(t)  => Right(toResponse(t))
+          case Right(t) =>
+            onAuthChanged(t.id)
+            Right(toResponse(t))
           case Left(msg) =>
             if msg.startsWith("tenant not found") then
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))

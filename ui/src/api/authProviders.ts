@@ -8,6 +8,9 @@ export interface ProviderField {
   key:         string;
   label:       string;
   placeholder: string;
+  /** When true, an empty value is allowed -- the form's submit gate ignores
+    * this field. Defaults to false (required). */
+  optional?:   boolean;
 }
 
 export const PROVIDER_FIELDS: Record<AuthProvider, ProviderField[]> = {
@@ -20,6 +23,14 @@ export const PROVIDER_FIELDS: Record<AuthProvider, ProviderField[]> = {
   google: [
     { key: 'issuer', label: 'Issuer URL',       placeholder: 'accounts.google.com' },
     { key: 'hd',     label: 'Workspace domain', placeholder: 'example.com' },
+    // Optional per-tenant OAuth client. Leaving both blank falls back to
+    // `quack-flightsql.auth.google` from application.conf -- so existing
+    // tenants keep working without any UI change. Setting BOTH overrides
+    // the global client for this tenant.
+    { key: 'clientId',        label: 'OAuth client ID (optional)',
+      placeholder: '<your-tenant>.apps.googleusercontent.com', optional: true },
+    { key: 'clientSecretRef', label: 'OAuth client secret ref (optional)',
+      placeholder: 'env:GOOGLE_CS_<tenant>', optional: true },
   ],
   azure: [
     { key: 'issuer',   label: 'Issuer URL',
