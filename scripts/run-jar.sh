@@ -31,29 +31,26 @@
 #   JAVA_HOME                     uses `java` on PATH if unset
 #   JAVA_OPTS                     extra JVM flags (e.g. -Xmx2g)
 #
-#   LOAD_TPCH                TPC-H seed scale factor. Unset/empty/0 = skip
-#                                 the seed; positive integer = run
-#                                 load-tpch-dbgen.sh before the JVM boots
-#                                 (requires `duckdb` CLI).              (default unset)
-#   QOD_BOOTSTRAP_TPCH_SCHEMA DuckLake schema for the seed            (default tpch1)
+#   LOAD_TPC=N                    Seeds the demo (acme + globex) and loads TPC-H
+#                                 into acme/acme_tpch and TPC-DS into
+#                                 globex/globex_tpcds at scale factor N.
+#                                 Also sets QOD_BOOTSTRAP_YAML so the JVM imports
+#                                 the bundled demo manifest on first boot.
+#                                 Loaders run in background before exec java.
+#                                 Positive integer = scale factor.      (default unset)
 #
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
-#   LOAD_TPCH=N                   TPC-H seed scale factor (positive integer).
-#                                 Runs load-tpch-dbgen.sh before the JVM boots.
-#                                 LOAD_TPCH=1 ≈ 6M lineitem rows; LOAD_TPCH=10
-#                                 ≈ 60M. Works in either BUILD=0 or BUILD=1.
-#                                                                       (default unset)
 #
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
 #   QOD_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
 #   QOD_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
 #   BUILD=1 ./scripts/run-jar.sh                           # local source build
-#   LOAD_TPCH=1 ./scripts/run-jar.sh                       # + TPC-H SF=1
-#   NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh                # wipe + fresh boot + TPC-H SF=1
+#   LOAD_TPC=1 ./scripts/run-jar.sh                        # + demo seed SF=1
+#   NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh                 # wipe + fresh boot + demo SF=1
 
 set -euo pipefail
 
@@ -66,12 +63,13 @@ DISTRIB_DIR="$REPO_DIR/distrib"
 cd "$REPO_DIR"
 
 # Anchor the DuckLake data path to the repo unless the caller already set
-# it. `application.conf` defaults to "./ducklake/tpch" which, combined
-# with the cd above, would also land here -- but exporting an absolute
-# path makes startup logs unambiguous AND survives any later JVM cwd
-# changes (e.g. tests that fork). Override by exporting QOD_DUCKLAKE_DATA_PATH
-# before invoking this script.
-export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/tpch}"
+# it. Exporting an absolute path makes startup logs unambiguous AND
+# survives any later JVM cwd changes (e.g. tests that fork). The LOAD_TPC
+# block below derives per-tenant-db paths as `dirname($QOD_DUCKLAKE_DATA_PATH)
+# /<tenant-db>`, so the leaf segment is just an anchor -- the demo loaders
+# place their data alongside it (e.g. ducklake/acme_tpch, ducklake/globex_tpcds).
+# Override by exporting QOD_DUCKLAKE_DATA_PATH before invoking this script.
+export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/data}"
 
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
@@ -79,10 +77,10 @@ GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 
-# LOAD_TPCH=N validates and is consumed directly by the seed step below.
-if [[ -n "${LOAD_TPCH:-}" ]]; then
-  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
-    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
+# LOAD_TPC=N validates and is consumed directly by the seed step below.
+if [[ -n "${LOAD_TPC:-}" ]]; then
+  if ! [[ "$LOAD_TPC" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPC" -lt 1 ]]; then
+    echo "ERROR: LOAD_TPC must be a positive integer scale factor (got: '$LOAD_TPC')." >&2
     exit 1
   fi
 fi
@@ -460,63 +458,37 @@ if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$
   fi
 fi
 
-# ---- Optional: TPC-H seed (delegates to load-tpch-dbgen.sh) ----
-# Presence of LOAD_TPCH (positive integer) is the sole gate.
+# ---- Optional: TPC demo loaders ----
+# When LOAD_TPC is set, the JVM imports the bundled demo YAML and both
+# loaders run in background (loading TPC-H into acme/acme_tpch and
+# TPC-DS into globex/globex_tpcds, at scale factor LOAD_TPC).
 #
-# Targets the bootstrap tenant-db (default `tpch_tpch1`), NOT the
-# control-plane DB (`qod`). With per-tenant-db storage each tenant-db
-# owns its own Postgres catalog + data path; loading TPC-H into the
-# control-plane DB would not surface to FlightSQL clients that route
-# via (tenant, pool) -> tenant-db.
-if [[ -n "${LOAD_TPCH:-}" ]]; then
-  tpch_schema="${QOD_BOOTSTRAP_TPCH_SCHEMA:-tpch1}"
-  bs_tenant="${QOD_BOOTSTRAP_TENANT:-tpch}"
-  bs_tenantdb_suffix="${QOD_BOOTSTRAP_TENANTDB:-tpch1}"
-  # Mirror Names.normalizeTenantDbName: idempotent if the suffix already
-  # carries the tenant prefix; otherwise prepend "${tenant}_".
-  if [[ "$bs_tenantdb_suffix" == "${bs_tenant}_"* ]]; then
-    bs_tenantdb_name="$bs_tenantdb_suffix"
-  else
-    bs_tenantdb_name="${bs_tenant}_${bs_tenantdb_suffix}"
-  fi
-  # Derive per-tenant-db data path the same way Main.scala's bootstrap
-  # does: parent(rootDataPath) / <tenant-db name>. E.g.
-  # `.../ducklake/tpch` + `tpch_tpch1` -> `.../ducklake/tpch_tpch1`.
-  root_data_path="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/$bs_tenant}"
-  tenant_db_data_path="$(dirname "$root_data_path")/$bs_tenantdb_name"
+# Backgrounded BEFORE `exec java` because exec replaces this shell.
+# Each loader is idempotent (CREATE TABLE IF NOT EXISTS + insert-if-empty).
+if [[ -n "${LOAD_TPC:-}" ]]; then
+  : "${QOD_BOOTSTRAP_YAML:=$REPO_DIR/src/main/resources/bootstrap-demo.yaml}"
+  export QOD_BOOTSTRAP_YAML
 
-  if ! command -v duckdb >/dev/null 2>&1; then
-    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but duckdb CLI not on PATH; skipping TPC-H seed." >&2
-  elif [[ "$pg_reachable" != "1" ]]; then
-    echo "WARN: LOAD_TPCH=$LOAD_TPCH set but Postgres unreachable; skipping TPC-H seed." >&2
-  else
-    echo "load-tpch: target tenant-db '$bs_tenantdb_name' at $tenant_db_data_path"
-    DATA_PATH="$tenant_db_data_path" \
+  echo "load-tpc: SF=$LOAD_TPC, bootstrap=$QOD_BOOTSTRAP_YAML"
+
+  (
+    SF="$LOAD_TPC" \
     PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
     PG_ADMIN_DB="$pg_admin_db" \
-    DB_NAME="$bs_tenantdb_name" SCHEMA_NAME="$tpch_schema" SF="$LOAD_TPCH" \
+    DB_NAME="acme_tpch" SCHEMA_NAME="tpch1" \
+    DATA_PATH="$(dirname "${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/acme}")/acme_tpch" \
       "$REPO_DIR/scripts/load-tpch-dbgen.sh"
+  ) &
 
-    # Register a SECOND tenant-db (kind=memory) + a federated source
-    # pointing at the seeded Postgres database. Demonstrates federation
-    # against the same db without disturbing the primary DuckLake setup.
-    # Forked into the background because the manager hasn't booted yet
-    # (we exec java below); the helper polls /health then POSTs.
-    (
-      MANAGER_URL="http://127.0.0.1:${QOD_ON_DEMAND_PORT:-20900}" \
-      MANAGER_API_KEY="${QOD_API_KEY:-}" \
-      WAIT_TIMEOUT_SEC=180 \
-      BS_TENANT="$bs_tenant" \
-      FED_TENANTDB="${FED_TENANTDB:-fed}" \
-      FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
-      PG_HOST="$pg_host" PG_PORT="$pg_port" \
-      PG_USER="$pg_user" PG_PASS="$pg_pass" \
-      TARGET_DB="$bs_tenantdb_name" \
-        "$REPO_DIR/scripts/register-tpch-federation.sh" \
-        || echo "WARN: federation registration failed (manager came up?); TPC-H seed itself succeeded" >&2
-    ) &
-    disown $! 2>/dev/null || true
-  fi
+  (
+    SF="$LOAD_TPC" \
+    PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
+    PG_ADMIN_DB="$pg_admin_db" \
+    DB_NAME="globex_tpcds" SCHEMA_NAME="tpcds1" \
+    DATA_PATH="$(dirname "${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/globex}")/globex_tpcds" \
+      "$REPO_DIR/scripts/load-tpcds-dbgen.sh"
+  ) &
+  # No `wait`: exec java next detaches them.
 fi
 
 # ---- Effective settings ----
