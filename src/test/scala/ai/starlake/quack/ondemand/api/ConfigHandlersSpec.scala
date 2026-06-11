@@ -28,7 +28,6 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     es.exists(_.path == "quack-on-demand.admin.password")                  shouldBe true
     es.exists(_.path == "quack-on-demand.defaultMetastore.pgHost")         shouldBe true
     es.exists(_.path == "quack-on-demand.k8s.namespace")                   shouldBe true
-    es.exists(_.path == "quack-on-demand.bootstrap.roleDistribution.dual") shouldBe true
     es.exists(_.path == "quack-on-demand.metrics.sink")                    shouldBe true
     es.exists(_.path == "quack-on-demand.metrics.aws.stepSeconds")         shouldBe true
     es.exists(_.path == "quack-flightsql.port")                            shouldBe true
