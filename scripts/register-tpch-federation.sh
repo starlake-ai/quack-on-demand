@@ -2,7 +2,7 @@
 # Register a memory-backed tenant-db plus a federated Postgres source on
 # the running quack-on-demand manager. Invoked from the entry scripts
 # (run-docker-compose.sh, run-jar.sh, run-local-stack-k8s.sh) right after
-# LOAD_TPCH succeeds. Idempotent: re-runs are safe; the manager treats
+# LOAD_TPC seeding succeeds. Idempotent: re-runs are safe; the manager treats
 # duplicates as upserts where it can and 409s otherwise (which the script
 # logs and ignores so a re-run does not abort the launch).
 #

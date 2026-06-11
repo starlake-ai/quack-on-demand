@@ -17,9 +17,13 @@
 #   QOD_VERSION       image tag                 (default latest)
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
-#   LOAD_TPCH           TPC-H seed: unset = skip; numeric value = scale
-#                       factor (e.g. LOAD_TPCH=1, LOAD_TPCH=10). Replaces
-#                       the old LOAD_TPCH=true + TPCH_SF=N split.
+#   LOAD_TPC            Demo seed: unset = skip; numeric value = scale
+#                       factor for BOTH TPC-H and TPC-DS (e.g. LOAD_TPC=1,
+#                       LOAD_TPC=10). Sets QOD_BOOTSTRAP_YAML=classpath:
+#                       bootstrap-demo.yaml in the quack container so the JVM
+#                       imports the bundled manifest. Then runs both
+#                       load-tpch-dbgen.sh and load-tpcds-dbgen.sh inside the
+#                       container.
 #   NUKE                "1" tears down any existing stack and wipes
 #                       ./pgdata, ./ducklake, ./certs before starting.
 #                       Irreversible.            (default 0)
@@ -38,8 +42,8 @@
 #   ./scripts/run-docker-compose.sh                            # latest
 #   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh          # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
-#   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H SF=1
-#   LOAD_TPCH=10 ./scripts/run-docker-compose.sh               # + TPC-H SF=10
+#   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + TPC-H + TPC-DS SF=1
+#   LOAD_TPC=10 ./scripts/run-docker-compose.sh                # + TPC-H + TPC-DS SF=10
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
 #   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
 
@@ -99,7 +103,7 @@ if [[ "${BUILD:-0}" != "1" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
 fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
-LOAD_TPCH="${LOAD_TPCH:-}"
+LOAD_TPC="${LOAD_TPC:-}"
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -266,6 +270,15 @@ for p in "${!_profile_set[@]}"; do
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
+# ---- Inject QOD_BOOTSTRAP_YAML before up when LOAD_TPC is requested ----
+# The JVM reads this at startup, so it must be in .env before `docker compose up`.
+if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
+  if ! grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    printf '\nQOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml  # added by run-docker-compose.sh\n' >> "$ENV_FILE"
+    echo "injected QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml into $ENV_FILE"
+  fi
+fi
+
 # ---- Acquire image + up ----
 if [[ "${BUILD:-0}" == "1" ]]; then
   echo "BUILD=1: starting stack with 'docker compose up -d --build'..."
@@ -293,16 +306,16 @@ until code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:20900/api/
 done
 echo " ok (HTTP $code)"
 
-# ---- Optional TPC-H seed (docker compose exec quack /app/scripts/load-tpch-dbgen.sh) ----
-# LOAD_TPCH is presence-triggered with the value doubling as the scale factor.
-# Accepts positive integers (LOAD_TPCH=1, LOAD_TPCH=10, ...). Unset / empty /
-# 0 / false skips the seed.
-if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
-  if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
-    echo "ERROR: LOAD_TPCH must be a positive integer scale factor (got: '$LOAD_TPCH')." >&2
+# ---- Optional demo seed (LOAD_TPC=N) ----
+# LOAD_TPC is presence-triggered with the value doubling as the scale factor
+# for BOTH TPC-H and TPC-DS. Accepts positive integers (LOAD_TPC=1,
+# LOAD_TPC=10, ...). Unset / empty / 0 / false skips the seed.
+if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
+  if ! [[ "$LOAD_TPC" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPC" -lt 1 ]]; then
+    echo "ERROR: LOAD_TPC must be a positive integer scale factor (got: '$LOAD_TPC')." >&2
     exit 1
   fi
-  tpch_sf="$LOAD_TPCH"
+  tpc_sf="$LOAD_TPC"
   read_env() {
     local key="$1" default="$2"
     if [[ -f "$ENV_FILE" ]]; then
@@ -315,76 +328,47 @@ if [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]]; then
   }
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
-  tpch_schema="$(read_env TPCH_SCHEMA tpch1)"
 
-  # After the storage-refactor (commits 0cd1541 / aa4329b / 616fdd5),
-  # PG_DBNAME is the CONTROL-PLANE database (default `qod`); the
-  # tenant-db that holds the DuckLake catalog + parquet metadata is a
-  # separate Postgres DB the manager provisions, named
-  # `${tenant}_${tenantDb}` (default `tpch_tpch1`). Compose this name
-  # here from the same bootstrap defaults `application.conf` uses, with
-  # `QOD_BOOTSTRAP_TENANT` / `QOD_BOOTSTRAP_TENANTDB` overrides for
-  # users who customized the bootstrap.
-  bootstrap_tenant="$(read_env QOD_BOOTSTRAP_TENANT   tpch)"
-  bootstrap_tdb="$(read_env QOD_BOOTSTRAP_TENANTDB tpch1)"
-  tenant_db_name="${bootstrap_tenant}_${bootstrap_tdb}"
+  # The manager image is JRE-only and does not ship psql. Pre-create
+  # both demo tenant-db Postgres databases from the postgres container
+  # (where psql is present) so duckdb ATTACH does not fail on a missing
+  # database. Idempotent: the \gexec form only runs CREATE DATABASE when
+  # pg_database.datname is absent.
+  for demo_db in acme_tpch globex_tpcds; do
+    echo "ensuring demo database '$demo_db' exists on the postgres container..."
+    docker compose -f "$COMPOSE_FILE" exec -T \
+      -e PGPASSWORD="$pg_pass" \
+      postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -tAc \
+        "SELECT format('CREATE DATABASE %I', '$demo_db') \
+         WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$demo_db')" \
+      | docker compose -f "$COMPOSE_FILE" exec -T \
+          -e PGPASSWORD="$pg_pass" \
+          postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
+  done
 
-  # Honor QOD_DUCKLAKE_DATA_PATH when the user has switched to S3
-  # storage. Compose passes that var into the quack service unchanged.
-  # The manager derives per-tenant-db paths by replacing the last
-  # segment of the global default with the tenant-db name (mirrors
-  # Main.scala's tenantDbDataPath). Do the same here so the loader
-  # writes parquet to the exact same prefix the manager will read from.
-  root_data_path="$(read_env QOD_DUCKLAKE_DATA_PATH "/app/ducklake/tpch")"
-  root_parent="$(dirname "$root_data_path")"
-  data_path="$root_parent/$tenant_db_name"
-
-  # The manager image is JRE-only and does not ship psql, so
-  # load-tpch-dbgen.sh's `CREATE DATABASE` guard silently no-ops in the
-  # container. Pre-create the tenant-db here from the postgres container
-  # (where psql is obviously present) so the subsequent ATTACH inside
-  # duckdb does not faceplant on a missing database. Idempotent: the
-  # `\gexec` form runs CREATE DATABASE only when pg_database.datname is
-  # absent.
-  echo "ensuring tenant-db '$tenant_db_name' exists on the postgres container..."
-  docker compose -f "$COMPOSE_FILE" exec -T \
-    -e PGPASSWORD="$pg_pass" \
-    postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -tAc \
-      "SELECT format('CREATE DATABASE %I', '$tenant_db_name') \
-       WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$tenant_db_name')" \
-    | docker compose -f "$COMPOSE_FILE" exec -T \
-        -e PGPASSWORD="$pg_pass" \
-        postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
-
-  echo "seeding TPC-H (db=$tenant_db_name, schema=$tpch_schema, SF=$tpch_sf, data_path=$data_path) via docker compose exec quack ..."
+  echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$tpc_sf) via docker compose exec quack ..."
   docker compose -f "$COMPOSE_FILE" exec \
     -e PG_HOST=postgres \
     -e PG_PORT=5432 \
     -e PG_USER="$pg_user" \
     -e PG_PASS="$pg_pass" \
-    -e DB_NAME="$tenant_db_name" \
-    -e SCHEMA_NAME="$tpch_schema" \
-    -e DATA_PATH="$data_path" \
-    -e SF="$tpch_sf" \
+    -e DB_NAME="acme_tpch" \
+    -e SCHEMA_NAME="tpch1" \
+    -e DATA_PATH="/app/ducklake/acme_tpch" \
+    -e SF="$tpc_sf" \
     quack /app/scripts/load-tpch-dbgen.sh
 
-  # Register a SECOND tenant-db (kind=memory) plus a federated source
-  # that ATTACHes the seeded Postgres database. Demonstrates federation
-  # against the same db the user just seeded, without disturbing the
-  # primary DuckLake-backed tenant-db. See scripts/register-tpch-federation.sh.
-  echo "registering memory tenant-db + federated source pointing at '$tenant_db_name'..."
-  MANAGER_URL="http://localhost:${QOD_MANAGER_PORT:-20900}" \
-  MANAGER_API_KEY="${QOD_API_KEY:-}" \
-  BS_TENANT="$bootstrap_tenant" \
-  FED_TENANTDB="${FED_TENANTDB:-fed}" \
-  FED_ALIAS="${FED_ALIAS:-tpch_pg}" \
-  PG_HOST="postgres" \
-  PG_PORT="5432" \
-  PG_USER="$pg_user" \
-  PG_PASS="$pg_pass" \
-  TARGET_DB="$tenant_db_name" \
-    "$REPO_DIR/scripts/register-tpch-federation.sh" || \
-    echo "WARN: federation registration failed; TPC-H seed itself succeeded" >&2
+  echo "seeding TPC-DS (db=globex_tpcds, schema=tpcds1, SF=$tpc_sf) via docker compose exec quack ..."
+  docker compose -f "$COMPOSE_FILE" exec \
+    -e PG_HOST=postgres \
+    -e PG_PORT=5432 \
+    -e PG_USER="$pg_user" \
+    -e PG_PASS="$pg_pass" \
+    -e DB_NAME="globex_tpcds" \
+    -e SCHEMA_NAME="tpcds1" \
+    -e DATA_PATH="/app/ducklake/globex_tpcds" \
+    -e SF="$tpc_sf" \
+    quack /app/scripts/load-tpcds-dbgen.sh
 fi
 
 # ---- Summary ----

@@ -26,7 +26,7 @@ Three optional profiles add services only when you ask for them: `seaweedfs` (an
 
 ## Boot it
 
-The `scripts/run-docker-compose.sh` wrapper handles port preflight, profile auto-detection, optional TPC-H seeding, and readiness waiting. Two modes, selected by `BUILD`:
+The `scripts/run-docker-compose.sh` wrapper handles port preflight, profile auto-detection, optional demo seeding, and readiness waiting. Two modes, selected by `BUILD`:
 
 ```bash
 # Pull the published image starlakeai/quack-on-demand and start (default).
@@ -87,18 +87,24 @@ The wrapper exposes these host ports (override in `.env`):
 # Tear down the stack and wipe the repo-relative state folders, then boot clean.
 NUKE=1 ./scripts/run-docker-compose.sh
 
-# Seed TPC-H into the bootstrap tenant database before the manager is ready.
-# Numeric value = scale factor (SF=1 is roughly 6M lineitem rows).
-LOAD_TPCH=1 ./scripts/run-docker-compose.sh
+# Seed the demo tenants before the manager is ready.
+# Numeric value = scale factor for BOTH TPC-H and TPC-DS.
+# (SF=1 is roughly 6M lineitem rows for TPC-H.)
+LOAD_TPC=1 ./scripts/run-docker-compose.sh
 
 # Both flags combine.
-NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
+NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
 ```
 
-You can also seed a running stack:
+`LOAD_TPC=1` seeds two demo tenants inside the container: `acme` loaded with TPC-H (8 tables in schema `tpch1`, database `acme_tpch`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`, database `globex_tpcds`). The bundled manifest `bootstrap-demo.yaml` declares the tenants, pools, roles, groups, and users; `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is injected into `.env` automatically so the JVM imports it on startup.
+
+You can also seed a running stack directly:
 
 ```bash
-docker compose exec quack /app/scripts/load-tpch-dbgen.sh
+docker compose exec -e PG_HOST=postgres -e DB_NAME=acme_tpch -e SCHEMA_NAME=tpch1 \
+  -e DATA_PATH=/app/ducklake/acme_tpch -e SF=1 quack /app/scripts/load-tpch-dbgen.sh
+docker compose exec -e PG_HOST=postgres -e DB_NAME=globex_tpcds -e SCHEMA_NAME=tpcds1 \
+  -e DATA_PATH=/app/ducklake/globex_tpcds -e SF=1 quack /app/scripts/load-tpcds-dbgen.sh
 ```
 
 ## Optional profiles
