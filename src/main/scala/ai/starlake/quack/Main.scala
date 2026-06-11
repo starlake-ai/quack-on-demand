@@ -589,6 +589,7 @@ object Main extends IOApp with LazyLogging:
         fedStore = manifestFedStore
       ) *>
         IO.delay(sup.restore()) *>
+        sup.ensureDuckLakeInitialized() *>
         sup.reconcile() *>
         mgr.serve.use { _ =>
           logger.info(
