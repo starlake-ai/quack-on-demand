@@ -3,7 +3,7 @@ import { api, ApiError } from '../api/client';
 import type { RolePermissionResponse, RoleResponse } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
 
-const VERBS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'ALL'];
+const VERBS = ['RO', 'RW', 'DDL', 'ALL'];
 
 /** Roles tab on the /users page. Two-pane layout:
   *   - left: roles list + "+ New role"
@@ -19,10 +19,10 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
   const [selected, setSelected]       = useState<RoleResponse | null>(null);
   const [perms,    setPerms]          = useState<RolePermissionResponse[]>([]);
 
-  // Per-role verb counts shown in the list (SELECT / INSERT / UPDATE /
-  // DELETE / ALL). One /role/permission/list call per role on reload;
-  // mutated optimistically in the edit modal so the list stays in sync
-  // without a second round-trip.
+  // Per-role verb counts shown in the list (RO / RW / DDL / ALL). One
+  // /role/permission/list call per role on reload; mutated optimistically
+  // in the edit modal so the list stays in sync without a second
+  // round-trip.
   const [verbCounts, setVerbCounts] = useState<Record<string, Record<string, number>>>({});
 
   const [newName, setNewName]   = useState('');

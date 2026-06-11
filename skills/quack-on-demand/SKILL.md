@@ -108,12 +108,12 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete
 Grants live in `slkstate_acl_grant` in the same Postgres database as DuckLake's metadata. Endpoints are mounted only when `stateStorage=postgres` (the default).
 
 ```bash
-# Grant SELECT on tpch.tpch1.customer to user:alice
+# Grant RO (read-only) on tpch.tpch1.customer to user:alice
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
   -H 'Content-Type: application/json' \
   -d '{"tenantId":"default","principal":"user:alice",
        "catalogName":"tpch","schemaName":"tpch1","tableName":"customer",
-       "permission":"SELECT"}'
+       "permission":"RO"}'
 
 # Wildcard ALL for the admin role (NULL catalog/schema/table = any)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
@@ -131,7 +131,7 @@ ACL is *off* by default (`acl.enabled=false`). Flip with `QOD_ACL_ENABLED=true` 
 
 ## Federation - external catalogs via DuckDB extensions
 
-Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='SELECT')` grants access to a federated alias just like a DuckLake table.
+Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table.
 
 ### Tenant-db kinds
 
@@ -234,7 +234,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 | `unresolved secret 'X' in source '<alias>'` in supervisor log | Source's setupSql references `{{secret.X}}` but no matching row | Add the secret row via `PUT .../federated-sources/<alias>/secrets` |
 | `unsubstituted placeholder` at boot | Typo in setupSql like `{{secret.X}` (missing brace) | Fix setupSql via re-create (POST upserts); recycle the pool |
 | `catalog 'fedpg' does not exist` from the client | Pool was not recycled after editing the source | Drop and recreate the pool, or wait for idle-timeout recycle |
-| `missing SELECT grant on fedpg.public.X` | ACL not granted on the federated alias | `INSERT INTO qodstate_role_permission(role_id, catalog_name, schema_name, table_name, verb) VALUES (...)` |
+| `missing RO grant on fedpg.public.X` | ACL not granted on the federated alias | `INSERT INTO qodstate_role_permission(role_id, catalog_name, schema_name, table_name, verb) VALUES (..., 'RO')` |
 | `kind env var is required` from spawn script | Manager invoked the script without setting `kind` | Old `LocalQuackBackend` build - rebuild the manager (`sbt assembly`) and restart |
 | `secret '<name>' for source '<alias>' has no existing value to reuse` on YAML import | Imported `***REDACTED***` for a new source that didn't exist before | Provide the actual `value` or `externalRef` for that secret in the YAML |
 | YAML import HTTP 400 `duplicate alias '<X>' in payload` | Two sources in the imported YAML have the same alias | Dedupe in the YAML before re-importing |
@@ -242,8 +242,8 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 ### What does NOT need an ACL change
 
 The existing RBAC graph covers federated tables with zero changes:
-- Grant `SELECT` on `fedpg.public.orders` to role `analyst` via `INSERT INTO qodstate_role_permission`.
-- Federated writes (INSERT/UPDATE/DELETE on a federated alias) are denied by default - extending DML grants is a separate concern.
+- Grant `RO` on `fedpg.public.orders` to role `analyst` via `INSERT INTO qodstate_role_permission` (verb `RO`).
+- Federated writes (INSERT/UPDATE/DELETE on a federated alias) require an `RW` grant on the same triple; otherwise they are denied.
 - Read-only is enforced at ATTACH time (the user's `setupSql` should include `READ_ONLY`), not in the validator.
 
 ## Node status + metrics
@@ -294,7 +294,7 @@ The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager p
 |---|---|---|
 | `/api/*` returns 401 | `QOD_API_KEY` is set but the header is missing/wrong | Pass `X-API-Key: <key>` or log in via `/api/auth/login` |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `stop` + `start` (reconcile respawns) |
-| `access denied: missing SELECT grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `/api/acl/grant/create` or set `QOD_ACL_ENABLED=false` |
+| `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via the role-permission API or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/stop` + `pool/create` |
 | Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |

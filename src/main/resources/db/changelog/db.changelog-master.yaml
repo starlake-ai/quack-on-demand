@@ -23,3 +23,5 @@ databaseChangeLog:
       file: db/changelog/0008-tenant-db-defaults.yaml
   - include:
       file: db/changelog/0009-pool-cohorts.yaml
+  - include:
+      file: db/changelog/0010-rbac-verbs-collapse.yaml

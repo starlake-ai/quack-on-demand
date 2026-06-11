@@ -10,7 +10,7 @@ class RbacResolverSpec extends AnyFlatSpec with Matchers:
   private val role2 = RbacRole (id = "r-2", tenantId = "t-1", name = "viewer")
   private val group = RbacGroup(id = "g-1", tenantId = "t-1", name = "engineers")
   private val perm  = RolePermission("rp-1", "r-1", "*", "*", "*", "ALL")
-  private val perm2 = RolePermission("rp-2", "r-2", "tpch", "*", "customer", "SELECT")
+  private val perm2 = RolePermission("rp-2", "r-2", "tpch", "*", "customer", "RO")
   private val groupGrant =
     PoolPermission("pp-g", "t-1", poolId = Some("p-1"), groupId = Some("g-1"))
   private val userGrant =

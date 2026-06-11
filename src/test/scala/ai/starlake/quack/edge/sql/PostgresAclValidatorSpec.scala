@@ -67,7 +67,7 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
   // ---- tests ---------------------------------------------------------
 
   "PostgresAclValidator" should "allow SELECT touching only a federated alias when grant exists" in {
-    val eff = effectiveWith(permissions = List(perm("fedpg", "public", "orders", "SELECT")))
+    val eff = effectiveWith(permissions = List(perm("fedpg", "public", "orders", "RO")))
     val ctx = mkCtx("SELECT * FROM fedpg.public.orders", eff)
     validator.validate(ctx) shouldBe Allowed
   }
@@ -82,8 +82,8 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
 
   it should "allow SELECT joining DuckLake + federated alias when both grants exist" in {
     val eff = effectiveWith(permissions = List(
-      perm("fedpg", "public", "orders",   "SELECT"),
-      perm("tpch",  "main",   "lineitem", "SELECT")
+      perm("fedpg", "public", "orders",   "RO"),
+      perm("tpch",  "main",   "lineitem", "RO")
     ))
     val ctx = mkCtx(
       "SELECT o.id, l.qty FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id",
@@ -93,7 +93,7 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "deny the join when only one side is granted" in {
-    val eff = effectiveWith(permissions = List(perm("tpch", "main", "lineitem", "SELECT")))
+    val eff = effectiveWith(permissions = List(perm("tpch", "main", "lineitem", "RO")))
     val ctx = mkCtx(
       "SELECT o.id, l.qty FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id",
       eff
@@ -104,7 +104,7 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "allow with catalog-level wildcard on the federated alias" in {
-    val eff = effectiveWith(permissions = List(perm("fedpg", "*", "*", "SELECT")))
+    val eff = effectiveWith(permissions = List(perm("fedpg", "*", "*", "RO")))
     val ctx = mkCtx("SELECT * FROM fedpg.public.orders", eff)
     validator.validate(ctx) shouldBe Allowed
   }

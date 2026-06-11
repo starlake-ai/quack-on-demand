@@ -33,7 +33,7 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
     ),
     roles = List(
       ManifestRole("tpch", "reader", Some("read-only"), List(
-        ManifestTablePermission("tpch_tpch1", "tpch1", "customer", "SELECT")
+        ManifestTablePermission("tpch_tpch1", "tpch1", "customer", "RO")
       ))
     ),
     groups = Nil,

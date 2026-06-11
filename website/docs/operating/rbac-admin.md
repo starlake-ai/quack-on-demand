@@ -46,7 +46,7 @@ Response includes the generated `id` field. Copy it for the next step.
 
 **Grant a table permission to the role**
 
-Request body fields: `roleId` (required), `catalog` (default `*`), `schema` (default `*`), `table` (default `*`), `verb` (required; one of `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ALL`).
+Request body fields: `roleId` (required), `catalog` (default `*`), `schema` (default `*`), `table` (default `*`), `verb` (required; one of `RO`, `RW`, `DDL`, `ALL`). `RO` grants read-only, `RW` grants read + any DML (INSERT/UPDATE/DELETE/MERGE/TRUNCATE), `DDL` grants CREATE/DROP/ALTER, `ALL` grants everything.
 
 ```bash
 curl -sS -X POST http://localhost:20900/api/role/permission/grant \
@@ -57,7 +57,7 @@ curl -sS -X POST http://localhost:20900/api/role/permission/grant \
     "catalog": "tpch",
     "schema": "tpch1",
     "table": "customer",
-    "verb": "SELECT"
+    "verb": "RO"
   }'
 ```
 
@@ -67,7 +67,7 @@ To grant access to every table in a tenant (wildcard), omit `catalog`, `schema`,
 curl -sS -X POST http://localhost:20900/api/role/permission/grant \
   -H "X-API-Key: $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"roleId":"<role-id>","verb":"SELECT"}'
+  -d '{"roleId":"<role-id>","verb":"RO"}'
 ```
 
 In the admin UI: open the tenant detail page, navigate to the Roles tab, create a role, then use the permission editor to add grants.
@@ -251,7 +251,7 @@ Example response shape:
   "groups": [{"id":"...","name":"data-team",...}],
   "pools": [{"id":"...","tenantId":"...","poolId":"<pool-uuid>",...}],
   "tablePerms": [
-    {"id":"...","roleId":"...","catalogName":"tpch","schemaName":"tpch1","tableName":"customer","verb":"SELECT",...}
+    {"id":"...","roleId":"...","catalogName":"tpch","schemaName":"tpch1","tableName":"customer","verb":"RO",...}
   ]
 }
 ```

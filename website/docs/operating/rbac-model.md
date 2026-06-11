@@ -83,19 +83,20 @@ Each `qodstate_role_permission` row grants one verb on one table triple to a rol
 
 ### Verbs
 
-The SQL parser collapses every table touch into one of three access classes - `Read`, `Write`, `Ddl` - and a grant verb is matched against that class:
+The SQL parser collapses every table touch into one of three access classes - `Read`, `Write`, `Ddl` - and a grant verb is matched against that class. The grant vocabulary is the four values below; storing granular SQL verbs would be misleading because the validator only distinguishes these three classes anyway.
 
 | Grant verb | Covers (access class) |
 |---|---|
-| `SELECT` | `Read` (SELECT, and the read side of subqueries / CTEs / `INSERT ... SELECT`). |
-| `INSERT` / `UPDATE` / `DELETE` | `Write`. These are not distinguished today: holding any one authorizes all writes (INSERT, UPDATE, DELETE, MERGE, UPSERT, TRUNCATE) on the matched tables. |
-| `ALL` | `Read`, `Write`, and `Ddl` (CREATE / DROP / ALTER) on the matched tables. |
+| `RO`  | `Read` only (SELECT, and the read side of subqueries / CTEs / `INSERT ... SELECT`). |
+| `RW`  | `Read` and `Write` (any DML on the matched tables: INSERT, UPDATE, DELETE, MERGE, UPSERT, TRUNCATE). |
+| `DDL` | `Ddl` only (CREATE / DROP / ALTER on the matched tables). |
+| `ALL` | `Read`, `Write`, and `Ddl` on the matched tables. |
 
-Granular DDL verbs (`CREATE` / `DROP` / `ALTER`) are recognized by the matcher if present, but the operator-facing grant vocabulary is `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `ALL`, so in practice DDL is authorized by an `ALL` grant.
+`RW` is the only multi-class grant: it bundles `Read` so that a data worker who can write to a table can also read it, which matches every real-world DML workload. DDL is intentionally separate because CREATE / DROP / ALTER are higher-privilege.
 
 ### Wildcards
 
-Each of the three name parts (catalog, schema, table) may be the literal string `*`, which matches any value in that position. For example, a permission with `catalogName=*`, `schemaName=*`, `tableName=*`, `verb=SELECT` grants read access to every table the user can name.
+Each of the three name parts (catalog, schema, table) may be the literal string `*`, which matches any value in that position. For example, a permission with `catalogName=*`, `schemaName=*`, `tableName=*`, `verb=RO` grants read access to every table the user can name.
 
 Matching is case-insensitive for literal values and exact for `*`.
 
@@ -105,7 +106,7 @@ The catalog `*` wildcard is scoped to the session's tenant: it matches only cata
 
 For each statement the SQL parser produces a set of accesses, each a `(table, class)` pair where `class` is `Read`, `Write`, or `Ddl`. An access is covered by a permission row `p` when all of these hold:
 
-1. `p.verb` covers the access class (see the Verbs table: `ALL` covers any class; `SELECT` covers `Read`; `INSERT`/`UPDATE`/`DELETE` cover `Write`; `CREATE`/`DROP`/`ALTER` cover `Ddl`).
+1. `p.verb` covers the access class (see the Verbs table: `ALL` covers any class; `RO` covers `Read`; `RW` covers `Read` and `Write`; `DDL` covers `Ddl`).
 2. `p.catalogName` matches the access catalog (literal match, or the tenant-scoped `*` wildcard described above).
 3. `p.schemaName` is `*` or matches the access schema.
 4. `p.tableName` is `*` or matches the access table.
@@ -118,15 +119,15 @@ The parser extracts table accesses from each statement and the gate checks every
 
 ### Read queries (SELECT)
 
-`SELECT`, `WITH`, and `VALUES` are walked across the full AST: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Every table is a `Read` access and must be covered by a `SELECT` or `ALL` grant.
+`SELECT`, `WITH`, and `VALUES` are walked across the full AST: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Every table is a `Read` access and must be covered by an `RO`, `RW`, or `ALL` grant.
 
 ### Writes (INSERT / UPDATE / DELETE / MERGE / TRUNCATE)
 
-The write target is extracted as a `Write` access; any read source (for example the `SELECT` in `INSERT ... SELECT`, or an `UPDATE ... FROM` source) is extracted as a `Read` access. The target must be covered by an `INSERT`/`UPDATE`/`DELETE` (or `ALL`) grant and each source by a `SELECT` (or `ALL`) grant. Because the write verbs collapse to a single `Write` class, granting any one of `INSERT`/`UPDATE`/`DELETE` authorizes all writes on the matched tables.
+The write target is extracted as a `Write` access; any read source (for example the `SELECT` in `INSERT ... SELECT`, or an `UPDATE ... FROM` source) is extracted as a `Read` access. The target must be covered by an `RW` or `ALL` grant. Each source is a `Read` access and can be covered by `RO`, `RW`, or `ALL` on that source - holding `RW` on the target alone is not enough to read from a different source table.
 
 ### DDL (CREATE / DROP / ALTER)
 
-The DDL target is extracted as a `Ddl` access; a `CREATE TABLE ... AS SELECT` also yields a `Read` access for its source. A `Ddl` access is covered by an `ALL` grant (the operator-facing grant vocabulary does not expose a dedicated DDL verb).
+The DDL target is extracted as a `Ddl` access; a `CREATE TABLE ... AS SELECT` also yields a `Read` access for its source. A `Ddl` access is covered by a `DDL` or `ALL` grant; the source still needs `RO`/`RW`/`ALL` independently.
 
 ### Control-flow statements
 
@@ -189,7 +190,7 @@ Setup:
 |---|---|
 | User | `alice` (tenant `acme`) |
 | Role | `analyst_ro` |
-| Role permission | `SELECT on sales.mart.*` |
+| Role permission | `RO on sales.mart.*` |
 | Pool grant | `analyst_ro` reaches pool `bi` (via the user's group or a direct pool permission) |
 | Edge | `alice` assigned `analyst_ro` directly (`qodstate_user_role`) |
 
@@ -197,10 +198,10 @@ Results, connecting to pool `bi`:
 
 | Statement | Decision | Why |
 |---|---|---|
-| `SELECT * FROM mart.daily_revenue` | Allowed | Read access on `sales.mart.daily_revenue` covered by `SELECT on sales.mart.*`. |
+| `SELECT * FROM mart.daily_revenue` | Allowed | Read access on `sales.mart.daily_revenue` covered by `RO on sales.mart.*`. |
 | `SELECT * FROM mart.a JOIN mart.b USING (id)` | Allowed | Both joined tables are reads under `sales.mart.*`. |
 | `SELECT * FROM raw.events` | Denied | `sales.raw.events` is not under `sales.mart.*`; no covering grant. |
-| `INSERT INTO mart.daily_revenue VALUES (...)` | Denied | Write access needs `INSERT`/`UPDATE`/`DELETE`/`ALL`; the analyst holds only `SELECT`. |
+| `INSERT INTO mart.daily_revenue VALUES (...)` | Denied | Write access needs `RW` or `ALL`; the analyst holds only `RO`. |
 
 ### ETL pipeline through a group
 
@@ -213,7 +214,7 @@ Setup:
 | User | `etl-bot` (tenant `acme`) |
 | Group | `data-eng` |
 | Role | `etl` |
-| Role permissions | `SELECT on sales.raw.*`, `INSERT on sales.staging.*` |
+| Role permissions | `RO on sales.raw.*`, `RW on sales.staging.*` |
 | Edges | `data-eng` carries `etl` (`qodstate_group_role`); `etl-bot` is in `data-eng` (`qodstate_user_group`) |
 | Pool grant | `data-eng` holds a pool permission for pool `etl` |
 
@@ -221,12 +222,12 @@ Results, connecting to pool `etl`:
 
 | Statement | Decision | Why |
 |---|---|---|
-| `INSERT INTO staging.orders SELECT * FROM raw.orders` | Allowed | Write target `sales.staging.orders` covered by `INSERT`; read source `sales.raw.orders` covered by `SELECT`. Both sides must pass. |
-| `DELETE FROM staging.orders WHERE day < '2026-01-01'` | Allowed | DELETE collapses to the same `Write` class that the `INSERT on sales.staging.*` grant covers. |
-| `CREATE TABLE staging.orders_v2 AS SELECT * FROM raw.orders` | Denied | The `CREATE` is a `Ddl` access; only `ALL` covers DDL. The read source would pass, but the unmet DDL access denies the whole statement. |
+| `INSERT INTO staging.orders SELECT * FROM raw.orders` | Allowed | Write target `sales.staging.orders` covered by `RW on sales.staging.*`; read source `sales.raw.orders` covered by `RO on sales.raw.*`. Both sides must pass. |
+| `DELETE FROM staging.orders WHERE day < '2026-01-01'` | Allowed | DELETE is a `Write` access on `sales.staging.orders`, covered by the `RW on sales.staging.*` grant. |
+| `CREATE TABLE staging.orders_v2 AS SELECT * FROM raw.orders` | Denied | The `CREATE` is a `Ddl` access; the role has no `DDL` (or `ALL`) grant on `sales.staging.*`. The read source would pass, but the unmet DDL access denies the whole statement. |
 | `SELECT * FROM mart.daily_revenue` | Denied | No grant reaches `sales.mart.*`. |
 
-The DELETE example is the practical consequence of write-verb collapsing: holding any one of `INSERT`/`UPDATE`/`DELETE` on a table authorizes all three.
+`RW` on a table covers both reads and writes on that table; if the workload needs to write somewhere but read from elsewhere, add the matching read grant separately as in the ETL example above.
 
 ### Narrow single-table grant
 
@@ -237,7 +238,7 @@ Setup:
 | Entity | Value |
 |---|---|
 | Group | `finance` with role `gl_reader` |
-| Role permission | `SELECT on sales.finance.ledger` (all three parts literal, no wildcard) |
+| Role permission | `RO on sales.finance.ledger` (all three parts literal, no wildcard) |
 
 Results:
 
@@ -246,7 +247,7 @@ Results:
 | `SELECT balance FROM finance.ledger` | Allowed | Exact literal match on all three name parts. |
 | `SELECT * FROM finance.journal` | Denied | `journal` does not match the literal `ledger`; a single-table grant does not extend to siblings. |
 
-To widen this later, change the table part to `*` (`SELECT on sales.finance.*`).
+To widen this later, change the table part to `*` (`RO on sales.finance.*`).
 
 ### Tenant admin and the cross-tenant boundary
 
@@ -268,7 +269,7 @@ Results:
 | `CREATE TABLE mart.summary AS SELECT ...` | Allowed | `ALL` covers `Ddl` and the `Read` source. |
 | `SELECT * FROM widgets.public.orders` (a different tenant's catalog) | Denied | The catalog `*` wildcard is scoped to the session's tenant; it does not match `widgets`. |
 
-To grant a cross-tenant read deliberately, name the other catalog literally, for example `SELECT on widgets.*.*`. That bypasses the tenant-scoped wildcard through the literal-match path. Contrast with a superuser (`tenant IS NULL`), who skips the per-statement gate entirely and needs no such grant.
+To grant a cross-tenant read deliberately, name the other catalog literally, for example `RO on widgets.*.*`. That bypasses the tenant-scoped wildcard through the literal-match path. Contrast with a superuser (`tenant IS NULL`), who skips the per-statement gate entirely and needs no such grant.
 
 ### Pool gate versus statement gate
 
@@ -278,7 +279,7 @@ Setup:
 
 | Entity | Value |
 |---|---|
-| User | `bob` with role granting `SELECT on sales.mart.*` |
+| User | `bob` with role granting `RO on sales.mart.*` |
 | Pool grant | a pool permission for pool `bi` only |
 
 Results:

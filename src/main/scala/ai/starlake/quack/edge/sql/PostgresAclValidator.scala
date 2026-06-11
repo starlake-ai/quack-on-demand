@@ -135,19 +135,19 @@ final class PostgresAclValidator(
       Denied(msg)
 
   /** Whether a role-permission verb covers a parser-emitted access verb.
-    * Maps granular column values (SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/
-    * ALTER/TRUNCATE/ALL) into the collapsed (Read/Write/Ddl) space.
+    * Grant verbs are the canonical (RO / RW / DDL / ALL) set; the parser
+    * emits the collapsed `Verb.Read | Verb.Write | Verb.Ddl` per access.
+    * `RW` is the only multi-cover grant (Read + Write); DDL stays
+    * separate because CREATE/DROP/ALTER are deliberately higher-privilege.
     */
   private def verbCovers(grantVerb: String, access: Verb): Boolean =
     val gu = grantVerb.toUpperCase
     if gu == "ALL" then true
     else
       access match
-        case Verb.Read  => gu == "SELECT" || gu == "READ"
-        case Verb.Write =>
-          gu == "INSERT" || gu == "UPDATE" || gu == "DELETE" ||
-            gu == "WRITE" || gu == "TRUNCATE"
-        case Verb.Ddl => gu == "CREATE" || gu == "DROP" || gu == "ALTER" || gu == "DDL"
+        case Verb.Read  => gu == "RO" || gu == "RW"
+        case Verb.Write => gu == "RW"
+        case Verb.Ddl   => gu == "DDL"
 
   private def wildcardMatch(grant: String, ref: String): Boolean =
     grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
