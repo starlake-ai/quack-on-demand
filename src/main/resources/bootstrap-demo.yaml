@@ -37,6 +37,24 @@ tenants:
       - name: globex_tpcds
         defaultDatabase: globex_tpcds
         defaultSchema: tpcds1
+        # Federation demo: ATTACH acme's TPC-H Postgres as a read-only
+        # catalog named `acme_pg`. Connection secrets are pulled from the
+        # manager's existing QOD_PG_* env vars so this works unchanged in
+        # both native (localhost) and docker (postgres service) modes.
+        # ACL is still enforced separately: see role `cross_tenant_analyst`.
+        federatedSources:
+          - alias: acme_pg
+            description: Federated read-only view of the acme tenant's TPC-H Postgres
+            setupSql: |
+              INSTALL postgres;
+              LOAD postgres;
+              ATTACH 'host={{secret.PG_HOST}} port={{secret.PG_PORT}} dbname=acme_tpch user={{secret.PG_USER}} password={{secret.PG_PASSWORD}}'
+                AS {{alias}} (TYPE postgres, READ_ONLY);
+            secrets:
+              - { name: PG_HOST,     externalRef: "env:QOD_PG_HOST" }
+              - { name: PG_PORT,     externalRef: "env:QOD_PG_PORT" }
+              - { name: PG_USER,     externalRef: "env:QOD_PG_USER" }
+              - { name: PG_PASSWORD, externalRef: "env:QOD_PG_PASSWORD" }
     pools:
       - name: bi
         tenantDb: globex_tpcds
@@ -87,6 +105,13 @@ roles:
     permissions:
       - { catalog: globex_tpcds, schema: tpcds1, table: web_sales,   verb: RW }
       - { catalog: globex_tpcds, schema: tpcds1, table: store_sales, verb: RO }
+
+  - tenant: globex
+    name: cross_tenant_analyst
+    description: Reads the acme TPC-H catalog via the acme_pg federated source
+    permissions:
+      - { catalog: acme_pg, schema: tpch1, table: customer, verb: RO }
+      - { catalog: acme_pg, schema: tpch1, table: orders,   verb: RO }
 
   - tenant: globex
     name: tenant_admin
@@ -141,6 +166,7 @@ users:
     username: carol
     password: demo-carol
     role: user
+    roles: [cross_tenant_analyst]   # plus the `analyst` role inherited via the analysts group
     groups: [analysts]
     poolGrants:
       - { pool: bi }

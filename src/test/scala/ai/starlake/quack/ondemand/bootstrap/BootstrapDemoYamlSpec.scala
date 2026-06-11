@@ -43,7 +43,19 @@ class BootstrapDemoYamlSpec extends AnyFlatSpec with Matchers:
   it should "declare the documented roles per tenant" in {
     val byTenant = manifest.roles.groupBy(_.tenant).view.mapValues(_.map(_.name).toSet).toMap
     byTenant("acme")   shouldBe Set("analyst", "etl", "dba", "tenant_admin")
-    byTenant("globex") shouldBe Set("analyst", "etl", "tenant_admin")
+    byTenant("globex") shouldBe Set("analyst", "etl", "tenant_admin", "cross_tenant_analyst")
+  }
+
+  it should "register the federation demo: acme_pg under globex_tpcds" in {
+    val globexDb = manifest.tenants.find(_.name == "globex").get.tenantDbs.head
+    globexDb.federatedSources.map(_.alias) shouldBe List("acme_pg")
+    val acmePg = globexDb.federatedSources.head
+    acmePg.setupSql should include ("INSTALL postgres")
+    acmePg.setupSql should include ("dbname=acme_tpch")
+    acmePg.secrets.map(_.name).toSet shouldBe Set("PG_HOST", "PG_PORT", "PG_USER", "PG_PASSWORD")
+    // All four secrets must use externalRef (env:) so the demo works in both
+    // native (localhost) and docker (postgres service) modes without a YAML edit.
+    acmePg.secrets.flatMap(_.externalRef).forall(_.startsWith("env:")) shouldBe true
   }
 
   it should "declare the documented groups" in {
