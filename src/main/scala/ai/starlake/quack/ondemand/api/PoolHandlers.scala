@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -53,7 +54,14 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
       )
     }
 
-  def createPool(req: CreatePoolRequest): Out[PoolResponse] =
+  def createPool(req: CreatePoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      => createPoolInner(req)
+
+  private def createPoolInner(req: CreatePoolRequest): Out[PoolResponse] =
     if !req.roleDistribution.isValidFor(req.size) then
       IO.pure(
         Left(
@@ -116,54 +124,65 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
                   )
                 )
 
-  def scalePool(req: ScalePoolRequest): Out[PoolResponse] =
-    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-    sup.get(key) match
-      case None =>
-        IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
-      case Some(_) =>
-        if !req.roleDistribution.isValidFor(req.targetSize) then
-          IO.pure(
-            Left(
-              (
-                StatusCode.BadRequest,
-                ErrorResponse("invalid_distribution", "role counts do not sum to targetSize")
-              )
-            )
-          )
-        else
-          sup
-            .scale(key, req.targetSize, req.roleDistribution, req.force)
-            .map(_ =>
-              Right(
-                respond(key).getOrElse(
-                  PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+  def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+        sup.get(key) match
+          case None =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(_) =>
+            if !req.roleDistribution.isValidFor(req.targetSize) then
+              IO.pure(
+                Left(
+                  (
+                    StatusCode.BadRequest,
+                    ErrorResponse("invalid_distribution", "role counts do not sum to targetSize")
+                  )
                 )
               )
-            )
+            else
+              sup
+                .scale(key, req.targetSize, req.roleDistribution, req.force)
+                .map(_ =>
+                  Right(
+                    respond(key).getOrElse(
+                      PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+                    )
+                  )
+                )
 
-  def stopPool(req: StopPoolRequest): Out[Unit] =
-    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-    sup.get(key) match
+  def stopPool(req: StopPoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
       case None =>
-        IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
-      case Some(_) =>
-        sup.stopPool(key, req.force).map(_ => Right(()))
+        val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+        sup.get(key) match
+          case None =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(_) =>
+            sup.stopPool(key, req.force).map(_ => Right(()))
 
   def listPools(apiKey: Option[String])(
-      resolveTenant: String => Option[Option[String]]
+      scopeOf: String => Option[SessionScope]
   ): Out[PoolListResponse] = IO.delay {
-    val all      = sup.list().flatMap(p => respond(p.key))
-    val filtered = apiKey.flatMap(resolveTenant) match
-      case Some(Some(scope)) =>
-        // PoolResponse.tenant holds the display name (lowercase), not the id.
-        // Resolve the session's tenant id -> display name and filter by that.
-        // If the id doesn't resolve (deleted tenant), show nothing.
-        val display = sup.listTenants().find(_.id == scope).map(_.displayName)
-        display match
-          case Some(dn) => all.filter(_.tenant == dn)
-          case None     => List.empty
-      case _ => all
+    val all = sup.list().flatMap(p => respond(p.key))
+    val filtered = apiKey.flatMap(scopeOf) match
+      case None              => all // no session => static-key trusted admin
+      case Some(s) if s.superuser => all
+      case Some(s) =>
+        // PoolResponse.tenant holds the display name. Resolve each manageable
+        // tenant id to a display name and filter by that set. Deleted tenants
+        // simply drop out.
+        val allowedDisplay = sup.listTenants().collect {
+          case t if s.manageableTenants.contains(t.id) => t.displayName
+        }.toSet
+        all.filter(p => allowedDisplay.contains(p.tenant))
     Right(PoolListResponse(filtered))
   }
 
@@ -174,21 +193,26 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
       case None    =>
         IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
 
-  def setPoolDisabled(req: SetPoolDisabledRequest): Out[PoolResponse] =
-    val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-    sup.setPoolDisabled(key, req.disabled).map {
-      case Right(_) =>
-        respond(key) match
-          case Some(r) => Right(r)
-          case None    =>
-            Left(
-              (
-                StatusCode.NotFound,
-                ErrorResponse("not_found", s"pool $key disappeared after update")
-              )
-            )
-      case Left(msg) =>
-        if msg.startsWith("pool not found") then
-          Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-        else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
-    }
+  def setPoolDisabled(req: SetPoolDisabledRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+        sup.setPoolDisabled(key, req.disabled).map {
+          case Right(_) =>
+            respond(key) match
+              case Some(r) => Right(r)
+              case None    =>
+                Left(
+                  (
+                    StatusCode.NotFound,
+                    ErrorResponse("not_found", s"pool $key disappeared after update")
+                  )
+                )
+          case Left(msg) =>
+            if msg.startsWith("pool not found") then
+              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+        }

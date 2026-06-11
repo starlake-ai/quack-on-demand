@@ -50,7 +50,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         "schemaName" -> "main"
       ),
       dataPath  = "/data/acme_prod"
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.tenant   shouldBe "acme"
@@ -65,7 +65,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "", name = "", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
 
@@ -73,7 +73,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "ghost", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 404
 
@@ -81,10 +81,10 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     val again = h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     again.isLeft shouldBe true
     again.swap.toOption.get._1.code shouldBe 409
 
@@ -92,10 +92,10 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod",  kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "stage", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     val out = h.listTenantDbs("acme").unsafeRunSync().toOption.get
     out.tenantDbs.map(_.name).sorted shouldBe List("acme_prod", "acme_stage")
 
@@ -108,13 +108,13 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
-    h.deleteTenantDb(TenantDbOpRequest("acme", "acme_prod")).unsafeRunSync().isRight shouldBe true
+    ), None)((_: String) => None).unsafeRunSync()
+    h.deleteTenantDb(TenantDbOpRequest("acme", "acme_prod"), None)((_: String) => None).unsafeRunSync().isRight shouldBe true
     h.listTenantDbs("acme").unsafeRunSync().toOption.get.tenantDbs shouldBe Nil
 
   it should "404 when the database doesn't exist" in:
     val h = freshHandlers()
-    val out = h.deleteTenantDb(TenantDbOpRequest("acme", "acme_ghost")).unsafeRunSync()
+    val out = h.deleteTenantDb(TenantDbOpRequest("acme", "acme_ghost"), None)((_: String) => None).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 404
 
@@ -127,7 +127,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map.empty,
       dataPath  = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.kind shouldBe "memory"
@@ -140,7 +140,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map("dbName" -> "tpch"),
       dataPath  = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
     out.swap.toOption.get._2.message should include("empty metastore")
@@ -154,7 +154,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "duckdb-file",
       metastore = Map("dbName" -> "mydata", "schemaName" -> "main"),
       dataPath  = "/tmp/foo.duckdb"
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.kind shouldBe "duckdb-file"
@@ -164,7 +164,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "bad", kind = "postgres", metastore = Map.empty, dataPath = ""
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
     out.swap.toOption.get._2.message should include("unknown TenantDbKind")
@@ -180,7 +180,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       dataPath        = "",
       defaultDatabase = Some("fedpg"),
       defaultSchema   = Some("public")
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     val td = out.toOption.get
     td.defaultDatabase shouldBe Some("fedpg")
     td.defaultSchema   shouldBe Some("public")

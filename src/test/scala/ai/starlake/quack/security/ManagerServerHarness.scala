@@ -80,7 +80,10 @@ object ManagerServerHarness:
       pool              = "default",
       roleDistribution  = RoleDistributionConfig(writeonly = 0, readonly = 0, dual = 1)
     ),
-    federation = FederationConfig(secretStore = "env")
+    federation = FederationConfig(secretStore = "env"),
+    auth       = ManagerAuthConfig(
+      management = ManagementAuthConfig(identitySource = "db", identityClaim = "preferred_username")
+    )
   )
 
   // ------------------------------------------------------------------
@@ -250,7 +253,12 @@ object ManagerServerHarness:
 
     val sessions   = new SessionTokenStore
     val authSvc    = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
-    val authHandlers = new AuthHandlers(authSvc, sessions)
+    val authHandlers = new AuthHandlers(
+      authService       = authSvc,
+      tokens            = sessions,
+      identitySource    = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil
+    )
 
     val stmtHistory     = new StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory)

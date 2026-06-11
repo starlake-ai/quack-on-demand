@@ -69,13 +69,18 @@ class ResourceOwnerPasswordAuthenticator(
 
             val role   = RoleExtractor.extract(claims, roleClaim)
             val groups = RoleExtractor.extractGroups(claims, "groups")
+            val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
 
             Right(
               AuthenticatedProfile(
                 username = extractedUsername,
                 role = role,
                 groups = groups + role,
-                claims = Map("sub" -> extractedUsername, "role" -> role, "auth_method" -> name),
+                claims = Map(
+                  "sub"         -> extractedUsername,
+                  "role"        -> role,
+                  "auth_method" -> name
+                ) ++ email.map("email" -> _),
                 authMethod = name
               )
             )

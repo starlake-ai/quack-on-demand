@@ -30,6 +30,8 @@ QOD_AUTH_DB_QUERY="SELECT password_hash, role FROM qodstate_user \
 
 Rotate the bootstrap admin password by changing `QOD_ADMIN_PASSWORD` and restarting; the row is re-hashed on every boot.
 
+On the management plane (REST/UI), DB credentials are accepted when `auth.management.identitySource=db` (the default). Setting it to `oidc` skips the DB authenticator on the management login even with this provider enabled; the edge keeps using it.
+
 ---
 
 ## External JWT

@@ -5,6 +5,8 @@ interface AuthState {
   username: string | null;
   role: string | null;
   tenant: string | null;
+  superuser: boolean;
+  manageableTenants: string[];
   loading: boolean;
   // True when the server has no auth providers configured (auth.* all
   // disabled). In that case the UI runs without a login screen and the
@@ -23,6 +25,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsername] = useState<string | null>(null);
   const [role, setRole]         = useState<string | null>(null);
   const [tenant, setTenant]     = useState<string | null>(null);
+  const [superuser, setSuperuser]                   = useState<boolean>(false);
+  const [manageableTenants, setManageableTenants]   = useState<string[]>([]);
   const [loading, setLoading]   = useState(true);
   const [authEnabled, setAuthEnabled] = useState(true);
 
@@ -39,6 +43,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUsername(ANONYMOUS_USERNAME);
           setRole(ANONYMOUS_ROLE);
           setTenant(null);
+          setSuperuser(true);
+          setManageableTenants([]);
           setLoading(false);
           return;
         }
@@ -46,7 +52,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const t = session.get();
         if (!t) { setLoading(false); return; }
         api.whoami()
-          .then(w => { setUsername(w.username); setRole(w.role); setTenant(w.tenant ?? null); })
+          .then(w => {
+            setUsername(w.username);
+            setRole(w.role);
+            setTenant(w.tenant ?? null);
+            setSuperuser(w.superuser ?? false);
+            setManageableTenants(w.manageableTenants ?? []);
+          })
           .catch((e: ApiError) => { if (e.status === 401) session.clear(); })
           .finally(() => setLoading(false));
       })
@@ -63,6 +75,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(r.username);
     setRole(r.role);
     setTenant(r.tenant ?? null);
+    setSuperuser(r.superuser ?? false);
+    setManageableTenants(r.manageableTenants ?? []);
   }
 
   async function logout() {
@@ -73,10 +87,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsername(null);
     setRole(null);
     setTenant(null);
+    setSuperuser(false);
+    setManageableTenants([]);
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, tenant, loading, authEnabled, login, logout }}>
+    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
