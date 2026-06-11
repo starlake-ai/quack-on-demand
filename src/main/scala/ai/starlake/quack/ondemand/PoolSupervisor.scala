@@ -117,8 +117,16 @@ final class PoolSupervisor(
   }
 
   private def reconcilePool(key: PoolKey, state: PoolState): IO[PoolState] =
-    state.nodes
-      .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
+    if state.nodes.isEmpty && state.distribution.total > 0 then
+      // Pool persisted with zero running nodes. Happens after a fresh
+      // YAML bootstrap (ManifestImporter writes the pool row but does
+      // not spawn nodes the way createPool would). Spawn the full
+      // distribution now using the same NodeSpec construction path
+      // createPool uses.
+      spawnFromDistribution(key, state)
+    else
+      state.nodes
+        .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
         acc.flatMap { kept =>
           if isReachable(n) then backend.adopt(n).as(kept :+ n)
           else
@@ -157,6 +165,52 @@ final class PoolSupervisor(
           val updated = state.copy(nodes = newNodes)
           IO.delay(pools.put(key, updated)).as(updated)
         else IO.pure(state)
+      }
+
+  /** Spawn the full distribution for a pool whose persisted state has no nodes yet.
+    * Mirrors createPool's spawn block but operates on an existing PoolState rather than
+    * persisting a fresh Pool entity. Cohort placement is recovered from the pool's
+    * authored cohorts (via poolRows) when present; otherwise nodes spawn placement-less.
+    */
+  private def spawnFromDistribution(key: PoolKey, state: PoolState): IO[PoolState] =
+    val poolEntity = poolIdByKey.get(key).flatMap(poolRows.get)
+    val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] = poolEntity match
+      case Some(p) =>
+        p.effectiveCohorts.flatMap(c => c.distribution.asRoleList.map(r => (r, c.placement)))
+      case None =>
+        state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
+    val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+      NodeSpec(
+        key,
+        PoolSupervisor.nodeId(key, i + 1),
+        role,
+        state.metastore,
+        state.s3,
+        maxConcurrent = state.maxConcurrentPerNode,
+        kindWire = state.kindWire,
+        extraSetupSql = state.extraSetupSql,
+        placement = placement
+      )
+    }
+    specs
+      .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
+        acc.flatMap(rs =>
+          IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
+        )
+      }
+      .flatMap { running =>
+        val updated = state.copy(nodes = running)
+        pools.put(key, updated)
+        logger.info(
+          s"reconcile: spawned ${running.size} node(s) for empty pool $key"
+        )
+        poolIdByKey.get(key) match
+          case Some(pid) =>
+            running
+              .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, pid)))
+              .as(updated)
+          case None =>
+            IO.pure(updated)
       }
 
   /** Find the cohort placement that owns the node at 1-based `index` in the pool's deterministic

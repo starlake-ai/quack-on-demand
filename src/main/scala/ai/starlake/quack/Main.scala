@@ -569,9 +569,22 @@ object Main extends IOApp with LazyLogging:
       // REST/UI reading from an empty cache after a fresh boot.
       DemoBootstrapHook.run(
         env      = sys.env.get,
-        readFile = path => scala.util.Using(
-          scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
-        )(_.getLines().mkString("\n")),
+        readFile = path =>
+          if path.startsWith("classpath:") then
+            val resource = path.stripPrefix("classpath:")
+            scala.util.Try {
+              val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
+                .getOrElse(throw new java.io.FileNotFoundException(
+                  s"classpath resource not found: $resource"
+                ))
+              scala.util.Using.resource(stream)(s =>
+                scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
+              )
+            }
+          else
+            scala.util.Using(
+              scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
+            )(_.getLines().mkString("\n")),
         store    = store
       ) *>
         IO.delay(sup.restore()) *>
