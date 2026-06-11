@@ -73,6 +73,31 @@ final class PoolSupervisor(
 
   // ---------- Bootstrap / replay ----------
 
+  /** Per-tenant-db naming convention, applied ONLY to `kind=ducklake` because that's the kind
+    * where each tenant-db IS its own Postgres database (named after `td.name`) with parquet stored
+    * alongside it at `parent(defaultDataPath)/td.name`. Operators can override either by setting
+    * `dbName`/`dataPath` in `td.metastore` or `td.dataPath` explicitly. Mirrors what the deleted
+    * programmatic bootstrap did at create time and what the LOAD_TPC loader scripts write to.
+    *
+    * For `duckdb-file` and `memory` kinds the convention does not apply: those persistence layouts
+    * are operator-defined and we fall through to the plain `defaultMetastore ++ td.metastore` merge.
+    */
+  private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
+    val merged = defaultMetastore ++ td.metastore
+    if td.kind != TenantDbKind.DuckLake then merged
+    else
+      val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
+      val rootData = defaultMetastore.getOrElse("dataPath", "")
+      val tdData =
+        if td.dataPath.nonEmpty then td.dataPath
+        else if td.metastore.contains("dataPath") then td.metastore("dataPath")
+        else if rootData.isEmpty then ""
+        else
+          val p      = java.nio.file.Paths.get(rootData)
+          val parent = p.getParent
+          if parent == null then td.name else parent.resolve(td.name).toString
+      if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb
+
   def restore(): Unit =
     val snap = store.snapshot()
     snap.tenants.foreach(t => tenants.put(t.id, t))
@@ -87,7 +112,7 @@ final class PoolSupervisor(
         val key = PoolKey(t.displayName, td.name, p.name)
         poolIdByKey.put(key, p.id)
         val nodesHere = snap.nodes.filter(_.poolKey == key)
-        val merged    = defaultMetastore ++ td.metastore
+        val merged    = effectiveMetastoreFor(td)
         pools.put(
           key,
           PoolState(
@@ -308,12 +333,13 @@ final class PoolSupervisor(
     val t = tenant.toLowerCase
     pools.keys.find(k => k.tenant == t && k.pool == poolName)
 
-  /** Effective metastore for a tenant-db: global defaults overlaid with the tenant-db's own params.
+  /** Effective metastore for a tenant-db: global defaults overlaid with the tenant-db's own params,
+    * then the per-tenant-db naming convention (dbName=td.name, dataPath alongside the root).
     * Used by the catalog browser.
     */
   def effectiveMetastoreFor(tenantName: String, tenantDbName: String): Map[String, String] =
     findTenantDb(tenantName, tenantDbName)
-      .map(td => defaultMetastore ++ td.metastore)
+      .map(effectiveMetastoreFor)
       .getOrElse(defaultMetastore)
 
   // ---------- Tenant API ----------
@@ -582,7 +608,7 @@ final class PoolSupervisor(
           )
         )
       case Some(td) =>
-        val merged     = defaultMetastore ++ td.metastore
+        val merged     = effectiveMetastoreFor(td)
         val kindWire   = td.kind.wireValue
         val extraBlob  = federationBlobOf(td.id).unsafeRunSync().getOrElse("")
         val poolEntity = Pool(
