@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 import cats.effect.IO
@@ -20,13 +21,14 @@ final class ManifestHandlers(
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
   /** Manifest export / import are cross-tenant operations -- a dump or replay touches every
-    * tenant's pools, roles, groups and users. Restricted to superusers; tenant-scoped UI sessions
-    * are rejected with 403. Static `QOD_API_KEY` callers (no session) are admitted. */
+    * tenant's pools, roles, groups and users. Restricted to superusers; non-superuser sessions are
+    * rejected with 403. Static `QOD_API_KEY` callers (no session row) are admitted.
+    */
   private def superuserCheck(apiKey: Option[String])(
-      resolveTenant: String => Option[Option[String]]
+      scopeOf: String => Option[SessionScope]
   ): Option[(StatusCode, ErrorResponse)] =
-    apiKey.flatMap(resolveTenant) match
-      case Some(Some(_)) =>
+    apiKey.flatMap(scopeOf) match
+      case Some(s) if !s.superuser =>
         Some(
           StatusCode.Forbidden ->
             ErrorResponse(
@@ -37,9 +39,9 @@ final class ManifestHandlers(
       case _ => None
 
   def exportYaml(apiKey: Option[String])(
-      resolveTenant: String => Option[Option[String]]
+      scopeOf: String => Option[SessionScope]
   ): IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
-    superuserCheck(apiKey)(resolveTenant) match
+    superuserCheck(apiKey)(scopeOf) match
       case Some(err) => Left(err)
       case None =>
         val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname, federatedStore)
@@ -47,10 +49,10 @@ final class ManifestHandlers(
   }
 
   def importYaml(body: String, apiKey: Option[String])(
-      resolveTenant: String => Option[Option[String]]
+      scopeOf: String => Option[SessionScope]
   ): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
     IO.blocking {
-      superuserCheck(apiKey)(resolveTenant) match
+      superuserCheck(apiKey)(scopeOf) match
         case Some(err) => Left(err)
         case None =>
           parser.parse(body).flatMap(_.as[ConfigManifest]) match

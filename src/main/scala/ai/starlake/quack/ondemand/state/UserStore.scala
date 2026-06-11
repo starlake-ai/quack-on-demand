@@ -87,6 +87,40 @@ final class UserStore(jdbcUrl: String, dbUser: String, dbPassword: String) exten
       finally ps.close()
     }
 
+  /** All management-plane grants for an OIDC-verified identity. Matches `username = identity` first;
+    * if that yields nothing AND `email` is given, retries with `username = email` so operators can
+    * provision either form. tenant=NULL rows are superuser grants.
+    *
+    * Returns one `UserGrant` per row. Order is unspecified.
+    */
+  def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
+    withConn { c =>
+      val first = grantsByUsername(c, identity)
+      if first.nonEmpty then first
+      else
+        email
+          .filter(e => e.nonEmpty && e != identity)
+          .map(grantsByUsername(c, _))
+          .getOrElse(Nil)
+    }
+
+  private def grantsByUsername(c: Connection, username: String): List[UserGrant] =
+    val ps = c.prepareStatement(
+      "SELECT tenant, role FROM qodstate_user WHERE username = ?"
+    )
+    try
+      ps.setString(1, username)
+      val rs  = ps.executeQuery()
+      val buf = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      try
+        while rs.next() do
+          val t = Option(rs.getString(1)).filter(_.nonEmpty)
+          val r = Option(rs.getString(2)).getOrElse("user")
+          buf += UserGrant(t, r)
+      finally rs.close()
+      buf.toList
+    finally ps.close()
+
   private def lookupId(c: Connection, tenant: Option[String], username: String): Option[String] =
     val ps = tenant match
       case Some(t) =>

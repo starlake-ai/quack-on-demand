@@ -30,7 +30,7 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
 
   "ManifestHandlers.export" should "return a v1 YAML manifest" in {
     val handlers = newHandlers()
-    val yaml     = handlers.exportYaml(None)(_ => None).unsafeRunSync().toOption.get
+    val yaml     = handlers.exportYaml(None)((_: String) => None).unsafeRunSync().toOption.get
     yaml should include ("apiVersion: quack-on-demand/v1")
     yaml should include ("kind: ConfigManifest")
   }
@@ -43,7 +43,7 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
         |exportedAt: '2026-06-05T12:00:00Z'
         |exportedFrom: { managerVersion: test, hostname: host }
         |""".stripMargin
-    val res = handlers.importYaml(bad, None)(_ => None).unsafeRunSync()
+    val res = handlers.importYaml(bad, None)((_: String) => None).unsafeRunSync()
     res.isLeft shouldBe true
     res.left.toOption.get._1.code shouldBe 400
   }
@@ -61,6 +61,6 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
         |  - name: demo
         |""".stripMargin
     sup.listTenants() shouldBe empty
-    handlers.importYaml(yaml, None)(_ => None).unsafeRunSync().isRight shouldBe true
+    handlers.importYaml(yaml, None)((_: String) => None).unsafeRunSync().isRight shouldBe true
     sup.listTenants().map(_.displayName) should contain ("demo")
   }
