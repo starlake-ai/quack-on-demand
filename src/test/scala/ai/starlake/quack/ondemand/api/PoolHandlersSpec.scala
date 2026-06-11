@@ -60,7 +60,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "createPool" should "create a pool and return node info with maxConcurrent" in:
     val h = freshHandlers
-    val out = h.createPool(req(maxConcurrentPerNode = 4)).unsafeRunSync()
+    val out = h.createPool(req(maxConcurrentPerNode = 4), None)((_: String) => None).unsafeRunSync()
     out shouldBe a [Right[?, ?]]
     val Right(resp) = out: @unchecked
     resp.nodes.size shouldBe 2
@@ -68,14 +68,14 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "reject mismatched role distribution" in:
     val h = freshHandlers
-    val out = h.createPool(req(size = 3, dist = RoleDistribution(0, 1, 1))).unsafeRunSync()
+    val out = h.createPool(req(size = 3, dist = RoleDistribution(0, 1, 1)), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
 
   it should "return Conflict for duplicate pool" in:
     val h = freshHandlers
     val r  = req(size = 1, dist = RoleDistribution(0, 0, 1))
-    h.createPool(r).unsafeRunSync() shouldBe a [Right[?, ?]]
-    val out = h.createPool(r).unsafeRunSync()
+    h.createPool(r, None)((_: String) => None).unsafeRunSync() shouldBe a [Right[?, ?]]
+    val out = h.createPool(r, None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Conflict)
 
   it should "return 404 when the tenant is not registered" in:
@@ -86,7 +86,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       pool     = "sales",
       size     = 1,
       roleDistribution = RoleDistribution(0, 0, 1)
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1)        shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error)  shouldBe Some("tenant_not_found")
 
@@ -96,7 +96,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     // No createTenantDb -> the handler should refuse.
     val h = new PoolHandlers(sup, tracker)
-    val out = h.createPool(req()).unsafeRunSync()
+    val out = h.createPool(req(), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1)        shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error)  shouldBe Some("tenant_db_not_found")
 
@@ -104,20 +104,20 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers
     val out = h.scalePool(ScalePoolRequest(
       "acme", "acme_default", "missing", 2, RoleDistribution(0, 1, 1), force = false
-    )).unsafeRunSync()
+    ), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   "stopPool" should "stop a known pool" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1))).unsafeRunSync()
-    h.stopPool(StopPoolRequest("acme", "acme_default", "sales", force = true))
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    h.stopPool(StopPoolRequest("acme", "acme_default", "sales", force = true), None)((_: String) => None)
       .unsafeRunSync() shouldBe Right(())
 
   "listPools" should "return all pools" in:
     val h = freshHandlers
-    h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1))).unsafeRunSync()
-    h.createPool(req(pool = "ops",   size = 1, dist = RoleDistribution(0, 0, 1))).unsafeRunSync()
-    val out = h.listPools(None)(_ => None).unsafeRunSync()
+    h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    h.createPool(req(pool = "ops",   size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    val out = h.listPools(None)((_: String) => None).unsafeRunSync()
     out.toOption.get.pools.size shouldBe 2
 
   "poolStatus" should "return 404 for unknown pool" in:

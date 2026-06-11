@@ -296,12 +296,16 @@ final case class LoginResponse(
     token: String,
     username: String,
     role: String,
-    tenant: Option[String] = None
+    tenant: Option[String] = None,
+    superuser: Boolean = false,
+    manageableTenants: List[String] = Nil
 )
 final case class WhoamiResponse(
     username: String,
     role: String,
-    tenant: Option[String] = None
+    tenant: Option[String] = None,
+    superuser: Boolean = false,
+    manageableTenants: List[String] = Nil
 )
 
 // ----- Recent statement history -----
@@ -754,9 +758,55 @@ object Dtos:
   given Codec[TenantDbListResponse] = deriveCodec
   given Codec[TenantDbOpRequest]    = deriveCodec
 
-  given Codec[LoginRequest]             = deriveCodec
-  given Codec[LoginResponse]            = deriveCodec
-  given Codec[WhoamiResponse]           = deriveCodec
+  given Codec[LoginRequest] = deriveCodec
+  // Hand-rolled so new optional fields fall back to defaults when absent on the wire,
+  // and so old clients (no superuser/manageableTenants) keep parsing.
+  given Codec[LoginResponse] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        token             <- c.get[String]("token")
+        username          <- c.get[String]("username")
+        role              <- c.get[String]("role")
+        tenant            <- c.getOrElse[Option[String]]("tenant")(None)
+        superuser         <- c.getOrElse[Boolean]("superuser")(false)
+        manageableTenants <- c.getOrElse[List[String]]("manageableTenants")(Nil)
+      yield LoginResponse(token, username, role, tenant, superuser, manageableTenants)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "token"             -> r.token.asJson,
+          "username"          -> r.username.asJson,
+          "role"              -> r.role.asJson,
+          "tenant"            -> r.tenant.asJson,
+          "superuser"         -> r.superuser.asJson,
+          "manageableTenants" -> r.manageableTenants.asJson
+        )
+      )
+    }
+  )
+  given Codec[WhoamiResponse] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        username          <- c.get[String]("username")
+        role              <- c.get[String]("role")
+        tenant            <- c.getOrElse[Option[String]]("tenant")(None)
+        superuser         <- c.getOrElse[Boolean]("superuser")(false)
+        manageableTenants <- c.getOrElse[List[String]]("manageableTenants")(Nil)
+      yield WhoamiResponse(username, role, tenant, superuser, manageableTenants)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "username"          -> r.username.asJson,
+          "role"              -> r.role.asJson,
+          "tenant"            -> r.tenant.asJson,
+          "superuser"         -> r.superuser.asJson,
+          "manageableTenants" -> r.manageableTenants.asJson
+        )
+      )
+    }
+  )
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
 

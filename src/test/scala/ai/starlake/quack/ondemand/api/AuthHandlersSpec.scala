@@ -11,15 +11,14 @@ import ai.starlake.quack.edge.config.{
   KeycloakAuthConfig,
   OAuthConfig
 }
+import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
+import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
-/** Unit tests for [[AuthHandlers]].
-  *
-  * Uses a fake [[AuthenticationService]] subclass to avoid real DB / network calls.
-  */
+/** Unit tests for [[AuthHandlers]]. */
 class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   // Minimal config with all providers disabled so the parent constructor
@@ -79,7 +78,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   private def makeHandlers(
       result: Either[String, AuthenticatedProfile],
-      capturedScope: scala.collection.mutable.Buffer[(Option[String], String, String)]
+      capturedScope: scala.collection.mutable.Buffer[(Option[String], String, String)],
+      tokens: SessionTokenStore = new SessionTokenStore
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -91,9 +91,14 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         capturedScope += ((tenant, username, password))
         result
 
-    new AuthHandlers(fakeSvc, new SessionTokenStore)
+    new AuthHandlers(
+      authService       = fakeSvc,
+      tokens            = tokens,
+      identitySource    = ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil // unused in Db mode
+    )
 
-  "login" should "forward tenant scope to the auth service and echo it on the response" in {
+  "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
     val profile = AuthenticatedProfile(
       username   = "alice",
       role       = "admin",
@@ -110,13 +115,17 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
     result shouldBe a[Right[?, ?]]
     val resp = result.toOption.get
-    resp.tenant  shouldBe Some("t-abc123")
-    resp.username shouldBe "alice"
+    // The session scope is now the source of truth; the response carries
+    // tenant=None and surfaces the tenant via manageableTenants.
+    resp.tenant            shouldBe None
+    resp.superuser         shouldBe false
+    resp.manageableTenants shouldBe List("t-abc123")
+    resp.username          shouldBe "alice"
     calls should have size 1
     calls.head._1 shouldBe Some("t-abc123")
   }
 
-  it should "pass None scope when tenant is absent" in {
+  it should "pass None scope when tenant is absent and mint a superuser session" in {
     val profile = AuthenticatedProfile(
       username   = "root",
       role       = "admin",
@@ -129,9 +138,11 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val h     = makeHandlers(Right(profile), calls)
     val req   = LoginRequest("root", "pass", tenant = None)
 
-    h.login(req).unsafeRunSync()
+    val resp = h.login(req).unsafeRunSync().toOption.get
 
-    calls.head._1 shouldBe None
+    calls.head._1     shouldBe None
+    resp.superuser    shouldBe true
+    resp.manageableTenants shouldBe empty
   }
 
   it should "coerce blank tenant string to None before forwarding" in {
@@ -152,7 +163,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls.head._1 shouldBe None
   }
 
-  "whoami" should "surface the tenant from the stored profile" in {
+  "whoami" should "surface the tenant and scope from the stored session" in {
     val profile = AuthenticatedProfile(
       username   = "alice",
       role       = "admin",
@@ -162,25 +173,129 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tenant     = Some("t-abc123")
     )
     val store = new SessionTokenStore
-    val token = store.mint(profile)
-    val calls = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
-    val h     = makeHandlers(Right(profile), calls)
-    // Use the store we already minted from:
-    val hWithStore = new AuthHandlers(
-      new AuthenticationService(emptyConfig, "x"):
-        override val hasProviders: Boolean = true
-        override def authenticateBasic(
-            tenant: Option[String],
-            username: String,
-            password: String
-        ): Either[String, AuthenticatedProfile] = Right(profile),
-      store
+    val token = store.mintWithScope(
+      profile,
+      SessionScope(superuser = false, manageableTenants = Set("t-abc123"))
     )
+    val calls      = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
+    val hWithStore = makeHandlers(Right(profile), calls, store)
 
     val result = hWithStore.whoami(token).unsafeRunSync()
 
     result shouldBe a[Right[?, ?]]
     val resp = result.toOption.get
-    resp.tenant   shouldBe Some("t-abc123")
-    resp.username shouldBe "alice"
+    resp.tenant            shouldBe Some("t-abc123")
+    resp.username          shouldBe "alice"
+    resp.superuser         shouldBe false
+    resp.manageableTenants shouldBe List("t-abc123")
+  }
+
+  // ----- OIDC management identity source -----
+
+  private def oidcHandlers(
+      directory: Map[String, List[UserGrant]],
+      profile: AuthenticatedProfile = AuthenticatedProfile(
+        username   = "alice@corp",
+        role       = "user", // claim role MUST be ignored
+        groups     = Set.empty,
+        claims     = Map("email" -> "alice@corp"),
+        authMethod = "keycloak-ropc",
+        tenant     = None
+      )
+  ): AuthHandlers =
+    val fakeSvc = new AuthenticationService(emptyConfig, "x"):
+      override val hasProviders: Boolean = true
+      override def authenticateBasic(
+          tenant: Option[String],
+          username: String,
+          password: String
+      ): Either[String, AuthenticatedProfile] = Right(profile)
+
+    val fakeDirectory: GrantsLookup = (identity, email) =>
+      directory.getOrElse(
+        identity,
+        email.flatMap(directory.get).getOrElse(Nil)
+      )
+
+    new AuthHandlers(
+      authService       = fakeSvc,
+      tokens            = new SessionTokenStore,
+      identitySource    = ManagementIdentitySource.Oidc,
+      grantsForIdentity = fakeDirectory
+    )
+
+  "login (oidc)" should "treat tenant=NULL admin row as superuser, ignoring JWT role" in {
+    val h   = oidcHandlers(directory = Map("alice@corp" -> List(UserGrant(None, "admin"))))
+    val out = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    val r = out.toOption.get
+    r.superuser         shouldBe true
+    r.manageableTenants shouldBe empty
+    r.tenant            shouldBe None
+  }
+
+  it should "build a multi-tenant admin session when only tenant rows match" in {
+    val h = oidcHandlers(
+      directory = Map(
+        "alice@corp" -> List(
+          UserGrant(Some("t-a"), "admin"),
+          UserGrant(Some("t-b"), "admin")
+        )
+      )
+    )
+    val r = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
+    r.superuser              shouldBe false
+    r.manageableTenants.toSet shouldBe Set("t-a", "t-b")
+  }
+
+  it should "fall back to the email claim when the primary identity does not match" in {
+    val profile = AuthenticatedProfile(
+      username   = "alice@corp",
+      role       = "user",
+      groups     = Set.empty,
+      claims     = Map("email" -> "alice@corporate.example"),
+      authMethod = "keycloak-ropc",
+      tenant     = None
+    )
+    val h = oidcHandlers(
+      directory = Map("alice@corporate.example" -> List(UserGrant(None, "admin"))),
+      profile  = profile
+    )
+    val r = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
+    r.superuser shouldBe true
+  }
+
+  it should "403 not_provisioned when the directory yields no grants" in {
+    val h   = oidcHandlers(directory = Map.empty)
+    val out = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    val (code, err) = out.swap.toOption.get
+    code      shouldBe StatusCode.Forbidden
+    err.error shouldBe "not_provisioned"
+  }
+
+  it should "403 admin_required when no admin grant exists" in {
+    val h = oidcHandlers(
+      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "user")))
+    )
+    val out         = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
+    val (code, err) = out.swap.toOption.get
+    code      shouldBe StatusCode.Forbidden
+    err.error shouldBe "admin_required"
+  }
+
+  it should "discard the JWT role claim entirely (admin claim does NOT mint superuser)" in {
+    val profile = AuthenticatedProfile(
+      username   = "imposter",
+      role       = "admin",
+      groups     = Set("admin"),
+      claims     = Map("email" -> "imposter"),
+      authMethod = "keycloak-ropc",
+      tenant     = None
+    )
+    val h           = oidcHandlers(directory = Map.empty, profile = profile)
+    val out         = h.login(LoginRequest("imposter", "p")).unsafeRunSync()
+    val (code, err) = out.swap.toOption.get
+    code      shouldBe StatusCode.Forbidden
+    err.error shouldBe "not_provisioned"
   }

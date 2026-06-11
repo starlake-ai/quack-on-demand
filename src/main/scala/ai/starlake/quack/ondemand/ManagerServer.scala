@@ -57,32 +57,52 @@ final class ManagerServer(
     * `/api/...` (incl. `/ui/...`).
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
-    // Treat an empty string the same as unset. Compose / k8s configs
-    // routinely pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=`
-    // empty; pureconfig then materializes `Some("")`, which would
-    // otherwise enable the guard with a key no client ever sends.
-    cfg.apiKey.filter(_.nonEmpty) match
-      case None =>
-        logger.warn(
-          "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
-            "UI login flow) before exposing the manager beyond localhost."
-        )
-        routes
-      case Some(expected) =>
-        logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
-        Kleisli { req =>
-          val path = req.uri.path.toString
-          if !path.startsWith("/api/") && path != "/api" then routes(req)
-          else if isPublicApi(path) then routes(req)
-          else
-            val provided = req.headers
-              .get(CIString("X-API-Key"))
-              .map(_.head.value)
-            val staticMatch  = provided.contains(expected)
-            val sessionAdmin = provided.exists(sessions.isAdmin)
-            if staticMatch || sessionAdmin then routes(req)
-            else OptionT.pure[IO](Response[IO](Status.Unauthorized))
-        }
+    // Treat an empty string the same as unset. Compose / k8s configs routinely
+    // pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=` empty; pureconfig
+    // then materializes `Some("")`, which would otherwise enable the guard
+    // with a key no client ever sends.
+    val staticConfigured = cfg.apiKey.filter(_.nonEmpty)
+    if staticConfigured.isEmpty then
+      logger.warn(
+        "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
+          "UI login flow) before exposing the manager beyond localhost."
+      )
+    else
+      logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
+
+    Kleisli { req =>
+      val path = req.uri.path.toString
+      if !path.startsWith("/api/") && path != "/api" then routes(req)
+      else if isPublicApi(path) then routes(req)
+      else
+        val provided = req.headers.get(CIString("X-API-Key")).map(_.head.value)
+        val staticMatch  = staticConfigured.exists(expected => provided.contains(expected))
+        val sessionAdmin = provided.exists(sessions.isAdmin)
+        val openMode     = staticConfigured.isEmpty
+
+        val admitted = staticMatch || sessionAdmin || openMode
+        if !admitted then OptionT.pure[IO](Response[IO](Status.Unauthorized))
+        else
+          // Per-request tenant scope check. Only applies when there is a known
+          // session (not the static key, not open mode). Body-tenant endpoints
+          // do their own check via TenantScopeCheck.reject.
+          val tokenScope  = provided.flatMap(sessions.scopeOf)
+          val queryTenant = req.uri.query.params.get("tenant")
+          val pathTenant  = TenantScopeGuard.extractTenant(path, queryTenant)
+          (tokenScope, pathTenant) match
+            case (Some(scope), Some(t))
+                if !scope.superuser && !scope.manageableTenants.contains(t) =>
+              OptionT.pure[IO](
+                Response[IO](Status.Forbidden)
+                  .withEntity(
+                    s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""
+                  )
+                  .withContentType(
+                    org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                  )
+              )
+            case _ => routes(req)
+    }
 
   def serve: Resource[IO, org.http4s.server.Server] =
     val interpreter = Http4sServerInterpreter[IO]()
@@ -119,7 +139,7 @@ final class ManagerServer(
       RbacEndpoints.updateUser.serverLogic(users.updateUser),
       RbacEndpoints.deleteUser.serverLogic(users.deleteUser),
       RbacEndpoints.listUsers.serverLogic { case (t, key) =>
-        users.listUsers(t, key)(sessions.tenantOf)
+        users.listUsers(t, key)(sessions.scopeOf)
       },
       RbacEndpoints.effectivePermissions.serverLogic(users.effective),
       RbacEndpoints.createRole.serverLogic(roles.createRole),
@@ -173,24 +193,52 @@ final class ManagerServer(
       }
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      Endpoints.createPool.serverLogic(pools.createPool),
-      Endpoints.scalePool.serverLogic(pools.scalePool),
-      Endpoints.stopPool.serverLogic(pools.stopPool),
-      Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.tenantOf)),
+      Endpoints.createPool.serverLogic { case (req, key) =>
+        pools.createPool(req, key)(sessions.scopeOf)
+      },
+      Endpoints.scalePool.serverLogic { case (req, key) =>
+        pools.scalePool(req, key)(sessions.scopeOf)
+      },
+      Endpoints.stopPool.serverLogic { case (req, key) =>
+        pools.stopPool(req, key)(sessions.scopeOf)
+      },
+      Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.scopeOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
-      Endpoints.setPoolDisabled.serverLogic(pools.setPoolDisabled),
-      Endpoints.setRole.serverLogic(nodes.setRole),
-      Endpoints.setMaxConcurrent.serverLogic(nodes.setMaxConcurrent),
-      Endpoints.quarantineNode.serverLogic(nodes.quarantineNode),
-      Endpoints.restartNode.serverLogic(nodes.restartNode),
-      Endpoints.createTenant.serverLogic(tenants.createTenant),
-      Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.tenantOf)),
-      Endpoints.deleteTenant.serverLogic(tenants.deleteTenant),
-      Endpoints.setTenantDisabled.serverLogic(tenants.setTenantDisabled),
-      Endpoints.setTenantAuth.serverLogic(tenants.setTenantAuth),
-      Endpoints.createTenantDb.serverLogic(tenantDbs.createTenantDb),
+      Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
+        pools.setPoolDisabled(req, key)(sessions.scopeOf)
+      },
+      Endpoints.setRole.serverLogic { case (req, key) =>
+        nodes.setRole(req, key)(sessions.scopeOf)
+      },
+      Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
+        nodes.setMaxConcurrent(req, key)(sessions.scopeOf)
+      },
+      Endpoints.quarantineNode.serverLogic { case (req, key) =>
+        nodes.quarantineNode(req, key)(sessions.scopeOf)
+      },
+      Endpoints.restartNode.serverLogic { case (req, key) =>
+        nodes.restartNode(req, key)(sessions.scopeOf)
+      },
+      Endpoints.createTenant.serverLogic { case (req, key) =>
+        tenants.createTenant(req, key)(sessions.scopeOf)
+      },
+      Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.scopeOf)),
+      Endpoints.deleteTenant.serverLogic { case (req, key) =>
+        tenants.deleteTenant(req, key)(sessions.scopeOf)
+      },
+      Endpoints.setTenantDisabled.serverLogic { case (req, key) =>
+        tenants.setTenantDisabled(req, key)(sessions.scopeOf)
+      },
+      Endpoints.setTenantAuth.serverLogic { case (req, key) =>
+        tenants.setTenantAuth(req, key)(sessions.scopeOf)
+      },
+      Endpoints.createTenantDb.serverLogic { case (req, key) =>
+        tenantDbs.createTenantDb(req, key)(sessions.scopeOf)
+      },
       Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
-      Endpoints.deleteTenantDb.serverLogic(tenantDbs.deleteTenantDb),
+      Endpoints.deleteTenantDb.serverLogic { case (req, key) =>
+        tenantDbs.deleteTenantDb(req, key)(sessions.scopeOf)
+      },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.clientConfig.serverLogic(_ =>
         IO.pure(
@@ -206,10 +254,10 @@ final class ManagerServer(
           )
         )
       ),
-      Endpoints.serverConfig.serverLogic(apiKey => serverConfig.list(apiKey)(sessions.tenantOf)),
-      Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.tenantOf)),
+      Endpoints.serverConfig.serverLogic(apiKey => serverConfig.list(apiKey)(sessions.scopeOf)),
+      Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.scopeOf)),
       Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
-        manifest.importYaml(body, apiKey)(sessions.tenantOf)
+        manifest.importYaml(body, apiKey)(sessions.scopeOf)
       }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
