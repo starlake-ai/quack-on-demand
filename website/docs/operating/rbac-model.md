@@ -178,80 +178,60 @@ Environment variable: `QOD_ACL_DIALECT`.
 
 ## Worked examples
 
-These scenarios show how the entities, the EffectiveSet, and the two gates combine in practice. Each one lists the setup as entities plus grants, then the resulting allow/deny decision for representative statements. The grant notation `verb on catalog.schema.table` is one `qodstate_role_permission` row. For the REST and UI steps to create these, see the "Administering access" page; this section is about understanding the outcomes. All examples assume `QOD_ACL_ENABLED=true` and a tenant named `acme` whose tenant-db (catalog) is `sales` with schemas `raw`, `staging`, and `mart`.
+These scenarios show how the entities, the EffectiveSet, and the two gates combine in practice. Each one lists the setup as entities plus grants, then the resulting allow/deny decision for representative statements. The grant notation `verb on catalog.schema.table` is one `qodstate_role_permission` row. For the REST and UI steps to create these, see the "Administering access" page; this section is about understanding the outcomes. All examples assume `QOD_ACL_ENABLED=true`. The users, roles, groups, and grants shown match the bundled demo manifest at `src/main/resources/bootstrap-demo.yaml`, which is imported automatically when `LOAD_TPC=N` is set.
 
 ### Read-only analyst
 
-A BI analyst should query the curated `mart` schema and nothing else.
+A BI analyst may query a handful of curated TPC-H tables and nothing else.
 
 Setup:
 
 | Entity | Value |
 |---|---|
 | User | `alice` (tenant `acme`) |
-| Role | `analyst_ro` |
-| Role permission | `RO on sales.mart.*` |
-| Pool grant | `analyst_ro` reaches pool `bi` (via the user's group or a direct pool permission) |
-| Edge | `alice` assigned `analyst_ro` directly (`qodstate_user_role`) |
+| Role | `analyst` |
+| Role permissions | `RO on acme_tpch.tpch1.customer`, `RO on acme_tpch.tpch1.orders`, `RO on acme_tpch.tpch1.nation`, `RO on acme_tpch.tpch1.region` |
+| Pool grant | `alice` holds a direct pool permission for pool `bi` |
+| Edge | `alice` assigned `analyst` directly (`qodstate_user_role`) |
 
-Results, connecting to pool `bi`:
+Results, connecting to pool `bi` (default catalog `acme_tpch`, default schema `tpch1`):
 
 | Statement | Decision | Why |
 |---|---|---|
-| `SELECT * FROM mart.daily_revenue` | Allowed | Read access on `sales.mart.daily_revenue` covered by `RO on sales.mart.*`. |
-| `SELECT * FROM mart.a JOIN mart.b USING (id)` | Allowed | Both joined tables are reads under `sales.mart.*`. |
-| `SELECT * FROM raw.events` | Denied | `sales.raw.events` is not under `sales.mart.*`; no covering grant. |
-| `INSERT INTO mart.daily_revenue VALUES (...)` | Denied | Write access needs `RW` or `ALL`; the analyst holds only `RO`. |
+| `SELECT * FROM customer` | Allowed | Unqualified name resolves to `acme_tpch.tpch1.customer`; covered by `RO on acme_tpch.tpch1.customer`. |
+| `SELECT * FROM lineitem` | Denied | Resolves to `acme_tpch.tpch1.lineitem`; no grant on `lineitem` exists for `analyst`. |
+| `INSERT INTO customer VALUES (...)` | Denied | Write access needs `RW` or `ALL`; `analyst` holds only `RO` on `customer`. |
 
 ### ETL pipeline through a group
 
-A service account loads `staging` from `raw` on a schedule. Permissions are attached to a role, the role to a group, and the account to the group, so onboarding a second loader is just one group membership.
+A data-engineering account runs nightly loads. Permissions are attached to roles, the roles to a group, and the account to the group, so onboarding a second loader is one group-membership change.
 
 Setup:
 
 | Entity | Value |
 |---|---|
-| User | `etl-bot` (tenant `acme`) |
+| User | `bob` (tenant `acme`) |
 | Group | `data-eng` |
-| Role | `etl` |
-| Role permissions | `RO on sales.raw.*`, `RW on sales.staging.*` |
-| Edges | `data-eng` carries `etl` (`qodstate_group_role`); `etl-bot` is in `data-eng` (`qodstate_user_group`) |
-| Pool grant | `data-eng` holds a pool permission for pool `etl` |
+| Roles via group | `etl` and `dba` (`qodstate_group_role`) |
+| `etl` permissions | `RW on acme_tpch.tpch1.lineitem`, `RO on acme_tpch.tpch1.orders` |
+| `dba` permissions | `DDL on acme_tpch.tpch1.*` |
+| Edge | `bob` is a member of `data-eng` (`qodstate_user_group`) |
+| Pool grant | `bob` holds a direct pool permission for pool `etl` |
 
-Results, connecting to pool `etl`:
-
-| Statement | Decision | Why |
-|---|---|---|
-| `INSERT INTO staging.orders SELECT * FROM raw.orders` | Allowed | Write target `sales.staging.orders` covered by `RW on sales.staging.*`; read source `sales.raw.orders` covered by `RO on sales.raw.*`. Both sides must pass. |
-| `DELETE FROM staging.orders WHERE day < '2026-01-01'` | Allowed | DELETE is a `Write` access on `sales.staging.orders`, covered by the `RW on sales.staging.*` grant. |
-| `CREATE TABLE staging.orders_v2 AS SELECT * FROM raw.orders` | Denied | The `CREATE` is a `Ddl` access; the role has no `DDL` (or `ALL`) grant on `sales.staging.*`. The read source would pass, but the unmet DDL access denies the whole statement. |
-| `SELECT * FROM mart.daily_revenue` | Denied | No grant reaches `sales.mart.*`. |
-
-`RW` on a table covers both reads and writes on that table; if the workload needs to write somewhere but read from elsewhere, add the matching read grant separately as in the ETL example above.
-
-### Narrow single-table grant
-
-The finance team may read exactly one table, not its whole schema.
-
-Setup:
-
-| Entity | Value |
-|---|---|
-| Group | `finance` with role `gl_reader` |
-| Role permission | `RO on sales.finance.ledger` (all three parts literal, no wildcard) |
-
-Results:
+Results, connecting to pool `etl` (default catalog `acme_tpch`, default schema `tpch1`):
 
 | Statement | Decision | Why |
 |---|---|---|
-| `SELECT balance FROM finance.ledger` | Allowed | Exact literal match on all three name parts. |
-| `SELECT * FROM finance.journal` | Denied | `journal` does not match the literal `ledger`; a single-table grant does not extend to siblings. |
+| `INSERT INTO lineitem SELECT * FROM orders` | Allowed | Write target `acme_tpch.tpch1.lineitem` covered by `RW on acme_tpch.tpch1.lineitem` (via `etl`); read source `acme_tpch.tpch1.orders` covered by `RO on acme_tpch.tpch1.orders` (via `etl`). Both sides must pass. |
+| `DELETE FROM lineitem WHERE l_orderkey < 0` | Allowed | DELETE is a `Write` access on `acme_tpch.tpch1.lineitem`, covered by `RW on acme_tpch.tpch1.lineitem`. |
+| `CREATE TABLE foo (id INT)` | Allowed | `CREATE` is a `Ddl` access on `acme_tpch.tpch1.foo`; covered by `DDL on acme_tpch.tpch1.*` (via `dba`). |
+| `SELECT * FROM customer` | Denied | Resolves to `acme_tpch.tpch1.customer`; neither `etl` nor `dba` grants `RO` (or broader) on `customer`. |
 
-To widen this later, change the table part to `*` (`RO on sales.finance.*`).
+`RW` on a table covers both reads and writes on that table; if the workload needs to write somewhere but read from elsewhere, add the matching read grant separately as in the example above.
 
-### Tenant admin and the cross-tenant boundary
+### Cross-tenant denial via wildcard scope
 
-A tenant administrator should have full control inside their own tenant but must not reach another tenant's data.
+A tenant administrator holds `ALL on *.*.*` inside their tenant. The catalog `*` wildcard is scoped to the session's tenant, so it does not reach a sibling tenant's catalog.
 
 Setup:
 
@@ -260,16 +240,17 @@ Setup:
 | User | `acme-admin` (tenant `acme`, not a superuser) |
 | Role | `tenant_admin` |
 | Role permission | `ALL on *.*.*` |
+| Pool grants | pool `bi` and pool `etl` (both in tenant `acme`) |
 
-Results:
+Results, connecting to pool `bi`:
 
 | Statement | Decision | Why |
 |---|---|---|
-| `SELECT * FROM raw.events` | Allowed | `ALL` covers `Read`; `*` matches any catalog in tenant `acme`. |
-| `CREATE TABLE mart.summary AS SELECT ...` | Allowed | `ALL` covers `Ddl` and the `Read` source. |
-| `SELECT * FROM widgets.public.orders` (a different tenant's catalog) | Denied | The catalog `*` wildcard is scoped to the session's tenant; it does not match `widgets`. |
+| `SELECT * FROM customer` | Allowed | Resolves to `acme_tpch.tpch1.customer`; `ALL` covers `Read` and `*` matches any catalog within tenant `acme`. |
+| `CREATE TABLE tpch1.new_table (id INT)` | Allowed | `ALL` covers `Ddl`; the wildcard matches `acme_tpch`. |
+| `SELECT * FROM globex_tpcds.tpcds1.store_sales` | Denied | `globex_tpcds` belongs to tenant `globex`, not `acme`; the catalog `*` wildcard is scoped to the session's tenant and does not match it. |
 
-To grant a cross-tenant read deliberately, name the other catalog literally, for example `RO on widgets.*.*`. That bypasses the tenant-scoped wildcard through the literal-match path. Contrast with a superuser (`tenant IS NULL`), who skips the per-statement gate entirely and needs no such grant.
+To grant access to `globex_tpcds` deliberately, name it literally in a separate permission: `RO on globex_tpcds.*.*`. That bypasses the tenant-scoped wildcard through the literal-match path. Contrast with a superuser (`tenant IS NULL`), who skips the per-statement gate entirely and needs no such explicit grant.
 
 ### Pool gate versus statement gate
 
@@ -279,17 +260,17 @@ Setup:
 
 | Entity | Value |
 |---|---|
-| User | `bob` with role granting `RO on sales.mart.*` |
+| User | `alice` (tenant `acme`) with role `analyst` granting `RO on acme_tpch.tpch1.customer` (and others) |
 | Pool grant | a pool permission for pool `bi` only |
 
 Results:
 
 | Action | Decision | Why |
 |---|---|---|
-| Connect to pool `bi`, then `SELECT * FROM mart.daily_revenue` | Allowed | Gate 1 admits the pool; gate 2 admits the read. |
-| Connect to pool `etl` | Denied at handshake | Gate 1: `bob`'s effective pools do not include `etl`. No SQL is ever evaluated. |
+| Connect to pool `bi`, then `SELECT * FROM customer` | Allowed | Gate 1 admits the pool; gate 2 admits the read (`acme_tpch.tpch1.customer` covered by `RO`). |
+| Connect to pool `etl` | Denied at handshake | Gate 1: `alice`'s effective pools do not include `etl`. No SQL is ever evaluated. |
 
-A pool permission with a null `pool_id` would admit `bob` to every pool in tenant `acme`, collapsing the two rows above into one tenant-wide grant.
+A pool permission with a null `pool_id` would admit `alice` to every pool in tenant `acme`, collapsing the two rows above into one tenant-wide grant.
 
 ## Privilege-escalation guards
 

@@ -54,22 +54,26 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPCH=N` | Seed TPC-H at scale factor N before startup (`LOAD_TPCH=1` is about 6 M lineitem rows, `LOAD_TPCH=10` about 60 M). The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. |
+| `LOAD_TPC=N` | Scale factor N seeds the demo: TPC-H sf=N into `acme/acme_tpch`, TPC-DS sf=N into `globex/globex_tpcds`. Also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. (`LOAD_TPC=1` is about 6 M lineitem rows for TPC-H; `LOAD_TPC=10` about 60 M.) The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
 | `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
 
-For a clean, freshly seeded environment in one shot, combine them - this wipes any previous state and boots with a scale-factor-1 TPC-H dataset:
+For a clean, freshly seeded environment in one shot, combine them - this wipes any previous state and boots with a scale-factor-1 demo dataset:
 
 ```bash
-NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh
+NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
 ```
+
+`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 The jar path takes the same combination:
 
 ```bash
-NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh
 ```
+
+`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 ## Open the admin console
 
