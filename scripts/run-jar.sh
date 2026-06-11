@@ -409,28 +409,23 @@ if [[ "$NUKE" == "1" ]]; then
   fi
   # Drop the Postgres catalog DB (will be recreated below). Requires
   # Postgres to be reachable; otherwise warn and continue with the local
-  # wipes — they're still useful and the Postgres side is harmless when
+  # wipes; they are still useful and the Postgres side is harmless when
   # the DB is later recreated by the bootstrap step.
   #
-  # Also drop the bootstrap tenant-db Postgres DB (default `tpch_tpch1`)
+  # Also drop the demo tenant-db Postgres DBs (acme_tpch + globex_tpcds)
   # so the next boot starts with no leftover DuckLake catalog / tables
   # from a previous run. Runtime-created tenant-dbs (via the REST API,
-  # not the bootstrap config) are NOT covered — drop them manually if
+  # not the bundled demo YAML) are NOT covered; drop them manually if
   # you want them gone.
   if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
     echo "  dropping Postgres database: $pg_dbname (control plane)"
     PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc "DROP DATABASE IF EXISTS \"$pg_dbname\" WITH (FORCE)" >/dev/null
-    bs_tenant="${QOD_BOOTSTRAP_TENANT:-tpch}"
-    bs_tenantdb_suffix="${QOD_BOOTSTRAP_TENANTDB:-tpch1}"
-    if [[ "$bs_tenantdb_suffix" == "${bs_tenant}_"* ]]; then
-      bs_tenantdb_name="$bs_tenantdb_suffix"
-    else
-      bs_tenantdb_name="${bs_tenant}_${bs_tenantdb_suffix}"
-    fi
-    echo "  dropping Postgres database: $bs_tenantdb_name (bootstrap tenant-db)"
-    PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
-       -tAc "DROP DATABASE IF EXISTS \"$bs_tenantdb_name\" WITH (FORCE)" >/dev/null
+    for demo_db in acme_tpch globex_tpcds; do
+      echo "  dropping Postgres database: $demo_db (demo tenant-db)"
+      PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
+         -tAc "DROP DATABASE IF EXISTS \"$demo_db\" WITH (FORCE)" >/dev/null
+    done
   elif [[ "$state_mode" == "postgres" ]]; then
     echo "  WARN: Postgres unreachable; skipping DB drop (local wipes still proceed)" >&2
   fi
