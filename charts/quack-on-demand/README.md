@@ -24,7 +24,7 @@ cd quack-on-demand
 
 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 # NUKE=1            wipe the namespace before reinstalling
-# LOAD_TPCH=1       seed TPC-H scale factor 1 (~6M lineitem rows)
+# LOAD_TPC=1        seed the bundled demo (acme + globex)
 # BUILD=1           rebuild the manager + Quack-node images from the tree
 ```
 
@@ -84,7 +84,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `ingress.enabled` | `false` | REST/UI only. |
 | `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |
 | `metrics.sink` | `prometheus` | One of `prometheus` \| `aws` \| `azure` \| `gcp` \| `none`. |
-| `bootstrap.enabled` | `true` | Auto-create `tpch/tpch1/sales` tenant + tenant-db + pool on every boot. Disable when tenants are managed externally. |
+| `loadTpc.enabled` | `false` | Inject `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` to seed the bundled acme + globex demo manifest on boot. |
 
 ## Quack node image
 
