@@ -259,6 +259,13 @@ lazy val root = (project in file("."))
       "Add-Opens" -> "java.base/java.nio java.base/sun.nio.ch"
     ),
 
+    // Pin the assembly's Main-Class. Without this, sbt-assembly leaves it
+    // unset whenever more than one main is discovered (the `docs.GenOpenApi`
+    // / `docs.GenConfigDocs` helpers added for site generation each carry
+    // their own `def main`), and `java -jar` then fails with
+    // "no main manifest attribute".
+    assembly / mainClass := Some("ai.starlake.quack.Main"),
+
     // sbt-release flow - mirrors starlake-core's `sbt 'release with-defaults'`
     // dance: bump version (drop -SNAPSHOT), commit, tag, sign+publish to
     // Central Portal, release the bundle, bump to next snapshot, commit,
