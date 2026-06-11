@@ -35,7 +35,7 @@
 #   PG_PORT       Postgres port                       (default 5432)
 #   PG_USER       Postgres user                       (default postgres)
 #   PG_PASS       Postgres password                   (default azizam)
-#   DB_NAME       Postgres DB + DuckLake catalog name (default tpch)
+#   DB_NAME       Postgres DB + DuckLake catalog name (default acme_tpch)
 #   SCHEMA_NAME   DuckLake schema (must differ from DB_NAME)  (default tpch1)
 #   DATA_PATH     DuckLake data dir                   (default ducklake/$DB_NAME)
 #   SF            scale factor - controls row counts  (default 1)
@@ -43,7 +43,7 @@
 #                 SF=10 -> ~60M lineitem rows (much heavier)
 #
 # Usage:
-#   ./scripts/load-tpch-dbgen.sh                       # SF=1 into tpch.tpch1
+#   ./scripts/load-tpch-dbgen.sh                       # SF=1 into acme_tpch.tpch1
 #   SF=10 ./scripts/load-tpch-dbgen.sh                 # larger workload
 #   PG_HOST=db.internal SCHEMA_NAME=tpch10 SF=10 ./scripts/load-tpch-dbgen.sh
 
@@ -55,7 +55,7 @@ PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-azizam}"
 
-DB_NAME="${DB_NAME:-tpch}"
+DB_NAME="${DB_NAME:-acme_tpch}"
 SCHEMA_NAME="${SCHEMA_NAME:-tpch1}"
 SF="${SF:-1}"
 
