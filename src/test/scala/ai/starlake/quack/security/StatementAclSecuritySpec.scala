@@ -223,22 +223,22 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
   // D. Granular vs wildcard verbs
   // =========================================================================
 
-  /** Replace alice's role permission in the store with a SELECT-only grant on a
+  /** Replace alice's role permission in the store with an RO-only grant on a
     * specific table, then rebuild the supervisor so the resolver picks it up.
     * Returns a new (store, supervisor, effectiveSet) triple. */
-  private def aliceWithSelectOnlyGrant(): (InMemoryControlPlaneStore, PoolSupervisor, EffectiveSet) =
+  private def aliceWithReadOnlyGrant(): (InMemoryControlPlaneStore, PoolSupervisor, EffectiveSet) =
     val fix = SecurityFixtures.freshStore()
     // Remove the existing wildcard ALL permission.
     fix.store.deleteRolePermission(SecurityFixtures.AdminPermId)
-    // Insert a SELECT-only permission on acme.public.t.
+    // Insert an RO-only permission on acme.public.t.
     fix.store.insertRolePermission(
       RolePermission(
-        id          = "rp-select-only",
+        id          = "rp-ro-only",
         roleId      = SecurityFixtures.AdminRoleId,
         catalogName = "acme",
         schemaName  = "public",
         tableName   = "t",
-        verb        = "SELECT",
+        verb        = "RO",
         grantedAt   = Some(Instant.now())
       )
     )
@@ -246,13 +246,13 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
     val eff = effectiveSetFor(sup, fix.aliceUserId)
     (fix.store, sup, eff)
 
-  "alice with SELECT-only grant on acme.public.t" should "be allowed to SELECT that table" in {
-    val (_, _, eff) = aliceWithSelectOnlyGrant()
+  "alice with RO-only grant on acme.public.t" should "be allowed to SELECT that table" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
 
-    // Sanity: only the specific SELECT grant is present.
+    // Sanity: only the specific RO grant is present.
     eff.permissions.exists(_.verb == "ALL") shouldBe false
     eff.permissions.exists(p =>
-      p.verb == "SELECT" && p.catalogName == "acme" && p.tableName == "t"
+      p.verb == "RO" && p.catalogName == "acme" && p.tableName == "t"
     ) shouldBe true
 
     validator.validate(
@@ -260,12 +260,11 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
     ) shouldBe Allowed
   }
 
-  it should "be denied INSERT because her SELECT-only grant does not cover INSERT" in {
-    val (_, _, eff) = aliceWithSelectOnlyGrant()
+  it should "be denied INSERT because her RO-only grant does not cover writes" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
 
-    // SqlParser.extract now returns Extracted for INSERT with allTables = {acme.public.t}.
-    // The validator requires an INSERT or ALL grant covering acme.public.t.
-    // Alice only has SELECT on acme.public.t; SELECT does not satisfy INSERT -> Denied.
+    // SqlParser.extract returns Extracted for INSERT with allTables = {acme.public.t}.
+    // The validator requires RW or ALL to cover Verb.Write; RO covers only Verb.Read.
     val result = validator.validate(
       ctx("alice", "INSERT INTO acme.public.t VALUES (1)", eff)
     )
@@ -273,5 +272,5 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
       case Denied(msg) =>
         msg.length should be > 0
       case Allowed =>
-        fail("expected Denied for alice with SELECT-only grant on INSERT, got Allowed")
+        fail("expected Denied for alice with RO-only grant on INSERT, got Allowed")
   }

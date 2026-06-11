@@ -14,10 +14,11 @@ import java.time.Instant
   * Mirrors the construction pattern used in [[PostgresAclValidatorSpec]].
   *
   * The key behaviors under test:
-  *   - SELECT allowed iff a SELECT (or ALL) grant covers the table.
-  *   - INSERT allowed iff an INSERT (or ALL) grant covers the table.
-  *   - CREATE TABLE allowed iff a CREATE (or ALL) grant covers the table.
-  *   - SELECT grant does NOT satisfy an INSERT check (and vice versa).
+  *   - SELECT allowed iff an RO, RW, or ALL grant covers the table.
+  *   - INSERT/UPDATE allowed iff an RW or ALL grant covers the table.
+  *   - CREATE TABLE allowed iff a DDL or ALL grant covers the table.
+  *   - RO grant does NOT satisfy a Write (INSERT/UPDATE/DELETE) check.
+  *   - RW grant does NOT satisfy a DDL check.
   *   - Wildcard ALL on *.*.* satisfies any access.
   *   - COMMIT (ControlFlow) is always admitted regardless of grants.
   *   - Superuser (tenant=None) bypasses the check entirely.
@@ -104,56 +105,61 @@ class PostgresAclValidatorVerbsSpec extends AnyFlatSpec with Matchers:
       case Allowed     => fail("expected Denied for user with no grants, got Allowed")
   }
 
-  it should "allow a SELECT covered by a per-table SELECT grant" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "SELECT")))
+  it should "allow a SELECT covered by a per-table RO grant" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RO")))
     validator.validate(ctx("SELECT * FROM acme.public.t", "u1", e)) shouldBe Allowed
   }
 
-  it should "allow an INSERT covered by an INSERT grant on that table" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "INSERT")))
+  it should "allow an INSERT covered by an RW grant on that table" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RW")))
     validator.validate(ctx("INSERT INTO acme.public.t VALUES (1)", "u1", e)) shouldBe Allowed
   }
 
-  it should "deny INSERT on a table the user only has SELECT on" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "SELECT")))
+  it should "deny INSERT on a table the user only has RO on" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RO")))
     val result = validator.validate(ctx("INSERT INTO acme.public.t VALUES (1)", "u1", e))
     result match
       case Denied(msg) => msg should (include("acme") or include("Write"))
-      case Allowed     => fail("expected Denied for INSERT with SELECT-only grant, got Allowed")
+      case Allowed     => fail("expected Denied for INSERT with RO-only grant, got Allowed")
   }
 
-  it should "allow UPDATE covered by an UPDATE grant" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "UPDATE")))
+  it should "allow UPDATE covered by an RW grant" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RW")))
     validator.validate(
       ctx("UPDATE acme.public.t SET col = 1 WHERE id = 1", "u1", e)
     ) shouldBe Allowed
   }
 
-  it should "deny UPDATE when user only has SELECT on that table" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "SELECT")))
+  it should "deny UPDATE when user only has RO on that table" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RO")))
     val result = validator.validate(
       ctx("UPDATE acme.public.t SET col = 1 WHERE id = 1", "u1", e)
     )
     result match
       case Denied(_) => succeed
-      case Allowed   => fail("expected Denied for UPDATE with SELECT-only grant, got Allowed")
+      case Allowed   => fail("expected Denied for UPDATE with RO-only grant, got Allowed")
   }
 
-  it should "allow CREATE TABLE covered by a CREATE grant" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "newtable", "CREATE")))
+  it should "allow CREATE TABLE covered by a DDL grant" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "newtable", "DDL")))
     validator.validate(
       ctx("CREATE TABLE acme.public.newtable (id INT)", "u1", e)
     ) shouldBe Allowed
   }
 
-  it should "deny CREATE TABLE without a CREATE or ALL grant" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "newtable", "SELECT")))
+  it should "deny CREATE TABLE without a DDL or ALL grant" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "newtable", "RW")))
     val result = validator.validate(
       ctx("CREATE TABLE acme.public.newtable (id INT)", "u1", e)
     )
     result match
       case Denied(_) => succeed
-      case Allowed   => fail("expected Denied for CREATE without CREATE/ALL grant, got Allowed")
+      case Allowed   => fail("expected Denied for CREATE without DDL/ALL grant, got Allowed")
+  }
+
+  it should "allow SELECT covered by an RW grant (RW includes read)" in {
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "t", "RW")))
+    validator.validate(ctx("SELECT * FROM acme.public.t", "u1", e)) shouldBe Allowed
   }
 
   it should "allow anything for a wildcard ALL on *.*.*" in {
@@ -193,13 +199,15 @@ class PostgresAclValidatorVerbsSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "allow with catalog-level wildcard grant covering a specific table" in {
-    val e = eff("u1", Some("t1"), List(perm("acme", "*", "*", "SELECT")))
+    val e = eff("u1", Some("t1"), List(perm("acme", "*", "*", "RO")))
     validator.validate(ctx("SELECT * FROM acme.public.t", "u1", e)) shouldBe Allowed
   }
 
-  it should "deny INSERT on the read source of an INSERT...SELECT when only INSERT grant on target" in {
-    // INSERT INTO target SELECT * FROM source -- source requires a Read grant
-    val e = eff("u1", Some("t1"), List(perm("acme", "public", "target", "INSERT")))
+  it should "deny INSERT...SELECT when only an RW grant on the target exists (source has no RO/RW)" in {
+    // INSERT INTO target SELECT * FROM source -- source requires its own
+    // Read-covering grant. RW on target covers SELECT+INSERT on target but
+    // not SELECT on source.
+    val e = eff("u1", Some("t1"), List(perm("acme", "public", "target", "RW")))
     val result = validator.validate(
       ctx("INSERT INTO acme.public.target SELECT * FROM acme.public.source", "u1", e)
     )
@@ -207,7 +215,7 @@ class PostgresAclValidatorVerbsSpec extends AnyFlatSpec with Matchers:
       case Denied(_) => succeed
       case Allowed   =>
         fail(
-          "expected Denied for INSERT...SELECT when only INSERT grant exists (no READ on source)"
+          "expected Denied for INSERT...SELECT when only RW grant on target exists (no Read on source)"
         )
   }
 
@@ -233,7 +241,7 @@ class PostgresAclValidatorVerbsSpec extends AnyFlatSpec with Matchers:
     // names the catalog explicitly (e.g. `other.*.* SELECT`) still bypasses
     // the tenant scope -- operators can deliberately grant cross-tenant
     // access by naming the catalog.
-    val e = eff("u1", Some("t1"), List(perm("other", "*", "*", "SELECT")))
+    val e = eff("u1", Some("t1"), List(perm("other", "*", "*", "RO")))
     validator.validate(
       ctx("SELECT * FROM other.public.t", "u1", e)
     ) shouldBe Allowed

@@ -64,7 +64,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       catalogName = "tpch_tpch1",
       schemaName  = "tpch1",
       tableName   = "customer",
-      verb        = "SELECT"
+      verb        = "RO"
     ))
 
     // Superuser admin

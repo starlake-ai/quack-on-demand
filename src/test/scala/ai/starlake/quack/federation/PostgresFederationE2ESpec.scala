@@ -214,7 +214,7 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     val tenantId = "t-acl-inmem"
 
     // Grant SELECT on fedpg.public.orders.
-    val withGrant = mkEffective(tenantId, perms = List(perm("fedpg", "public", "orders", "SELECT")))
+    val withGrant = mkEffective(tenantId, perms = List(perm("fedpg", "public", "orders", "RO")))
     val ctxGrant  = mkCtx("SELECT * FROM fedpg.public.orders", tenantId, withGrant)
     validator.validate(ctxGrant) shouldBe Allowed
 
@@ -229,8 +229,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   it should "allow a DuckLake-join query when both local and federated grants exist" in {
     val tenantId = "t-acl-join-inmem"
     val perms    = List(
-      perm("fedpg", "public",    "orders",   "SELECT"),
-      perm("tpch",  "main",      "lineitem", "SELECT")
+      perm("fedpg", "public",    "orders",   "RO"),
+      perm("tpch",  "main",      "lineitem", "RO")
     )
     val eff = mkEffective(tenantId, perms)
     val sql = "SELECT o.id, l.qty FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id"
@@ -239,7 +239,7 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "deny the join when only the local-side grant is present" in {
     val tenantId = "t-acl-join-deny"
-    val eff      = mkEffective(tenantId, perms = List(perm("tpch", "main", "lineitem", "SELECT")))
+    val eff      = mkEffective(tenantId, perms = List(perm("tpch", "main", "lineitem", "RO")))
     val sql      = "SELECT o.id FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id"
     validator.validate(mkCtx(sql, tenantId, eff)) match
       case Denied(msg) => msg should (include("fedpg") or include("orders"))
@@ -279,7 +279,7 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "allow SELECT on fedpg.public.orders for DuckDbFile tenant after grant" in {
     val tenantId = "t-acl-file"
-    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "SELECT")))
+    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "RO")))
     validator.validate(mkCtx("SELECT * FROM fedpg.public.orders", tenantId, eff)) shouldBe Allowed
   }
 
@@ -334,8 +334,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   it should "allow SELECT joining DuckLake catalog + federated alias for DuckLake tenant" in {
     val tenantId = "t-acl-lake-join"
     val perms    = List(
-      perm("fedpg",   "public", "orders",   "SELECT"),
-      perm("tpch",    "main",   "customer", "SELECT")
+      perm("fedpg",   "public", "orders",   "RO"),
+      perm("tpch",    "main",   "customer", "RO")
     )
     val eff = mkEffective(tenantId, perms)
     val sql =
@@ -345,7 +345,7 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "deny SELECT on DuckLake catalog table when only federated grant exists" in {
     val tenantId = "t-acl-lake-partial"
-    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "SELECT")))
+    val eff      = mkEffective(tenantId, List(perm("fedpg", "public", "orders", "RO")))
     val sql      =
       "SELECT o.id, c.name FROM fedpg.public.orders o JOIN tpch.main.customer c ON o.cust_id = c.id"
     validator.validate(mkCtx(sql, tenantId, eff)) match

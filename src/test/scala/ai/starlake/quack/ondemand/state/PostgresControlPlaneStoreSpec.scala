@@ -261,7 +261,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.upsertRole(r1)
     store.upsertRole(r2)
     store.insertRolePermission(RolePermission("rp-1", "r-1", "*",    "*", "*",        "ALL"))
-    store.insertRolePermission(RolePermission("rp-2", "r-2", "tpch", "*", "customer", "SELECT"))
+    store.insertRolePermission(RolePermission("rp-2", "r-2", "tpch", "*", "customer", "RO"))
     val out = store.listRolePermissionsForRoles(Set("r-1", "r-2")).map(_.id).toSet
     out shouldBe Set("rp-1", "rp-2")
     store.listRolePermissionsForRoles(Set.empty) shouldBe empty

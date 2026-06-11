@@ -1,0 +1,35 @@
+# Collapse granular SQL verbs in qodstate_role_permission down to the four
+# values the enforcement layer actually distinguishes (RO / RW / DDL /
+# ALL). Granular SELECT/INSERT/UPDATE/DELETE storage was a footgun:
+# PostgresAclValidator only checks Verb.Read | Write | Ddl per access, so
+# a grant of INSERT silently admitted DELETE on the same table.
+#
+# No back-compat. Existing rows are truncated; the bootstrap admin's
+# wildcard `*.*.* ALL` row is re-inserted on next manager startup by
+# BootstrapAccessSeeder. Operators who created additional grants via REST
+# must re-grant them with the new verb vocabulary.
+databaseChangeLog:
+
+  - changeSet:
+      id: 0010-rbac-verb-check-drop
+      author: quack-on-demand
+      changes:
+        - sql:
+            sql: "ALTER TABLE qodstate_role_permission DROP CONSTRAINT IF EXISTS qodstate_role_permission_verb_check"
+
+  - changeSet:
+      id: 0010-rbac-verb-truncate
+      author: quack-on-demand
+      changes:
+        # Drop every row. The new CHECK below would reject any pre-existing
+        # SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER value, and we are
+        # explicitly not preserving them.
+        - sql:
+            sql: "TRUNCATE qodstate_role_permission"
+
+  - changeSet:
+      id: 0010-rbac-verb-check-readd
+      author: quack-on-demand
+      changes:
+        - sql:
+            sql: "ALTER TABLE qodstate_role_permission ADD CONSTRAINT qodstate_role_permission_verb_check CHECK (verb IN ('RO','RW','DDL','ALL'))"
