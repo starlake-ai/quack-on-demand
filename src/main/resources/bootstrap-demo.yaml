@@ -1,0 +1,154 @@
+# Demo bootstrap manifest -- loaded by DemoBootstrapHook when
+# QOD_BOOTSTRAP_YAML points here. Triggered by `LOAD_TPC=N`.
+#
+# Shows off: multi-tenancy (acme + globex), the full RO/RW/DDL/ALL
+# verb matrix, group-attached role chains, and the catalog-wildcard
+# tenant-scope (acme-admin's *.*.* ALL cannot reach globex).
+#
+# Plaintext passwords are bcrypted at import time. Anyone reading this
+# file in the jar sees the credentials -- that is the point of a demo.
+
+apiVersion: quack-on-demand/v1
+kind: ConfigManifest
+exportedAt: '1970-01-01T00:00:00Z'
+exportedFrom:
+  managerVersion: bootstrap
+  hostname: bundled
+
+# authProvider defaults to 'db' and tenantDbs.kind defaults to 'ducklake';
+# we omit both here to keep the demo focused on what is actually being
+# demonstrated (multi-tenancy, RBAC, pools).
+tenants:
+  - name: acme
+    tenantDbs:
+      - name: acme_tpch
+        defaultDatabase: acme_tpch
+        defaultSchema: tpch1
+    pools:
+      - name: bi
+        tenantDb: acme_tpch
+        roleDistribution: { writeonly: 0, readonly: 1, dual: 1 }
+      - name: etl
+        tenantDb: acme_tpch
+        roleDistribution: { writeonly: 1, readonly: 0, dual: 1 }
+
+  - name: globex
+    tenantDbs:
+      - name: globex_tpcds
+        defaultDatabase: globex_tpcds
+        defaultSchema: tpcds1
+    pools:
+      - name: bi
+        tenantDb: globex_tpcds
+        roleDistribution: { writeonly: 0, readonly: 1, dual: 1 }
+
+roles:
+  # ---- acme ----
+  - tenant: acme
+    name: analyst
+    description: Read-only analyst for curated TPC-H sales tables
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: orders,   verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: nation,   verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: region,   verb: RO }
+
+  - tenant: acme
+    name: etl
+    description: ETL load role -- read raw inputs, write the lineitem fact
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: lineitem, verb: RW }
+      - { catalog: acme_tpch, schema: tpch1, table: orders,   verb: RO }
+
+  - tenant: acme
+    name: dba
+    description: DDL on the whole acme_tpch.tpch1 schema (no data verbs)
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: '*', verb: DDL }
+
+  - tenant: acme
+    name: tenant_admin
+    description: Full ALL within acme (catalog wildcard is tenant-scoped)
+    permissions:
+      - { catalog: '*', schema: '*', table: '*', verb: ALL }
+
+  # ---- globex ----
+  - tenant: globex
+    name: analyst
+    description: Read-only analyst for curated TPC-DS sales tables
+    permissions:
+      - { catalog: globex_tpcds, schema: tpcds1, table: store_sales,           verb: RO }
+      - { catalog: globex_tpcds, schema: tpcds1, table: customer,              verb: RO }
+      - { catalog: globex_tpcds, schema: tpcds1, table: customer_demographics, verb: RO }
+
+  - tenant: globex
+    name: etl
+    description: Write web_sales, read store_sales
+    permissions:
+      - { catalog: globex_tpcds, schema: tpcds1, table: web_sales,   verb: RW }
+      - { catalog: globex_tpcds, schema: tpcds1, table: store_sales, verb: RO }
+
+  - tenant: globex
+    name: tenant_admin
+    description: Full ALL within globex
+    permissions:
+      - { catalog: '*', schema: '*', table: '*', verb: ALL }
+
+groups:
+  - { tenant: acme,   name: analysts, description: BI analysts,      roles: [analyst] }
+  - { tenant: acme,   name: data-eng, description: Data engineering,  roles: [etl, dba] }
+  - { tenant: globex, name: analysts, description: BI analysts,      roles: [analyst] }
+
+users:
+  - username: root
+    password: demo-root
+    role: admin
+
+  - tenant: acme
+    username: alice
+    password: demo-alice
+    role: user
+    roles: [analyst]
+    poolGrants:
+      - { pool: bi }
+
+  - tenant: acme
+    username: bob
+    password: demo-bob
+    role: user
+    groups: [data-eng]
+    poolGrants:
+      - { pool: etl }
+
+  - tenant: acme
+    username: dave
+    password: demo-dave
+    role: user
+    roles: [dba]
+    poolGrants:
+      - { pool: etl }
+
+  - tenant: acme
+    username: acme-admin
+    password: demo-acme-admin
+    role: admin
+    roles: [tenant_admin]
+    poolGrants:
+      - { pool: bi }
+      - { pool: etl }
+
+  - tenant: globex
+    username: carol
+    password: demo-carol
+    role: user
+    groups: [analysts]
+    poolGrants:
+      - { pool: bi }
+
+  - tenant: globex
+    username: globex-admin
+    password: demo-globex-admin
+    role: admin
+    roles: [tenant_admin]
+    poolGrants:
+      - { pool: bi }
