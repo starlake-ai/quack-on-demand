@@ -95,17 +95,24 @@ services:
       QOD_PG_SCHEMA:   ${PG_SCHEMA:-main}
 
       # DuckLake "data root" the manager bakes into per-tenant-db
-      # catalogs. The manager derives `${root_parent}/${tenant}_${tenantDb}`
-      # for each tenant-db (matches Main.scala's tenantDbDataPath), so the
-      # bootstrap `tpch/tpch1` ends up at `/app/ducklake/tpch_tpch1`.
-      # The value here is the GLOBAL default, not a per-tenant override.
+      # catalogs. The supervisor derives each tenant-db's path as
+      # `dirname($QOD_DUCKLAKE_DATA_PATH)/<tenantDb-name>` (matches
+      # PoolSupervisor.effectiveMetastoreFor's convention), so with the
+      # demo seed `acme/acme_tpch` lands at `/app/ducklake/acme_tpch`
+      # and `globex/globex_tpcds` at `/app/ducklake/globex_tpcds`.
+      # The value here is the GLOBAL default; the leaf segment is just
+      # an anchor and is NOT a real tenant-db.
       #
       # Honor a user-supplied override (.env / shell) so switching to
-      # `s3://...` storage works without editing this file. Falls back
-      # to `/app/ducklake/tpch` (matches `application.conf`'s
-      # `defaultMetastore.dataPath = "./ducklake/tpch"`) when
-      # QOD_DUCKLAKE_DATA_PATH is unset.
-      QOD_DUCKLAKE_DATA_PATH: ${QOD_DUCKLAKE_DATA_PATH:-/app/ducklake/tpch}
+      # `s3://...` storage works without editing this file.
+      QOD_DUCKLAKE_DATA_PATH: ${QOD_DUCKLAKE_DATA_PATH:-/app/ducklake/data}
+
+      # Demo bootstrap manifest. run-docker-compose.sh writes this to
+      # .env when LOAD_TPC is set so the JVM imports the bundled YAML
+      # (which lives inside the assembly jar). Operators with custom
+      # manifests can point this at a host file mounted into the
+      # container.
+      QOD_BOOTSTRAP_YAML: ${QOD_BOOTSTRAP_YAML:-}
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
       QOD_AUTH_DB_ENABLED: ${AUTH:-true}
