@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, AuthScope}
 import ai.starlake.quack.model.{Names, Tenant}
 import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
@@ -50,7 +50,7 @@ final class FlightEdgeServer(
   private var server: FlightServer = null.asInstanceOf[FlightServer]
 
   def start(): Unit =
-    val producer = new FlightProducerImpl(router, cfg.tenantClaim)
+    val producer = new FlightProducerImpl(router)
     val location =
       if cfg.tlsEnabled then Location.forGrpcTls(cfg.host, cfg.port)
       else Location.forGrpcInsecure(cfg.host, cfg.port)
@@ -162,6 +162,13 @@ final class FlightEdgeServer(
         // (pool names are unique per tenant).
         val poolHdr   = Option(headers.get("pool"))
         val tenantHdr = Option(headers.get("tenant"))
+        // `superuser=true` URL param picks the system realm regardless of
+        // the `tenant` header. The tenant/pool headers still drive query
+        // routing -- a system superuser can target a tenant's pool while
+        // authenticating against the global realm. Anything other than the
+        // literal string "true" (case-insensitive) is treated as false.
+        val superuserHdr = Option(headers.get("superuser"))
+          .exists(_.equalsIgnoreCase("true"))
 
         // Fast path: client is presenting a Bearer that's an already-known
         // session peerId from a prior handshake. Skip TenantSelector and
@@ -170,7 +177,7 @@ final class FlightEdgeServer(
           case Some(knownPeerId) =>
             authResult(knownPeerId)
           case None =>
-            handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr)
+            handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr, superuserHdr)
 
       /** Mint a new session peerId. Runs the configured auth chain when one exists; otherwise
         * trusts the client (legacy v1). On success we resolve tenant/pool via TenantSelector and
@@ -181,7 +188,8 @@ final class FlightEdgeServer(
           basicPair: Option[(String, String)],
           basicUsername: Option[String],
           poolHdr: Option[String],
-          tenantHdr: Option[String]
+          tenantHdr: Option[String],
+          superuser: Boolean
       ): CallHeaderAuthenticator.AuthResult =
         // Pre-resolve the target (tenant, tenantDb, pool) from the headers
         // + basic username BEFORE authenticating. The Basic provider chain
@@ -211,7 +219,6 @@ final class FlightEdgeServer(
           bearer = bearer,
           headers = hdrs,
           username = basicUsername,
-          tenantClaim = cfg.tenantClaim,
           lookupPool = lookupPool
         )
 
@@ -224,28 +231,43 @@ final class FlightEdgeServer(
               case (Some(token), _) =>
                 // Bearer auth verifies the JWT signature; tenant/pool
                 // scoping is enforced later by the (tenant, pool) headers
-                // on top of the verified claims.
-                authService.authenticateBearer(token).map(Some(_))
+                // on top of the verified claims. The auth realm is picked
+                // by `superuser` (same rule as Basic).
+                val bearerScope: AuthScope =
+                  if superuser then AuthScope.System
+                  else
+                    val tenantArg = resolvedTenant
+                      .map(_.id)
+                      .orElse(preResolved.toOption.map(_.poolKey.tenant))
+                    tenantArg match
+                      case Some(t) => AuthScope.Tenant(t)
+                      case None    => AuthScope.System
+                authService.authenticateBearer(bearerScope, token).map(Some(_))
               case (None, Some((_, p))) =>
                 preResolved match
                   case Right(r) =>
-                    // qodstate_user.tenant stores the surrogate id (`t-...`),
-                    // not the display name. `r.poolKey.tenant` is the
-                    // normalized display name here; resolve it back to the
-                    // id before calling the Basic provider chain. If the
-                    // tenant doesn't exist in our registry, fall back to
-                    // the raw header value -- the DB query will return
-                    // "User not found" with the same shape as today.
-                    val tenantArg = resolvedTenant
-                      .orElse(resolveTenant(r.poolKey.tenant))
-                      .map(_.id)
-                      .getOrElse(r.poolKey.tenant)
+                    // AuthScope picks the realm:
+                    //   superuser=true -> System (validates against the global
+                    //     realm; matching qodstate_user row must have
+                    //     tenant IS NULL). Tenant/pool headers still drive
+                    //     query routing.
+                    //   superuser=false -> Tenant. qodstate_user.tenant stores
+                    //     the surrogate id (`t-...`), not the display name.
+                    //     `r.poolKey.tenant` is the normalized display name;
+                    //     resolve it back to the id before calling the chain.
+                    //     If the tenant doesn't exist in our registry, fall
+                    //     back to the raw header value so the DB query returns
+                    //     "User not found" with the same shape as today.
+                    val scope: AuthScope =
+                      if superuser then AuthScope.System
+                      else
+                        val tenantArg = resolvedTenant
+                          .orElse(resolveTenant(r.poolKey.tenant))
+                          .map(_.id)
+                          .getOrElse(r.poolKey.tenant)
+                        AuthScope.Tenant(tenantArg)
                     authService
-                      .authenticateBasic(
-                        Some(tenantArg),
-                        r.user,
-                        p
-                      )
+                      .authenticateBasic(scope, r.user, p)
                       .map(Some(_))
                   case Left(err) =>
                     Left(s"missing tenant scope for Basic auth: $err")
@@ -276,7 +298,6 @@ final class FlightEdgeServer(
               bearer = bearer,
               headers = hdrs,
               username = resolvedUsername,
-              tenantClaim = cfg.tenantClaim,
               lookupPool = lookupPool
             ) match
               case Right(resolved) =>

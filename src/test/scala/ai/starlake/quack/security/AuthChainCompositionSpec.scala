@@ -4,6 +4,7 @@ package ai.starlake.quack.security
 import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
+  AuthScope,
   BasicAuthProvider,
   BearerAuthProvider,
   JwtBearerAuthenticator,
@@ -48,14 +49,14 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
     */
   private def walkBasicChain(
       chain:    Seq[BasicAuthProvider],
-      tenant:   Option[String],
+      scope:    AuthScope,
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
     val errors = List.newBuilder[String]
     chain.iterator
       .map { p =>
-        p.authenticate(tenant, username, password) match
+        p.authenticate(scope, username, password) match
           case r @ Right(_) => r
           case Left(err) =>
             errors += s"${p.name}: $err"
@@ -256,7 +257,7 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
       val chain = Seq(inMemory, ropc)
 
       // alice exists in the in-memory store with the correct password
-      val result = walkBasicChain(chain, Some(SecurityFixtures.TenantId), "alice", "alicepw")
+      val result = walkBasicChain(chain, AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "alicepw")
       result shouldBe a[Right[?, ?]]
       result.toOption.get.authMethod shouldBe "in-memory"
 
@@ -285,7 +286,7 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
 
       // alice exists in in-memory with "alicepw", NOT "oidcpw".
       // Keycloak ROPC is seeded to accept alice/oidcpw.
-      val result = walkBasicChain(chain, Some(SecurityFixtures.TenantId), "alice", "oidcpw")
+      val result = walkBasicChain(chain, AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "oidcpw")
       result shouldBe a[Right[?, ?]]
       // authMethod comes from ResourceOwnerPasswordAuthenticator.name = "keycloak-ropc"
       result.toOption.get.authMethod shouldBe "keycloak-ropc"
@@ -314,7 +315,7 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
       val chain = Seq(inMemory, ropc)
 
       // "Z" is neither alicepw (in-memory) nor oidcpw (Keycloak)
-      val result = walkBasicChain(chain, Some(SecurityFixtures.TenantId), "alice", "Z")
+      val result = walkBasicChain(chain, AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "Z")
       result shouldBe a[Left[?, ?]]
       val msg = result.swap.getOrElse("")
       msg should include("Authentication failed:")

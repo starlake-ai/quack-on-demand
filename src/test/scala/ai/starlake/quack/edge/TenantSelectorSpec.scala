@@ -20,22 +20,30 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
     case ("other", "sales") => Right("other_default")
     case (t, p)             => Left(s"pool '$p' not found in tenant '$t'")
 
-  "TenantSelector (JWT)" should "accept tenant claim + pool header" in:
+  "TenantSelector (JWT)" should "accept JWT + tenant + pool headers" in:
     val out = TenantSelector.resolve(
       bearer  = Some(validToken),
-      headers = Map("pool" -> "sales"),
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
 
-  it should "let a `tenant` header override the JWT claim" in:
+  it should "reject when the tenant header is missing even if the JWT has a tenant claim" in:
+    // URL is authoritative -- JWT claims are never trusted for routing.
+    val out = TenantSelector.resolve(
+      bearer  = Some(validToken),
+      headers = Map("pool" -> "sales"),
+      username = Some("alice"),
+      lookupPool = lookup
+    )
+    out shouldBe a [Left[_, _]]
+
+  it should "use the tenant header value, not the JWT claim" in:
     val out = TenantSelector.resolve(
       bearer  = Some(validToken),
       headers = Map("tenant" -> "other", "pool" -> "sales"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe Right(Resolved(PoolKey("other", "other_default", "sales"), "alice"))
@@ -44,7 +52,7 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
     val out = TenantSelector.resolve(
       bearer  = Some(noTenantToken),
       headers = Map("tenant" -> "acme", "pool" -> "sales"),
-      username = None, tenantClaim = "tenant",
+      username = None,
       lookupPool = lookup
     )
     out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "bob"))
@@ -52,8 +60,8 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
   it should "reject when pool header is missing" in:
     val out = TenantSelector.resolve(
       bearer  = Some(validToken),
-      headers = Map.empty,
-      username = None, tenantClaim = "tenant",
+      headers = Map("tenant" -> "acme"),
+      username = None,
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -62,7 +70,7 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
     val out = TenantSelector.resolve(
       bearer  = Some(noTenantToken),
       headers = Map("pool" -> "sales"),
-      username = None, tenantClaim = "tenant",
+      username = None,
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -70,9 +78,8 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
   it should "reject when the lookup can't find the (tenant, pool) pair" in:
     val out = TenantSelector.resolve(
       bearer  = Some(validToken),
-      headers = Map("pool" -> "ghost"),
+      headers = Map("tenant" -> "acme", "pool" -> "ghost"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -83,7 +90,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       bearer = None,
       headers = Map("tenant" -> "acme", "pool" -> "sales"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
@@ -93,7 +99,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       bearer = None,
       headers = Map("pool" -> "sales"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -103,7 +108,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       bearer = None,
       headers = Map("tenant" -> "acme"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -111,7 +115,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
   it should "reject when neither JWT nor username present" in:
     val out = TenantSelector.resolve(
       bearer = None, headers = Map.empty, username = None,
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -121,7 +124,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       bearer = None,
       headers = Map("tenant" -> "acme", "pool" -> "sales"),
       username = Some(""),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]
@@ -131,7 +133,6 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
       bearer = None,
       headers = Map("tenant" -> "acme", "pool" -> "ghost"),
       username = Some("alice"),
-      tenantClaim = "tenant",
       lookupPool = lookup
     )
     out shouldBe a [Left[_, _]]

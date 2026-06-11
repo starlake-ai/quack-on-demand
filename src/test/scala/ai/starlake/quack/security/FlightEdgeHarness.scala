@@ -148,7 +148,6 @@ object FlightEdgeHarness:
       tlsEnabled    = tls,
       tlsCertChain  = certPath,
       tlsPrivateKey = keyPath,
-      tenantClaim   = "tenant",
       sessionTtlSec = 3600L
     )
 
@@ -167,7 +166,6 @@ object FlightEdgeHarness:
       sessions       = sessions,
       tracker        = tracker,
       adapter        = adapter,
-      tenantClaim    = "tenant",
       validator      = StatementValidator.allowAll,
       history        = history,
       stmtInstruments = si

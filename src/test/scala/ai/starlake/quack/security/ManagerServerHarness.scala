@@ -96,7 +96,6 @@ object ManagerServerHarness:
     tlsEnabled   = false,
     tlsCertChain = "",
     tlsPrivateKey = "",
-    tenantClaim  = "tenant",
     sessionTtlSec = 3600L
   )
 

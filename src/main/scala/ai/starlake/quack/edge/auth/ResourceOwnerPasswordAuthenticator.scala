@@ -28,14 +28,15 @@ class ResourceOwnerPasswordAuthenticator(
     .build()
 
   override def authenticate(
-      tenant: Option[String],
+      scope: AuthScope,
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
-    // OIDC ROPC providers don't see `tenant` -- the OIDC server is
+    // OIDC ROPC providers don't see `scope` -- the OIDC server is
     // authoritative for the password check; map-to-tenant happens via
-    // the JWT claims on the way back.
-    val _ = tenant
+    // the JWT claims on the way back. (The TenantOidcRegistry picks the
+    // right ROPC provider instance per scope before this is called.)
+    val _ = scope
     try
       val body    = buildFormBody(username, password)
       val request = HttpRequest

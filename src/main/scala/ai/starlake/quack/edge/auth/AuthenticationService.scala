@@ -5,9 +5,18 @@ import com.typesafe.scalalogging.LazyLogging
 
 /** Central authentication orchestrator. Builds chains of authenticators from config and tries them
   * in order for each authentication request.
+  *
+  * `tenantOidcRegistry` (optional) lets an `AuthScope.Tenant(tenantId)` bearer handshake validate
+  * the token against THAT tenant's per-tenant OIDC client (Google / Keycloak / Azure / AWS) instead
+  * of the manager-wide one. When absent (or when the registry has no per-tenant override for the
+  * tenant), the chain falls back to the global config -- which is what the system-scope path uses
+  * unconditionally.
   */
-class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
-    extends AutoCloseable,
+class AuthenticationService(
+    config: AuthenticationConfig,
+    jwtSecretKey: String,
+    tenantOidcRegistry: Option[TenantOidcRegistry] = None
+) extends AutoCloseable,
       LazyLogging:
 
   private val basicProviders: List[BasicAuthProvider]   = buildBasicChain()
@@ -15,7 +24,8 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
 
   logger.info(
     s"Authentication service initialized. Basic providers: [${basicProviders.map(_.name).mkString(", ")}], " +
-      s"Bearer providers: [${bearerProviders.map(_.name).mkString(", ")}]"
+      s"Bearer providers: [${bearerProviders.map(_.name).mkString(", ")}]" +
+      tenantOidcRegistry.fold("")(_ => " (per-tenant OIDC registry enabled)")
   )
 
   // Start OAuth HTTP server if enabled and an OIDC provider is configured
@@ -33,39 +43,58 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
 
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
-  /** Authenticate `(tenant, username, password)` against the basic chain. `tenant` is `None` for
-    * the system-admin login path (manager UI/REST) and `Some(_)` for a tenant-scoped FlightSQL
-    * principal. The database provider filters its lookup by the `(tenant, username)` partial unique
-    * index on `qodstate_user`; OIDC ROPC providers ignore the scope.
+  /** Authenticate `(scope, username, password)` against the basic chain.
+    *
+    *   - [[AuthScope.System]] -- manager UI login with empty tenant, or FlightSQL handshake with
+    *     `?superuser=true`. Validated against the global realm; the matching `qodstate_user` row
+    *     must have `tenant IS NULL`.
+    *   - [[AuthScope.Tenant]] -- regular tenant login. Validated against the tenant's realm; the
+    *     matching `qodstate_user` row must have `tenant = ?`.
     */
   def authenticateBasic(
-      tenant: Option[String],
+      scope: AuthScope,
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
     if basicProviders.isEmpty then Left("No basic auth providers configured")
     else
-      val scope  = tenant.getOrElse("system")
+      val scopeLabel = scope match
+        case AuthScope.System    => "system"
+        case AuthScope.Tenant(t) => t
       val errors = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
-          provider.authenticate(tenant, username, password) match
+          provider.authenticate(scope, username, password) match
             case right @ Right(_) =>
-              logger.info(s"User '$username' ($scope) authenticated via ${provider.name}")
+              logger.info(s"User '$username' ($scopeLabel) authenticated via ${provider.name}")
               right
             case Left(err) =>
-              logger.debug(s"Provider ${provider.name} rejected '$username' ($scope): $err")
+              logger.debug(s"Provider ${provider.name} rejected '$username' ($scopeLabel): $err")
               errors += s"${provider.name}: $err"
               Left(err)
         }
         .collectFirst { case r @ Right(_) => r }
         .getOrElse(Left(s"Authentication failed: ${errors.result().mkString("; ")}"))
 
+  /** System-scope bearer validation against the global chain. Used for management-plane logins
+    * (no tenant context) and FlightSQL handshakes with `?superuser=true`.
+    */
   def authenticateBearer(token: String): Either[String, AuthenticatedProfile] =
-    if bearerProviders.isEmpty then Left("No bearer auth providers configured")
+    authenticateBearer(AuthScope.System, token)
+
+  /** Scope-aware bearer validation. For `AuthScope.Tenant(t)` the registry can substitute a
+    * per-tenant OIDC authenticator into the chain in place of the matching global one (Google /
+    * Keycloak / Azure / AWS).
+    */
+  def authenticateBearer(
+      scope: AuthScope,
+      token: String
+  ): Either[String, AuthenticatedProfile] =
+    val chain = bearerChainFor(scope)
+    if chain.isEmpty then Left("No bearer auth providers configured")
     else
       val errors = List.newBuilder[String]
-      bearerProviders.iterator
+      chain.iterator
         .map { provider =>
           provider.authenticate(token) match
             case right @ Right(_) =>
@@ -78,6 +107,29 @@ class AuthenticationService(config: AuthenticationConfig, jwtSecretKey: String)
         }
         .collectFirst { case r @ Right(_) => r }
         .getOrElse(Left(s"Bearer authentication failed: ${errors.result().mkString("; ")}"))
+
+  /** Resolve the bearer chain for a given scope. For `AuthScope.Tenant(t)` we ask the registry for
+    * a per-tenant OIDC authenticator built from the tenant's `authProvider` + `authConfig`. If the
+    * global chain already has a slot for that provider it gets swapped; if not (operator runs
+    * fully per-tenant OIDC) the per-tenant authenticator is prepended so it actually gets tried.
+    */
+  private def bearerChainFor(scope: AuthScope): List[BearerAuthProvider] =
+    scope match
+      case AuthScope.System => bearerProviders
+      case AuthScope.Tenant(tenantId) =>
+        tenantOidcRegistry.flatMap(_.forTenant(tenantId)) match
+          case None            => bearerProviders
+          case Some(perTenant) =>
+            val target = perTenant.providerName
+            val swapped = bearerProviders.map {
+              case o: OidcBearerAuthenticator if o.providerName == target => perTenant
+              case other                                                  => other
+            }
+            val hadMatch = bearerProviders.exists {
+              case o: OidcBearerAuthenticator => o.providerName == target
+              case _                          => false
+            }
+            if hadMatch then swapped else perTenant :: swapped
 
   override def close(): Unit =
     oauthServer.foreach { s =>

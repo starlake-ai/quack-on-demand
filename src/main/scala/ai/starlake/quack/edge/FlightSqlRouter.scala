@@ -23,7 +23,6 @@ final class FlightSqlRouter(
     val sessions: SessionRegistry,
     val tracker: NodeLoadTracker,
     val adapter: QuackHttpAdapter,
-    val tenantClaim: String,
     val validator: StatementValidator = StatementValidator.allowAll,
     val history: StatementHistoryStore = new StatementHistoryStore(),
     val stmtInstruments: StatementInstruments = StatementInstruments.noop,

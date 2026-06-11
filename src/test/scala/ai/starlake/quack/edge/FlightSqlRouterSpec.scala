@@ -64,7 +64,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
 
     val sessions = new SessionRegistry
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter, tenantClaim = "tenant",
+    val router = new FlightSqlRouter(sup, sessions, tracker, adapter,
                                      stmtInstruments = si)
     (router, sessions, node)
 
@@ -181,7 +181,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         IO.pure(TestArrow.okResponse())
     val adapter  = new QuackHttpAdapter(client, new NodeLoadTracker)
     val router   = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                       tenantClaim = "tenant", validator = capturer)
+                                       validator = capturer)
     router.execute("d-1", "alice", key, "SELECT 1").unsafeRunSync()
     capturer.lastCtx.defaultDatabase shouldBe Some("fedpg")
     capturer.lastCtx.defaultSchema   shouldBe Some("public")
@@ -208,7 +208,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
     val router  = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                      tenantClaim = "tenant", validator = capturer)
+                                      validator = capturer)
     router.execute("d-2", "alice", key, "SELECT 1").unsafeRunSync()
     capturer.lastCtx.defaultDatabase shouldBe Some("memory")
     capturer.lastCtx.defaultSchema   shouldBe Some("main")
@@ -246,7 +246,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             IO.pure(TestArrow.okResponse())
         val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
         val router  = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                          tenantClaim = "tenant", validator = capturer)
+                                          validator = capturer)
         router.execute("d-3", "alice", key, "SELECT 1").unsafeRunSync()
         capturer.lastCtx.defaultDatabase shouldBe Some("delta_lake")
         capturer.lastCtx.defaultSchema   shouldBe Some("myschema")

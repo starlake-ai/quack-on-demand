@@ -15,9 +15,26 @@ The client sends a username and password (the `user` / `password` JDBC params, o
 
 ### Bearer JWT
 
-The client presents a validated JWT as the bearer token. The user is taken from the token's `sub` claim. The tenant is taken from a `tenant` header if present, otherwise from the configured tenant claim (default claim name `tenant`, set by `tenantClaim` / `QOD_*`). The `pool` is always required as a header / param. A `tenant` header wins over the JWT claim when both are present.
+The client presents a validated JWT as the bearer token. The user is taken from the token's `sub` claim. The `tenant` and `pool` headers are always required — the edge does NOT read a tenant claim from the JWT; the URL is authoritative.
 
 In both paths the owning database (tenant-db) is resolved server-side from `(tenant, pool)`; the client never names it. A disabled tenant or pool causes the handshake to fail as unauthenticated.
+
+## Auth realm: tenant vs. system superuser
+
+Two URL params pick which realm validates your credentials. The realm choice is independent of the routing target — a system superuser still addresses a specific `(tenant, pool)` for the query.
+
+- `tenant=X&pool=Y` (no `superuser` flag) — **tenant realm**. Credentials are checked against tenant `X`'s configured auth provider (`qodstate_tenant.authConfig`); the matching `qodstate_user` row must have `tenant = X`.
+- `tenant=X&pool=Y&superuser=true` — **system realm**. Credentials are checked against the manager's global auth providers (`quack-flightsql.auth.*` in `application.conf`); the matching `qodstate_user` row must have `tenant IS NULL`. The tenant/pool params still drive query routing.
+
+There is no fallback between the two: a system credential cannot authenticate a tenant-scoped login and vice versa. Pre-existing JDBC URLs that used the bootstrap admin (`admin@localhost.local`) against tenants must add `?superuser=true` after upgrading.
+
+```
+# Tenant user
+jdbc:arrow-flight-sql://host:31338/?tenant=tpch&pool=sales
+
+# System superuser targeting the same tenant
+jdbc:arrow-flight-sql://host:31338/?tenant=tpch&pool=sales&superuser=true
+```
 
 ## No-auth mode
 

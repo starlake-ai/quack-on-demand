@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, AuthScope}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -27,11 +27,12 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   private val emptyConfig = AuthenticationConfig(
     roleClaim = "role",
     database = DatabaseAuthConfig(
-      enabled  = false,
-      jdbcUrl  = "",
-      username = "",
-      password = "",
-      query    = ""
+      enabled     = false,
+      jdbcUrl     = "",
+      username    = "",
+      password    = "",
+      systemQuery = "",
+      tenantQuery = ""
     ),
     keycloak = KeycloakAuthConfig(
       enabled      = false,
@@ -78,17 +79,17 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   private def makeHandlers(
       result: Either[String, AuthenticatedProfile],
-      capturedScope: scala.collection.mutable.Buffer[(Option[String], String, String)],
+      capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
       override def authenticateBasic(
-          tenant: Option[String],
+          scope: AuthScope,
           username: String,
           password: String
       ): Either[String, AuthenticatedProfile] =
-        capturedScope += ((tenant, username, password))
+        capturedScope += ((scope, username, password))
         result
 
     new AuthHandlers(
@@ -107,7 +108,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authMethod = "db",
       tenant     = Some("t-abc123")
     )
-    val calls = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(Right(profile), calls)
     val req   = LoginRequest("alice", "secret", tenant = Some("t-abc123"))
 
@@ -122,10 +123,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     resp.manageableTenants shouldBe List("t-abc123")
     resp.username          shouldBe "alice"
     calls should have size 1
-    calls.head._1 shouldBe Some("t-abc123")
+    calls.head._1 shouldBe AuthScope.Tenant("t-abc123")
   }
 
-  it should "pass None scope when tenant is absent and mint a superuser session" in {
+  it should "pass System scope when tenant is absent and mint a superuser session" in {
     val profile = AuthenticatedProfile(
       username   = "root",
       role       = "admin",
@@ -134,18 +135,18 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authMethod = "db",
       tenant     = None
     )
-    val calls = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(Right(profile), calls)
     val req   = LoginRequest("root", "pass", tenant = None)
 
     val resp = h.login(req).unsafeRunSync().toOption.get
 
-    calls.head._1     shouldBe None
+    calls.head._1     shouldBe AuthScope.System
     resp.superuser    shouldBe true
     resp.manageableTenants shouldBe empty
   }
 
-  it should "coerce blank tenant string to None before forwarding" in {
+  it should "coerce blank tenant string to System scope before forwarding" in {
     val profile = AuthenticatedProfile(
       username   = "root",
       role       = "admin",
@@ -154,13 +155,13 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authMethod = "db",
       tenant     = None
     )
-    val calls = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(Right(profile), calls)
     val req   = LoginRequest("root", "pass", tenant = Some("   "))
 
     h.login(req).unsafeRunSync()
 
-    calls.head._1 shouldBe None
+    calls.head._1 shouldBe AuthScope.System
   }
 
   "whoami" should "surface the tenant and scope from the stored session" in {
@@ -177,7 +178,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       profile,
       SessionScope(superuser = false, manageableTenants = Set("t-abc123"))
     )
-    val calls      = scala.collection.mutable.Buffer.empty[(Option[String], String, String)]
+    val calls      = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val hWithStore = makeHandlers(Right(profile), calls, store)
 
     val result = hWithStore.whoami(token).unsafeRunSync()
@@ -206,7 +207,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
       override def authenticateBasic(
-          tenant: Option[String],
+          scope: AuthScope,
           username: String,
           password: String
       ): Either[String, AuthenticatedProfile] = Right(profile)

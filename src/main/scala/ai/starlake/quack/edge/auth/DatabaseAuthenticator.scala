@@ -5,27 +5,18 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
-import java.sql.Types
-
-/** Authenticates `(tenant, username, password)` against the `qodstate_user` table on the
-  * control-plane Postgres. The `pool` parameter is kept on the [[BasicAuthProvider]] signature for
-  * back-compat with the auth chain but is no longer used here -- pool access is enforced at the
-  * FlightSQL handshake via [[ai.starlake.quack.ondemand.state.PoolPermission]], not in the password
-  * lookup.
+/** Authenticates `(scope, username, password)` against the `qodstate_user` table on the
+  * control-plane Postgres.
   *
-  * The query MUST return two columns `(password_hash, role)` and accept two placeholders in order:
-  * `tenant`, `username`. `tenant` is bound as SQL NULL for the manager UI / REST login.
+  * Two queries from `DatabaseAuthConfig`, picked by `AuthScope`:
+  *   - [[AuthScope.System]] uses `systemQuery` (one placeholder: username). Matches the
+  *     `tenant IS NULL` row. The caller asked for system auth (UI login with empty tenant, or
+  *     FlightSQL `?superuser=true`).
+  *   - [[AuthScope.Tenant]] uses `tenantQuery` (two placeholders: tenant, username). Matches the
+  *     `tenant = ?` row.
   *
-  * Default query in `application.conf` treats a row with `tenant IS NULL` as a wildcard matching
-  * any caller, so the bootstrap superuser works on both the manager UI and any FlightSQL tenant. A
-  * tenant-scoped row `(tenant, username)` wins over the wildcard NULL row when both exist:
-  * {{{
-  *   SELECT password_hash, role FROM qodstate_user
-  *   WHERE (tenant IS NULL OR tenant = ?)
-  *     AND username = ?
-  *   ORDER BY (tenant IS NOT NULL) DESC
-  *   LIMIT 1
-  * }}}
+  * No fallback between scopes: a tenant credential cannot authenticate a system login and vice
+  * versa.
   */
 class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
     extends BasicAuthProvider,
@@ -43,22 +34,25 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
     hc.setConnectionTimeout(5000)
     new HikariDataSource(hc)
 
-  private val query: String = config.query
-
   override def authenticate(
-      tenant: Option[String],
+      scope: AuthScope,
       username: String,
       password: String
   ): Either[String, AuthenticatedProfile] =
     try
       val conn = dataSource.getConnection
       try
+        val (query, tenantArg) = scope match
+          case AuthScope.System    => (config.systemQuery, None)
+          case AuthScope.Tenant(t) => (config.tenantQuery, Some(t))
         val ps = conn.prepareStatement(query)
         try
-          tenant match
-            case Some(t) => ps.setString(1, t)
-            case None    => ps.setNull(1, Types.VARCHAR)
-          ps.setString(2, username)
+          tenantArg match
+            case Some(t) =>
+              ps.setString(1, t)
+              ps.setString(2, username)
+            case None =>
+              ps.setString(1, username)
           val rs = ps.executeQuery()
           if rs.next() then
             val storedHash = rs.getString(1)
@@ -71,7 +65,7 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
                   groups = Set(role),
                   claims = Map("sub" -> username, "role" -> role, "auth_method" -> "database"),
                   authMethod = "database",
-                  tenant = tenant
+                  tenant = scope.tenantId
                 )
               )
             else Left("Invalid password")

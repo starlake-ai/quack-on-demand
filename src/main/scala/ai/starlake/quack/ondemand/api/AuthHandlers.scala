@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.auth.{AuthenticationService, AuthScope}
 import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
 import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
@@ -45,7 +45,9 @@ final class AuthHandlers(
         )
       )
     else
-      val scope = req.tenant.map(_.trim).filter(_.nonEmpty)
+      val scope: AuthScope = req.tenant.map(_.trim).filter(_.nonEmpty) match
+        case Some(t) => AuthScope.Tenant(t)
+        case None    => AuthScope.System
       authService.authenticateBasic(scope, req.username, req.password) match
         case Left(err) =>
           Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))

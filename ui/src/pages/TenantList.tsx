@@ -78,7 +78,7 @@ export default function TenantList() {
 
   const fields = PROVIDER_FIELDS[newProvider];
   const createReady = newName.length > 0 &&
-    fields.every(f => (newConfig[f.key] ?? '').trim().length > 0);
+    fields.every(f => f.optional || (newConfig[f.key] ?? '').trim().length > 0);
 
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
 
@@ -130,7 +130,7 @@ export default function TenantList() {
                   value={newConfig[f.key] ?? ''}
                   onChange={ev => setNewConfig(prev => ({ ...prev, [f.key]: ev.target.value }))}
                   placeholder={f.placeholder}
-                  required
+                  required={!f.optional}
                 />
               </label>
             ))

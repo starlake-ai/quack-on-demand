@@ -49,7 +49,14 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
        "authConfig":{"issuer":"https://kc.example.com/realms/acme","realm":"acme"}}'
 ```
 
-`authConfig` is empty for `db`. For OIDC providers it expects `issuer` (full URL) plus one of `realm` (Keycloak), `hd` (Google Workspace domain), `tenantId` (Azure), or `userPoolId` (Cognito). See [Authentication providers](/operating/auth-providers) for the per-provider details.
+`authConfig` is empty for `db`. For OIDC providers it expects `issuer` (full URL) plus one of `realm` (Keycloak), `hd` (Google Workspace domain), `tenantId` (Azure), or `userPoolId` (Cognito).
+
+For Google, two optional extra keys give the tenant its own OAuth client instead of sharing the manager-wide one from `quack-flightsql.auth.google.*`:
+
+- `clientId` — the tenant's Google OAuth client ID.
+- `clientSecretRef` — a reference to the secret (e.g. `env:GOOGLE_CS_ACME`), never the literal value. Today only `env:NAME` is supported.
+
+Both must be set together; leaving either blank falls back to the global client. See [Authentication providers](/operating/auth-providers) for the per-provider details.
 
 ### List, disable, change auth, delete
 

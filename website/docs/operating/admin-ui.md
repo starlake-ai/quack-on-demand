@@ -11,7 +11,14 @@ The screenshots below are from a local demo deployment with the bootstrap TPC-H 
 
 ## Signing in
 
-The login screen takes a username and password and mints a session token used for the rest of the session. When the server has no auth providers configured (the no-auth dev mode), the login screen is skipped and the session is a synthetic anonymous superuser. The signed-in user and role appear in the top-right pill; the no-auth mode shows `anonymous / no-auth`.
+The login screen takes a username, password, and an optional **Tenant ID**. The tenant field is the realm signal:
+
+- **Leave it blank** to log in as a system superuser. Credentials are validated against the manager's global auth providers (`quack-flightsql.auth.*`) and the matching `qodstate_user` row must have `tenant IS NULL`.
+- **Fill it in** (e.g. `t-02d0e86e`) to log in as a tenant user. Credentials are validated against THAT tenant's configured provider, and the matching `qodstate_user` row must have `tenant = <id>`.
+
+There is no separate superuser checkbox; the field's presence is the only signal. Pre-existing scripts that called `/api/auth/login` with a `tenant` value for the bootstrap admin need to drop the field (or send an empty string) after upgrading.
+
+When the server has no auth providers configured (the no-auth dev mode), the login screen is skipped and the session is a synthetic anonymous superuser. The signed-in user and role appear in the top-right pill; the no-auth mode shows `anonymous / no-auth`.
 
 ![The Quack on Demand admin login screen](/img/ui/login.png)
 

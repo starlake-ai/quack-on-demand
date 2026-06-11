@@ -27,15 +27,14 @@ object TenantSelector:
     if r == 0 then s else s + "=" * (4 - r)
 
   /** Resolve `(tenant, tenantDb, pool, user)` from the incoming credentials. The edge applies NO
-    * defaults: every client must fully address its target via the `tenant` and `pool` headers (or,
-    * on the JWT path, `tenant` may come from the configured `tenantClaim` instead). The owning
-    * `tenantDb` is resolved server-side via `lookupPool`, which also enforces the `tenant.disabled`
-    * / `pool.disabled` kill switches: a Left propagates back as an UNAUTHENTICATED error at the
-    * FlightSQL edge.
+    * defaults: every client must address its target via the `tenant` and `pool` headers. The
+    * owning `tenantDb` is resolved server-side via `lookupPool`, which also enforces the
+    * `tenant.disabled` / `pool.disabled` kill switches: a Left propagates back as an
+    * UNAUTHENTICATED error at the FlightSQL edge.
     *
-    *   - JWT path: `tenant` from a `tenant` header OR the JWT `tenantClaim` (header wins); `pool`
-    *     header required; user from the `sub` claim (falls back to the bare Basic username if both
-    *     are present).
+    *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are
+    *     never trusted for routing). User comes from the `sub` claim, falling back to the bare
+    *     Basic username if both are present.
     *   - Basic path: bare username; `tenant` + `pool` headers required.
     *
     * Header names are plain (`tenant`, `pool`) so that Flight JDBC URL connection parameters route
@@ -46,7 +45,6 @@ object TenantSelector:
       bearer: Option[String],
       headers: Map[String, String],
       username: Option[String],
-      tenantClaim: String,
       lookupPool: (String, String) => Either[String, String]
   ): Either[String, Resolved] =
     val hPool   = headers.get("pool").filter(_.nonEmpty)
@@ -58,11 +56,9 @@ object TenantSelector:
     bearer match
       case Some(token) if token.split('.').length == 3 =>
         for
-          tenant <- hTenant
-            .orElse(claimFromJwt(token, tenantClaim))
-            .toRight(s"missing tenant: provide a 'tenant' header or a '$tenantClaim' JWT claim")
-          pool <- hPool.toRight("'pool' header required")
-          key  <- resolvePoolKey(tenant, pool)
+          tenant <- hTenant.toRight("'tenant' header required")
+          pool   <- hPool.toRight("'pool' header required")
+          key    <- resolvePoolKey(tenant, pool)
         yield
           val user = usernameFromJwt(token).orElse(username).getOrElse("unknown")
           Resolved(key, user)

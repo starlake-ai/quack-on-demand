@@ -131,7 +131,9 @@ object Main extends IOApp with LazyLogging:
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
 
-    val authService = new AuthenticationService(authCfg, authCfg.jwt.secretKey)
+    // AuthenticationService construction is deferred until after `sup` is built
+    // so the optional per-tenant OIDC registry can read tenant authConfig rows
+    // out of the supervisor.
 
     // Bootstrap admin users. Always runs at startup when stateStorage=postgres
     // so the DB auth backend has at least one credential. Re-hashed on every
@@ -253,9 +255,26 @@ object Main extends IOApp with LazyLogging:
       dbAdmin,
       federationBlobOf
     )
+
+    // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
+    // per-tenant clientId / clientSecretRef gets its own Google
+    // OidcBearerAuthenticator (substituted into the bearer chain when the
+    // FlightSQL handshake resolves to that tenant). Other tenants fall back
+    // to the manager-wide `quack-flightsql.auth.google` block.
+    val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
+      loadTenant = id => sup.getTenantById(id),
+      secrets    = ai.starlake.quack.secrets.SecretRefResolver.default,
+      roleClaim  = authCfg.roleClaim
+    )
+    val authService = new AuthenticationService(
+      authCfg,
+      authCfg.jwt.secretKey,
+      Some(tenantOidcRegistry)
+    )
+
     val pools     = new PoolHandlers(sup, tracker)
     val nodes     = new NodeHandlers(sup, tracker, backend)
-    val tenants   = new TenantHandlers(sup)
+    val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
     val health    = new HealthHandler(sup)
 
@@ -520,7 +539,6 @@ object Main extends IOApp with LazyLogging:
         sessions,
         tracker,
         adapter,
-        edgeCfg.tenantClaim,
         aclValidator,
         stmtHistory,
         stmtInstruments,
@@ -540,7 +558,6 @@ object Main extends IOApp with LazyLogging:
               edgeCfg.tlsEnabled,
               edgeCfg.tlsCertChain,
               edgeCfg.tlsPrivateKey,
-              edgeCfg.tenantClaim,
               edgeCfg.sessionTtlSec
             ),
             fsRouter,
