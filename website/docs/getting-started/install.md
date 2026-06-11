@@ -44,19 +44,23 @@ To stop the manager:
 ./scripts/stop-jar.sh
 ```
 
-### Seeding TPC-H for a quick smoke test
+### Seeding the demo dataset for a quick smoke test
 
-Pass `LOAD_TPCH=1` to seed TPC-H at scale factor 1 (approximately 6 million lineitem rows) into the bootstrap tenant-db before the JVM starts. Requires the `duckdb` CLI on PATH.
+Pass `LOAD_TPC=1` to seed the demo at scale factor 1 before the JVM starts. Requires the `duckdb` CLI on PATH.
 
 ```bash
-LOAD_TPCH=1 ./scripts/run-jar.sh
+LOAD_TPC=1 ./scripts/run-jar.sh
 ```
+
+`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 For a completely fresh start (drops the control-plane DB and wipes local state directories before booting):
 
 ```bash
-NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh
 ```
+
+`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 ## Build from source
 

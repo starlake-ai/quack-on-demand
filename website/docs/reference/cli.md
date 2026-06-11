@@ -30,19 +30,19 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 |---|---|---|
 | `BUILD` | `0` | `1` runs `sbt assembly` first instead of using the existing jar. |
 | `QOD_VERSION` | latest | Release to resolve from Maven Central (`0.3.2`, `latest-snapshot`, ...). |
-| `LOAD_TPCH` | unset | Numeric value seeds TPC-H at that scale factor before boot. |
+| `LOAD_TPC` | unset | Scale factor N seeds the demo: TPC-H sf=N into `acme/acme_tpch`, TPC-DS sf=N into `globex/globex_tpcds`. Also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
 | `NUKE` | `0` | `1` drops the control-plane DB and wipes local state dirs first. Irreversible. |
 
 ```bash
 ./scripts/run-jar.sh
 BUILD=1 ./scripts/run-jar.sh
-NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh
 ./scripts/stop-jar.sh        # SIGTERM, wait, then SIGKILL
 ```
 
 ### `run-docker-compose.sh`
 
-Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPCH` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
+Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPC` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
 
 ```bash
 ./scripts/run-docker-compose.sh
@@ -56,6 +56,7 @@ Runs a single manager container against an external Postgres (requires `PG_HOST`
 
 ### Other scripts
 
-- `load-tpch-dbgen.sh` - seed TPC-H into the bootstrap tenant-db (invoked by the boot scripts via `LOAD_TPCH`, or run directly inside a running container).
+- `load-tpch-dbgen.sh` - seed TPC-H into the `acme_tpch` tenant-db (invoked by the boot scripts via `LOAD_TPC`, or run directly inside a running container).
+- `load-tpcds-dbgen.sh` - seed TPC-DS into the `globex_tpcds` tenant-db (invoked by the boot scripts via `LOAD_TPC`, or run directly inside a running container).
 - `spawn-quack-node.sh` - spawns one Quack node. Invoked by `LocalQuackBackend` with the right port, token, and metastore contract; do not run it directly.
 - `loadtest/loadtest.py` - the bundled ADBC load tester, usable as a one-shot client. See [Connecting clients](/connecting/clients).
