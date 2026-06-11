@@ -27,23 +27,39 @@ object Endpoints:
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
   val createPool: PublicEndpoint[
-    CreatePoolRequest,
+    (CreatePoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
   ] =
-    base.post.in("pool" / "create").in(jsonBody[CreatePoolRequest]).out(jsonBody[PoolResponse])
+    base.post
+      .in("pool" / "create")
+      .in(jsonBody[CreatePoolRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[PoolResponse])
 
   val scalePool: PublicEndpoint[
-    ScalePoolRequest,
+    (ScalePoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
   ] =
-    base.post.in("pool" / "scale").in(jsonBody[ScalePoolRequest]).out(jsonBody[PoolResponse])
+    base.post
+      .in("pool" / "scale")
+      .in(jsonBody[ScalePoolRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[PoolResponse])
 
-  val stopPool: PublicEndpoint[StopPoolRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("pool" / "stop").in(jsonBody[StopPoolRequest])
+  val stopPool: PublicEndpoint[
+    (StopPoolRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("pool" / "stop")
+      .in(jsonBody[StopPoolRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
   val listPools: PublicEndpoint[Option[
     String
@@ -65,20 +81,49 @@ object Endpoints:
       )
       .out(jsonBody[PoolResponse])
 
-  val setRole: PublicEndpoint[SetRoleRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("node" / "setRole").in(jsonBody[SetRoleRequest])
+  val setRole: PublicEndpoint[
+    (SetRoleRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("node" / "setRole")
+      .in(jsonBody[SetRoleRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
-  val setMaxConcurrent
-      : PublicEndpoint[SetMaxConcurrentRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("node" / "setMaxConcurrent").in(jsonBody[SetMaxConcurrentRequest])
+  val setMaxConcurrent: PublicEndpoint[
+    (SetMaxConcurrentRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("node" / "setMaxConcurrent")
+      .in(jsonBody[SetMaxConcurrentRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
-  val quarantineNode
-      : PublicEndpoint[NodeOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("node" / "quarantine").in(jsonBody[NodeOpRequest])
+  val quarantineNode: PublicEndpoint[
+    (NodeOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("node" / "quarantine")
+      .in(jsonBody[NodeOpRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
-  val restartNode
-      : PublicEndpoint[NodeOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("node" / "restart").in(jsonBody[NodeOpRequest])
+  val restartNode: PublicEndpoint[
+    (NodeOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("node" / "restart")
+      .in(jsonBody[NodeOpRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
   val health: PublicEndpoint[Unit, Unit, HealthResponse, Any] =
     endpoint.get.in("health").out(jsonBody[HealthResponse])
@@ -122,9 +167,17 @@ object Endpoints:
       .in(sttp.tapir.header[Option[String]]("X-API-Key"))
       .out(jsonBody[ManifestImportSummary])
 
-  val createTenant
-      : PublicEndpoint[TenantRequest, (sttp.model.StatusCode, ErrorResponse), TenantResponse, Any] =
-    base.post.in("tenant" / "create").in(jsonBody[TenantRequest]).out(jsonBody[TenantResponse])
+  val createTenant: PublicEndpoint[
+    (TenantRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantResponse,
+    Any
+  ] =
+    base.post
+      .in("tenant" / "create")
+      .in(jsonBody[TenantRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[TenantResponse])
 
   val listTenants: PublicEndpoint[Option[
     String
@@ -134,12 +187,19 @@ object Endpoints:
       .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[TenantListResponse])
 
-  val deleteTenant
-      : PublicEndpoint[TenantOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("tenant" / "delete").in(jsonBody[TenantOpRequest])
+  val deleteTenant: PublicEndpoint[
+    (TenantOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("tenant" / "delete")
+      .in(jsonBody[TenantOpRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
   val setTenantDisabled: PublicEndpoint[
-    SetTenantDisabledRequest,
+    (SetTenantDisabledRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -147,10 +207,11 @@ object Endpoints:
     base.post
       .in("tenant" / "setDisabled")
       .in(jsonBody[SetTenantDisabledRequest])
+      .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[TenantResponse])
 
   val setTenantAuth: PublicEndpoint[
-    SetTenantAuthRequest,
+    (SetTenantAuthRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -158,10 +219,11 @@ object Endpoints:
     base.post
       .in("tenant" / "setAuth")
       .in(jsonBody[SetTenantAuthRequest])
+      .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[TenantResponse])
 
   val setPoolDisabled: PublicEndpoint[
-    SetPoolDisabledRequest,
+    (SetPoolDisabledRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -169,11 +231,12 @@ object Endpoints:
     base.post
       .in("pool" / "setDisabled")
       .in(jsonBody[SetPoolDisabledRequest])
+      .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[PoolResponse])
 
   // ----- Tenant databases -----
   val createTenantDb: PublicEndpoint[
-    TenantDbRequest,
+    (TenantDbRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantDbResponse,
     Any
@@ -181,15 +244,23 @@ object Endpoints:
     base.post
       .in("database" / "create")
       .in(jsonBody[TenantDbRequest])
+      .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[TenantDbResponse])
 
   val listTenantDbs
       : PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), TenantDbListResponse, Any] =
     base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
 
-  val deleteTenantDb
-      : PublicEndpoint[TenantDbOpRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("database" / "delete").in(jsonBody[TenantDbOpRequest])
+  val deleteTenantDb: PublicEndpoint[
+    (TenantDbOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("database" / "delete")
+      .in(jsonBody[TenantDbOpRequest])
+      .in(header[Option[String]]("X-API-Key"))
 
   // ----- UI login -----
   val login

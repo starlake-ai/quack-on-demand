@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{
   PoolPermission,
@@ -103,15 +104,37 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   // ---------- /user/list ----------
 
   def listUsers(tenant: Option[String], apiKey: Option[String])(
-      resolveTenant: String => Option[Option[String]]
+      scopeOf: String => Option[SessionScope]
   ): Out[UserListResponse] = IO.blocking {
-    val effectiveTenant = apiKey.flatMap(resolveTenant) match
-      case Some(Some(scope)) => Some(scope) // tenant session: clamp to scope, ignore client param
-      case _                 => tenant      // superuser / static-key: honour the query param
+    // Superuser / static-key: honour the query param. Multi-tenant admin:
+    // clamp to the requested tenant if it is in `manageableTenants`,
+    // otherwise constrain the listing to the union of manageable tenants
+    // (collected after the listUsers call below).
+    val sessionScope = apiKey.flatMap(scopeOf)
+    val (effectiveTenant, filterToManageable) = sessionScope match
+      case None              => (tenant, false)
+      case Some(s) if s.superuser => (tenant, false)
+      case Some(s) =>
+        tenant match
+          case Some(t) if s.manageableTenants.contains(t) => (Some(t), false)
+          // Asking for a tenant we don't manage => empty result.
+          case Some(_) => (Some("__forbidden__"), false)
+          // Implicit: ask for all and filter against manageable set.
+          case None => (None, true)
     val users     = sup.listUsers(effectiveTenant)
     val tenantMap = tenantNameMap
     val effs      = sup.effectiveSetsForUsers(users)
-    val rows      = users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
+    val rows0     = users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
+    val rows      =
+      if !filterToManageable then rows0
+      else
+        val allowed = sessionScope.map(_.manageableTenants).getOrElse(Set.empty)
+        rows0.filter { r =>
+          // r.tenant carries the display NAME; map back to id via tenantMap.
+          r.tenant.flatMap(name => tenantMap.find(_._2 == name).map(_._1)) match
+            case Some(id) => allowed.contains(id)
+            case None     => false
+        }
     Right(UserListResponse(rows))
   }
 

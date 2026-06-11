@@ -343,8 +343,21 @@ export interface EffectivePermissionsResponse {
 
 // ----- Auth -----
 export interface LoginRequest  { username: string; password: string; tenant?: string }
-export interface LoginResponse { token: string; username: string; role: string; tenant?: string | null }
-export interface WhoamiResponse { username: string; role: string; tenant?: string | null }
+export interface LoginResponse {
+  token: string;
+  username: string;
+  role: string;
+  tenant?: string | null;
+  superuser?: boolean;
+  manageableTenants?: string[];
+}
+export interface WhoamiResponse {
+  username: string;
+  role: string;
+  tenant?: string | null;
+  superuser?: boolean;
+  manageableTenants?: string[];
+}
 
 // ----- Recent statement history -----
 export interface StatementHistoryEntry {

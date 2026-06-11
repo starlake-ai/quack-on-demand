@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -40,36 +41,43 @@ final class TenantDbHandlers(
       federatedSourceCount = federatedCount(td.id)
     )
 
-  def createTenantDb(req: TenantDbRequest): Out[TenantDbResponse] =
-    if req.tenant.isEmpty || req.name.isEmpty then
-      IO.pure(
-        Left((StatusCode.BadRequest, ErrorResponse("invalid", "tenant and name must be non-empty")))
-      )
-    else
-      TenantDbKind.fromWire(req.kind) match
-        case Left(err) =>
-          IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
-        case Right(kind) =>
-          sup
-            .createTenantDb(
-              tenantName = req.tenant,
-              suffix = req.name,
-              kind = kind,
-              metastore = req.metastore,
-              dataPath = req.dataPath,
-              objectStore = req.objectStore,
-              defaultDatabase = req.defaultDatabase,
-              defaultSchema = req.defaultSchema
+  def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[TenantDbResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        if req.tenant.isEmpty || req.name.isEmpty then
+          IO.pure(
+            Left(
+              (StatusCode.BadRequest, ErrorResponse("invalid", "tenant and name must be non-empty"))
             )
-            .map {
-              case Right(td) => Right(toResponse(req.tenant, td))
-              case Left(msg) if msg.startsWith("tenant not found") =>
-                Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-              case Left(msg) if msg.startsWith("invalid kind=") =>
-                Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg)))
-              case Left(msg) =>
-                Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
-            }
+          )
+        else
+          TenantDbKind.fromWire(req.kind) match
+            case Left(err) =>
+              IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
+            case Right(kind) =>
+              sup
+                .createTenantDb(
+                  tenantName = req.tenant,
+                  suffix = req.name,
+                  kind = kind,
+                  metastore = req.metastore,
+                  dataPath = req.dataPath,
+                  objectStore = req.objectStore,
+                  defaultDatabase = req.defaultDatabase,
+                  defaultSchema = req.defaultSchema
+                )
+                .map {
+                  case Right(td) => Right(toResponse(req.tenant, td))
+                  case Left(msg) if msg.startsWith("tenant not found") =>
+                    Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+                  case Left(msg) if msg.startsWith("invalid kind=") =>
+                    Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg)))
+                  case Left(msg) =>
+                    Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
+                }
 
   def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.delay {
     Right(
@@ -79,11 +87,16 @@ final class TenantDbHandlers(
     )
   }
 
-  def deleteTenantDb(req: TenantDbOpRequest): Out[Unit] =
-    sup.deleteTenantDb(req.tenant, req.name).map {
-      case Right(_)                                 => Right(())
-      case Left(msg) if msg.contains("active pool") =>
-        Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
-      case Left(msg) =>
-        Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-    }
+  def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        sup.deleteTenantDb(req.tenant, req.name).map {
+          case Right(_)                                 => Right(())
+          case Left(msg) if msg.contains("active pool") =>
+            Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
+          case Left(msg) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        }
