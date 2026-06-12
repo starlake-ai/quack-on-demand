@@ -217,6 +217,14 @@ final case class ManagerConfig(
       description = "Seconds between supervisor health checks against child nodes."
     )
     healthCheckIntervalSec: Int,
+    @field @ConfigField(
+      envVar = "QOD_SESSION_IDLE_TTL_SEC",
+      description =
+        "UI session idle TTL in seconds. A session unused for this long is dropped on the next " +
+          "access; each successful access slides the window. Manager restart still invalidates " +
+          "everything (sessions are heap-only)."
+    )
+    sessionIdleTtlSec: Int,
     defaultMetastore: DefaultMetastoreConfig,
     admin: AdminConfig,
     k8s: K8sConfig,

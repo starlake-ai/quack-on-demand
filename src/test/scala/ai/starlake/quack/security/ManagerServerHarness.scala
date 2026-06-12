@@ -54,6 +54,7 @@ object ManagerServerHarness:
     spawnScript           = "",
     drainTimeoutSec       = 5,
     healthCheckIntervalSec = 30,
+    sessionIdleTtlSec     = 28800,
     defaultMetastore      = DefaultMetastoreConfig(
       pgHost     = "localhost",
       pgPort     = "5432",

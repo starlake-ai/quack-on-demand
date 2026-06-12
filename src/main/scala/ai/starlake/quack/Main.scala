@@ -294,7 +294,9 @@ object Main extends IOApp with LazyLogging:
         Some(new CatalogHandlers(reader, kindOf))
       else None
 
-    val sessionTokens  = new SessionTokenStore
+    val sessionTokens  = new SessionTokenStore(
+      idleTtl = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
+    )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
     val authUserStore: Option[UserStore] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
