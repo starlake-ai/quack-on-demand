@@ -11,9 +11,14 @@ import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
 
 /** Carries a streaming result back through the router. The caller MUST invoke `close()` once all
-  * batches have been consumed.
+  * batches have been consumed. `nodeId` is the Quack node that produced the stream, exposed so the
+  * Flight producer can soft-pin a prepared statement's later Execute back to the same node.
   */
-final case class QueryResult(rows: org.apache.arrow.vector.ipc.ArrowReader, close: () => Unit)
+final case class QueryResult(
+    rows: org.apache.arrow.vector.ipc.ArrowReader,
+    close: () => Unit,
+    nodeId: String
+)
 
 /** Routing core extracted from the Arrow Flight surface so it can be unit-tested. The Flight
   * producer is a thin shell around `execute`.
@@ -62,13 +67,20 @@ final class FlightSqlRouter(
     * `effectiveSet` carries the RBAC closure pinned on ConnectionContext at handshake time. `None`
     * means no handshake state was attached; PostgresAclValidator denies anything tenant-scoped in
     * that case to fail safe.
+    *
+    * `preferredNode` is a SOFT pin: when set and still present in the pool snapshot, the router
+    * routes here regardless of load. A transaction pin (set by an open BEGIN on this connection)
+    * still overrides. When the preferred node has disappeared, fall back to the load-aware pick.
+    * Used by the FlightSQL prepared-statement path to keep Prepare + Execute on the same Quack
+    * process so DuckDB-side caches stay warm across the two halves of one client `execute()`.
     */
   def execute(
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       sql: String,
-      effectiveSet: Option[EffectiveSet] = None
+      effectiveSet: Option[EffectiveSet] = None,
+      preferredNode: Option[String] = None
   ): IO[Either[String, QueryResult]] =
     val s    = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
     val kind = classifier.classify(sql)
@@ -127,7 +139,10 @@ final class FlightSqlRouter(
         )
         IO.pure(Left(s"pool not found: $poolKey"))
       case Some(snap) =>
-        val pinned = s.pinnedNodeId.filter(_ => s.txOpen)
+        // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
+        // current snapshot; otherwise None lets Router.pick run its load-aware choice.
+        val txPin = s.pinnedNodeId.filter(_ => s.txOpen)
+        val pinned = txPin.orElse(preferredNode.filter(id => snap.nodes.exists(_.nodeId == id)))
         // Each quack_query lands in a fresh DuckDB session on the remote, so
         // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
@@ -168,7 +183,7 @@ final class FlightSqlRouter(
                   case QuackResponse.Ok(reader, latency, close) =>
                     sessions.onStatement(connectionId, kind, nodeId)
                     record(user, poolKey, nodeId, sql, latency, "ok", None)
-                    IO.pure(Right(QueryResult(reader, close)))
+                    IO.pure(Right(QueryResult(reader, close, nodeId)))
 
                   case QuackResponse.Failed(QuackError.Transient(m), latency) =>
                     record(user, poolKey, nodeId, sql, latency, "transient", Some(m))
@@ -238,7 +253,7 @@ final class FlightSqlRouter(
                     // would have its COMMIT routed by load and likely
                     // hit node A - breaking transaction consistency.
                     sessions.onStatement(connectionId, kind, nodeId)
-                    Right(QueryResult(reader, close))
+                    Right(QueryResult(reader, close, nodeId))
                   case QuackResponse.Failed(QuackError.Transient(m), _) =>
                     Left(s"retry failed (transient): $m")
                   case QuackResponse.Failed(QuackError.Permanent(m), _) =>

@@ -33,14 +33,26 @@ final class FlightProducerImpl(
     * stream and the underlying [[QueryResult.rows]] cannot be replayed. So we re-execute the SQL
     * through the router on every Execute. One Prepare = one extra round-trip vs. caching, but the
     * client gets correct multi-Execute semantics.
+    *
+    * `preferredNode` is the Quack node that served Prepare (when there was one). The Execute path
+    * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across
+    * the two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node
+    * call (DML / DDL / transaction control via [[PrepareStrategy.SkipExecute]]).
     */
   private final case class PreparedExec(
       sql: String,
       connId: String,
       user: String,
       poolKey: ai.starlake.quack.model.PoolKey,
-      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet]
+      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
+      preferredNode: Option[String]
   )
+
+  /** Cached empty Arrow schema for the [[PrepareStrategy.SkipExecute]] arm. FlightSQL clients
+    * interpret a zero-field `dataset_schema` as "this statement is an update, not a query" and
+    * dispatch through `executeUpdate` rather than `executeQuery`. */
+  private val emptySchemaBytes: ByteString =
+    serializeSchema(new Schema(java.util.Collections.emptyList[Field]()))
 
   private val preparedStatements =
     scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
@@ -71,33 +83,63 @@ final class FlightProducerImpl(
       ConnectionContext.userFor(peer)
     ) match
       case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff = ConnectionContext.effectiveSetFor(peer)
-        // Pre-execute so we can populate `dataset_schema` (Arrow JDBC + DBeaver
-        // dispatch as query vs. update based on its presence). We drop the
-        // materialized rows immediately and re-execute on each Execute.
-        scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()) match
-          case scala.util.Success(Right(result)) =>
-            val handle      = java.util.UUID.randomUUID().toString
-            val schemaBytes =
-              try serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
-              finally result.close()
-            preparedStatements.put(handle, PreparedExec(sql, connId, user, poolKey, eff))
+        val eff      = ConnectionContext.effectiveSetFor(peer)
+        val kind     = router.classifier.classify(sql)
+        val strategy = PrepareStrategy.choose(sql, kind)
+
+        // Schema-probe SQL the node sees at Prepare time. For DML/DDL we don't ask anything;
+        // for a wrappable SELECT we send a LIMIT-0 subquery so the planner returns the result
+        // schema without running the body; for everything else we fall back to the original SQL.
+        val probeSqlOpt: Option[String] = strategy match
+          case PrepareStrategy.SkipExecute        => None
+          case PrepareStrategy.ProbeWrap(probe)   => Some(probe)
+          case PrepareStrategy.FullExecute        => Some(sql)
+
+        probeSqlOpt match
+          case None =>
+            // SkipExecute: empty Arrow schema, no node call, no soft pin.
+            val handle = java.util.UUID.randomUUID().toString
+            preparedStatements.put(
+              handle,
+              PreparedExec(sql, connId, user, poolKey, eff, preferredNode = None)
+            )
             val resp = FlightSql.ActionCreatePreparedStatementResult
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
-              .setDatasetSchema(schemaBytes)
+              .setDatasetSchema(emptySchemaBytes)
               .build()
             listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
             listener.onCompleted()
-          case scala.util.Success(Left(msg)) =>
-            listener.onError(
-              CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
-            )
-          case scala.util.Failure(t) =>
-            logger.error(s"createPreparedStatement threw: ${t.getMessage}", t)
-            listener.onError(
-              CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException()
-            )
+
+          case Some(probeSql) =>
+            scala.util.Try(
+              router.execute(connId, user, poolKey, probeSql, eff).unsafeRunSync()
+            ) match
+              case scala.util.Success(Right(result)) =>
+                val handle      = java.util.UUID.randomUUID().toString
+                val schemaBytes =
+                  try serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
+                  finally result.close()
+                preparedStatements.put(
+                  handle,
+                  PreparedExec(sql, connId, user, poolKey, eff, preferredNode = Some(result.nodeId))
+                )
+                val resp = FlightSql.ActionCreatePreparedStatementResult
+                  .newBuilder()
+                  .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
+                  .setDatasetSchema(schemaBytes)
+                  .build()
+                listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
+                listener.onCompleted()
+              case scala.util.Success(Left(msg)) =>
+                listener.onError(
+                  CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
+                )
+              case scala.util.Failure(t) =>
+                logger.error(s"createPreparedStatement threw: ${t.getMessage}", t)
+                listener.onError(
+                  CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException()
+                )
       case _ =>
         listener.onError(
           CallStatus.UNAUTHENTICATED
@@ -149,7 +191,9 @@ final class FlightProducerImpl(
         )
       case Some(p) =>
         scala.util.Try(
-          router.execute(p.connId, p.user, p.poolKey, p.sql, p.effectiveSet).unsafeRunSync()
+          router
+            .execute(p.connId, p.user, p.poolKey, p.sql, p.effectiveSet, p.preferredNode)
+            .unsafeRunSync()
         ) match
           case scala.util.Success(Right(result)) =>
             try streamArrow(result.rows, listener)
