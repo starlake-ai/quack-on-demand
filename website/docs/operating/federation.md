@@ -79,17 +79,19 @@ Secret values are always redacted on reads: a value-backed secret comes back as 
 
 ### Secret resolvers
 
-The resolver backend is selected by `QOD_FEDERATION_SECRET_STORE`, one of `postgres` (default), `env`, `aws-sm`, `gcp-sm`, `azure-kv`, or `vault`. The `externalRef` format depends on the backend:
+The resolver backend is selected by `QOD_FEDERATION_SECRET_STORE`. The default is `dispatch`, which routes per secret by `externalRef` prefix (inline `value` → `postgres`, `env:` → env, `aws-sm:` / `gcp-sm:` / `azure-kv:` / `vault:` → the matching cloud backend). The single-backend modes `postgres` and `env` are also valid. The single-backend modes `aws-sm` / `gcp-sm` / `azure-kv` / `vault` are **refused at config load** because the resolvers are stubs; deployments that use them through `externalRef` should run under `dispatch` instead. The `externalRef` format depends on the backend:
 
 | Backend | `externalRef` format |
 |---|---|
-| `env` | `env:SL_QOD_SECRET_FOO` |
+| `env` | `env:QOD_SECRET_FOO` |
 | `aws-sm` | `aws-sm:arn:aws:secretsmanager:...` or `aws-sm:name#jsonKey` |
 | `gcp-sm` | `gcp-sm:projects/<p>/secrets/<name>/versions/latest` |
 | `azure-kv` | `azure-kv:<secretName>` (vault URL from config) |
 | `vault` | `vault:secret/data/<path>#<key>` |
 
-The four KMS backends (`aws-sm`, `gcp-sm`, `azure-kv`, `vault`) are stubbed in the current version: resolving one raises an error until the corresponding resolver is implemented with the real SDK call. The `postgres` and `env` resolvers are live. See the [Configuration reference](/reference/configuration) for the per-backend config keys.
+The four cloud backends (`aws-sm`, `gcp-sm`, `azure-kv`, `vault`) are still stub resolvers in the current version: under `dispatch` mode the dispatcher keeps them wired so deployments that only consume `postgres` + `env` work without changes; the moment a source's secret carries a stub prefix, the manager raises `NotImplementedError` at node spawn with a message pointing at the supported alternatives. The Admin UI marks the stub options as `(not implemented)` and disables the select. The `postgres` and `env` resolvers are live. See the [Configuration reference](/reference/configuration) for the per-backend config keys.
+
+The substitution that splices a resolved value into `setupSql` is SQL-quote-safe: every `'` in the value is doubled before splicing, so a password like `O'Brien` survives a `PASSWORD '{{secret.PG_PWD}}'` template intact instead of breaking the `ATTACH`. See `FederationBlobBuilderSpec` for the contract.
 
 ## Granting access to federated tables
 

@@ -3,16 +3,29 @@ id: rbac-admin
 title: Administering access
 ---
 
-This page contains task-oriented recipes for managing users, roles, groups, memberships, and pool grants through the REST API. All endpoints described here are available only when `stateStorage=postgres` (the default). They require a valid admin credential on every request.
+This page contains task-oriented recipes for managing users, roles, groups, memberships, and pool grants through the REST API. They require a valid admin credential on every request.
 
 For a description of the underlying data model, the EffectiveSet, pool-access gates, and privilege-escalation rules, see the "Access control model" page.
 
 ## Authentication
 
-Pass an `X-API-Key` header on every request. Two ways to obtain a value:
+Every RBAC endpoint admits either of two transports:
 
-- **Static key**: set `QOD_API_KEY` in the manager environment. Use that same value as the header.
-- **Session token**: call `POST /api/auth/login` with `{"username":"...","password":"..."}` and use the returned `token` field.
+- **Static key** — set `QOD_API_KEY` in the manager environment and pass it as `X-API-Key`. Best for CLI scripts and CI.
+- **Session token** — `POST /api/auth/login` with `{"username":"...","password":"..."}`. Two ways to use the response:
+  - **Cookie** (browser default). The login response sets `qod_session=<jwt>` as an HttpOnly Secure SameSite=Lax cookie; the browser auto-attaches it on subsequent same-origin calls. JavaScript cannot read or send it manually — the `/api/auth/whoami` and `/api/auth/logout` endpoints accept the cookie automatically.
+  - **Header** (CLI). The JSON body still contains a `token` field; pass it as `X-API-Key: $TOKEN` for non-browser callers.
+
+## Tenant scope on every endpoint
+
+Every RBAC handler checks the caller's session scope before mutating. A tenant-A admin session calling a tenant-B endpoint (resource id, query, or body field) gets:
+
+```json
+{ "error": "tenant_forbidden",
+  "message": "session has no admin grant on tenant 't-...'" }
+```
+
+with HTTP `403`. Superuser and static-key sessions bypass the gate. Unknown ids return `404` (not `403`) so a probe cannot distinguish "exists in another tenant" from "doesn't exist at all". The pattern covers id-only endpoints (`/role/delete`, `/user/delete`, `/group/delete`, `/role/permission/revoke`, `/pool/permission/revoke`, all 6 membership ops, the per-user `/effective`) — those resolve the owning tenant from the resource before applying the check.
 
 ```bash
 TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
