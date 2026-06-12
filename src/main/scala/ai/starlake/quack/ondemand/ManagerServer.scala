@@ -136,33 +136,77 @@ final class ManagerServer(
     )
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      RbacEndpoints.createUser.serverLogic(users.createUser),
-      RbacEndpoints.updateUser.serverLogic(users.updateUser),
-      RbacEndpoints.deleteUser.serverLogic(users.deleteUser),
+      RbacEndpoints.createUser.serverLogic { case (req, key) =>
+        users.createUser(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.updateUser.serverLogic { case (req, key) =>
+        users.updateUser(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.deleteUser.serverLogic { case (req, key) =>
+        users.deleteUser(req, key)(sessions.scopeOf)
+      },
       RbacEndpoints.listUsers.serverLogic { case (t, key) =>
         users.listUsers(t, key)(sessions.scopeOf)
       },
-      RbacEndpoints.effectivePermissions.serverLogic(users.effective),
-      RbacEndpoints.createRole.serverLogic(roles.createRole),
-      RbacEndpoints.deleteRole.serverLogic(roles.deleteRole),
-      RbacEndpoints.listRoles.serverLogic(roles.listRoles),
-      RbacEndpoints.grantRolePermission.serverLogic(roles.grantPermission),
-      RbacEndpoints.revokeRolePermission.serverLogic(roles.revokePermission),
-      RbacEndpoints.listRolePermissions.serverLogic(roles.listPermissions),
-      RbacEndpoints.createGroup.serverLogic(groups.createGroup),
-      RbacEndpoints.deleteGroup.serverLogic(groups.deleteGroup),
-      RbacEndpoints.listGroups.serverLogic(groups.listGroups),
-      RbacEndpoints.addUserRoleMembership.serverLogic(memberships.addUserRole),
-      RbacEndpoints.removeUserRoleMembership.serverLogic(memberships.removeUserRole),
-      RbacEndpoints.addUserGroupMembership.serverLogic(memberships.addUserGroup),
-      RbacEndpoints.removeUserGroupMembership.serverLogic(memberships.removeUserGroup),
-      RbacEndpoints.addGroupRoleMembership.serverLogic(memberships.addGroupRole),
-      RbacEndpoints.removeGroupRoleMembership.serverLogic(memberships.removeGroupRole),
-      RbacEndpoints.listGroupRoleMembership.serverLogic(memberships.listGroupRoles),
-      RbacEndpoints.grantPoolPermission.serverLogic(poolPermissions.grant),
-      RbacEndpoints.revokePoolPermission.serverLogic(poolPermissions.revoke),
-      RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g) =>
-        poolPermissions.list(t, u, g)
+      RbacEndpoints.effectivePermissions.serverLogic { case (id, key) =>
+        users.effective(id, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.createRole.serverLogic { case (req, key) =>
+        roles.createRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.deleteRole.serverLogic { case (req, key) =>
+        roles.deleteRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listRoles.serverLogic { case (t, key) =>
+        roles.listRoles(t, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.grantRolePermission.serverLogic { case (req, key) =>
+        roles.grantPermission(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.revokeRolePermission.serverLogic { case (req, key) =>
+        roles.revokePermission(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
+        roles.listPermissions(roleId, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.createGroup.serverLogic { case (req, key) =>
+        groups.createGroup(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.deleteGroup.serverLogic { case (req, key) =>
+        groups.deleteGroup(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listGroups.serverLogic { case (t, key) =>
+        groups.listGroups(t, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, key) =>
+        memberships.addUserRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, key) =>
+        memberships.removeUserRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, key) =>
+        memberships.addUserGroup(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, key) =>
+        memberships.removeUserGroup(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, key) =>
+        memberships.addGroupRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, key) =>
+        memberships.removeGroupRole(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
+        memberships.listGroupRoles(groupId, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.grantPoolPermission.serverLogic { case (req, key) =>
+        poolPermissions.grant(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.revokePoolPermission.serverLogic { case (req, key) =>
+        poolPermissions.revoke(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g, key) =>
+        poolPermissions.list(t, u, g, key)(sessions.scopeOf)
       }
     )
 

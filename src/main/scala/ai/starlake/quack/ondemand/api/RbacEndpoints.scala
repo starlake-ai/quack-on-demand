@@ -10,6 +10,12 @@ import sttp.tapir.json.circe._
   * `val` into a static field initializer; the RBAC + control-plane surfaces together overflow that
   * budget). Mounted by [[ai.starlake.quack.ondemand.ManagerServer]] alongside the control-plane
   * endpoints.
+  *
+  * Every endpoint plumbs the optional `X-API-Key` header through to the handler so the handler can
+  * resolve the calling session and enforce a per-request tenant-scope check. Body-tenant endpoints
+  * (e.g. `createRole` carrying `tenant: String`) gate on the body field; id-only endpoints (e.g.
+  * `deleteRole {id}`) resolve the owning tenant from the resource before gating. See
+  * [[TenantScopeCheck]].
   */
 object RbacEndpoints:
 
@@ -17,26 +23,40 @@ object RbacEndpoints:
     .in("api")
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
+  private val apiKey = header[Option[String]]("X-API-Key")
+
   // ----- RBAC: users -----
   val createUser: PublicEndpoint[
-    UserCreateRequest,
+    (UserCreateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UserResponse,
     Any
   ] =
-    base.post.in("user" / "create").in(jsonBody[UserCreateRequest]).out(jsonBody[UserResponse])
+    base.post
+      .in("user" / "create")
+      .in(jsonBody[UserCreateRequest])
+      .in(apiKey)
+      .out(jsonBody[UserResponse])
 
   val updateUser: PublicEndpoint[
-    UserUpdateRequest,
+    (UserUpdateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UserResponse,
     Any
   ] =
-    base.post.in("user" / "update").in(jsonBody[UserUpdateRequest]).out(jsonBody[UserResponse])
+    base.post
+      .in("user" / "update")
+      .in(jsonBody[UserUpdateRequest])
+      .in(apiKey)
+      .out(jsonBody[UserResponse])
 
-  val deleteUser
-      : PublicEndpoint[UserDeleteRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("user" / "delete").in(jsonBody[UserDeleteRequest])
+  val deleteUser: PublicEndpoint[
+    (UserDeleteRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post.in("user" / "delete").in(jsonBody[UserDeleteRequest]).in(apiKey)
 
   val listUsers: PublicEndpoint[
     (
@@ -52,38 +72,55 @@ object RbacEndpoints:
     base.get
       .in("user" / "list")
       .in(query[Option[String]]("tenant"))
-      .in(header[Option[String]]("X-API-Key"))
+      .in(apiKey)
       .out(jsonBody[UserListResponse])
 
   val effectivePermissions: PublicEndpoint[
-    String,
+    (String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     EffectivePermissionsResponse,
     Any
   ] =
     base.get
       .in("user" / path[String]("id") / "effective")
+      .in(apiKey)
       .out(jsonBody[EffectivePermissionsResponse])
 
   // ----- RBAC: roles -----
   val createRole: PublicEndpoint[
-    RoleCreateRequest,
+    (RoleCreateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RoleResponse,
     Any
   ] =
-    base.post.in("role" / "create").in(jsonBody[RoleCreateRequest]).out(jsonBody[RoleResponse])
+    base.post
+      .in("role" / "create")
+      .in(jsonBody[RoleCreateRequest])
+      .in(apiKey)
+      .out(jsonBody[RoleResponse])
 
-  val deleteRole
-      : PublicEndpoint[RoleDeleteRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("role" / "delete").in(jsonBody[RoleDeleteRequest])
+  val deleteRole: PublicEndpoint[
+    (RoleDeleteRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post.in("role" / "delete").in(jsonBody[RoleDeleteRequest]).in(apiKey)
 
-  val listRoles
-      : PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), RoleListResponse, Any] =
-    base.get.in("role" / "list").in(query[String]("tenant")).out(jsonBody[RoleListResponse])
+  val listRoles: PublicEndpoint[
+    (String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    RoleListResponse,
+    Any
+  ] =
+    base.get
+      .in("role" / "list")
+      .in(query[String]("tenant"))
+      .in(apiKey)
+      .out(jsonBody[RoleListResponse])
 
   val grantRolePermission: PublicEndpoint[
-    RolePermissionGrantRequest,
+    (RolePermissionGrantRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RolePermissionResponse,
     Any
@@ -91,18 +128,22 @@ object RbacEndpoints:
     base.post
       .in("role" / "permission" / "grant")
       .in(jsonBody[RolePermissionGrantRequest])
+      .in(apiKey)
       .out(jsonBody[RolePermissionResponse])
 
   val revokeRolePermission: PublicEndpoint[
-    RolePermissionRevokeRequest,
+    (RolePermissionRevokeRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("role" / "permission" / "revoke").in(jsonBody[RolePermissionRevokeRequest])
+    base.post
+      .in("role" / "permission" / "revoke")
+      .in(jsonBody[RolePermissionRevokeRequest])
+      .in(apiKey)
 
   val listRolePermissions: PublicEndpoint[
-    String,
+    (String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RolePermissionListResponse,
     Any
@@ -110,81 +151,121 @@ object RbacEndpoints:
     base.get
       .in("role" / "permission" / "list")
       .in(query[String]("roleId"))
+      .in(apiKey)
       .out(jsonBody[RolePermissionListResponse])
 
   // ----- RBAC: groups -----
   val createGroup: PublicEndpoint[
-    GroupCreateRequest,
+    (GroupCreateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     GroupResponse,
     Any
   ] =
-    base.post.in("group" / "create").in(jsonBody[GroupCreateRequest]).out(jsonBody[GroupResponse])
+    base.post
+      .in("group" / "create")
+      .in(jsonBody[GroupCreateRequest])
+      .in(apiKey)
+      .out(jsonBody[GroupResponse])
 
-  val deleteGroup
-      : PublicEndpoint[GroupDeleteRequest, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("group" / "delete").in(jsonBody[GroupDeleteRequest])
+  val deleteGroup: PublicEndpoint[
+    (GroupDeleteRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post.in("group" / "delete").in(jsonBody[GroupDeleteRequest]).in(apiKey)
 
-  val listGroups
-      : PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), GroupListResponse, Any] =
-    base.get.in("group" / "list").in(query[String]("tenant")).out(jsonBody[GroupListResponse])
+  val listGroups: PublicEndpoint[
+    (String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    GroupListResponse,
+    Any
+  ] =
+    base.get
+      .in("group" / "list")
+      .in(query[String]("tenant"))
+      .in(apiKey)
+      .out(jsonBody[GroupListResponse])
 
   // ----- RBAC: memberships (204 on success) -----
   val addUserRoleMembership: PublicEndpoint[
-    UserRoleMembershipRequest,
+    (UserRoleMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "user-role" / "add").in(jsonBody[UserRoleMembershipRequest])
+    base.post
+      .in("membership" / "user-role" / "add")
+      .in(jsonBody[UserRoleMembershipRequest])
+      .in(apiKey)
   val removeUserRoleMembership: PublicEndpoint[
-    UserRoleMembershipRequest,
+    (UserRoleMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "user-role" / "remove").in(jsonBody[UserRoleMembershipRequest])
+    base.post
+      .in("membership" / "user-role" / "remove")
+      .in(jsonBody[UserRoleMembershipRequest])
+      .in(apiKey)
 
   val addUserGroupMembership: PublicEndpoint[
-    UserGroupMembershipRequest,
+    (UserGroupMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "user-group" / "add").in(jsonBody[UserGroupMembershipRequest])
+    base.post
+      .in("membership" / "user-group" / "add")
+      .in(jsonBody[UserGroupMembershipRequest])
+      .in(apiKey)
   val removeUserGroupMembership: PublicEndpoint[
-    UserGroupMembershipRequest,
+    (UserGroupMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "user-group" / "remove").in(jsonBody[UserGroupMembershipRequest])
+    base.post
+      .in("membership" / "user-group" / "remove")
+      .in(jsonBody[UserGroupMembershipRequest])
+      .in(apiKey)
 
   val addGroupRoleMembership: PublicEndpoint[
-    GroupRoleMembershipRequest,
+    (GroupRoleMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "group-role" / "add").in(jsonBody[GroupRoleMembershipRequest])
+    base.post
+      .in("membership" / "group-role" / "add")
+      .in(jsonBody[GroupRoleMembershipRequest])
+      .in(apiKey)
   val removeGroupRoleMembership: PublicEndpoint[
-    GroupRoleMembershipRequest,
+    (GroupRoleMembershipRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("membership" / "group-role" / "remove").in(jsonBody[GroupRoleMembershipRequest])
+    base.post
+      .in("membership" / "group-role" / "remove")
+      .in(jsonBody[GroupRoleMembershipRequest])
+      .in(apiKey)
 
-  val listGroupRoleMembership
-      : PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), RoleListResponse, Any] =
+  val listGroupRoleMembership: PublicEndpoint[
+    (String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    RoleListResponse,
+    Any
+  ] =
     base.get
       .in("membership" / "group-role" / "list")
       .in(query[String]("groupId"))
+      .in(apiKey)
       .out(jsonBody[RoleListResponse])
 
   // ----- RBAC: pool permissions -----
   val grantPoolPermission: PublicEndpoint[
-    PoolPermissionGrantRequest,
+    (PoolPermissionGrantRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolPermissionResponse,
     Any
@@ -192,18 +273,22 @@ object RbacEndpoints:
     base.post
       .in("pool" / "permission" / "grant")
       .in(jsonBody[PoolPermissionGrantRequest])
+      .in(apiKey)
       .out(jsonBody[PoolPermissionResponse])
 
   val revokePoolPermission: PublicEndpoint[
-    PoolPermissionRevokeRequest,
+    (PoolPermissionRevokeRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("pool" / "permission" / "revoke").in(jsonBody[PoolPermissionRevokeRequest])
+    base.post
+      .in("pool" / "permission" / "revoke")
+      .in(jsonBody[PoolPermissionRevokeRequest])
+      .in(apiKey)
 
   val listPoolPermissions: PublicEndpoint[
-    (Option[String], Option[String], Option[String]),
+    (Option[String], Option[String], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolPermissionListResponse,
     Any
@@ -213,4 +298,5 @@ object RbacEndpoints:
       .in(query[Option[String]]("tenant"))
       .in(query[Option[String]]("userId"))
       .in(query[Option[String]]("groupId"))
+      .in(apiKey)
       .out(jsonBody[PoolPermissionListResponse])
