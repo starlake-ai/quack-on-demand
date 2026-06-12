@@ -151,6 +151,12 @@ type SecretStoreSpec = {
   /** Credentials the manager process needs to reach the backend. */
   credentials:  string;
   example?:     string;
+  /** True if the manager-side resolver is still a stub (NotImplementedError
+   *  at node spawn). UI grays the option and blocks form submission.
+   *  Existing data with this store is still rendered / browsable so an
+   *  operator can replace it; only saving a new value for it is blocked.
+   */
+  unimplemented?: boolean;
 };
 
 const SECRET_STORES: SecretStoreSpec[] = [
@@ -175,43 +181,47 @@ const SECRET_STORES: SecretStoreSpec[] = [
   },
   {
     id:          'aws-sm',
-    label:       'AWS Secrets Manager (stub)',
+    label:       'AWS Secrets Manager (not implemented)',
     inputLabel:  'ARN or name[#jsonKey]',
     placeholder: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/pg-RaNDom',
     mono:        true,
     resolution:  'AwsSecretsManagerResolver calls GetSecretValue. Optional #jsonKey selects a field from a JSON-shaped secret.',
     credentials: 'AWS SDK default credential chain: env vars (AWS_ACCESS_KEY_ID etc.), ~/.aws/credentials, EC2 instance profile, EKS IRSA, ECS task role. Region picked from federation.aws-sm.region.',
     example:     'aws-sm:prod/warehouse/pg#password',
+    unimplemented: true,
   },
   {
     id:          'gcp-sm',
-    label:       'GCP Secret Manager (stub)',
+    label:       'GCP Secret Manager (not implemented)',
     inputLabel:  'Resource name',
     placeholder: 'projects/my-project/secrets/prod-warehouse-pg/versions/latest',
     mono:        true,
     resolution:  'GcpSecretsManagerResolver calls google-cloud-secretmanager accessSecretVersion on the resource path.',
     credentials: 'Application Default Credentials: GOOGLE_APPLICATION_CREDENTIALS service-account JSON, GKE Workload Identity, or the GCE metadata server.',
     example:     'gcp-sm:projects/my-project/secrets/prod-pg/versions/latest',
+    unimplemented: true,
   },
   {
     id:          'azure-kv',
-    label:       'Azure Key Vault (stub)',
+    label:       'Azure Key Vault (not implemented)',
     inputLabel:  'Secret name',
     placeholder: 'prod-warehouse-pg-password',
     mono:        true,
     resolution:  'AzureSecretsManagerResolver calls SecretClient.getSecret on the configured vault URL.',
     credentials: 'DefaultAzureCredential chain: AZURE_* env vars, AKS workload identity, az CLI login (dev). Vault URL picked from federation.azure-kv.vaultUrl.',
     example:     'azure-kv:prod-warehouse-pg-password',
+    unimplemented: true,
   },
   {
     id:          'vault',
-    label:       'HashiCorp Vault (stub)',
+    label:       'HashiCorp Vault (not implemented)',
     inputLabel:  'Path[#key]',
     placeholder: 'secret/data/prod/warehouse/pg#password',
     mono:        true,
     resolution:  'VaultSecretResolver reads the KV v2 path and (optionally) selects a single field via #key.',
     credentials: 'Static token read from the env var named by federation.vault.tokenEnv (default VAULT_TOKEN). Vault address from federation.vault.address.',
     example:     'vault:secret/data/prod/warehouse/pg#password',
+    unimplemented: true,
   },
 ];
 
@@ -502,10 +512,27 @@ function SecretEditor({
                 Store
                 <select value={store} onChange={ev => setStore(ev.target.value as SecretStore)}>
                   {SECRET_STORES.map(s => (
-                    <option key={s.id} value={s.id}>{s.label}</option>
+                    <option
+                      key={s.id}
+                      value={s.id}
+                      disabled={s.unimplemented}
+                      title={s.unimplemented
+                        ? 'Resolver stub -- the manager would raise NotImplementedError at node spawn. Use postgres (inline value) or env (process env var) instead.'
+                        : undefined}
+                    >
+                      {s.label}
+                    </option>
                   ))}
                 </select>
               </label>
+              {storeSpec.unimplemented && (
+                <div style={{ fontSize: '0.85em', color: 'var(--bad)' }}>
+                  This resolver is a stub; saving a secret with it will work but the manager
+                  raises NotImplementedError at node spawn until the SDK is wired. Use
+                  <code> postgres </code> (inline value) or <code> env </code> (process env
+                  var) instead.
+                </div>
+              )}
               <label>
                 {storeSpec.inputLabel}
                 <input
