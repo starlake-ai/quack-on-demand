@@ -92,10 +92,7 @@ final class PoolSupervisor(
         if td.dataPath.nonEmpty then td.dataPath
         else if td.metastore.contains("dataPath") then td.metastore("dataPath")
         else if rootData.isEmpty then ""
-        else
-          val p      = java.nio.file.Paths.get(rootData)
-          val parent = p.getParent
-          if parent == null then td.name else parent.resolve(td.name).toString
+        else PoolSupervisor.replaceLastSegment(rootData, td.name)
       if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb
 
   def restore(): Unit =
@@ -1258,3 +1255,29 @@ object PoolSupervisor:
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
     val safeDb = key.tenantDb.replace('_', '-')
     s"quack-${key.tenant}-$safeDb-${key.pool}-$index"
+
+  /** Replace the last segment of a dataPath with `newSegment`, used to derive a per-tenant-db
+    * dataPath alongside the configured root. URI-style paths (`<scheme>://...`) are handled with
+    * string operations so we don't let `java.nio.file.Paths.get` collapse the scheme's `//` to
+    * `/` (which DuckLake's `__ducklake_metadata.data_path` check then rejects on re-ATTACH).
+    * Filesystem paths fall through to NIO so portability behavior is unchanged.
+    *
+    * Examples (root + newSegment -> result):
+    *   ./ducklake/tpch          + acme_tpch -> ./ducklake/acme_tpch
+    *   /var/data/tpch           + acme_tpch -> /var/data/acme_tpch
+    *   s3://qod-ducklake/tpch   + acme_tpch -> s3://qod-ducklake/acme_tpch
+    *   gs://bucket/tpch         + acme_tpch -> gs://bucket/acme_tpch
+    */
+  private[ondemand] def replaceLastSegment(path: String, newSegment: String): String =
+    // Strict URI scheme: a leading letter then letters/digits/+/-/. then `://`.
+    val schemeRe = """^([a-zA-Z][a-zA-Z0-9+\-.]*://)(.*)$""".r
+    path match
+      case schemeRe(prefix, rest) =>
+        val trimmed = rest.stripSuffix("/")
+        val i       = trimmed.lastIndexOf('/')
+        if i < 0 then prefix + newSegment
+        else prefix + trimmed.substring(0, i) + "/" + newSegment
+      case _ =>
+        val p      = java.nio.file.Paths.get(path)
+        val parent = p.getParent
+        if parent == null then newSegment else parent.resolve(newSegment).toString

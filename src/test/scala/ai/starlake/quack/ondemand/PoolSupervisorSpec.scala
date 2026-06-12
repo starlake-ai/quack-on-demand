@@ -29,6 +29,28 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     PoolSupervisor.nodeId(k, 7) shouldBe "quack-acme-acme-default-sales-7"
   }
 
+  "PoolSupervisor.replaceLastSegment" should "derive sibling paths for filesystem roots" in {
+    PoolSupervisor.replaceLastSegment("./ducklake/tpch", "acme_tpch")  shouldBe "./ducklake/acme_tpch"
+    PoolSupervisor.replaceLastSegment("/var/data/tpch", "acme_tpch")   shouldBe "/var/data/acme_tpch"
+    PoolSupervisor.replaceLastSegment("tpch", "acme_tpch")             shouldBe "acme_tpch"
+  }
+
+  it should "preserve the scheme separator for URI-style roots (DuckLake __ducklake_metadata.data_path match)" in {
+    // Regression: `java.nio.file.Paths.get` collapses `s3://...` to `s3:/...`,
+    // which made DuckLake refuse to re-ATTACH the catalog at the loader's
+    // canonical `s3://...` form. See run-local-stack-k8s.sh failure.
+    PoolSupervisor.replaceLastSegment("s3://qod-ducklake/tpch", "acme_tpch") shouldBe
+      "s3://qod-ducklake/acme_tpch"
+    PoolSupervisor.replaceLastSegment("gs://bucket/tpch", "acme_tpch")       shouldBe
+      "gs://bucket/acme_tpch"
+    PoolSupervisor.replaceLastSegment("azure://acct/ctr/tpch", "acme_tpch")  shouldBe
+      "azure://acct/ctr/acme_tpch"
+  }
+
+  it should "fall back gracefully when the URI has only a bucket segment" in {
+    PoolSupervisor.replaceLastSegment("s3://qod-ducklake", "acme_tpch") shouldBe "s3://acme_tpch"
+  }
+
   private val key: PoolKey = PoolKey("acme", "acme_default", "sales")
   private val ms           = Map("pgHost" -> "localhost")
 
