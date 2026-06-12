@@ -270,6 +270,8 @@ git add build.sbt
 git commit -m "next snapshot: libquackwire ${libq_next}" -q
 git push origin HEAD 2>&1 | tail -2 || true
 
+read -p "Press Enter to continue... "        # waits for Enter
+
 # ---- Optional: multi-arch Docker push ----
 if [[ "$NO_DOCKER" == "1" ]]; then
   echo "skipping Docker Hub push (NO_DOCKER=1)."
