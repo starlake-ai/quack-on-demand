@@ -48,8 +48,6 @@ import ai.starlake.quack.ondemand.state.{
   LiquibaseRunner,
   PostgresControlPlaneStore,
   PostgresDbAdmin,
-  PostgresStateStore,
-  StateStore,
   UserStore
 }
 import cats.effect.{ExitCode, IO, IOApp}
@@ -131,35 +129,33 @@ object Main extends IOApp with LazyLogging:
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
     // out of the supervisor.
 
-    // Bootstrap admin users. Always runs at startup when stateStorage=postgres
-    // so the DB auth backend has at least one credential. Re-hashed on every
-    // boot: changing QOD_ADMIN_PASSWORD + restart rotates. All names in
-    // QOD_ADMIN_USERNAME (comma-separated) get the same password + role.
-    // Skipped for stateStorage=file (no Postgres connection assumed).
-    if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-      // Apply the Liquibase changelog first: `qodstate_user` (and the rest
-      // of the control plane) must exist before we upsert the admin row.
-      // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
-      LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
-      val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val admins    = mgrCfg.admin.usernameList
-      if admins.isEmpty then
-        logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
-      else
-        admins.foreach { name =>
-          // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
-          // CHECK only forbids empty-string tenants now; NULL alone is fine.
-          val out = userStore.upsertUser(
-            tenant = None,
-            username = name,
-            plaintext = mgrCfg.admin.password,
-            role = mgrCfg.admin.role
-          )
-          val verb = if out.inserted then "created" else "updated"
-          logger.info(
-            s"admin user $verb: $name (id=${out.id}, role=${mgrCfg.admin.role}) in qodstate_user"
-          )
-        }
+    // Bootstrap admin users at startup so the DB auth backend has at least
+    // one credential. Re-hashed on every boot: changing QOD_ADMIN_PASSWORD
+    // + restart rotates. All names in QOD_ADMIN_USERNAME (comma-separated)
+    // get the same password + role.
+    // Apply the Liquibase changelog first: `qodstate_user` (and the rest
+    // of the control plane) must exist before we upsert the admin row.
+    // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+    val bootstrapUserStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val admins             = mgrCfg.admin.usernameList
+    if admins.isEmpty then
+      logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
+    else
+      admins.foreach { name =>
+        // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
+        // CHECK only forbids empty-string tenants now; NULL alone is fine.
+        val out = bootstrapUserStore.upsertUser(
+          tenant = None,
+          username = name,
+          plaintext = mgrCfg.admin.password,
+          role = mgrCfg.admin.role
+        )
+        val verb = if out.inserted then "created" else "updated"
+        logger.info(
+          s"admin user $verb: $name (id=${out.id}, role=${mgrCfg.admin.role}) in qodstate_user"
+        )
+      }
 
     val backend: QuackBackend = mgrCfg.runtimeType.toLowerCase match
       case "local" =>
@@ -220,14 +216,11 @@ object Main extends IOApp with LazyLogging:
     // Shared FederatedSourceStore: used by federationBlobOf (resolves
     // sources + secrets into spawn SQL), by TenantDbHandlers (counts
     // sources per tenant-db for the UI), by FederatedSourceHandlers
-    // (CRUD), and by ManifestHandlers (YAML round-trip). Only wired in
-    // postgres mode; file mode has no federated-source tables.
+    // (CRUD), and by ManifestHandlers (YAML round-trip).
     val manifestFedStore: Option[FederatedSourceStore] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val dm      = mgrCfg.defaultMetastore
-        val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
-        Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
-      else None
+      val dm      = mgrCfg.defaultMetastore
+      val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+      Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
 
     // Federation blob lookup: resolves enabled federated sources + their
     // secrets into a ready-to-execute SQL blob for each tenant-db.
@@ -298,16 +291,14 @@ object Main extends IOApp with LazyLogging:
     // (default <- tenant overrides) the same way PoolSupervisor does for
     // spawn-node.
     val catalogHandlers: Option[CatalogHandlers] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
-          catalogReaderCache.computeIfAbsent(
-            (tenant, tenantDb),
-            { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
-          )
-        def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
-          sup.findTenantDb(tenant, tenantDb).map(_.kind)
-        Some(new CatalogHandlers(reader, kindOf))
-      else None
+      def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
+        catalogReaderCache.computeIfAbsent(
+          (tenant, tenantDb),
+          { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
+        )
+      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
+        sup.findTenantDb(tenant, tenantDb).map(_.kind)
+      Some(new CatalogHandlers(reader, kindOf))
 
     val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
@@ -322,9 +313,7 @@ object Main extends IOApp with LazyLogging:
     )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
     val authUserStore: Option[UserStore] =
-      if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
-      else None
+      Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
     val grantsForIdentity: GrantsLookup =
       (identity, email) =>
         authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
@@ -536,16 +525,14 @@ object Main extends IOApp with LazyLogging:
       val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
 
       val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
-        if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-          val dm               = mgrCfg.defaultMetastore
-          val jdbcUrlForFed    = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
-          val fedHandlersStore = new FederatedSourceStore(jdbcUrlForFed, dm.pgUser, dm.pgPassword)
-          val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
-            sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
-          Some(
-            new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver)
-          )
-        else None
+        val dm               = mgrCfg.defaultMetastore
+        val jdbcUrlForFed    = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+        val fedHandlersStore = new FederatedSourceStore(jdbcUrlForFed, dm.pgUser, dm.pgPassword)
+        val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
+          sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
+        Some(
+          new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver)
+        )
 
       // manifestFedStore is hoisted above the supervisor build (see top of
       // this Resource.eval block); reuse the same instance here so the

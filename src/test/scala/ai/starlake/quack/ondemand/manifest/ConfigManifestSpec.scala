@@ -27,8 +27,7 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
           name = "sales", tenantDb = "tpch_tpch1",
           roleDistribution = ManifestRoleDistribution(1, 1, 1),
           maxConcurrentPerNode = 0, disabled = false
-        )),
-        identities = Nil
+        ))
       )
     ),
     roles = List(
@@ -78,7 +77,7 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
     parsed.users   shouldBe empty
   }
 
-  it should "decode a tenant that omits authProvider / tenantDbs / pools / identities" in {
+  it should "decode a tenant that omits authProvider / tenantDbs / pools" in {
     val yaml =
       """apiVersion: quack-on-demand/v1
         |kind: ConfigManifest
@@ -95,7 +94,6 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
     tenant.authConfig   shouldBe Map.empty[String, String]
     tenant.tenantDbs    shouldBe empty
     tenant.pools        shouldBe empty
-    tenant.identities   shouldBe empty
   }
 
   it should "decode a user that omits role / enabled / roles / groups / poolGrants" in {

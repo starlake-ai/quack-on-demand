@@ -64,12 +64,9 @@ final class PostgresDbAdmin(
         val st = conn.createStatement()
         try
           // WITH (FORCE) (PG 13+) terminates any lingering idle backend
-          // connection. The non-FORCE form is the fallback for older
-          // Postgres -- not the common case for us but worth handling.
-          try st.execute(s"""DROP DATABASE "${escapeIdent(name)}" WITH (FORCE)""")
-          catch
-            case _: org.postgresql.util.PSQLException =>
-              st.execute(s"""DROP DATABASE "${escapeIdent(name)}"""")
+          // connection. The project floor is PG16, so this is always
+          // supported -- no fallback needed.
+          st.execute(s"""DROP DATABASE "${escapeIdent(name)}" WITH (FORCE)""")
           logger.info(s"dropDatabase: dropped '$name'")
         finally st.close()
     }

@@ -117,25 +117,9 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [ ] **Cookie session over a path-rewriting reverse proxy.** The cookie path is now configurable via `QOD_SESSION_COOKIE_PATH` (default `/api`), so most reverse-proxy shapes work out of the box. If we ever move to a cross-origin UI/API split, also wire CORS + `Domain=` (currently no CORS layer).
 
-## Dead code — safe one-shot deletion bundle (~250 LOC prod + ~80 LOC tests)
+## Dead code — safe one-shot deletion bundle
 
-`Main.scala:213-214` unconditionally builds `PostgresControlPlaneStore` — the `stateStorage` config knob only gates side-features.
-
-- [ ] `src/main/scala/ai/starlake/quack/ondemand/state/PostgresStateStore.scala` (109 LOC) — imported by `Main.scala:51`, never instantiated.
-- [ ] `src/main/scala/ai/starlake/quack/ondemand/state/StateStore.scala` (82 LOC) — `FileStateStore` only referenced by `StateStoreSpec`.
-- [ ] `src/main/scala/ai/starlake/quack/ondemand/state/StoredState.scala` (12 LOC) — schema-stale.
-- [ ] `src/main/scala/ai/starlake/quack/ondemand/state/StoredPool.scala` (13 LOC) — schema-stale (no `cohorts`/`idleTimeoutSec`/`disabled`/`tenantDbId`).
-- [ ] `src/main/scala/ai/starlake/quack/ondemand/state/StoredTenant.scala` (9 LOC) — schema-stale (no `authProvider`/`authConfig`/`displayName`/`disabled`).
-- [ ] `src/test/scala/ai/starlake/quack/ondemand/state/StateStoreSpec.scala` — delete with above.
-- [ ] `Main.scala` — drop `stateStorage` guards at L139, 226, 284, 300, 512; drop the `PostgresStateStore` import.
-- [ ] `Config.scala:185-192` — drop the `stateStorage` field.
-- [ ] `application.conf:22-33` — drop `stateStorage` + the stale `slkstate_pool_state` doc comment.
-- [ ] `test/.../ManagerServerHarness.scala:51` — drop `stateStorage = "file"`.
-- [ ] `state/DbAdmin.scala:69-72` — drop the non-FORCE `DROP DATABASE` fallback (PG16 floor → unreachable).
-- [ ] `manifest/ConfigManifest.scala` — drop `ManifestIdentity` (L68-72 + codec L243-251 + decode L263-264). Exported empty, never read by importer.
-- [ ] `ManifestExporter.scala:160` — remove the now-orphan `identities = Nil`.
-- [ ] `api/Dtos.scala` — drop `FederationImportSummary` case class + codec (defined, never referenced).
-- [ ] `CLAUDE.md` — drop the "YAML grant store ... unwired after the RBAC cutover" line; the code is already gone.
+- [x] **Deleted 2026-06-12.** ~250 LOC prod + ~80 LOC tests dropped in one commit. File-state mode (`PostgresStateStore`, `StateStore`/`FileStateStore`, `StoredState`, `StoredPool`, `StoredTenant`, `StateStoreSpec`) gone along with the `stateStorage`/`statePath` config keys and the 5 `Main.scala` guards they gated. Also dropped: `DbAdmin.dropDatabase` non-FORCE fallback (PG16 floor), `ManifestIdentity` + codec + decode + orphan exporter assignment, `FederationImportSummary` + codec, and the stale `CLAUDE.md` line about YAML grants.
 
 ---
 
