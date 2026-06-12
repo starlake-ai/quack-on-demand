@@ -15,7 +15,7 @@ class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
   given ConfigReader[ManagementAuthConfig] = deriveReader[ManagementAuthConfig]
 
   private val sessionFields =
-    """sessionJwtSecret = "", sessionCookieSecure = true, sessionCookiePath = "/api""""
+    """sessionJwtSecret = "", sessionCookieSecure = "auto", sessionCookiePath = "/api""""
 
   "ManagementAuthConfig" should "default to db identity source and preferred_username claim" in {
     val cfg = ConfigFactory.parseString(

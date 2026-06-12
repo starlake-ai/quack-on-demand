@@ -79,7 +79,7 @@ object ManagerServerHarness:
         identityClaim       = "preferred_username",
         // 44-char base64 = 32 raw bytes; meets HS256 min-key-length.
         sessionJwtSecret    = "test-harness-jwt-secret-padding-padding-pad=",
-        sessionCookieSecure = false,
+        sessionCookieSecure = "false",
         sessionCookiePath   = "/api"
       )
     )

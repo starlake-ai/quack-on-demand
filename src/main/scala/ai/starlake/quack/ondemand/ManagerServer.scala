@@ -133,8 +133,10 @@ final class ManagerServer(
     }
 
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      Endpoints.login.serverLogic(auth.login),
-      Endpoints.logout.serverLogic { case (apiKey, cookie) => auth.logout(apiKey, cookie) },
+      Endpoints.login.serverLogic { case (req, proto) => auth.login(req, proto) },
+      Endpoints.logout.serverLogic { case (apiKey, cookie, proto) =>
+        auth.logout(apiKey, cookie, proto)
+      },
       Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
       Endpoints.statementHistory.serverLogic { case (limit, key) =>
         statementHistory.recent(limit, key)(sessions.scopeOf)

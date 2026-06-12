@@ -329,13 +329,27 @@ object Main extends IOApp with LazyLogging:
     val grantsForIdentity: GrantsLookup =
       (identity, email) =>
         authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
+    // 'auto' -> None (handler derives Secure from X-Forwarded-Proto per request); 'true' / 'false'
+    // -> explicit override. Unknown values fall back to auto with a warning so a typo in the env
+    // var doesn't accidentally weaken the cookie.
+    val cookieSecureOverride: Option[Boolean] =
+      mgrCfg.auth.management.sessionCookieSecure.trim.toLowerCase match
+        case "auto"  => None
+        case "true"  => Some(true)
+        case "false" => Some(false)
+        case other   =>
+          logger.warn(
+            s"QOD_SESSION_COOKIE_SECURE='$other' not recognized; expected auto|true|false. " +
+              "Treating as 'auto' (derive from X-Forwarded-Proto)."
+          )
+          None
     val authHandlers = new AuthHandlers(
-      authService       = authService,
-      tokens            = sessionTokens,
-      identitySource    = identitySource,
-      grantsForIdentity = grantsForIdentity,
-      cookieSecure      = mgrCfg.auth.management.sessionCookieSecure,
-      cookiePath        = mgrCfg.auth.management.sessionCookiePath
+      authService          = authService,
+      tokens               = sessionTokens,
+      identitySource       = identitySource,
+      grantsForIdentity    = grantsForIdentity,
+      cookieSecureOverride = cookieSecureOverride,
+      cookiePath           = mgrCfg.auth.management.sessionCookiePath
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

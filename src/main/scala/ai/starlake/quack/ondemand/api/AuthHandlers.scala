@@ -28,7 +28,7 @@ final class AuthHandlers(
     tokens: SessionTokenStore,
     identitySource: ManagementIdentitySource,
     grantsForIdentity: GrantsLookup,
-    cookieSecure: Boolean = true,
+    cookieSecureOverride: Option[Boolean] = None,
     cookiePath: String = "/api"
 ):
 
@@ -40,33 +40,48 @@ final class AuthHandlers(
   // REST surface.
   private val sameSiteLax: Option[Cookie.SameSite] = Some(Cookie.SameSite.Lax)
 
-  private def sessionCookie(token: String): CookieValueWithMeta =
+  /** Decide whether the `qod_session` cookie should carry the `Secure` flag for this response.
+    * When the operator has set an explicit override (env `QOD_SESSION_COOKIE_SECURE=true|false`)
+    * we honor it unconditionally; otherwise we derive from the `X-Forwarded-Proto` header injected
+    * by the TLS-terminating ingress, treating "no header" as plaintext HTTP. This lets
+    * `run-jar.sh` on `http://localhost:20900` and a helm deploy behind a TLS ingress both work
+    * without an env var, while still allowing operators to force-secure when they're behind a
+    * proxy that strips `X-Forwarded-Proto`. */
+  private def deriveSecure(forwardedProto: Option[String]): Boolean =
+    cookieSecureOverride.getOrElse(
+      forwardedProto.exists(_.equalsIgnoreCase("https"))
+    )
+
+  private def sessionCookie(token: String, forwardedProto: Option[String]): CookieValueWithMeta =
     CookieValueWithMeta.unsafeApply(
       value           = token,
       maxAge          = Some(tokens.maxAgeSeconds),
       path            = Some(cookiePath),
       domain          = None,
-      secure          = cookieSecure,
+      secure          = deriveSecure(forwardedProto),
       httpOnly        = true,
       sameSite        = sameSiteLax,
       expires         = None,
       otherDirectives = Map.empty
     )
 
-  private def clearCookie: CookieValueWithMeta =
+  private def clearCookie(forwardedProto: Option[String]): CookieValueWithMeta =
     CookieValueWithMeta.unsafeApply(
       value           = "",
       maxAge          = Some(0L),
       path            = Some(cookiePath),
       domain          = None,
-      secure          = cookieSecure,
+      secure          = deriveSecure(forwardedProto),
       httpOnly        = true,
       sameSite        = sameSiteLax,
       expires         = None,
       otherDirectives = Map.empty
     )
 
-  def login(req: LoginRequest): Out[(CookieValueWithMeta, LoginResponse)] = IO.blocking {
+  def login(
+      req: LoginRequest,
+      forwardedProto: Option[String] = None
+  ): Out[(CookieValueWithMeta, LoginResponse)] = IO.blocking {
     if req.username.isEmpty || req.password.isEmpty then
       Left(
         (
@@ -140,24 +155,40 @@ final class AuthHandlers(
               superuser         = superuser,
               manageableTenants = manageableTenants.toList.sorted
             )
-            Right((sessionCookie(token), resp))
+            Right((sessionCookie(token, forwardedProto), resp))
   }
 
   /** Logout. Accepts the token via X-API-Key header OR qod_session cookie -- the UI uses the
     * cookie (JS can't read HttpOnly cookies); CLI uses the header. The response always emits a
     * clear-cookie so the browser drops its copy.
     */
-  def logout(apiKey: Option[String], cookie: Option[String]): Out[CookieValueWithMeta] =
+  def logout(
+      apiKey: Option[String],
+      cookie: Option[String],
+      forwardedProto: Option[String] = None
+  ): Out[CookieValueWithMeta] =
     IO.delay {
       apiKey.orElse(cookie).foreach(tokens.revoke)
-      Right(clearCookie)
+      Right(clearCookie(forwardedProto))
     }
 
-  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT. */
+  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT.
+    *
+    * The error body distinguishes WHY the lookup failed so the client (and operators reading the
+    * network tab) can tell apart the four very different cases that previously all surfaced as
+    * `"expired"`:
+    *   - `no_session` -- no header AND no cookie. The UI's mount-time probe hits this on every
+    *     fresh load before login; it's not really an error.
+    *   - `invalid`    -- token is malformed, has no `jti`, or its HMAC signature doesn't verify
+    *     under the manager's `QOD_SESSION_JWT_SECRET`. Signature mismatch usually means the
+    *     secret rotated (e.g. helm regenerated the Secret on upgrade).
+    *   - `expired`    -- the JWT's `exp` claim is in the past. Actually expired.
+    *   - `revoked`    -- the jti is on the in-process denylist (an explicit logout, not yet GC'd).
+    */
   def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] = IO.delay {
     val token = apiKey.orElse(cookie).getOrElse("")
-    tokens.get(token) match
-      case Some(s) =>
+    tokens.lookupResult(token) match
+      case SessionTokenStore.LookupResult.Ok(s) =>
         Right(
           WhoamiResponse(
             username          = s.profile.username,
@@ -167,8 +198,20 @@ final class AuthHandlers(
             manageableTenants = s.scope.manageableTenants.toList.sorted
           )
         )
-      case None =>
+      case SessionTokenStore.LookupResult.NoSession =>
         Left(
-          (StatusCode.Unauthorized, ErrorResponse("expired", "session token unknown or expired"))
+          (StatusCode.Unauthorized, ErrorResponse("no_session", "no session token presented"))
+        )
+      case SessionTokenStore.LookupResult.Invalid =>
+        Left(
+          (StatusCode.Unauthorized, ErrorResponse("invalid", "session token is invalid"))
+        )
+      case SessionTokenStore.LookupResult.Expired =>
+        Left(
+          (StatusCode.Unauthorized, ErrorResponse("expired", "session token has expired"))
+        )
+      case SessionTokenStore.LookupResult.Revoked =>
+        Left(
+          (StatusCode.Unauthorized, ErrorResponse("revoked", "session token has been revoked"))
         )
   }
