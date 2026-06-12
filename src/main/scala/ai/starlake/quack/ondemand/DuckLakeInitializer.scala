@@ -83,6 +83,36 @@ object DuckLakeInitializer extends LazyLogging:
     )
     Class.forName("org.duckdb.DuckDBDriver")
     Class.forName("org.postgresql.Driver")
+    // Idempotently provision the target Postgres database before the
+    // DuckLake ATTACH. The YAML bootstrap can run BEFORE the loader
+    // scripts have created the tenant-db Postgres databases (compose's
+    // `exec` loaders run after the manager comes up), so we must not
+    // assume the database already exists. CREATE DATABASE cannot run
+    // inside the target DB, so connect to the admin DB first.
+    val adminDb = sys.env.getOrElse("PG_ADMIN_DB", "postgres")
+    val adminUrl =
+      s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(adminDb, "UTF-8")}"
+    val adminConn = DriverManager.getConnection(adminUrl, pgUser, pgPassword)
+    try
+      val checkStmt = adminConn.createStatement()
+      val exists = try
+        val rs = checkStmt.executeQuery(
+          s"SELECT 1 FROM pg_database WHERE datname = '${escapeSql(dbName)}'"
+        )
+        try rs.next() finally rs.close()
+      finally checkStmt.close()
+      if !exists then
+        val createStmt = adminConn.createStatement()
+        try createStmt.execute(s"CREATE DATABASE ${quoteIdent(dbName)}")
+        catch
+          case t: java.sql.SQLException if t.getMessage.contains("already exists") =>
+            // Lost a race with a concurrent loader; harmless.
+            ()
+        finally createStmt.close()
+    finally
+      try adminConn.close()
+      catch case _: Throwable => ()
+
     // Side-channel Postgres connection that holds the per-dbname
     // advisory lock for the duration of the DuckLake ATTACH. Concurrent
     // initializers (e.g. multiple managers or a manager racing with a
