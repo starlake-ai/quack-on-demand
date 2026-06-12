@@ -143,6 +143,40 @@ object ManifestImporter:
     validate(m, store).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
+      // 0. Snapshot the existing graph ONCE so the per-tenant loops below
+      //    don't re-query the store on every iteration. Previously each
+      //    pass through users/roles/groups/pool-grants paid one or more
+      //    listTenantDbs / listPools / listRoles / listGroups calls per
+      //    iteration -- with the no-pool JDBC days that was hundreds of
+      //    Postgres handshakes per import. We mutate the maps in lock-step
+      //    with every upsert so the rest of apply() sees the live state.
+      val snap = store.snapshot()
+      val tenantDbsByTenant =
+        snap.tenantDbs.groupBy(_.tenantId).map { case (k, xs) =>
+          k -> scala.collection.mutable.Map.from(xs.map(td => td.name -> td))
+        }.to(scala.collection.mutable.Map)
+      val poolsByDb =
+        snap.pools.groupBy(_.tenantDbId).map { case (k, xs) =>
+          k -> scala.collection.mutable.Map.from(xs.map(p => p.name -> p))
+        }.to(scala.collection.mutable.Map)
+      val rolesByTenant =
+        snap.roles.groupBy(_.tenantId).map { case (k, xs) =>
+          k -> scala.collection.mutable.Map.from(xs.map(r => r.name -> r))
+        }.to(scala.collection.mutable.Map)
+      val groupsByTenant =
+        snap.groups.groupBy(_.tenantId).map { case (k, xs) =>
+          k -> scala.collection.mutable.Map.from(xs.map(g => g.name -> g))
+        }.to(scala.collection.mutable.Map)
+
+      def dbsOf(tid: String): collection.Map[String, TenantDb] =
+        tenantDbsByTenant.getOrElse(tid, scala.collection.mutable.Map.empty)
+      def poolsOf(dbId: String): collection.Map[String, Pool] =
+        poolsByDb.getOrElse(dbId, scala.collection.mutable.Map.empty)
+      def rolesOf(tid: String): collection.Map[String, RbacRole] =
+        rolesByTenant.getOrElse(tid, scala.collection.mutable.Map.empty)
+      def groupsOf(tid: String): collection.Map[String, RbacGroup] =
+        groupsByTenant.getOrElse(tid, scala.collection.mutable.Map.empty)
+
       // 1. Snapshot existing password hashes for every user mentioned in
       //    the manifest so the "no password field" path can carry them
       //    forward.
@@ -183,42 +217,50 @@ object ManifestImporter:
 
         // ---- TenantDbs: delete-then-upsert.
         val keepDbNames = mt.tenantDbs.map(_.name).toSet
-        store.listTenantDbs(tenantId).foreach { d =>
-          if !keepDbNames.contains(d.name) then store.deleteTenantDb(d.id)
+        val localDbs    = tenantDbsByTenant.getOrElseUpdate(
+          tenantId, scala.collection.mutable.Map.empty
+        )
+        localDbs.values.toList.foreach { d =>
+          if !keepDbNames.contains(d.name) then
+            store.deleteTenantDb(d.id)
+            localDbs.remove(d.name)
+            poolsByDb.remove(d.id) // cascades on the DB side
         }
         mt.tenantDbs.foreach { mtd =>
           TenantDbKind.fromWire(mtd.kind) match
             case Left(err) =>
               errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
             case Right(dbKind) =>
-              val existing = store.listTenantDbs(tenantId).find(_.name == mtd.name)
-              val tdId = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
-              store.upsertTenantDb(
-                TenantDb(
-                  id = tdId,
-                  tenantId = tenantId,
-                  name = mtd.name,
-                  kind = dbKind,
-                  metastore = mtd.metastore,
-                  dataPath = mtd.dataPath,
-                  objectStore = mtd.objectStore,
-                  defaultDatabase = mtd.defaultDatabase,
-                  defaultSchema = mtd.defaultSchema
-                )
+              val existing = localDbs.get(mtd.name)
+              val tdId     = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
+              val upserted = TenantDb(
+                id = tdId,
+                tenantId = tenantId,
+                name = mtd.name,
+                kind = dbKind,
+                metastore = mtd.metastore,
+                dataPath = mtd.dataPath,
+                objectStore = mtd.objectStore,
+                defaultDatabase = mtd.defaultDatabase,
+                defaultSchema = mtd.defaultSchema
               )
+              store.upsertTenantDb(upserted)
+              localDbs.put(mtd.name, upserted)
               applyFederatedSources(federatedStore, mtd, tdId, errs)
         }
 
         // ---- Pools: delete-then-upsert, keyed by (tenant, pool name).
         val keepPoolNames = mt.pools.map(_.name).toSet
-        val currentDbs    = store.listTenantDbs(tenantId)
-        currentDbs.foreach { d =>
-          store.listPools(d.id).foreach { p =>
-            if !keepPoolNames.contains(p.name) then store.deletePool(p.id)
+        localDbs.values.foreach { d =>
+          val localPools = poolsByDb.getOrElseUpdate(d.id, scala.collection.mutable.Map.empty)
+          localPools.values.toList.foreach { p =>
+            if !keepPoolNames.contains(p.name) then
+              store.deletePool(p.id)
+              localPools.remove(p.name)
           }
         }
         mt.pools.foreach { mp =>
-          val dbId = currentDbs.find(_.name == mp.tenantDb).map(_.id).getOrElse {
+          val dbId = localDbs.get(mp.tenantDb).map(_.id).getOrElse {
             // Validation already caught dangling tenantDb references, so
             // this branch is unreachable -- but bail loudly if it ever
             // fires rather than corrupting the row.
@@ -226,8 +268,9 @@ object ManifestImporter:
             ""
           }
           if dbId.nonEmpty then
-            val existing = store.listPools(dbId).find(_.name == mp.name)
-            val poolId   = existing.map(_.id).getOrElse(Names.newSurrogateId("p"))
+            val localPools = poolsByDb.getOrElseUpdate(dbId, scala.collection.mutable.Map.empty)
+            val existing   = localPools.get(mp.name)
+            val poolId     = existing.map(_.id).getOrElse(Names.newSurrogateId("p"))
             val dist     = RoleDistribution(
               writeonly = mp.roleDistribution.writeonly,
               readonly = mp.roleDistribution.readonly,
@@ -248,19 +291,19 @@ object ManifestImporter:
                 )
               )
             }
-            store.upsertPool(
-              Pool(
-                id = poolId,
-                tenantId = tenantId,
-                tenantDbId = dbId,
-                name = mp.name,
-                size = dist.total,
-                distribution = dist,
-                maxConcurrentPerNode = mp.maxConcurrentPerNode,
-                disabled = mp.disabled,
-                cohorts = cohorts
-              )
+            val upserted = Pool(
+              id = poolId,
+              tenantId = tenantId,
+              tenantDbId = dbId,
+              name = mp.name,
+              size = dist.total,
+              distribution = dist,
+              maxConcurrentPerNode = mp.maxConcurrentPerNode,
+              disabled = mp.disabled,
+              cohorts = cohorts
             )
+            store.upsertPool(upserted)
+            localPools.put(mp.name, upserted)
         }
       }
 
@@ -272,16 +315,19 @@ object ManifestImporter:
           case None =>
             errs += s"role '${mr.name}': tenant '${mr.tenant}' not found after tenant pass"
           case Some(tenantId) =>
-            val existing = store.listRoles(tenantId).find(_.name == mr.name)
-            val roleId   = existing.map(_.id).getOrElse(Names.newSurrogateId("r"))
-            store.upsertRole(
-              RbacRole(
-                id = roleId,
-                tenantId = tenantId,
-                name = mr.name,
-                description = mr.description.filter(_.nonEmpty)
-              )
+            val localRoles = rolesByTenant.getOrElseUpdate(
+              tenantId, scala.collection.mutable.Map.empty
             )
+            val existing = localRoles.get(mr.name)
+            val roleId   = existing.map(_.id).getOrElse(Names.newSurrogateId("r"))
+            val upserted = RbacRole(
+              id = roleId,
+              tenantId = tenantId,
+              name = mr.name,
+              description = mr.description.filter(_.nonEmpty)
+            )
+            store.upsertRole(upserted)
+            localRoles.put(mr.name, upserted)
             // Replace permissions: delete every existing then re-insert.
             store.listRolePermissions(roleId).foreach(p => store.deleteRolePermission(p.id))
             mr.permissions.foreach { perm =>
@@ -304,18 +350,22 @@ object ManifestImporter:
           case None =>
             errs += s"group '${mg.name}': tenant '${mg.tenant}' not found after tenant pass"
           case Some(tenantId) =>
-            val existing = store.listGroups(tenantId).find(_.name == mg.name)
-            val groupId  = existing.map(_.id).getOrElse(Names.newSurrogateId("g"))
-            store.upsertGroup(
-              RbacGroup(
-                id = groupId,
-                tenantId = tenantId,
-                name = mg.name,
-                description = mg.description.filter(_.nonEmpty)
-              )
+            val localGroups = groupsByTenant.getOrElseUpdate(
+              tenantId, scala.collection.mutable.Map.empty
             )
-            val tenantRoles = store.listRoles(tenantId)
-            val keepRoleIds = mg.roles.flatMap(rn => tenantRoles.find(_.name == rn).map(_.id)).toSet
+            val existing = localGroups.get(mg.name)
+            val groupId  = existing.map(_.id).getOrElse(Names.newSurrogateId("g"))
+            val upserted = RbacGroup(
+              id = groupId,
+              tenantId = tenantId,
+              name = mg.name,
+              description = mg.description.filter(_.nonEmpty)
+            )
+            store.upsertGroup(upserted)
+            localGroups.put(mg.name, upserted)
+            val tenantRoles = rolesOf(tenantId)
+            val keepRoleIds =
+              mg.roles.flatMap(rn => tenantRoles.get(rn).map(_.id)).toSet
             store.listRolesForGroup(groupId).foreach { rid =>
               if !keepRoleIds.contains(rid) then store.removeGroupRole(groupId, rid)
             }
@@ -340,9 +390,9 @@ object ManifestImporter:
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
 
             // --- User roles
-            val tenantRoles   = tenantId.map(store.listRoles).getOrElse(Nil)
+            val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
             val keepUserRoles = mu.roles.flatMap { rn =>
-              tenantRoles.find(_.name == rn).map(_.id)
+              tenantRoles.get(rn).map(_.id)
             }.toSet
             store.listDirectRolesForUser(userId).foreach { rid =>
               if !keepUserRoles.contains(rid) then store.removeUserRole(userId, rid)
@@ -350,9 +400,9 @@ object ManifestImporter:
             keepUserRoles.foreach(rid => store.addUserRole(userId, rid))
 
             // --- User groups
-            val tenantGroups   = tenantId.map(store.listGroups).getOrElse(Nil)
+            val tenantGroups   = tenantId.map(groupsOf).getOrElse(collection.Map.empty)
             val keepUserGroups = mu.groups.flatMap { gn =>
-              tenantGroups.find(_.name == gn).map(_.id)
+              tenantGroups.get(gn).map(_.id)
             }.toSet
             store.listGroupsForUser(userId).foreach { gid =>
               if !keepUserGroups.contains(gid) then store.removeUserGroup(userId, gid)
@@ -366,10 +416,11 @@ object ManifestImporter:
             mu.poolGrants.foreach { mpg =>
               val poolId: Option[String] = mpg.pool.flatMap { pn =>
                 tenantId.flatMap { tid =>
-                  store
-                    .listTenantDbs(tid)
-                    .flatMap(d => store.listPools(d.id))
-                    .find(_.name == pn)
+                  // Walk this tenant's tenant-dbs from the local map and
+                  // search each db's pool map by name -- no store call.
+                  dbsOf(tid).values.iterator
+                    .flatMap(d => poolsOf(d.id).get(pn))
+                    .nextOption()
                     .map(_.id)
                 }
               }

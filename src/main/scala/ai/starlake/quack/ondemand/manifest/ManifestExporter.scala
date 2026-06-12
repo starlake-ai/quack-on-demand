@@ -29,18 +29,38 @@ object ManifestExporter:
       federatedStore: Option[FederatedSourceStore] = None
   ): ConfigManifest =
 
-    val tenants = store.listTenants().sortBy(_.displayName).map { t =>
+    // Pull the whole graph in one round-trip. Previously the per-tenant
+    // loop below issued listTenantDbs / listPools / listRoles / listGroups
+    // for every tenant -- O(tenants) extra Postgres handshakes that the
+    // HikariCP pool turns into borrow-from-idle, but still latency that's
+    // pure waste when snapshot() already returns everything.
+    val snap         = store.snapshot()
+    val dbsByTenant  = snap.tenantDbs.groupBy(_.tenantId)
+    val poolsByDb    = snap.pools.groupBy(_.tenantDbId)
+    val rolesByT     = snap.roles.groupBy(_.tenantId)
+    val groupsByT    = snap.groups.groupBy(_.tenantId)
+    val rolePermsByRole = snap.rolePermissions.groupBy(_.roleId)
+    val rolesByGroup    = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
+    val rolesByUser     = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
+    val groupsByUser    = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
+    val poolPermsByUser =
+      snap.poolPermissions.collect { case p if p.userId.isDefined => p.userId.get -> p }
+        .groupBy(_._1).view.mapValues(_.map(_._2)).toMap
+    val usersByTenant   = snap.users.groupBy(_.tenant)
+
+    val tenants = snap.tenants.sortBy(_.displayName).map { t =>
       // Build id -> name maps for dbs, pools, roles, groups in this tenant.
-      val dbRows                          = store.listTenantDbs(t.id).sortBy(_.name)
+      val dbRows                          = dbsByTenant.getOrElse(t.id, Nil).sortBy(_.name)
       val dbIdToName: Map[String, String] = dbRows.map(d => d.id -> d.name).toMap
 
-      val poolRows = dbRows.flatMap(d => store.listPools(d.id)).sortBy(_.name)
+      val poolRows =
+        dbRows.flatMap(d => poolsByDb.getOrElse(d.id, Nil)).sortBy(_.name)
       val poolIdToName: Map[String, String] = poolRows.map(p => p.id -> p.name).toMap
 
-      val roleRows                          = store.listRoles(t.id).sortBy(_.name)
+      val roleRows                          = rolesByT.getOrElse(t.id, Nil).sortBy(_.name)
       val roleIdToName: Map[String, String] = roleRows.map(r => r.id -> r.name).toMap
 
-      val groupRows                          = store.listGroups(t.id).sortBy(_.name)
+      val groupRows                          = groupsByT.getOrElse(t.id, Nil).sortBy(_.name)
       val groupIdToName: Map[String, String] = groupRows.map(g => g.id -> g.name).toMap
 
       val manifestDbs = dbRows.map { d =>
@@ -108,8 +128,8 @@ object ManifestExporter:
           tenant = t.displayName,
           name = r.name,
           description = r.description.filter(_.nonEmpty),
-          permissions = store
-            .listRolePermissions(r.id)
+          permissions = rolePermsByRole
+            .getOrElse(r.id, Nil)
             .sortBy(p => (p.catalogName, p.schemaName, p.tableName, p.verb))
             .map { p =>
               ManifestTablePermission(
@@ -127,14 +147,25 @@ object ManifestExporter:
           tenant = t.displayName,
           name = g.name,
           description = g.description.filter(_.nonEmpty),
-          roles = store.listRolesForGroup(g.id).flatMap(roleIdToName.get).sorted
+          roles = rolesByGroup.getOrElse(g.id, Nil).flatMap(roleIdToName.get).sorted
         )
       }
 
-      val tenantUsers = store.listUsers(Some(t.name)).sortBy(_.username).map { u =>
-        val userRoleNames  = store.listDirectRolesForUser(u.id).flatMap(roleIdToName.get).sorted
-        val userGroupNames = store.listGroupsForUser(u.id).flatMap(groupIdToName.get).sorted
-        val userPoolGrants = store.listPoolPermissionsForUser(u.id).map { pp =>
+      // User rows reference their tenant by id in production (PoolSupervisor
+      // resolves displayName -> id before write) but the test fixtures here
+      // seed users keyed by displayName. Union both keys so either shape
+      // round-trips. Dedup by user id to avoid double-counting in the rare
+      // case both columns happen to match.
+      val tenantUsers = (
+        usersByTenant.getOrElse(Some(t.id),   Nil) ++
+        usersByTenant.getOrElse(Some(t.name), Nil)
+      ).distinctBy(_.id)
+        .sortBy(_.username).map { u =>
+        val userRoleNames  =
+          rolesByUser.getOrElse(u.id, Nil).flatMap(roleIdToName.get).sorted
+        val userGroupNames =
+          groupsByUser.getOrElse(u.id, Nil).flatMap(groupIdToName.get).sorted
+        val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { pp =>
           ManifestPoolGrant(pool = pp.poolId.flatMap(poolIdToName.get))
         }
         ManifestUser(
@@ -166,8 +197,8 @@ object ManifestExporter:
     }
 
     // Superusers are listed with tenant=None; collect them separately.
-    val superusers = store.listSuperusers().sortBy(_.username).map { u =>
-      val userPoolGrants = store.listPoolPermissionsForUser(u.id).map { pp =>
+    val superusers = snap.users.filter(_.tenant.isEmpty).sortBy(_.username).map { u =>
+      val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { _ =>
         ManifestPoolGrant(pool = None) // superusers: pool id resolution requires tenant context
       }
       ManifestUser(
