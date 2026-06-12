@@ -38,6 +38,10 @@ final class FlightProducerImpl(
     * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across
     * the two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node
     * call (DML / DDL / transaction control via [[PrepareStrategy.SkipExecute]]).
+    *
+    * `prepareDurationMs` is the wall-clock time the LIMIT-0 probe spent on the node. Forwarded to
+    * the router on the Execute call so the resulting [[StatementRecord]] carries it -- the UI
+    * uses it to render "57 ms / prep 28 ms" on the single visible row. `None` for SkipExecute.
     */
   private final case class PreparedExec(
       sql: String,
@@ -45,7 +49,8 @@ final class FlightProducerImpl(
       user: String,
       poolKey: ai.starlake.quack.model.PoolKey,
       effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
-      preferredNode: Option[String]
+      preferredNode: Option[String],
+      prepareDurationMs: Option[Long]
   )
 
   /** Cached empty Arrow schema for the [[PrepareStrategy.SkipExecute]] arm. FlightSQL clients
@@ -97,11 +102,15 @@ final class FlightProducerImpl(
 
         probeSqlOpt match
           case None =>
-            // SkipExecute: empty Arrow schema, no node call, no soft pin.
+            // SkipExecute: empty Arrow schema, no node call, no soft pin, no prep duration.
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(
               handle,
-              PreparedExec(sql, connId, user, poolKey, eff, preferredNode = None)
+              PreparedExec(
+                sql, connId, user, poolKey, eff,
+                preferredNode     = None,
+                prepareDurationMs = None
+              )
             )
             val resp = FlightSql.ActionCreatePreparedStatementResult
               .newBuilder()
@@ -112,8 +121,13 @@ final class FlightProducerImpl(
             listener.onCompleted()
 
           case Some(probeSql) =>
+            // `recordExecution = false`: the probe is internal plumbing -- the operator-visible
+            // history row is the matching Execute, which will carry the probe's duration via
+            // PreparedExec.prepareDurationMs.
             scala.util.Try(
-              router.execute(connId, user, poolKey, probeSql, eff).unsafeRunSync()
+              router
+                .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
+                .unsafeRunSync()
             ) match
               case scala.util.Success(Right(result)) =>
                 val handle      = java.util.UUID.randomUUID().toString
@@ -122,7 +136,11 @@ final class FlightProducerImpl(
                   finally result.close()
                 preparedStatements.put(
                   handle,
-                  PreparedExec(sql, connId, user, poolKey, eff, preferredNode = Some(result.nodeId))
+                  PreparedExec(
+                    sql, connId, user, poolKey, eff,
+                    preferredNode     = Some(result.nodeId),
+                    prepareDurationMs = Some(result.durationMs)
+                  )
                 )
                 val resp = FlightSql.ActionCreatePreparedStatementResult
                   .newBuilder()
@@ -192,7 +210,15 @@ final class FlightProducerImpl(
       case Some(p) =>
         scala.util.Try(
           router
-            .execute(p.connId, p.user, p.poolKey, p.sql, p.effectiveSet, p.preferredNode)
+            .execute(
+              p.connId,
+              p.user,
+              p.poolKey,
+              p.sql,
+              p.effectiveSet,
+              p.preferredNode,
+              prepareDurationMs = p.prepareDurationMs
+            )
             .unsafeRunSync()
         ) match
           case scala.util.Success(Right(result)) =>

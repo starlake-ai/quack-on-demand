@@ -310,7 +310,12 @@ final case class StatementHistoryEntry(
     sql: String,
     durationMs: Long,
     status: String, // ok | denied | transient | permanent | no-node | no-pool | pin-lost
-    error: Option[String]
+    error: Option[String],
+    /** Time the FlightSQL Prepare-time LIMIT-0 probe spent on the node, when this Execute
+      * belongs to a prepared-statement round. The UI renders it as subtext under the Execute
+      * duration ("57 ms / prep 28 ms"). Absent for one-shot statements and for SkipExecute
+      * Prepare paths (DML / DDL / transaction control). */
+    prepareDurationMs: Option[Long] = None
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
