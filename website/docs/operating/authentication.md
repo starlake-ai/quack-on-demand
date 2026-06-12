@@ -123,7 +123,10 @@ The JWT `exp` is **absolute** (8h from mint by default, env `QOD_SESSION_IDLE_TT
 
 Cookie attributes are configurable:
 
-- `QOD_SESSION_COOKIE_SECURE` (default `true`) — set `false` only for plaintext-HTTP dev deployments.
+- `QOD_SESSION_COOKIE_SECURE` (default `auto`) — controls the `Secure` flag on the `qod_session` cookie.
+  - `auto` (default): derive per request from the `X-Forwarded-Proto` header injected by any TLS-terminating ingress. `https` → `Secure`, `http` or no header → not `Secure`. This makes `scripts/run-jar.sh` on `http://localhost:20900` and helm behind a TLS ingress both work without an env var.
+  - `true`: force `Secure` regardless of request scheme. Use behind a TLS terminator that does **not** inject `X-Forwarded-Proto` (some cloud LBs, TLS passthrough setups), or to require HTTPS by policy.
+  - `false`: force not `Secure`. Use for stunnel-style local TLS termination where you want to opt out of derivation.
 - `QOD_SESSION_COOKIE_PATH` (default `/api`) — override behind a path-rewriting reverse proxy to match the browser-visible URL prefix.
 
 The `application.conf` default `sessionJwtSecret` is a **well-known dev string**. Anyone with the source can forge admin sessions if you don't override it. Main emits a loud startup warning when the default is in use.
