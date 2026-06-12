@@ -94,15 +94,22 @@ object DuckLakeInitializer extends LazyLogging:
       s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(adminDb, "UTF-8")}"
     val adminConn = DriverManager.getConnection(adminUrl, pgUser, pgPassword)
     try
-      val checkStmt = adminConn.createStatement()
+      // pg_database lookup uses a PreparedStatement bind so we never
+      // SQL-format `dbName` -- which is operator-controlled today but
+      // could become user-controlled if tenant-db creation ever moves
+      // closer to the wire.
+      val checkStmt = adminConn.prepareStatement(
+        "SELECT 1 FROM pg_database WHERE datname = ?"
+      )
       val exists = try
-        val rs = checkStmt.executeQuery(
-          s"SELECT 1 FROM pg_database WHERE datname = '${escapeSql(dbName)}'"
-        )
+        checkStmt.setString(1, dbName)
+        val rs = checkStmt.executeQuery()
         try rs.next() finally rs.close()
       finally checkStmt.close()
       if !exists then
         val createStmt = adminConn.createStatement()
+        // CREATE DATABASE cannot use parameter binding for the identifier;
+        // standard double-quote ident escape.
         try createStmt.execute(s"CREATE DATABASE ${quoteIdent(dbName)}")
         catch
           case t: java.sql.SQLException if t.getMessage.contains("already exists") =>
@@ -122,11 +129,12 @@ object DuckLakeInitializer extends LazyLogging:
     val pgUrl  = s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(dbName, "UTF-8")}"
     val pgConn = DriverManager.getConnection(pgUrl, pgUser, pgPassword)
     try
-      val lockStmt = pgConn.createStatement()
+      val lockStmt = pgConn.prepareStatement(
+        "SELECT pg_advisory_lock(hashtext(?))"
+      )
       try
-        lockStmt.execute(
-          s"SELECT pg_advisory_lock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))"
-        )
+        lockStmt.setString(1, s"qod-ducklake-init:$dbName")
+        lockStmt.execute()
       finally
         try lockStmt.close()
         catch case _: Throwable => ()
@@ -136,20 +144,35 @@ object DuckLakeInitializer extends LazyLogging:
         val stmt = conn.createStatement()
         try
           // Proxy passthrough so INSTALL works behind corporate firewalls.
-          // Mirrors spawn-quack-node.sh's SET http_proxy handling.
+          // Mirrors spawn-quack-node.sh's SET http_proxy handling. Source is
+          // a sanitized env var (host:port), interpolated into a DuckDB
+          // string literal via the same escape helper as ATTACH.
           proxyHostPort.foreach { hp =>
-            stmt.execute(s"SET http_proxy = '${escapeSql(hp)}'")
+            stmt.execute(s"SET http_proxy = ${duckdbLiteral(hp)}")
           }
           stmt.execute("INSTALL ducklake; LOAD ducklake;")
           stmt.execute("INSTALL postgres; LOAD postgres;")
           storageSqlFor(dataPath).foreach(stmt.execute)
-          // Single-quotes around literals; DuckLake's parser doesn't
-          // accept E'' or $$..$$ for the ATTACH connstring, so escape
-          // any embedded apostrophes the conventional way.
+          // Two-layer escape: libpq parses the post-`ducklake:postgres:`
+          // payload as a keyword=value connstring, which is itself wrapped
+          // in a DuckDB string literal. Naive single-quote doubling alone
+          // breaks for an apostrophe in pgPassword: `foo'bar` ->
+          // `password=foo''bar` -> DuckDB un-escapes to `password=foo'bar`
+          // -> libpq parses `password=foo` and chokes on the orphan
+          // `'bar`. [[libpqValue]] wraps + escapes per libpq's rules,
+          // [[duckdbLiteral]] then wraps the whole thing in a DuckDB
+          // literal and doubles any `'` that appears (including the ones
+          // [[libpqValue]] introduced).
+          val connstr =
+            s"ducklake:postgres:" +
+              s"host=${libpqValue(pgHost)} " +
+              s"port=${libpqValue(pgPort)} " +
+              s"dbname=${libpqValue(dbName)} " +
+              s"user=${libpqValue(pgUser)} " +
+              s"password=${libpqValue(pgPassword)}"
           val attach =
-            s"ATTACH 'ducklake:postgres:host=${escapeSql(pgHost)} port=${escapeSql(pgPort)} " +
-              s"dbname=${escapeSql(dbName)} user=${escapeSql(pgUser)} password=${escapeSql(pgPassword)}' " +
-              s"AS ${quoteIdent(dbName)} (DATA_PATH '${escapeSql(dataPath)}')"
+            s"ATTACH ${duckdbLiteral(connstr)} " +
+              s"AS ${quoteIdent(dbName)} (DATA_PATH ${duckdbLiteral(dataPath)})"
           stmt.execute(attach)
           stmt.execute(s"USE ${quoteIdent(dbName)}")
           stmt.execute(s"CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schemaName)}")
@@ -164,11 +187,12 @@ object DuckLakeInitializer extends LazyLogging:
       // Release the lock. pg_advisory_lock is session-scoped so closing
       // pgConn below would also release it, but doing it explicitly
       // shrinks the window during which the lock is held.
-      val unlockStmt = pgConn.createStatement()
+      val unlockStmt = pgConn.prepareStatement(
+        "SELECT pg_advisory_unlock(hashtext(?))"
+      )
       try
-        unlockStmt.execute(
-          s"SELECT pg_advisory_unlock(hashtext('qod-ducklake-init:${escapeSql(dbName)}'))"
-        )
+        unlockStmt.setString(1, s"qod-ducklake-init:$dbName")
+        unlockStmt.execute()
       finally
         try unlockStmt.close()
         catch case _: Throwable => ()
@@ -202,11 +226,11 @@ object DuckLakeInitializer extends LazyLogging:
         val useSsl   = sys.env.getOrElse("QOD_S3_USE_SSL", "true")
         s"""CREATE OR REPLACE SECRET quack_s3 (
            |  TYPE s3,
-           |  KEY_ID '${escapeSql(key)}',
-           |  SECRET '${escapeSql(secret)}',
-           |  REGION '${escapeSql(region)}',
-           |  ENDPOINT '${escapeSql(ep)}',
-           |  URL_STYLE '${escapeSql(urlStyle)}',
+           |  KEY_ID ${duckdbLiteral(key)},
+           |  SECRET ${duckdbLiteral(secret)},
+           |  REGION ${duckdbLiteral(region)},
+           |  ENDPOINT ${duckdbLiteral(ep)},
+           |  URL_STYLE ${duckdbLiteral(urlStyle)},
            |  USE_SSL $useSsl
            |)""".stripMargin
       List(install) ++ secret.toList
@@ -217,7 +241,7 @@ object DuckLakeInitializer extends LazyLogging:
       val secret  = sys.env.get("QOD_AZURE_CONNECTION_STRING").filter(_.nonEmpty).map { cs =>
         s"""CREATE OR REPLACE SECRET quack_azure (
            |  TYPE azure,
-           |  CONNECTION_STRING '${escapeSql(cs)}'
+           |  CONNECTION_STRING ${duckdbLiteral(cs)}
            |)""".stripMargin
       }
       List(install) ++ secret.toList
@@ -232,5 +256,16 @@ object DuckLakeInitializer extends LazyLogging:
         url.stripPrefix("http://").stripPrefix("https://").stripSuffix("/")
       }
 
-  private def escapeSql(v: String): String  = v.replace("'", "''")
+  /** DuckDB SQL string literal: wrap in single quotes, double any embedded `'`. */
+  private[ondemand] def duckdbLiteral(v: String): String =
+    "'" + v.replace("'", "''") + "'"
+
+  /** Identifier quote: wrap in `"`, double any embedded `"`. */
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
+
+  /** libpq keyword-value value: always wrap in `'...'`, escape `'` as `\'` and `\` as `\\`.
+    * Order matters -- the backslash escape must run before the apostrophe escape, otherwise the
+    * backslash we add to `\'` gets doubled.
+    */
+  private[ondemand] def libpqValue(v: String): String =
+    "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
