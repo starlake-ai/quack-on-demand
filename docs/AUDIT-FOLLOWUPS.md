@@ -1,65 +1,37 @@
 # ondemand/ audit followups
 
-Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quack/ondemand/` (70 files, ~8.5 K LOC). Each item is independently actionable. Priority key:
+Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quack/ondemand/` (70 files, ~8.5 K LOC). Updated as items ship. Each entry is independently actionable.
+
+**Priority key:**
 
 - **P0** — correctness / authZ; ship-blocker for any prod-facing deployment.
 - **P1** — cheap wins (<1 day each), measurable user impact.
 - **P2** — structural refactors (days to a week), reduce ongoing maintenance cost.
 - **P3** — polish, naming, deferred decisions.
 
----
+## Progress (as of 2026-06-12)
 
-## P0 — security & correctness
-
-- [x] **Cross-tenant RBAC writes.** ~~RBAC handlers do not enforce body-tenant scope.~~ Fixed 2026-06-12: `X-API-Key` plumbed into all RBAC endpoint signatures (`api/RbacEndpoints.scala`); two new helpers `TenantScopeCheck.rejectForResource` / `rejectForUser` resolve id-only endpoints to their owning tenant via 5 new `PoolSupervisor.tenantFor*` lookups + 2 new store methods (`getRolePermission`, `getPoolPermission`); every handler in `UserHandlers`/`RoleHandlers`/`GroupHandlers`/`MembershipHandlers`/`PoolPermissionHandlers` now gates before mutating. E2E coverage in `test/.../security/RbacTenantScopeSpec.scala`. Follow-up still wanted: make `TenantScopeCheck` a Tapir middleware so future handlers cannot forget it.
-
-- [x] **Statement-history endpoint leaks SQL across tenants.** ~~`GET /api/node/statements` returns user/tenant/pool/sql for every caller's queries.~~ Fixed 2026-06-12: `X-API-Key` plumbed into the endpoint, supervisor injected into `StatementHistoryHandlers`, ring snapshot filtered by session `manageableTenants`. Allow-set carries both surrogate id AND display name per tenant so the filter stays agnostic to which form upstream chose to record (mirrors the FlightSQL handshake's accept-either convention). Coverage in `test/.../security/StatementHistoryScopeSpec.scala`.
-
-- [x] **`NodeHandlers.setRole` silently no-ops.** ~~Endpoint is registered, parses input, returns 204 without persisting.~~ Removed 2026-06-12: per-user decision (option 1) — the endpoint, handler, DTO + codec, and ManagerServer binding all dropped. `PoolSupervisor.scale` is the right primitive for rebalancing a pool's role distribution.
-
-- [x] **`NodeHandlers.restartNode` does not restart.** ~~Only stops the node.~~ Removed 2026-06-12: same pattern as `setRole` — endpoint, handler, ManagerServer binding all dropped; `NodeHandlers` lost the `backend` constructor param it only needed for this method. `quarantineNode` covers the "drain without killing" use case; `scale` covers the "respawn" use case. A scheduled reconcile (P2) would be the way to make a future `restart` actually restart.
-
-- [x] **`LoginResponse.role` hardcodes `"admin"`** ~~while `WhoamiResponse.role` reflects the actual profile.~~ Fixed 2026-06-12 (folded into the setRole removal commit): dropped `role` from `LoginResponse` case class + hand-rolled codec + `AuthHandlers.login`; matching TS type + `AuthContext.login` updated to fetch role from `/whoami` after a successful login. `WhoamiResponse.role` remains the single source of truth for the descriptive label.
-
-- [x] **`DuckLakeInitializer` interpolates `pgPassword` into a quoted SQL blob.** ~~Apostrophe in password breaks the ATTACH.~~ Fixed 2026-06-12: 3 Postgres calls switched to `PreparedStatement` binds (`pg_database WHERE datname=?`, `pg_advisory_lock(hashtext(?))`, `pg_advisory_unlock(hashtext(?))`); the DuckLake ATTACH now uses a two-layer escape (`libpqValue` for inner connstring + `duckdbLiteral` for the outer literal). Same helper now used for the `SET http_proxy` and `CREATE SECRET` literals. Coverage in `test/.../ondemand/DuckLakeInitializerEscapeSpec.scala`.
-
-- [x] **`FederationBlobBuilder.substitute` is not SQL-safe** ~~against a hostile secret value.~~ Fixed 2026-06-12: every resolved secret value and the expanded alias now go through `sqlEscapeSingleQuote` (doubles `'` → `''`) before splicing. Safe inside the operator template's `'{{secret.X}}'` wrap (standard SQL literal escape), no-op for values without apostrophes. The honest-brokenness case (real apostrophe in a password breaks the ATTACH) is fixed; the defense-in-depth case (hostile value escaping the literal) is closed. Trust model documented in the file's preamble. Coverage in `test/.../federation/FederationBlobBuilderSpec.scala`.
-
-- [x] **Manifest UUIDs truncated to 8 hex chars** ~~(~10 sites in `manifest/ManifestImporter.scala`).~~ Fixed 2026-06-12: extracted `Names.newSurrogateId(prefix)` returning prefix + 32-hex (UUID with dashes stripped, ~128 bits of entropy). Replaced all 15 truncation sites across `PoolSupervisor`, `UserStore`, `PostgresControlPlaneStore`, `ManifestImporter` (9), and `FederatedSourceHandlers` (2). Loosened `Names.TenantIdPattern` to `^t-[0-9a-f]{8,}$` so legacy 8-char ids in existing rows continue to match. `NamesSpec` gains 4 cases including a 10K-id non-collision check.
+| Priority | Closed | Open |
+|---|---:|---:|
+| P0 — security & correctness | 7 | 0 |
+| P0 — known limitations | 3 | 1 |
+| P1 — perf cheap wins | 8 | 1 |
+| P1 — code quality | 0 | 8 |
+| P2 — structural | 0 | 13 |
+| P3 — polish | 0 | 14 |
+| Dead-code bundle (~250 LOC) | 0 | 15 |
 
 ---
 
-## P0 — known limitations to surface or fix
+# Open
 
-- [x] **K8s backend loses node tokens on manager restart.** ~~`discoverExisting` returns adopted pods with empty token; every Flight call 401s until a full pool respawn.~~ Fixed 2026-06-12: per-pod K8s Secret `qod-token-${nodeId}` holds the bearer; pod env injects `QOD_NODE_TOKEN` via `env.valueFrom.secretKeyRef`. `discoverExisting` now reads the Secret to recover the real token, so manager restart no longer wedges pools on 401. Stop deletes the Secret alongside the pod. Coverage in `KubernetesQuackBackendSpec` (3 cases: create + ref, GC, restart adoption).
-
-- [x] **K8s backend silently drops `spec.extraSetupSql`.** ~~Federation does not work on K8s.~~ Fixed 2026-06-12: per-pool K8s Secret `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenantDb hyphenized for RFC-1123) holds the resolved federation SQL; pods reference it via `env.valueFrom.secretKeyRef` so `spawn-quack-node.sh` reads `$extraSetupSql` identically to the local backend. `kubectl describe pod` shows the ref, not the value; etcd never sees the credential. Secret GC'd when the last pod of the pool stops (queried by pool labels, excluding the just-deleted pod and any Terminating). Coverage in `KubernetesQuackBackendSpec` (4 cases: create + ref, no-op when empty, GC on last stop, kept when siblings remain).
-
-- [x] **`SessionTokenStore` never expires tokens.** ~~Manager restart is the only revocation path.~~ Fixed 2026-06-12: added a configurable idle TTL (default 8h, env `QOD_SESSION_IDLE_TTL_SEC`) tracked per-session via `lastAccessedAt`. Every successful lookup either slides the window or evicts the entry, so all readers (`get/isAdmin/isSuperuser/canManage/scopeOf`) honour expiry consistently. Clock injectable so the spec ticks deterministic minutes without sleeping. Coverage in `test/.../api/SessionTokenStoreExpirySpec.scala`.
+## P0 — known limitations
 
 - [ ] **Cloud secret resolvers** (`Vault`, `Aws`, `Azure`, `Gcp`) are stubs raising `NotImplementedError`. Wired in `Main.scala:194-204`. Either implement, or gate the UI option as "not yet implemented" and refuse on config load.
 
----
+## P1 — performance
 
-## P1 — performance cheap wins (each <1 day)
-
-- [x] **Add HikariCP to `PostgresControlPlaneStore.withConn`** ~~(single biggest perf gain in the codebase).~~ Fixed 2026-06-12: HikariCP pool (size 20, configurable later) on both `PostgresControlPlaneStore` and `UserStore`. `close()` added to `ControlPlaneStore` trait (no-op default) so Main's shutdown hook drains both pools cleanly. Handshake path goes from 5 fresh TCP+TLS+auth handshakes per request to 5 borrow-from-idle.
-
-- [x] **Fix `unsafeRunSync()` inside `IO.defer`** at `PoolSupervisor.scala:633`. ~~Blocks a cats-effect compute-pool thread under load.~~ Fixed 2026-06-12: `federationBlobOf(td.id).flatMap { blobOpt => ... }` wraps the rest of the pool-create path properly.
-
-- [x] **Replace K8s `waitReady` busy-poll** at `runtime/KubernetesQuackBackend.scala:196-203`. ~~`Thread.sleep(500)` inside `IO.blocking` -- 120 unnecessary API calls per 60s startup.~~ Fixed 2026-06-12: now uses `client.pods.withName(...).waitUntilCondition(predicate, timeout, SECONDS)` which sits on a watch instead of polling. Same `readPodReady` predicate so the readiness contract is unchanged.
-
-- [x] **Cache `EffectiveSet` per `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`.** ~~Recomputed on every FlightSQL handshake.~~ Fixed 2026-06-12: a small `ConcurrentHashMap`-backed cache with 60s TTL keyed by `(userId, jwtRolesHash, jwtGroupsHash)` covers the hot read path. `invalidateEffectiveCache()` is called from every RBAC mutator (createRole/deleteRole/grantRolePermission/revokeRolePermission/createGroup/deleteGroup/all 6 membership edges/grantPoolPermission/revokePoolPermission/createUser/updateUser/deleteUser) plus `restore()`, so a freshly-granted role takes effect on the next handshake -- no waiting for the TTL. Didn't pull in Caffeine since the working set is small and bounded.
-
-- [x] **Snapshot maps once in `ManifestImporter.apply`.** ~~N+1 reads compounding with per-call connection cost.~~ Fixed 2026-06-12: a single `store.snapshot()` at the top of `apply` seeds 4 mutable name→entity maps (tenant-dbs/pools/roles/groups), each updated in lock-step with every upsert so downstream loops see the live state. User pool-grant lookup now walks the local maps instead of `listTenantDbs(t).flatMap(d => listPools(d.id))` per grant per user.
-
-- [x] **Switch `ManifestExporter.build` to `store.snapshot()`.** ~~Same N+1 shape as the importer.~~ Fixed 2026-06-12: one `snapshot()` call seeds 9 derived indexes (`dbsByTenant`, `poolsByDb`, `rolesByT`, `groupsByT`, `rolePermsByRole`, `rolesByGroup`, `rolesByUser`, `groupsByUser`, `poolPermsByUser`, `usersByTenant`); every per-tenant subquery now reads from those maps. User lookup unions `Some(t.id)` + `Some(t.name)` to handle both production (id-keyed) and legacy fixture (name-keyed) shapes.
-
-- [x] **Evict + close cached `DuckLakeCatalogReader`** ~~on tenant-db delete or auth-credential change. Pool stays open with idle conns forever.~~ Fixed 2026-06-12: `PoolSupervisor` accepts an `onTenantDbDeleted` callback; `Main.scala` plugs in a lambda that removes the cached reader from the `ConcurrentHashMap` and calls `reader.close()` to release the underlying Hikari pool. Both `deleteTenantDb` and the cascade through `deleteTenant` fire the hook. Credential rotation is covered too -- an operator deleting + recreating a tenant-db evicts the stale reader; the next catalog browse builds a fresh one against the new metastore. Shutdown hook also drains the whole cache.
-
-- [ ] **Narrow the advisory-lock window in `DuckLakeInitializer`.** Lines `DuckLakeInitializer.scala:143-156` hold the lock across `INSTALL/LOAD`; only `ATTACH` + `CREATE SCHEMA` actually need it.
-
----
+- [ ] **Narrow the advisory-lock window in `DuckLakeInitializer`.** Lines `DuckLakeInitializer.scala:143-156` hold the lock across `INSTALL/LOAD`; only `ATTACH` + `CREATE SCHEMA` actually need it. Low-impact unless boot reconcile is also parallelized.
 
 ## P1 — code quality / cleanup
 
@@ -84,8 +56,6 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
   - `password = None` at L143, L176 — exported manifests cannot round-trip without manual edit.
   - Hardcoded `enabled = true` at L145, L178 — silently loses disabled-user state.
   - Superuser pool grants emit `pool = None` (L171) — cross-tenant grants collapse to a useless global on export.
-
----
 
 ## P2 — structural
 
@@ -117,15 +87,13 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [ ] **`ManifestImporter` bypasses `PoolSupervisor` side effects.** Imported tenants get no admin role seeded (REST `createTenant` seeds via `store.createTenantWithAdminRole`); imported tenant-dbs rely on the boot-time `ensureDuckLakeInitialized` sweep. Either route imports through the supervisor or extract the seeding logic into a shared helper.
 
----
-
 ## P3 — polish / deferred decisions
 
-- [ ] **`AuthZ enforcement spread across 3 layers**: `apiKeyGuard` middleware, `TenantScopeCheck.reject` in handlers, per-handler superuser checks. Single source of truth via Tapir middleware (related to the P0 RBAC fix).
+- [ ] **AuthZ enforcement spread across 3 layers**: `apiKeyGuard` middleware, `TenantScopeCheck.reject` in handlers, per-handler superuser checks. Single source of truth via Tapir middleware (related to the P0 RBAC fix).
 
 - [ ] **`DemoBootstrapHook.DemoNames` collision check** (`bootstrap/DemoBootstrapHook.scala:64-65`) — a non-demo manifest with no demo tenants re-imports on every boot, and the importer's delete-then-upsert wipes REST-added sibling rows. Tighten to "any tenant exists" or make the gate explicit.
 
-- [ ] **Rename or fix half-implemented backend ops:** `NodeHandlers.restartNode` (only stops), `LocalQuackBackend.drainAndStop` is a stub that just calls `stop` (`PoolSupervisor.scala:807`).
+- [ ] **Rename or fix half-implemented backend ops:** `LocalQuackBackend.drainAndStop` is a stub that just calls `stop` (`PoolSupervisor.scala:807`).
 
 - [ ] **`Tenant.name` vs `displayName`** — `name` is the lowercased addressing key, `displayName` the human label. Co-equal after normalization; collapse to one field where possible.
 
@@ -147,7 +115,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [ ] **Document the FederationBlobBuilder operator-trust model** in `federation/FederationBlobBuilder.scala` and in the federation manifest schema (related to the P0 SQL-safety item).
 
----
+- [ ] **Cookie session over a path-rewriting reverse proxy.** The cookie path is now configurable via `QOD_SESSION_COOKIE_PATH` (default `/api`), so most reverse-proxy shapes work out of the box. If we ever move to a cross-origin UI/API split, also wire CORS + `Domain=` (currently no CORS layer).
 
 ## Dead code — safe one-shot deletion bundle (~250 LOC prod + ~80 LOC tests)
 
@@ -171,7 +139,39 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 ---
 
-## Not dead, but flagged as suspicious — left in place
+# Done — 2026-06-12 changelog
+
+Sorted by ship date. Each entry names the commit and a one-line summary.
+
+### P0 — security & correctness
+
+- [x] `88dd7c5` — **Cross-tenant RBAC writes** closed. Every RBAC handler now gates via `TenantScopeCheck.{reject,rejectForResource,rejectForUser}`; new supervisor lookup helpers + store getters resolve id-only endpoints to their owning tenant. Coverage in `RbacTenantScopeSpec`.
+- [x] `901ef3a` — **Statement-history cross-tenant leak** closed. `GET /api/node/statements` filters by session `manageableTenants`, allow-set carries both id and display name.
+- [x] `558e4db` — **`NodeHandlers.setRole` removed** + tautological `LoginResponse.role` dropped.
+- [x] `c47bcbb` — **`NodeHandlers.restartNode` removed**.
+- [x] `f6f75a3` — **DuckLake `pgPassword` SQL escape** fixed. PG calls switched to PreparedStatement; ATTACH uses layered `libpqValue` + `duckdbLiteral` escape.
+- [x] `5f5e3f8` — **`FederationBlobBuilder` SQL-quote-escape** for resolved secrets + alias.
+- [x] `b959c78` — **8-char id truncation → full 128-bit UUIDs** (`Names.newSurrogateId`); pattern loosened so legacy ids still match.
+
+### P0 — known limitations
+
+- [x] `25195ff` — **`SessionTokenStore` idle-TTL** (initial sliding-window).
+- [x] `b7e804a` — **`SessionTokenStore` → JWT + HttpOnly cookie**. Stateless sessions; `apiKeyGuard` admits via header OR cookie; UI dropped localStorage path; configurable `sessionJwtSecret` / `sessionCookieSecure` / `sessionCookiePath`.
+- [x] `0d8f088` — **K8s federation `extraSetupSql`** propagated via per-pool Secret + `env.valueFrom.secretKeyRef`. GC on last pod stop.
+- [x] `c3296cc` — **K8s node tokens persisted in per-pod Secret**; recovered on restart by `discoverExisting`.
+
+### P1 — performance cheap wins
+
+- [x] `d4984ca` — **HikariCP** on `PostgresControlPlaneStore` (size 20) + `UserStore` (size 10). `close()` on the trait wired into the shutdown hook.
+- [x] `7b43c0d` — Three fixes in one commit:
+  - `PoolSupervisor.createPool`: `unsafeRunSync` → `flatMap` so the federation-blob fetch composes properly.
+  - `KubernetesQuackBackend.waitReady`: `Thread.sleep(500)` busy-poll → fabric8 `waitUntilCondition` watch.
+  - `ManifestImporter.apply` + `ManifestExporter.build`: one `store.snapshot()` per call seeds mutable name→entity maps so the per-tenant loops don't go back to the store.
+- [x] `c33cd1e` — **EffectiveSet cache** (60s TTL, `ConcurrentHashMap`, keyed by `(userId, jwtRolesHash, jwtGroupsHash)`); invalidated from every RBAC mutator + `restore()`. **DuckLakeCatalogReader eviction**: `PoolSupervisor.onTenantDbDeleted` callback fires on `deleteTenantDb` and the cascade through `deleteTenant`; Main's shutdown hook drains the cache.
+
+---
+
+# Not dead, but flagged as suspicious — left in place
 
 - `RolePermission.Wildcard = "*"` — used 12+ times (PostgresAclValidator, PoolSupervisor admin seed).
 - `Tenant.name` vs `displayName` — both reachable, see P3.
@@ -180,9 +180,10 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 ---
 
-## Audit provenance
+# Audit provenance
 
 Findings synthesized from six parallel agent passes on 2026-06-12 covering:
+
 1. Top-level + runtime (`PoolSupervisor`, `ManagerServer`, `DuckLakeInitializer`, backends)
 2. `api/` REST handlers (23 files)
 3. `state/` + `rbac/` + `auth/`
