@@ -97,7 +97,6 @@ final class AuthHandlers(
               LoginResponse(
                 token             = token,
                 username          = profile.username,
-                role              = "admin",
                 tenant            = None,
                 superuser         = superuser,
                 manageableTenants = manageableTenants.toList.sorted

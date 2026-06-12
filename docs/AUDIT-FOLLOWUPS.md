@@ -15,13 +15,13 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [x] **Statement-history endpoint leaks SQL across tenants.** ~~`GET /api/node/statements` returns user/tenant/pool/sql for every caller's queries.~~ Fixed 2026-06-12: `X-API-Key` plumbed into the endpoint, supervisor injected into `StatementHistoryHandlers`, ring snapshot filtered by session `manageableTenants`. Allow-set carries both surrogate id AND display name per tenant so the filter stays agnostic to which form upstream chose to record (mirrors the FlightSQL handshake's accept-either convention). Coverage in `test/.../security/StatementHistoryScopeSpec.scala`.
 
-- [ ] **`NodeHandlers.setRole` silently no-ops.** Endpoint is registered, parses input, returns 204 without persisting (`api/NodeHandlers.scala:36-38`). Either implement or remove the endpoint + DTO + UI affordance.
+- [x] **`NodeHandlers.setRole` silently no-ops.** ~~Endpoint is registered, parses input, returns 204 without persisting.~~ Removed 2026-06-12: per-user decision (option 1) — the endpoint, handler, DTO + codec, and ManagerServer binding all dropped. `PoolSupervisor.scale` is the right primitive for rebalancing a pool's role distribution.
 
 - [ ] **`NodeHandlers.restartNode` does not restart.** Only stops the node (`api/NodeHandlers.scala:80-91`). Rename to `stopNode` or finish the restart loop.
 
-- [ ] **`LoginResponse.role` hardcodes `"admin"`** while `WhoamiResponse.role` reflects the actual profile (`api/AuthHandlers.scala:100` vs `:119`). Wire shape disagrees with itself for the same session.
+- [x] **`LoginResponse.role` hardcodes `"admin"`** ~~while `WhoamiResponse.role` reflects the actual profile.~~ Fixed 2026-06-12 (folded into the setRole removal commit): dropped `role` from `LoginResponse` case class + hand-rolled codec + `AuthHandlers.login`; matching TS type + `AuthContext.login` updated to fetch role from `/whoami` after a successful login. `WhoamiResponse.role` remains the single source of truth for the descriptive label.
 
-- [ ] **`DuckLakeInitializer` interpolates `pgPassword` into a quoted SQL blob** with a hand-rolled `escapeSql` (`DuckLakeInitializer.scala:149-152, 235-236`). An apostrophe in the password breaks the ATTACH. Use DuckDB's `SECRET` API or a server-side bind.
+- [x] **`DuckLakeInitializer` interpolates `pgPassword` into a quoted SQL blob.** ~~Apostrophe in password breaks the ATTACH.~~ Fixed 2026-06-12: 3 Postgres calls switched to `PreparedStatement` binds (`pg_database WHERE datname=?`, `pg_advisory_lock(hashtext(?))`, `pg_advisory_unlock(hashtext(?))`); the DuckLake ATTACH now uses a two-layer escape (`libpqValue` for inner connstring + `duckdbLiteral` for the outer literal). Same helper now used for the `SET http_proxy` and `CREATE SECRET` literals. Coverage in `test/.../ondemand/DuckLakeInitializerEscapeSpec.scala`.
 
 - [ ] **`FederationBlobBuilder.substitute` is not SQL-safe** against a hostile secret value (`federation/FederationBlobBuilder.scala:82`). Only quotes regex metachars (`Matcher.quoteReplacement`), not SQL quotes. Either escape SQL quotes or document the operator-trust model in-tree and in the manifest schema.
 

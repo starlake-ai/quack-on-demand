@@ -254,9 +254,6 @@ final class ManagerServer(
       Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
         pools.setPoolDisabled(req, key)(sessions.scopeOf)
       },
-      Endpoints.setRole.serverLogic { case (req, key) =>
-        nodes.setRole(req, key)(sessions.scopeOf)
-      },
       Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
         nodes.setMaxConcurrent(req, key)(sessions.scopeOf)
       },

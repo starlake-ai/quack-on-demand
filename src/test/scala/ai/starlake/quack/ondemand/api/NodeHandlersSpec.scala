@@ -52,12 +52,6 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.quarantineNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
-  "setRole" should "reject unknown role" in:
-    val (sup, _, h) = fixture
-    val nodeId = sup.list().head.nodes.head.nodeId
-    val out = h.setRole(SetRoleRequest("acme", "acme_default", "sales", nodeId, "NOPE"), None)((_: String) => None).unsafeRunSync()
-    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
-
   "setMaxConcurrent" should "update an existing node" in:
     val (sup, _, h) = fixture
     val nodeId = sup.list().head.nodes.head.nodeId

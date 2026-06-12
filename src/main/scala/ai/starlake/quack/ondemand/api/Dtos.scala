@@ -151,13 +151,6 @@ final case class ManifestImportSummary(
     users: Int
 )
 
-final case class SetRoleRequest(
-    tenant: String,
-    tenantDb: String,
-    pool: String,
-    nodeId: String,
-    role: String
-)
 final case class SetMaxConcurrentRequest(
     tenant: String,
     tenantDb: String,
@@ -291,10 +284,15 @@ final case class LoginRequest(
     password: String,
     tenant: Option[String] = None
 )
+/** Login response. Carries the session token + the authority bits the UI needs to decide what to
+  * render. `role` is deliberately NOT here: every minted session is admin by construction (the
+  * login handler 403s anything else), so the field was a tautology of the gate. UIs that want to
+  * show the user's authoritative role read [[WhoamiResponse.role]] (sourced from the auth
+  * backend's profile) instead.
+  */
 final case class LoginResponse(
     token: String,
     username: String,
-    role: String,
     tenant: Option[String] = None,
     superuser: Boolean = false,
     manageableTenants: List[String] = Nil
@@ -672,7 +670,6 @@ object Dtos:
   given Codec[PoolResponse]            = deriveCodec
   given Codec[PoolListResponse]        = deriveCodec
   given Codec[HealthResponse]          = deriveCodec
-  given Codec[SetRoleRequest]          = deriveCodec
   given Codec[SetMaxConcurrentRequest] = deriveCodec
   given Codec[NodeOpRequest]           = deriveCodec
   given Codec[ErrorResponse]           = deriveCodec
@@ -765,18 +762,16 @@ object Dtos:
       for
         token             <- c.get[String]("token")
         username          <- c.get[String]("username")
-        role              <- c.get[String]("role")
         tenant            <- c.getOrElse[Option[String]]("tenant")(None)
         superuser         <- c.getOrElse[Boolean]("superuser")(false)
         manageableTenants <- c.getOrElse[List[String]]("manageableTenants")(Nil)
-      yield LoginResponse(token, username, role, tenant, superuser, manageableTenants)
+      yield LoginResponse(token, username, tenant, superuser, manageableTenants)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(
         JsonObject(
           "token"             -> r.token.asJson,
           "username"          -> r.username.asJson,
-          "role"              -> r.role.asJson,
           "tenant"            -> r.tenant.asJson,
           "superuser"         -> r.superuser.asJson,
           "manageableTenants" -> r.manageableTenants.asJson
