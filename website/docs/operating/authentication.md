@@ -102,11 +102,31 @@ See the Access control model page for a full description of how the EffectiveSet
 
 ## Sessions
 
+### FlightSQL edge
+
 On a successful handshake the edge mints a random UUID as a session peer ID and returns it to the client as `Authorization: Bearer <peerId>`. The client sends that value on every subsequent Flight RPC; the edge looks it up in `ConnectionContext` to recover the `(tenant, pool, user, EffectiveSet)` tuple without repeating the provider chain or re-querying Postgres.
 
 The session is cached for `sessionTtlSec` seconds (env `QOD_SESSION_TTL_SEC`, default `3600`). After the TTL expires the peer ID is evicted. The next RPC from that client arrives as an unknown Bearer, and the edge forces a full re-handshake through the auth chain.
 
 The TTL bounds the window during which a revoked credential or a rotated token remains effective after the next policy change.
+
+### Management plane (UI + REST)
+
+On a successful `/api/auth/login` the manager mints a **JWT** (HS256, signed with `QOD_SESSION_JWT_SECRET`) carrying `{sub, tenant, role, superuser, manageableTenants, jti, iat, exp}`. The token is delivered two ways:
+
+- as an `HttpOnly Secure SameSite=Lax` cookie (`qod_session`) set by the response — the browser auto-attaches it on subsequent same-origin `/api/*` requests. JavaScript cannot read it; XSS payloads cannot exfiltrate it.
+- as the `token` field in the JSON body — for CLI / static-key callers that send it via the `X-API-Key` header.
+
+The `apiKeyGuard` middleware admits a request when EITHER path matches a verified JWT. Verification is stateless (signature + `exp` check); manager restart does not invalidate sessions as long as the JWT secret stays pinned, which makes horizontal scale-out possible.
+
+The JWT `exp` is **absolute** (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there is no sliding-window refresh. Revocation works against a small in-process jti denylist that survives only the current process — for a hard kill of all sessions, rotate `QOD_SESSION_JWT_SECRET`.
+
+Cookie attributes are configurable:
+
+- `QOD_SESSION_COOKIE_SECURE` (default `true`) — set `false` only for plaintext-HTTP dev deployments.
+- `QOD_SESSION_COOKIE_PATH` (default `/api`) — override behind a path-rewriting reverse proxy to match the browser-visible URL prefix.
+
+The `application.conf` default `sessionJwtSecret` is a **well-known dev string**. Anyone with the source can forge admin sessions if you don't override it. Main emits a loud startup warning when the default is in use.
 
 ## Management plane (REST and UI)
 

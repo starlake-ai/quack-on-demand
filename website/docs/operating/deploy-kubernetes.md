@@ -41,7 +41,11 @@ Every pod receives the following labels:
 | `quack-node-id` | Unique node identifier; used as the pod name and the Service name. |
 | `quack-max-concurrent` | Maximum concurrent queries this node accepts. |
 
-On manager restart, the `discoverExisting` pass lists all pods matching the `podLabel` and reconstructs the in-memory node registry from these labels. Note that the per-node auth token is held only in memory, so rediscovered pods come back with an empty token until the manager reconnects. A follow-up will persist tokens in Kubernetes Secrets.
+On manager restart, the `discoverExisting` pass lists all pods matching the `podLabel` and reconstructs the in-memory node registry from these labels. The per-node bearer token survives the restart: the manager writes a Secret `qod-token-${nodeId}` alongside each pod and references it via `env.valueFrom.secretKeyRef`. `discoverExisting` reads the Secret back into the token cache, so adopted pods continue to serve queries without a forced pool respawn. The token Secret is deleted alongside the pod on stop.
+
+## Federation Secret
+
+When a pool's `extraSetupSql` is non-empty (i.e. federated sources are registered against the pool's tenant-db), the manager writes a per-pool Secret `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenant-db underscores hyphenized for RFC-1123) and injects it into every pod via `env.valueFrom.secretKeyRef` so `spawn-quack-node.sh` reads `$extraSetupSql` from the env. The bearer never appears in `kubectl describe pod` output. The Secret is garbage-collected when the last pod of the pool stops; rotation is "update the Secret, restart the pods" (kubelet does not re-inject env values into a running container).
 
 ## Object-store credentials
 
