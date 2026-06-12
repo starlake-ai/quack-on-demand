@@ -14,9 +14,13 @@ import scala.jdk.CollectionConverters._
   * orphan-discovery pass can reconstruct [[ai.starlake.quack.model.RunningNode]] after a manager
   * restart.
   *
-  * v1 limitation: the per-node token is held only in-memory. After a manager restart, discovered
-  * pods come back with an empty token; a follow-up task could persist it in a K8s Secret named
-  * after the pod.
+  * Two Secrets accompany each pod:
+  *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
+  *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
+  *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
+  *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads
+  *     it back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing
+  *     after a restart.
   */
 final class KubernetesQuackBackend(
     client: KubernetesClient,
@@ -103,9 +107,20 @@ final class KubernetesQuackBackend(
       source.setSecretKeyRef(ref)
       fedEnv.setValueFrom(source)
       envs.add(fedEnv)
+    // Token is materialised from the per-pod Secret instead of inlined, so
+    // (a) kubectl describe pod doesn't expose the bearer string and
+    // (b) the value is recoverable after a manager restart via
+    // discoverExisting. ensureTokenSecret() must have created the Secret
+    // BEFORE pod create or kubelet will reject the pod with
+    // CreateContainerConfigError.
     val tokenEnv = new EnvVar()
     tokenEnv.setName("QOD_NODE_TOKEN")
-    tokenEnv.setValue(token)
+    val tokenSource = new EnvVarSource()
+    val tokenRef    = new SecretKeySelector()
+    tokenRef.setName(tokenSecretNameFor(spec.nodeId))
+    tokenRef.setKey(KubernetesQuackBackend.TokenSecretKey)
+    tokenSource.setSecretKeyRef(tokenRef)
+    tokenEnv.setValueFrom(tokenSource)
     envs.add(tokenEnv)
     val portEnv = new EnvVar()
     portEnv.setName("QOD_NODE_PORT")
@@ -186,12 +201,10 @@ final class KubernetesQuackBackend(
     val token = LocalQuackBackend.randomToken()
     tokens.put(spec.nodeId, token)
 
-    // The per-pool federation Secret has to exist BEFORE the pod is
-    // created -- kubelet rejects a pod whose env.valueFrom references
-    // a missing Secret. Idempotent: same content -> no-op; new SQL ->
-    // updated bytes (kubelet does NOT re-inject env values into running
-    // containers, so an existing pod still sees the old SQL until it
-    // restarts, matching the local backend's "once at startup" model).
+    // Both Secrets must exist before pod create -- kubelet rejects a pod
+    // whose env.valueFrom references a missing Secret. ensureTokenSecret
+    // also makes the bearer string recoverable after manager restart.
+    ensureTokenSecret(spec.nodeId, token)
     if spec.extraSetupSql.nonEmpty then
       ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
 
@@ -232,6 +245,10 @@ final class KubernetesQuackBackend(
 
     client.services.inNamespace(namespace).withName(nodeId).delete()
     client.pods.inNamespace(namespace).withName(nodeId).delete()
+    // Token Secret tracks the pod 1:1, so we can drop it right away.
+    // Idempotent on missing (e.g. an externally-stopped pod whose
+    // token Secret a previous reconcile already cleaned up).
+    client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(nodeId)).delete()
     tokens.remove(nodeId)
 
     // If this was the last live pod for the pool, GC the federation
@@ -284,6 +301,30 @@ final class KubernetesQuackBackend(
     val safeDb = key.tenantDb.replace('_', '-')
     s"qod-fedsql-${key.tenant}-$safeDb-${key.pool}"
 
+  /** K8s Secret name for a node's bearer token. `nodeId` is already RFC-1123 safe (see
+    * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]), so the prefix is the only addition.
+    */
+  private def tokenSecretNameFor(nodeId: String): String = s"qod-token-$nodeId"
+
+  /** Create-or-replace the per-pod token Secret. Same pattern as [[ensureFederationSecret]] --
+    * must run before pod create so kubelet sees the Secret when validating the pod's
+    * `env.valueFrom.secretKeyRef`. Idempotent across spawn retries.
+    */
+  private def ensureTokenSecret(nodeId: String, token: String): Unit =
+    val meta = new ObjectMeta()
+    meta.setName(tokenSecretNameFor(nodeId))
+    val labels = new java.util.HashMap[String, String]()
+    labels.put(labelKey, labelValue)
+    labels.put("quack-node-id", nodeId)
+    meta.setLabels(labels)
+    val secret = new Secret()
+    secret.setMetadata(meta)
+    val data = new java.util.HashMap[String, String]()
+    data.put(KubernetesQuackBackend.TokenSecretKey, token)
+    secret.setStringData(data)
+    client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
+    ()
+
   /** Create-or-replace the per-pool federation Secret. Content is `stringData` (UTF-8, kubelet
     * base64-encodes); kubelet rejects pods that reference a missing Secret so this MUST run
     * before pod create. Idempotent -- fabric8's `resource(...).createOr(replace)` mirrors a
@@ -327,6 +368,18 @@ final class KubernetesQuackBackend(
       val labels = Option(p.getMetadata.getLabels)
         .map(_.asScala)
         .getOrElse(scala.collection.mutable.Map.empty)
+      val nodeId  = p.getMetadata.getName
+      // Recover the bearer token from the per-pod Secret so a manager
+      // restart doesn't wedge every Flight call to this pod on 401. Pods
+      // without a matching Secret (legacy + pre-Secret deployments)
+      // surface the empty string the way they always did, with a warn
+      // so the operator knows to scale.replace those pods.
+      val recoveredToken =
+        Option(client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(nodeId)).get())
+          .flatMap(s => readTokenFromSecret(s))
+      recoveredToken match
+        case Some(t) => tokens.put(nodeId, t)
+        case None    => () // keep the existing in-memory entry if any, leave empty otherwise
       for
         tenant   <- labels.get("quack-tenant")
         tenantDb <- labels.get("quack-tenant-db")
@@ -334,19 +387,40 @@ final class KubernetesQuackBackend(
         roleS    <- labels.get("quack-role")
         role     <- Role.parse(roleS).toOption
       yield RunningNode(
-        nodeId = p.getMetadata.getName,
+        nodeId = nodeId,
         poolKey = PoolKey(tenant, tenantDb, pool),
         role = role,
-        host = s"${p.getMetadata.getName}.$namespace.svc.cluster.local",
+        host = s"$nodeId.$namespace.svc.cluster.local",
         port = quackPort,
-        token = tokens.getOrElse(p.getMetadata.getName, ""),
+        token = tokens.getOrElse(nodeId, ""),
         pid = None,
-        podName = Some(p.getMetadata.getName),
+        podName = Some(nodeId),
         startedAt = Instant.now(),
         maxConcurrent = labels.get("quack-max-concurrent").flatMap(_.toIntOption).getOrElse(0)
       )
     }
   }
+
+  /** Decode the bearer token from the per-pod Secret. The Secret stores `stringData` on write but
+    * the K8s API materialises it back as base64-encoded `data` on read; tolerate both shapes
+    * because fabric8's mock server keeps `stringData` populated.
+    */
+  private def readTokenFromSecret(s: Secret): Option[String] =
+    Option(s.getStringData)
+      .map(_.asScala.toMap)
+      .flatMap(_.get(KubernetesQuackBackend.TokenSecretKey))
+      .orElse {
+        Option(s.getData)
+          .map(_.asScala.toMap)
+          .flatMap(_.get(KubernetesQuackBackend.TokenSecretKey))
+          .map { b64 =>
+            new String(
+              java.util.Base64.getDecoder.decode(b64),
+              java.nio.charset.StandardCharsets.UTF_8
+            )
+          }
+      }
+      .filter(_.nonEmpty)
 
   def cleanup(): IO[Unit] = IO.unit
 
@@ -360,6 +434,11 @@ object KubernetesQuackBackend:
     * Secret's keyed payload.
     */
   val FederationSecretKey: String = "extraSetupSql"
+
+  /** Key inside the per-pod token Secret holding the bearer string. Matches the env var name
+    * `spawn-quack-node.sh` expects.
+    */
+  val TokenSecretKey: String = "QOD_NODE_TOKEN"
 
   /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
     * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.

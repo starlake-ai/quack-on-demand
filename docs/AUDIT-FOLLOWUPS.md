@@ -31,7 +31,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 ## P0 — known limitations to surface or fix
 
-- [ ] **K8s backend loses node tokens on manager restart.** `runtime/KubernetesQuackBackend.scala:17-19, 239` — `discoverExisting` returns adopted pods with empty token; every Flight call 401s until a full pool respawn. Persist tokens in a per-pod K8s Secret.
+- [x] **K8s backend loses node tokens on manager restart.** ~~`discoverExisting` returns adopted pods with empty token; every Flight call 401s until a full pool respawn.~~ Fixed 2026-06-12: per-pod K8s Secret `qod-token-${nodeId}` holds the bearer; pod env injects `QOD_NODE_TOKEN` via `env.valueFrom.secretKeyRef`. `discoverExisting` now reads the Secret to recover the real token, so manager restart no longer wedges pools on 401. Stop deletes the Secret alongside the pod. Coverage in `KubernetesQuackBackendSpec` (3 cases: create + ref, GC, restart adoption).
 
 - [x] **K8s backend silently drops `spec.extraSetupSql`.** ~~Federation does not work on K8s.~~ Fixed 2026-06-12: per-pool K8s Secret `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenantDb hyphenized for RFC-1123) holds the resolved federation SQL; pods reference it via `env.valueFrom.secretKeyRef` so `spawn-quack-node.sh` reads `$extraSetupSql` identically to the local backend. `kubectl describe pod` shows the ref, not the value; etcd never sees the credential. Secret GC'd when the last pod of the pool stops (queried by pool labels, excluding the just-deleted pod and any Terminating). Coverage in `KubernetesQuackBackendSpec` (4 cases: create + ref, no-op when empty, GC on last stop, kept when siblings remain).
 

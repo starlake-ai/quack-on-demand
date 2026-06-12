@@ -225,3 +225,71 @@ class KubernetesQuackBackendSpec extends AnyFlatSpec with Matchers with BeforeAn
     backend.stop("quack-fed-a").unsafeRunSync()
 
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
+
+  // ---------- per-pod token Secret + restart adoption ----------
+
+  private def tokenSecretName(nodeId: String) = s"qod-token-$nodeId"
+
+  /** Read whichever shape the mock server keeps populated. */
+  private def readTokenPayload(s: io.fabric8.kubernetes.api.model.Secret): String =
+    Option(s.getStringData).map(_.asScala.toMap).flatMap(_.get(KubernetesQuackBackend.TokenSecretKey))
+      .getOrElse {
+        val b64 = s.getData.get(KubernetesQuackBackend.TokenSecretKey)
+        new String(java.util.Base64.getDecoder.decode(b64), java.nio.charset.StandardCharsets.UTF_8)
+      }
+
+  "token persistence" should "create a per-pod Secret and reference it from QOD_NODE_TOKEN" in:
+    val backend = fedBackend
+    val node    = backend.start(
+      NodeSpec(FedKey, "quack-tok-1", Role.Dual, metastore = Map.empty, s3 = Map.empty)
+    ).unsafeRunSync()
+
+    // Secret exists with the token the manager handed back.
+    val secret = server.getClient.secrets.inNamespace("default")
+      .withName(tokenSecretName("quack-tok-1")).get()
+    secret should not be null
+    readTokenPayload(secret) shouldBe node.token
+
+    // The pod's QOD_NODE_TOKEN env is a SecretKeyRef pointing at the same
+    // Secret + key. The plain `value` field stays null -- the bearer never
+    // lands in the pod manifest.
+    val container = server.getClient.pods.inNamespace("default")
+      .withName(node.podName.get).get()
+      .getSpec.getContainers.get(0)
+    val tokenEnv = container.getEnv.asScala.find(_.getName == "QOD_NODE_TOKEN").value
+    tokenEnv.getValue shouldBe null
+    val ref = tokenEnv.getValueFrom.getSecretKeyRef
+    ref.getName shouldBe tokenSecretName("quack-tok-1")
+    ref.getKey  shouldBe KubernetesQuackBackend.TokenSecretKey
+
+  it should "delete the token Secret on stop()" in:
+    val backend = fedBackend
+    backend.start(
+      NodeSpec(FedKey, "quack-tok-2", Role.Dual, metastore = Map.empty, s3 = Map.empty)
+    ).unsafeRunSync()
+
+    server.getClient.secrets.inNamespace("default")
+      .withName(tokenSecretName("quack-tok-2")).get() should not be null
+
+    backend.stop("quack-tok-2").unsafeRunSync()
+
+    server.getClient.secrets.inNamespace("default")
+      .withName(tokenSecretName("quack-tok-2")).get() shouldBe null
+
+  it should "recover the bearer token from the Secret on discoverExisting (manager restart)" in:
+    // First backend instance: spawns a pod, persists its token to a Secret.
+    val firstBackend = fedBackend
+    val originalNode = firstBackend.start(
+      NodeSpec(FedKey, "quack-tok-3", Role.Dual, metastore = Map.empty, s3 = Map.empty)
+    ).unsafeRunSync()
+    val originalToken = originalNode.token
+    originalToken should not be empty
+
+    // Second backend instance against the SAME mock server (simulating a
+    // manager restart). Its in-memory `tokens` map is empty; without the
+    // Secret-read code path, discoverExisting would surface "" and every
+    // Flight call would 401.
+    val rebornBackend = fedBackend
+    val rebornNodes   = rebornBackend.discoverExisting().unsafeRunSync()
+    val recovered     = rebornNodes.find(_.nodeId == "quack-tok-3").value
+    recovered.token shouldBe originalToken
