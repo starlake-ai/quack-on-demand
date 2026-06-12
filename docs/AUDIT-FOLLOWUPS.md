@@ -35,7 +35,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [ ] **K8s backend silently drops `spec.extraSetupSql`** (TODO at `runtime/KubernetesQuackBackend.scala:88-91`). Federation does not work on K8s.
 
-- [ ] **`SessionTokenStore` never expires tokens** (`api/SessionTokenStore.scala:17`). Manager restart is the only revocation path. Add Caffeine with idle TTL.
+- [x] **`SessionTokenStore` never expires tokens.** ~~Manager restart is the only revocation path.~~ Fixed 2026-06-12: added a configurable idle TTL (default 8h, env `QOD_SESSION_IDLE_TTL_SEC`) tracked per-session via `lastAccessedAt`. Every successful lookup either slides the window or evicts the entry, so all readers (`get/isAdmin/isSuperuser/canManage/scopeOf`) honour expiry consistently. Clock injectable so the spec ticks deterministic minutes without sleeping. Coverage in `test/.../api/SessionTokenStoreExpirySpec.scala`.
 
 - [ ] **Cloud secret resolvers** (`Vault`, `Aws`, `Azure`, `Gcp`) are stubs raising `NotImplementedError`. Wired in `Main.scala:194-204`. Either implement, or gate the UI option as "not yet implemented" and refuse on config load.
 
