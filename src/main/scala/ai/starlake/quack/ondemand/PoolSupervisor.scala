@@ -362,6 +362,27 @@ final class PoolSupervisor(
       .map(effectiveMetastoreFor)
       .getOrElse(defaultMetastore)
 
+  // ---------- Tenant-of-resource lookups (RBAC scope check) ----------
+
+  /** Tenant id owning a `qodstate_user` row. Outer `Option` distinguishes "user not found" from
+    * "user is a superuser" (`Some(None)`).
+    */
+  def tenantForUser(userId: String): Option[Option[String]] =
+    store.getUserById(userId).map(_.tenant)
+
+  def tenantForRole(roleId: String): Option[String] =
+    rbacResolver.role(roleId).map(_.tenantId)
+
+  def tenantForGroup(groupId: String): Option[String] =
+    rbacResolver.group(groupId).map(_.tenantId)
+
+  /** Resolve a role-permission id to its owning tenant via the parent role. */
+  def tenantForRolePermission(id: String): Option[String] =
+    store.getRolePermission(id).flatMap(p => rbacResolver.role(p.roleId).map(_.tenantId))
+
+  def tenantForPoolPermission(id: String): Option[String] =
+    store.getPoolPermission(id).map(_.tenantId)
+
   // ---------- Tenant API ----------
 
   def createTenant(t: Tenant): IO[Either[String, Tenant]] = IO.blocking {

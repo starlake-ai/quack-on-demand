@@ -715,6 +715,19 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def getRolePermission(id: String): Option[RolePermission] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, role_id, catalog_name, schema_name, table_name, verb, granted_at
+        |FROM qodstate_role_permission WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readRolePermission(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
   private def readRolePermission(rs: ResultSet): RolePermission =
     RolePermission(
       id = rs.getString("id"),
@@ -921,6 +934,19 @@ final class PostgresControlPlaneStore(
     try
       ps.setString(1, id)
       ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
+  def getPoolPermission(id: String): Option[PoolPermission] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant_id, pool_id, user_id, group_id, granted_at
+        |FROM qodstate_pool_permission WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readPoolPermission(rs)) else None
+      finally rs.close()
     finally ps.close()
   }
 

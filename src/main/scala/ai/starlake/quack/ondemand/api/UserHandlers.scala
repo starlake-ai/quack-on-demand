@@ -63,43 +63,84 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
 
   // ---------- /user/create ----------
 
-  def createUser(req: UserCreateRequest): Out[UserResponse] =
-    sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
-      case Right(u) =>
-        toResponseFor(u.id) match
-          case Some(r) => Right(r)
-          case None    =>
-            Left(
-              (
-                StatusCode.InternalServerError,
-                ErrorResponse("missing", s"created user ${u.id} not found")
+  /** Tenant-scope semantics: `req.tenant = None` creates a superuser, which only an existing
+    * superuser session (or a static-key caller) may do. `Some(t)` requires the session to manage
+    * `t`. The `req.tenant` value here is a display name OR id (the supervisor normalizes).
+    */
+  def createUser(req: UserCreateRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[UserResponse] =
+    val scopeGate: Option[(StatusCode, ErrorResponse)] = req.tenant match
+      case None =>
+        // Creating a superuser: only a superuser session may do this.
+        apiKey.flatMap(scopeOf) match
+          case Some(s) if !s.superuser =>
+            Some(
+              StatusCode.Forbidden -> ErrorResponse(
+                "tenant_forbidden",
+                "only a superuser session may create a superuser account"
               )
             )
-      case Left(err) => Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err)))
-    }
+          case _ => None
+      case Some(raw) =>
+        // Map raw (display-name or id) onto the canonical tenant id so the
+        // check matches `manageableTenants`.
+        val canonical = sup
+          .listTenants()
+          .find(t => t.id == raw || t.displayName == raw.toLowerCase)
+          .map(_.id)
+          .getOrElse(raw)
+        TenantScopeCheck.reject(apiKey, canonical)(scopeOf)
+    scopeGate match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
+          case Right(u) =>
+            toResponseFor(u.id) match
+              case Some(r) => Right(r)
+              case None    =>
+                Left(
+                  (
+                    StatusCode.InternalServerError,
+                    ErrorResponse("missing", s"created user ${u.id} not found")
+                  )
+                )
+          case Left(err) => Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err)))
+        }
 
   // ---------- /user/update ----------
 
-  def updateUser(req: UserUpdateRequest): Out[UserResponse] =
-    sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
-      case Right(u) =>
-        toResponseFor(u.id) match
-          case Some(r) => Right(r)
-          case None    =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
-      case Left(err) =>
-        val code =
-          if err.startsWith("user not found") then StatusCode.NotFound else StatusCode.BadRequest
-        Left((code, ErrorResponse("invalid_user", err)))
-    }
+  def updateUser(req: UserUpdateRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[UserResponse] =
+    TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
+          case Right(u) =>
+            toResponseFor(u.id) match
+              case Some(r) => Right(r)
+              case None    =>
+                Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
+          case Left(err) =>
+            val code =
+              if err.startsWith("user not found") then StatusCode.NotFound
+              else StatusCode.BadRequest
+            Left((code, ErrorResponse("invalid_user", err)))
+        }
 
   // ---------- /user/delete ----------
 
-  def deleteUser(req: UserDeleteRequest): Out[Unit] =
-    sup.deleteUser(req.id).map {
-      case Right(_)  => Right(())
-      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
-    }
+  def deleteUser(req: UserDeleteRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        sup.deleteUser(req.id).map {
+          case Right(_)  => Right(())
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+        }
 
   // ---------- /user/list ----------
 
@@ -140,20 +181,27 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
 
   // ---------- /user/{id}/effective ----------
 
-  def effective(id: String): Out[EffectivePermissionsResponse] = IO.blocking {
-    sup.effectiveSetForUser(id) match
-      case None => Left((StatusCode.NotFound, ErrorResponse("not_found", s"user not found: $id")))
-      case Some(eff) =>
-        Right(
-          EffectivePermissionsResponse(
-            user = toResponse(eff, tenantNameMap),
-            roles = eff.roles.map(toRoleResponse),
-            groups = eff.groups.map(toGroupResponse),
-            pools = eff.poolPerms.map(toPoolPermissionResponse),
-            tablePerms = eff.permissions.map(toRolePermissionResponse)
-          )
-        )
-  }
+  def effective(id: String, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[EffectivePermissionsResponse] =
+    TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(id))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None =>
+        IO.blocking {
+          sup.effectiveSetForUser(id) match
+            case None =>
+              Left((StatusCode.NotFound, ErrorResponse("not_found", s"user not found: $id")))
+            case Some(eff) =>
+              Right(
+                EffectivePermissionsResponse(
+                  user = toResponse(eff, tenantNameMap),
+                  roles = eff.roles.map(toRoleResponse),
+                  groups = eff.groups.map(toGroupResponse),
+                  pools = eff.poolPerms.map(toPoolPermissionResponse),
+                  tablePerms = eff.permissions.map(toRolePermissionResponse)
+                )
+              )
+        }
 
   // ---------- mapper helpers (shared with Role/Group/Pool handlers) ----------
 

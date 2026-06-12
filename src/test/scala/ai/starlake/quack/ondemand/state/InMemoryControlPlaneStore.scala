@@ -157,6 +157,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
   def listRolePermissionsForRoles(roleIds: Set[String]): List[RolePermission] =
     rolePermissions.values.filter(p => roleIds.contains(p.roleId)).toList
   def deleteRolePermission(id: String): Boolean = rolePermissions.remove(id).isDefined
+  def getRolePermission(id: String): Option[RolePermission] = rolePermissions.get(id)
 
   // ---------------- RBAC: groups ----------------
   private val groups = TrieMap.empty[String, RbacGroup]
@@ -213,6 +214,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     poolPermissions.put(populated.id, populated)
     populated
   def deletePoolPermission(id: String): Boolean = poolPermissions.remove(id).isDefined
+  def getPoolPermission(id: String): Option[PoolPermission] = poolPermissions.get(id)
   def listPoolPermissions(
       tenantId: Option[String] = None,
       userId:   Option[String] = None,

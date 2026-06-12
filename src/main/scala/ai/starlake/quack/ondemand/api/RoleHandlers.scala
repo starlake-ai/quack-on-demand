@@ -1,12 +1,17 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
 import sttp.model.StatusCode
 
 /** REST handlers for the role surface (`/api/role/...`). Resolves the `tenant` query/body field to
   * a surrogate id via the supervisor's tenant cache so the UI can keep typing display names while
   * the Postgres rows stay keyed by `qodstate_tenant.id`.
+  *
+  * Every mutating endpoint enforces a per-request tenant-scope check before touching the store
+  * (body-tenant for create/list; id-of-resource for delete/grant/revoke/list). See
+  * [[TenantScopeCheck]].
   */
 final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
 
@@ -19,7 +24,9 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
       .map(_.id)
       .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
 
-  def createRole(req: RoleCreateRequest): Out[RoleResponse] =
+  def createRole(req: RoleCreateRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[RoleResponse] =
     resolveTenantId(req.tenant) match
       case None =>
         IO.pure(
@@ -31,46 +38,75 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
           )
         )
       case Some(tid) =>
-        sup.createRole(tid, req.name, req.description).map {
-          case Right(r)  => Right(mappers.toRoleResponse(r))
-          case Left(err) =>
-            val code =
-              if err.startsWith("role '") then StatusCode.Conflict else StatusCode.BadRequest
-            Left((code, ErrorResponse("invalid_role", err)))
+        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
+          case Some(err) => IO.pure(Left(err))
+          case None      =>
+            sup.createRole(tid, req.name, req.description).map {
+              case Right(r)  => Right(mappers.toRoleResponse(r))
+              case Left(err) =>
+                val code =
+                  if err.startsWith("role '") then StatusCode.Conflict else StatusCode.BadRequest
+                Left((code, ErrorResponse("invalid_role", err)))
+            }
+
+  def deleteRole(req: RoleDeleteRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(req.id))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.deleteRole(req.id).map {
+          case Right(_)  => Right(())
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 
-  def deleteRole(req: RoleDeleteRequest): Out[Unit] =
-    sup.deleteRole(req.id).map {
-      case Right(_)  => Right(())
-      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
-    }
-
-  def listRoles(tenant: String): Out[RoleListResponse] = IO.blocking {
+  def listRoles(tenant: String, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[RoleListResponse] = IO.blocking {
     resolveTenantId(tenant) match
       case None      => Right(RoleListResponse(Nil))
       case Some(tid) =>
-        Right(RoleListResponse(sup.listRoles(tid).map(mappers.toRoleResponse)))
+        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
+          case Some(err) => Left(err)
+          case None      =>
+            Right(RoleListResponse(sup.listRoles(tid).map(mappers.toRoleResponse)))
   }
 
-  def grantPermission(req: RolePermissionGrantRequest): Out[RolePermissionResponse] =
-    sup.grantRolePermission(req.roleId, req.catalog, req.schema, req.table, req.verb).map {
-      case Right(p)  => Right(mappers.toRolePermissionResponse(p))
-      case Left(err) =>
-        val code =
-          if err.startsWith("role not found") then StatusCode.NotFound else StatusCode.BadRequest
-        Left((code, ErrorResponse("invalid_permission", err)))
-    }
+  def grantPermission(req: RolePermissionGrantRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[RolePermissionResponse] =
+    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(req.roleId))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.grantRolePermission(req.roleId, req.catalog, req.schema, req.table, req.verb).map {
+          case Right(p)  => Right(mappers.toRolePermissionResponse(p))
+          case Left(err) =>
+            val code =
+              if err.startsWith("role not found") then StatusCode.NotFound
+              else StatusCode.BadRequest
+            Left((code, ErrorResponse("invalid_permission", err)))
+        }
 
-  def revokePermission(req: RolePermissionRevokeRequest): Out[Unit] =
-    sup.revokeRolePermission(req.id).map {
-      case Right(_)  => Right(())
-      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
-    }
+  def revokePermission(req: RolePermissionRevokeRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRolePermission(req.id))(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.revokeRolePermission(req.id).map {
+          case Right(_)  => Right(())
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+        }
 
-  def listPermissions(roleId: String): Out[RolePermissionListResponse] = IO.blocking {
-    Right(
-      RolePermissionListResponse(
-        sup.listRolePermissions(roleId).map(mappers.toRolePermissionResponse)
-      )
-    )
+  def listPermissions(roleId: String, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[RolePermissionListResponse] = IO.blocking {
+    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(roleId))(scopeOf) match
+      case Some(err) => Left(err)
+      case None      =>
+        Right(
+          RolePermissionListResponse(
+            sup.listRolePermissions(roleId).map(mappers.toRolePermissionResponse)
+          )
+        )
   }

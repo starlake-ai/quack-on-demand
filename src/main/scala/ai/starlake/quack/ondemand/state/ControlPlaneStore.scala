@@ -109,6 +109,11 @@ trait ControlPlaneStore:
   def insertRolePermission(p: RolePermission): RolePermission
   def listRolePermissions(roleId: String): List[RolePermission]
 
+  /** Look up a single role permission by id. Used by the tenant-scope check to resolve a permission
+    * id back to its owning tenant (via the parent role).
+    */
+  def getRolePermission(id: String): Option[RolePermission]
+
   /** Bulk fetch -- used by the per-statement validator to expand all effective roles' permissions
     * in one round-trip.
     */
@@ -154,6 +159,11 @@ trait ControlPlaneStore:
     */
   def insertPoolPermission(p: PoolPermission): PoolPermission
   def deletePoolPermission(id: String): Boolean
+
+  /** Look up a single pool permission by id. Used by the tenant-scope check to resolve a grant id
+    * back to its owning tenant.
+    */
+  def getPoolPermission(id: String): Option[PoolPermission]
 
   /** Filter by any subset of tenant / user / group. All-None lists every row. */
   def listPoolPermissions(
