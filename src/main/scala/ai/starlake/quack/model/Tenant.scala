@@ -17,8 +17,12 @@ package ai.starlake.quack.model
   *     compile.
   *   - `authProvider` : one of {db, keycloak, google, azure, aws}. Defaults to `db` -- the username
   *     on `qodstate_user` IS the identity, no extra configuration needed.
-  *   - `authConfig` : provider-specific config. Empty for `db`. For OIDC providers: `issuer` (full
-  *     URL), plus one of `realm` / `hd` / `tenantId` / `userPoolId` depending on the provider.
+  *   - `authConfig` : provider-specific config. Empty for `db`. For OIDC providers, the keys read
+  *     by [[ai.starlake.quack.edge.auth.TenantOidcRegistry]] are: `keycloak` -> baseUrl + realm +
+  *     clientId + clientSecretRef; `google` -> clientId + clientSecretRef; `azure` -> tenantId +
+  *     clientId + clientSecretRef; `aws` -> region + userPoolId + clientId. The override is
+  *     all-or-nothing per provider: missing required keys fall back to the manager-wide
+  *     `quack-flightsql.auth.<provider>.*` config.
   */
 final case class Tenant(
     name: String,

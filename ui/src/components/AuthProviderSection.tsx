@@ -152,17 +152,26 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                   user record IS the identity.
                 </p>
               ) : (
-                fields.map(f => (
-                  <label key={f.key}>
-                    {f.label}
-                    <input
-                      value={config[f.key] ?? ''}
-                      onChange={ev => setConfigField(f.key, ev.target.value)}
-                      placeholder={f.placeholder}
-                      required={!f.optional}
-                    />
-                  </label>
-                ))
+                <>
+                  <p className="subtle" style={{ marginTop: 0 }}>
+                    Leave every field blank to use the manager-wide OIDC
+                    config from <code>application.conf</code>. Fill them all
+                    in to override the global client for this tenant -- the
+                    override is all-or-nothing: a missing required field
+                    silently falls back to the global config.
+                  </p>
+                  {fields.map(f => (
+                    <label key={f.key}>
+                      {f.label}
+                      <input
+                        value={config[f.key] ?? ''}
+                        onChange={ev => setConfigField(f.key, ev.target.value)}
+                        placeholder={f.placeholder}
+                        required={!f.optional}
+                      />
+                    </label>
+                  ))}
+                </>
               )}
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
