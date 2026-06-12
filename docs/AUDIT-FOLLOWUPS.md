@@ -13,9 +13,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [x] **Cross-tenant RBAC writes.** ~~RBAC handlers do not enforce body-tenant scope.~~ Fixed 2026-06-12: `X-API-Key` plumbed into all RBAC endpoint signatures (`api/RbacEndpoints.scala`); two new helpers `TenantScopeCheck.rejectForResource` / `rejectForUser` resolve id-only endpoints to their owning tenant via 5 new `PoolSupervisor.tenantFor*` lookups + 2 new store methods (`getRolePermission`, `getPoolPermission`); every handler in `UserHandlers`/`RoleHandlers`/`GroupHandlers`/`MembershipHandlers`/`PoolPermissionHandlers` now gates before mutating. E2E coverage in `test/.../security/RbacTenantScopeSpec.scala`. Follow-up still wanted: make `TenantScopeCheck` a Tapir middleware so future handlers cannot forget it.
 
-- [ ] **Statement-history endpoint leaks SQL across tenants.** `GET /api/node/statements` returns `user`/`tenant`/`pool`/`sql` for every caller's queries — no tenant filter.
-  - `api/StatementHistoryHandlers.scala`, endpoint at `api/Endpoints.scala:277-283` (no `apiKey` plumbed).
-  - Fix: filter by `manageableTenants` from the session scope; require admin / superuser for cross-tenant view.
+- [x] **Statement-history endpoint leaks SQL across tenants.** ~~`GET /api/node/statements` returns user/tenant/pool/sql for every caller's queries.~~ Fixed 2026-06-12: `X-API-Key` plumbed into the endpoint, supervisor injected into `StatementHistoryHandlers`, ring snapshot filtered by session `manageableTenants`. Allow-set carries both surrogate id AND display name per tenant so the filter stays agnostic to which form upstream chose to record (mirrors the FlightSQL handshake's accept-either convention). Coverage in `test/.../security/StatementHistoryScopeSpec.scala`.
 
 - [ ] **`NodeHandlers.setRole` silently no-ops.** Endpoint is registered, parses input, returns 204 without persisting (`api/NodeHandlers.scala:36-38`). Either implement or remove the endpoint + DTO + UI affordance.
 
