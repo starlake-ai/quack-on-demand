@@ -48,7 +48,13 @@ final class PoolSupervisor(
     store: ControlPlaneStore,
     defaultMetastore: Map[String, String] = Map.empty,
     dbAdmin: DbAdmin = NoopDbAdmin,
-    federationBlobOf: String => IO[Option[String]] = _ => IO.pure(None)
+    federationBlobOf: String => IO[Option[String]] = _ => IO.pure(None),
+    /** Callback fired immediately after a tenant-db row is removed (either via [[deleteTenantDb]]
+      * or cascaded through [[deleteTenant]]). The default is a no-op; `Main` wires it to evict
+      * the [[ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader]] cache so the per-tenant-db
+      * Hikari pool releases its connections + heap on delete.
+      */
+    onTenantDbDeleted: (String, String) => Unit = (_, _) => ()
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -69,6 +75,30 @@ final class PoolSupervisor(
     * incrementally after each supervisor RBAC mutation.
     */
   val rbacResolver: RbacResolver = new RbacResolver()
+
+  /** Short-TTL cache for `effectiveSetForUser`. Every FlightSQL handshake costs 3 store reads
+    * (`getUserById` + `listDirectRolesForUser` + `listGroupsForUser`) + resolver joins; under any
+    * real load the same (userId, JWT claims) tuple repeats every few seconds, so a 60s cache
+    * collapses N handshakes' worth of work into 1. Invalidated wholesale on every RBAC mutation
+    * (the graph cache that backs it is small + cheap to rebuild) and on `restore()`.
+    *
+    * Cache key bakes in the JWT fingerprint so a JWT role/group claim flip is reflected
+    * immediately even within the TTL.
+    */
+  private final case class EffectiveCacheKey(userId: String, jwtRolesHash: Int, jwtGroupsHash: Int)
+  private final case class EffectiveCacheEntry(
+      expiresAt: java.time.Instant,
+      value: ai.starlake.quack.ondemand.rbac.EffectiveSet
+  )
+  private val effectiveCache =
+    new java.util.concurrent.ConcurrentHashMap[EffectiveCacheKey, EffectiveCacheEntry]()
+  private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(60).seconds
+
+  /** Drop every cached `EffectiveSet`. Called from every RBAC mutator so a freshly-granted role or
+    * pool permission takes effect on the next handshake, not after a TTL window.
+    */
+  private def invalidateEffectiveCache(): Unit = effectiveCache.clear()
 
   // ---------- Bootstrap / replay ----------
 
@@ -126,6 +156,7 @@ final class PoolSupervisor(
     // Hand the RBAC graph to the resolver in one shot. Subsequent
     // mutations are mirrored incrementally by the methods below.
     rbacResolver.replace(snap)
+    invalidateEffectiveCache()
 
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db. Runs in a single
     * controlled session per tenant-db so concurrent node ATTACHes do not race on the
@@ -464,6 +495,8 @@ final class PoolSupervisor(
         else
           tdbs.foreach { td =>
             store.deleteTenantDb(td.id); tenantDbs.remove(td.id)
+            try onTenantDbDeleted(name.toLowerCase, td.name)
+            catch case _: Throwable => ()
             dbAdmin.dropDatabase(td.name) match
               case Right(_)  => ()
               case Left(err) =>
@@ -566,6 +599,8 @@ final class PoolSupervisor(
               else
                 store.deleteTenantDb(td.id)
                 tenantDbs.remove(td.id)
+                try onTenantDbDeleted(tn, tenantDbName)
+                catch case _: Throwable => ()
                 dbAdmin.dropDatabase(td.name) match
                   case Right(_)  => ()
                   case Left(err) =>
@@ -871,6 +906,7 @@ final class PoolSupervisor(
         password.foreach(pw => userStore.upsertUser(u.tenant, u.username, pw, newRole))
         val updated = u.copy(role = newRole)
         store.upsertUserIdentity(updated)
+        invalidateEffectiveCache()
         Right(updated)
   }
 
@@ -881,6 +917,7 @@ final class PoolSupervisor(
         // ON DELETE CASCADE in qodstate_user_role / user_group /
         // pool_permission cleans up the user's edges automatically.
         store.deleteUser(userId)
+        invalidateEffectiveCache()
         Right(())
   }
 
@@ -906,6 +943,7 @@ final class PoolSupervisor(
       val r = RbacRole(newId("r"), tenantId, name, description)
       store.upsertRole(r)
       rbacResolver.putRole(r)
+      invalidateEffectiveCache()
       Right(r)
   }
 
@@ -915,6 +953,7 @@ final class PoolSupervisor(
       case Some(_) =>
         store.deleteRole(id)
         rbacResolver.removeRole(id)
+        invalidateEffectiveCache()
         Right(())
   }
 
@@ -935,12 +974,14 @@ final class PoolSupervisor(
       val p         = RolePermission(newId("rp"), roleId, catalog, schema, table, upper)
       val persisted = store.insertRolePermission(p)
       rbacResolver.putRolePermission(persisted)
+      invalidateEffectiveCache()
       Right(persisted)
   }
 
   def revokeRolePermission(id: String): IO[Either[String, Unit]] = IO.blocking {
     if store.deleteRolePermission(id) then
       rbacResolver.removeRolePermission(id)
+      invalidateEffectiveCache()
       Right(())
     else Left(s"role permission not found: $id")
   }
@@ -963,6 +1004,7 @@ final class PoolSupervisor(
       val g = RbacGroup(newId("g"), tenantId, name, description)
       store.upsertGroup(g)
       rbacResolver.putGroup(g)
+      invalidateEffectiveCache()
       Right(g)
   }
 
@@ -972,6 +1014,7 @@ final class PoolSupervisor(
       case Some(_) =>
         store.deleteGroup(id)
         rbacResolver.removeGroup(id)
+        invalidateEffectiveCache()
         Right(())
   }
 
@@ -987,11 +1030,13 @@ final class PoolSupervisor(
       case Some(err) => Left(err)
       case None      =>
         store.addUserRole(userId, roleId)
+        invalidateEffectiveCache()
         Right(())
   }
 
   def removeUserRole(userId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
     store.removeUserRole(userId, roleId)
+    invalidateEffectiveCache()
     Right(())
   }
 
@@ -1000,11 +1045,13 @@ final class PoolSupervisor(
       case Some(err) => Left(err)
       case None      =>
         store.addUserGroup(userId, groupId)
+        invalidateEffectiveCache()
         Right(())
   }
 
   def removeUserGroup(userId: String, groupId: String): IO[Either[String, Unit]] = IO.blocking {
     store.removeUserGroup(userId, groupId)
+    invalidateEffectiveCache()
     Right(())
   }
 
@@ -1014,12 +1061,14 @@ final class PoolSupervisor(
     else
       store.addGroupRole(groupId, roleId)
       rbacResolver.addGroupRoleEdge(groupId, roleId)
+      invalidateEffectiveCache()
       Right(())
   }
 
   def removeGroupRole(groupId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
     store.removeGroupRole(groupId, roleId)
     rbacResolver.removeGroupRoleEdge(groupId, roleId)
+    invalidateEffectiveCache()
     Right(())
   }
 
@@ -1079,12 +1128,14 @@ final class PoolSupervisor(
         val pp        = PoolPermission(newId("pp"), tenantId, poolId, userId, groupId)
         val persisted = store.insertPoolPermission(pp)
         rbacResolver.putPoolPermission(persisted)
+        invalidateEffectiveCache()
         Right(persisted)
   }
 
   def revokePoolPermission(id: String): IO[Either[String, Unit]] = IO.blocking {
     if store.deletePoolPermission(id) then
       rbacResolver.removePoolPermission(id)
+      invalidateEffectiveCache()
       Right(())
     else Left(s"pool permission not found: $id")
   }
@@ -1190,6 +1241,23 @@ final class PoolSupervisor(
       userId: String,
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty
+  ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
+    val key = EffectiveCacheKey(userId, jwtRoles.hashCode, jwtGroups.hashCode)
+    val now = java.time.Instant.now()
+    val cached = effectiveCache.get(key)
+    if cached != null && cached.expiresAt.isAfter(now) then Some(cached.value)
+    else computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
+      effectiveCache.put(
+        key,
+        EffectiveCacheEntry(now.plusSeconds(EffectiveCacheTtl.toSeconds), computed)
+      )
+      computed
+    }
+
+  private def computeEffectiveSetForUser(
+      userId: String,
+      jwtRoles: Set[String],
+      jwtGroups: Set[String]
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
     store.getUserById(userId).map { u =>
       val directRoleIdsLocal = store.listDirectRolesForUser(u.id).toSet

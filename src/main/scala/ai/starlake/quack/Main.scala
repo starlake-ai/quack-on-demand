@@ -243,13 +243,30 @@ object Main extends IOApp with LazyLogging:
         case None =>
           _ => IO.pure(None)
 
+    // The DuckLake catalog cache is allocated up-front (not inside the
+    // catalogHandlers branch below) so we can plug its eviction callback
+    // into the supervisor's onTenantDbDeleted hook. Tenant-db delete
+    // (or cascaded delete via deleteTenant) calls evict, which both
+    // removes the entry and closes the underlying HikariCP pool. Same
+    // hook covers an operator deleting + recreating a tenant-db to
+    // rotate Postgres credentials -- the new reader picks up the new
+    // metastore on the next call.
+    val catalogReaderCache =
+      new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
+    def evictCatalogReader(tenant: String, tenantDb: String): Unit =
+      val removed = catalogReaderCache.remove((tenant, tenantDb))
+      if removed != null then
+        try removed.close()
+        catch case _: Throwable => ()
+
     val sup = new PoolSupervisor(
       backend,
       tracker,
       store,
       mgrCfg.defaultMetastore.asMap,
       dbAdmin,
-      federationBlobOf
+      federationBlobOf,
+      onTenantDbDeleted = evictCatalogReader
     )
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
@@ -282,10 +299,8 @@ object Main extends IOApp with LazyLogging:
     // spawn-node.
     val catalogHandlers: Option[CatalogHandlers] =
       if mgrCfg.stateStorage.equalsIgnoreCase("postgres") then
-        val cache =
-          new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
         def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
-          cache.computeIfAbsent(
+          catalogReaderCache.computeIfAbsent(
             (tenant, tenantDb),
             { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
           )
@@ -630,6 +645,15 @@ object Main extends IOApp with LazyLogging:
                   catch case _: Throwable => ()
                   try authUserStore.foreach(_.close())
                   catch case _: Throwable => ()
+                  // Close every cached catalog reader's Hikari pool. The
+                  // map shouldn't see new entries past this point because
+                  // serve() has already returned, but iterate defensively.
+                  val it = catalogReaderCache.values.iterator()
+                  while it.hasNext do
+                    val r = it.next()
+                    try r.close()
+                    catch case _: Throwable => ()
+                  catalogReaderCache.clear()
                 },
                 "qod-shutdown-hook"
               )
