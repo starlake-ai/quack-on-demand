@@ -49,9 +49,9 @@ final case class CreatePoolRequest(
     idleTimeoutSec: Int = -1,
     maxConcurrentPerNode: Int = 0,
     // Optional placement plan. When empty, the supervisor schedules
-    // every node with no constraint (legacy behavior). When non-empty,
-    // the per-cohort RoleDistributions must sum to `roleDistribution`
-    // and the total count must equal `size`. Ignored in non-K8s mode.
+    // every node with no constraint. When non-empty, the per-cohort
+    // RoleDistributions must sum to `roleDistribution` and the total
+    // count must equal `size`. Ignored in non-K8s mode.
     cohorts: List[PoolCohortDto] = Nil,
     // When true, the pool is persisted with `disabled = true` so the
     // FlightSQL edge rejects fresh handshakes until enabled. Nodes are
@@ -263,7 +263,7 @@ final case class FederatedSecretResponse(
     id: String,
     federatedSourceId: String,
     name: String,
-    value: Option[String], // ALWAYS redacted in response: "***REDACTED***" if originally non-null
+    value: Option[String], // ALWAYS redacted in response: "***REDACTED***" if stored as non-null
     externalRef: Option[String]
 )
 
@@ -609,7 +609,7 @@ object Dtos:
     }
   )
   // Custom codec for NodeInfo so all metric fields default to zero / true
-  // when absent in JSON (legacy clients + UI poll responses both go through).
+  // when absent in JSON; lets clients and UI poll responses share one shape.
   given Codec[NodeInfo] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for

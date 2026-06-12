@@ -347,10 +347,10 @@ object Main extends IOApp with LazyLogging:
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter = new QuackHttpAdapter(client, tracker)
-    // SQL ACL validator. Phase C: the only validator is the RBAC-backed
-    // PostgresAclValidator, which reads from the cached EffectiveSet
-    // pinned on ConnectionContext at handshake time. acl.enabled=false
-    // still falls back to allow-all for local-dev workflows.
+    // SQL ACL validator. The RBAC-backed PostgresAclValidator reads from
+    // the cached EffectiveSet pinned on ConnectionContext at handshake
+    // time. acl.enabled=false falls back to allow-all for local-dev
+    // workflows.
     val aclValidator: StatementValidator =
       if !aclCfg.enabled then
         logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
@@ -491,11 +491,11 @@ object Main extends IOApp with LazyLogging:
             raw =>
               if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
               else sup.getTenant(raw),
-            // Phase C handshake authorize: user-scope + pool-access +
-            // EffectiveSet. Failures bubble up as PERMISSION_DENIED on
-            // the FlightSQL handshake. JWT role + groups claims flow in
-            // from FlightEdgeServer.handshake and get union-merged with
-            // the user's local membership edges inside the supervisor.
+            // Handshake authorize: user-scope + pool-access + EffectiveSet.
+            // Failures bubble up as PERMISSION_DENIED on the FlightSQL
+            // handshake. JWT role + groups claims flow in from
+            // FlightEdgeServer.handshake and get union-merged with the
+            // user's local membership edges inside the supervisor.
             (tenant, pool, username, jwtRoles, jwtGroups) =>
               sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups)
           )

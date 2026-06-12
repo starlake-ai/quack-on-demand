@@ -4,9 +4,9 @@ import ai.starlake.quack.ondemand.state.UserGrant
 
 /** Source of truth for management-plane authorization.
   *
-  * `Db` keeps the legacy behavior: `qodstate_user` is BOTH the identity directory (password) and the
-  * role/tenant source. `Oidc` splits the two: the IdP verifies identity, and `qodstate_user` is
-  * consulted for role + the set of tenants the principal manages.
+  * `Db` uses `qodstate_user` as BOTH the identity directory (password) and the role/tenant source.
+  * `Oidc` splits the two: the IdP verifies identity, and `qodstate_user` is consulted for role +
+  * the set of tenants the principal manages.
   */
 sealed abstract class ManagementIdentitySource
 
@@ -23,7 +23,7 @@ object ManagementIdentitySource:
           s"unknown auth.management.identitySource: '$other' (expected: db | oidc)"
         )
 
-/** Resolve a verified identity (+ optional email claim) to its `UserGrant`s. Production binding is
-  * a method ref onto `UserStore.grantsForIdentity`.
+/** Resolve a verified identity (+ optional email claim) to its `UserGrant`s. Bound to
+  * `UserStore.grantsForIdentity` at startup.
   */
 type GrantsLookup = (String, Option[String]) => List[UserGrant]

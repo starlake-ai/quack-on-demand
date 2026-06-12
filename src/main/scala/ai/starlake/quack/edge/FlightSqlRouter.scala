@@ -60,8 +60,8 @@ final class FlightSqlRouter(
     * error message.
     *
     * `effectiveSet` carries the RBAC closure pinned on ConnectionContext at handshake time. `None`
-    * is the legacy (no handshake state) path -- PostgresAclValidator denies anything tenant-scoped
-    * in that case to fail safe.
+    * means no handshake state was attached; PostgresAclValidator denies anything tenant-scoped in
+    * that case to fail safe.
     */
   def execute(
       connectionId: String,

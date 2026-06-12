@@ -144,12 +144,9 @@ object ManifestImporter:
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
       // 0. Snapshot the existing graph ONCE so the per-tenant loops below
-      //    don't re-query the store on every iteration. Previously each
-      //    pass through users/roles/groups/pool-grants paid one or more
-      //    listTenantDbs / listPools / listRoles / listGroups calls per
-      //    iteration -- with the no-pool JDBC days that was hundreds of
-      //    Postgres handshakes per import. We mutate the maps in lock-step
-      //    with every upsert so the rest of apply() sees the live state.
+      //    don't re-query the store on every iteration. The maps are
+      //    mutated in lock-step with every upsert so the rest of apply()
+      //    sees the live state.
       val snap = store.snapshot()
       val tenantDbsByTenant =
         snap.tenantDbs.groupBy(_.tenantId).map { case (k, xs) =>

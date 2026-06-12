@@ -11,10 +11,10 @@ import ai.starlake.quack.ondemand.state._
   *   effective_perms(U)  = ⋃ permissions(r)               for r ∈ effective_roles(U)
   * }}}
   *
-  * Phase C will pin one of these onto each FlightSQL [[ai.starlake.quack.edge.ConnectionContext]]
-  * keyed by peerId so the per-statement ACL gate reads it without any further joins. Phase B
-  * exposes it through the `/user/{id}/effective` REST surface and reuses it inside the
-  * role/group/pool columns served by `/user/list`.
+  * One of these is pinned onto each FlightSQL [[ai.starlake.quack.edge.ConnectionContext]] keyed by
+  * peerId so the per-statement ACL gate reads it without any further joins. The REST surface also
+  * exposes it through `/user/{id}/effective` and reuses it inside the role/group/pool columns
+  * served by `/user/list`.
   */
 final case class EffectiveSet(
     user: RbacUser,

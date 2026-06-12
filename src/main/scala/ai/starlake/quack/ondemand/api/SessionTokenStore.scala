@@ -13,21 +13,15 @@ import java.util.{Base64, Date, UUID}
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import scala.jdk.CollectionConverters._
 
-/** Session token registry for UI logins. Tokens are signed JWTs (HS256 over the configured
-  * [[secret]]); state is what's inside the token itself plus a small in-process denylist of
-  * revoked `jti`s.
+/** Session token registry for UI logins. Tokens are HS256-signed JWTs over the configured
+  * [[secret]]; the server holds no per-session row, only a small in-process denylist of revoked
+  * `jti`s. Any replica that shares the secret can verify any token, and a pinned secret across
+  * deploys means sessions survive restart.
   *
-  * **Why JWT.** The previous implementation kept an in-memory `TrieMap[token, Session]`, so manager
-  * restart logged everyone out and the manager could not be horizontally scaled. With a JWT the
-  * server holds no per-session row: any replica with the same `secret` can verify any token, and a
-  * pinned secret across deploys means sessions survive restart.
-  *
-  * **Trade-off.** JWT `exp` is absolute, not sliding -- a session is good for exactly `maxLifetime`
-  * after `mintWithScope`, regardless of activity. (The legacy implementation slid the window on
-  * every access.) Revocation works only while the manager process still holds the `jti` in the
-  * denylist; the denylist is bounded (entries sweep past their own `exp`) and lost on restart, so
-  * a revoked-but-resurrected token is the price of going stateless. For absolute kill-all-sessions
-  * rotate `secret` (env `QOD_SESSION_JWT_SECRET`).
+  * **Lifetime.** JWT `exp` is absolute: a session is good for exactly `maxLifetime` after
+  * `mintWithScope`, regardless of activity. Revocation works while the manager process still holds
+  * the `jti` in the denylist; the denylist sweeps entries past their own `exp` and is lost on
+  * restart. For an absolute kill-all-sessions, rotate `secret` (env `QOD_SESSION_JWT_SECRET`).
   *
   * **Transport.** [[ManagerServer]] admits requests via `X-API-Key` header OR a `qod_session`
   * cookie carrying the same JWT. [[AuthHandlers.login]] sets the cookie HttpOnly + SameSite=Lax;
@@ -63,9 +57,8 @@ final class SessionTokenStore(
     clock: () => Instant = () => Instant.now()
 ):
 
-  // Expose the lifetime under the legacy field name so existing callers
-  // that read `idleTtl` keep compiling. The semantic is now ABSOLUTE
-  // (max session age from mint) rather than idle-sliding.
+  // Absolute max session age from mint. Exposed under the `idleTtl` field
+  // name because that's how external callers read it.
   val idleTtl: FiniteDuration = maxLifetime
 
   /** Cookie-friendly Max-Age (seconds, signed Long matches Tapir's CookieValueWithMeta API). */

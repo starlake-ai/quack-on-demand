@@ -69,9 +69,9 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
-  /** In-memory mirror of the RBAC slice of the snapshot. Phase B's REST handlers and (Phase C) the
-    * FlightSQL handshake gates read effective sets from here without re-joining qodstate_role /
-    * qodstate_group on every call. Replaced from the store snapshot at `restore()` and updated
+  /** In-memory mirror of the RBAC slice of the snapshot. The REST handlers and the FlightSQL
+    * handshake gates read effective sets from here without re-joining qodstate_role /
+    * qodstate_group on every call. Rebuilt from the store snapshot at `restore()` and updated
     * incrementally after each supervisor RBAC mutation.
     */
   val rbacResolver: RbacResolver = new RbacResolver()
@@ -163,10 +163,9 @@ final class PoolSupervisor(
     * `ducklake_metadata` CREATE TABLE in Postgres. Idempotent.
     *
     * Intended to run after [[restore]] (so the tenant-dbs cache is populated) and BEFORE
-    * [[reconcile]] (so newly spawned nodes find a fully-initialized catalog). The deleted
-    * programmatic bootstrap used to call this from `createTenantDb`; the YAML import path
-    * persists tenant-dbs directly via `ManifestImporter` and skips that hook, so a fresh
-    * boot needs a dedicated init pass.
+    * [[reconcile]] (so newly spawned nodes find a fully-initialized catalog). The YAML import
+    * path persists tenant-dbs directly via `ManifestImporter` without per-row bootstrap, so a
+    * fresh boot needs this dedicated init pass.
     */
   def ensureDuckLakeInitialized(): IO[Unit] = IO.blocking {
     tenantDbs.values.toList.foreach { td =>

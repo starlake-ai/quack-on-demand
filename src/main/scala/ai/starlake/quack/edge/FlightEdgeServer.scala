@@ -28,11 +28,11 @@ final class FlightEdgeServer(
     // display-name space) AND to recover the id for the Basic auth chain
     // (which queries `qodstate_user.tenant`, which stores the id).
     resolveTenant: String => Option[Tenant],
-    // Phase C: post-authentication authorize callback. Runs once per
-    // handshake after the auth chain validated the credentials. It
-    // performs the user-scope and pool-access gates, computes the
-    // EffectiveSet (union-merging any JWT-claimed role / group names),
-    // and returns an AuthorizedHandshake. The result is pinned onto
+    // Post-authentication authorize callback. Runs once per handshake
+    // after the auth chain validated the credentials. It performs the
+    // user-scope and pool-access gates, computes the EffectiveSet
+    // (union-merging any JWT-claimed role / group names), and returns
+    // an AuthorizedHandshake. The result is pinned onto
     // ConnectionContext so the per-statement ACL gate can read it
     // without further joins.
     //
@@ -180,8 +180,8 @@ final class FlightEdgeServer(
             handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr, superuserHdr)
 
       /** Mint a new session peerId. Runs the configured auth chain when one exists; otherwise
-        * trusts the client (legacy v1). On success we resolve tenant/pool via TenantSelector and
-        * bind the connection context.
+        * trusts the client. On success we resolve tenant/pool via TenantSelector and bind the
+        * connection context.
         */
       private def handshake(
           bearer: Option[String],
@@ -279,7 +279,7 @@ final class FlightEdgeServer(
             throw CallStatus.UNAUTHENTICATED.withDescription(err).toRuntimeException()
           case Right(profileOpt) =>
             // Prefer the authenticated username when a provider validated;
-            // fall back to whatever the Basic header carried (legacy path).
+            // fall back to whatever the Basic header carried.
             val resolvedUsername = profileOpt.map(_.username).orElse(basicUsername)
             // Bearer present but unknown to ConnectionContext AND no provider
             // claimed it AND no Basic credentials → stale session token from a
@@ -301,7 +301,7 @@ final class FlightEdgeServer(
               lookupPool = lookupPool
             ) match
               case Right(resolved) =>
-                // Phase C handshake gates 4 + 5: user-scope + pool-access.
+                // Handshake gates 4 + 5: user-scope + pool-access.
                 // EffectiveSet is computed once here and pinned to
                 // ConnectionContext; the per-statement validator reads it
                 // without re-querying Postgres. JWT role + groups claims

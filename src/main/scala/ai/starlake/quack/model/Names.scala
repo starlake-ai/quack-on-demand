@@ -16,13 +16,12 @@ object Names:
   private val Pattern = "^[a-zA-Z_][a-zA-Z0-9_]*$".r
 
   /** Shape of a surrogate tenant id minted by [[newSurrogateId]]: literal `t-` followed by 8+
-    * lowercase hex chars. New ids are 32 hex chars (UUID with dashes stripped, ~128 bits of entropy
-    * so collisions are effectively impossible). The original schema minted 8-hex ids; the pattern
-    * stays open-ended so both legacy and new ids match, and so this method continues to disambiguate
-    * the FlightSQL `tenant` connection-string param -- a caller may pass either the display name
-    * (`tpch`) or the surrogate id (`t-02d0e86e` / `t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e`); the two
-    * shapes don't overlap because display names cannot start with `t-` (hyphen is not in the
-    * identifier alphabet). */
+    * lowercase hex chars. Ids minted today are 32 hex chars (UUID with dashes stripped, ~128 bits
+    * of entropy); the open-ended length lets shorter ids that already exist in the database keep
+    * matching. This is the pattern used to disambiguate the FlightSQL `tenant` connection-string
+    * param -- a caller may pass either the display name (`tpch`) or the surrogate id
+    * (`t-02d0e86e` / `t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e`); the two shapes never overlap because
+    * display names cannot start with `t-` (hyphen is not in the identifier alphabet). */
   private val TenantIdPattern = "^t-[0-9a-f]{8,}$".r
 
   def isValid(raw: String): Boolean =
@@ -81,11 +80,6 @@ object Names:
   /** Mint a surrogate row id with the given prefix (e.g. `t`, `td`, `p`, `r`, `g`, `rp`, `pp`,
     * `fs`, `fsec`, `u`). Format: `<prefix>-<32 lowercase hex chars>` -- a UUID with dashes
     * stripped, ~128 bits of entropy.
-    *
-    * The legacy schema took the first 8 hex chars only (32 bits), which hit a 50% birthday
-    * collision around ~77K rows -- workable for a demo but unsuitable for a production tenant
-    * graph. Migrated 2026-06-12; existing 8-char ids in the database remain valid (the loosened
-    * [[TenantIdPattern]] still matches them).
     */
   def newSurrogateId(prefix: String): String =
     s"$prefix-${java.util.UUID.randomUUID().toString.replace("-", "")}"
