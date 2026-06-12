@@ -89,4 +89,44 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     }
     ex.getMessage should include("PWD")
   }
+
+  // ---------- SQL-safety of substituted values ----------
+  // The production template wraps secrets in a single-quoted SQL literal
+  // (PASSWORD '{{secret.PG_PWD}}'). A naive substitution would break or
+  // injection-attack the moment the value contained an apostrophe.
+  // [[sqlEscapeSingleQuote]] doubles each `'` so the value survives intact.
+
+  "build" should "double single quotes in a secret value so the surrounding literal stays valid" in {
+    val s    = src("fedpg", "PASSWORD '{{secret.PWD}}';")
+    val secs = Map(s.id -> List(secret(s.id, "PWD", "O'Brien")))
+    val blob = builderWith(List(s), secs).build("td-1").unsafeRunSync().value
+    // SQL-literal escaped form: 'O''Brien'  (DuckDB parses to O'Brien)
+    blob should include ("PASSWORD 'O''Brien';")
+  }
+
+  it should "neutralize a hostile secret value that tries to close the literal" in {
+    val hostile = "'); DROP TABLE qodstate_user;--"
+    val s       = src("fedpg", "PASSWORD '{{secret.PWD}}';")
+    val secs    = Map(s.id -> List(secret(s.id, "PWD", hostile)))
+    val blob    = builderWith(List(s), secs).build("td-1").unsafeRunSync().value
+    // After doubling apostrophes the entire hostile string is one big literal:
+    //   PASSWORD '''); DROP TABLE qodstate_user;--';
+    // The `DROP` is inside the literal, not a fresh statement.
+    blob should include ("PASSWORD '''); DROP TABLE qodstate_user;--';")
+    blob should not include "');\nDROP"  // sanity: no statement boundary leaked
+  }
+
+  it should "leave a secret with no apostrophes unchanged (no-op escape)" in {
+    val s    = src("fedpg", "PASSWORD '{{secret.PWD}}';")
+    val secs = Map(s.id -> List(secret(s.id, "PWD", "hunter2")))
+    val blob = builderWith(List(s), secs).build("td-1").unsafeRunSync().value
+    blob should include ("PASSWORD 'hunter2';")
+  }
+
+  it should "also escape single quotes in the alias before splicing" in {
+    val s    = src("o'fed", "-- alias: '{{alias}}'\nATTACH ... AS {{alias}};")
+    val blob = builderWith(List(s), Map.empty).build("td-1").unsafeRunSync().value
+    blob should include ("-- alias: 'o''fed'")
+    blob should include ("AS o''fed;")
+  }
 }
