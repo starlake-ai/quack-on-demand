@@ -257,7 +257,7 @@ object ManagerServerHarness:
     val historyHandlers = new StatementHistoryHandlers(statementStore, sup)
 
     val pools     = new PoolHandlers(sup, tracker)
-    val nodes     = new NodeHandlers(sup, tracker, backend)
+    val nodes     = new NodeHandlers(sup, tracker)
     val tenants   = new TenantHandlers(sup)
     val tenantDbs = new TenantDbHandlers(sup, federatedStore = None)
     val health    = new HealthHandler(sup)

@@ -269,7 +269,7 @@ object Main extends IOApp with LazyLogging:
     )
 
     val pools     = new PoolHandlers(sup, tracker)
-    val nodes     = new NodeHandlers(sup, tracker, backend)
+    val nodes     = new NodeHandlers(sup, tracker)
     val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
     val health    = new HealthHandler(sup)

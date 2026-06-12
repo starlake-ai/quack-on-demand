@@ -4,14 +4,12 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.runtime.QuackBackend
 import cats.effect.IO
 import sttp.model.StatusCode
 
 final class NodeHandlers(
     sup: PoolSupervisor,
-    tracker: NodeLoadTracker,
-    backend: QuackBackend
+    tracker: NodeLoadTracker
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -63,15 +61,3 @@ final class NodeHandlers(
           IO.delay(tracker.setHealthy(req.nodeId, false))
         }
 
-  def restartNode(req: NodeOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
-  ): Out[Unit] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None =>
-        withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
-          IO.delay(tracker.setDraining(req.nodeId, true)) *>
-            backend.stop(req.nodeId) *>
-            IO.delay(tracker.setDraining(req.nodeId, false))
-          // Re-start handled via `scale` + ID reuse; out of scope for v1.
-        }
