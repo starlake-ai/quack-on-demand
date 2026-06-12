@@ -77,6 +77,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok")
       .count() shouldBe (beforeCount + 1.0)
 
+  it should "expose the chosen nodeId on the QueryResult so callers can soft-pin follow-ups" in:
+    val (router, _, node) = setup()
+    val out = router.execute("c-1b", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out match
+      case Right(qr) =>
+        qr.nodeId shouldBe node.nodeId
+        qr.close()
+      case Left(msg) => fail(s"expected Right, got Left($msg)")
+
   it should "pin the session inside a BEGIN…COMMIT block" in:
     val (router, sessions, node) = setup()
     router.execute("c-1", "alice", poolKey, "BEGIN").unsafeRunSync()
@@ -212,6 +221,82 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.execute("d-2", "alice", key, "SELECT 1").unsafeRunSync()
     capturer.lastCtx.defaultDatabase shouldBe Some("memory")
     capturer.lastCtx.defaultSchema   shouldBe Some("main")
+
+  // ---- preferredNode (soft pin) tests ----
+
+  /** Spin up a pool with N dual-role nodes so we have routing choices to make. */
+  private def setupMultiNode(replicas: Int) =
+    val backend = new QuackBackend:
+      private val n = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
+                            23000 + n.size, "tok", Some(3L), None, Instant.EPOCH,
+                            maxConcurrent = s.maxConcurrent)
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String) = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting() = IO.pure(n.values.toList)
+      def cleanup() = IO { n.clear() }
+
+    val tracker = new NodeLoadTracker
+    val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    val key = PoolKey("acme", "acme_default", "sales")
+    sup.createTenant(Tenant(key.tenant)).unsafeRunSync()
+    sup.createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, replicas)).unsafeRunSync()
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient   = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val sessions = new SessionRegistry
+    val router = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    (router, sessions, sup.get(key).get.nodes, key)
+
+  it should "honor preferredNode when no transaction pin overrides" in:
+    val (router, _, nodes, key) = setupMultiNode(3)
+    nodes.size shouldBe 3
+    val target = nodes(1).nodeId
+    val out = router
+      .execute("p-1", "alice", key, "SELECT 1", preferredNode = Some(target))
+      .unsafeRunSync()
+    out match
+      case Right(qr) =>
+        qr.nodeId shouldBe target
+        qr.close()
+      case Left(msg) => fail(s"expected Right, got Left($msg)")
+
+  it should "fall back to load-based pick when preferredNode is not in the snapshot" in:
+    val (router, _, nodes, key) = setupMultiNode(2)
+    val out = router
+      .execute("p-2", "alice", key, "SELECT 1", preferredNode = Some("nonexistent-node-id"))
+      .unsafeRunSync()
+    out match
+      case Right(qr) =>
+        nodes.map(_.nodeId) should contain (qr.nodeId)
+        qr.close()
+      case Left(msg) => fail(s"expected Right, got Left($msg)")
+
+  it should "let the transaction pin override preferredNode" in:
+    val (router, sessions, nodes, key) = setupMultiNode(3)
+    // BEGIN pins to whichever node served it; pick a DIFFERENT node as the preferredNode
+    // to prove the tx pin wins.
+    router.execute("p-3", "alice", key, "BEGIN").unsafeRunSync()
+    val pinned = sessions.get("p-3").flatMap(_.pinnedNodeId).getOrElse(fail("no pin after BEGIN"))
+    val different = nodes.map(_.nodeId).find(_ != pinned).getOrElse(fail("need >1 node"))
+    val out = router
+      .execute("p-3", "alice", key, "INSERT INTO t VALUES (1)", preferredNode = Some(different))
+      .unsafeRunSync()
+    out match
+      case Right(qr) =>
+        qr.nodeId shouldBe pinned
+        qr.close()
+      case Left(msg) => fail(s"expected Right, got Left($msg)")
 
   it should "fall back to metastore.dbName / schemaName for DuckLake kind" in:
     val sup  = freshSupervisorAndBackend()
