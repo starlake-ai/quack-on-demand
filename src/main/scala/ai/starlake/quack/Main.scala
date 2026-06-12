@@ -614,6 +614,12 @@ object Main extends IOApp with LazyLogging:
                   catch case _: Throwable => ()
                   try backend.cleanup().unsafeRunSync()
                   catch case _: Throwable => ()
+                  // Drain the JDBC connection pools. Both close()s are
+                  // idempotent + no-op if already closed.
+                  try store.close()
+                  catch case _: Throwable => ()
+                  try authUserStore.foreach(_.close())
+                  catch case _: Throwable => ()
                 },
                 "qod-shutdown-hook"
               )

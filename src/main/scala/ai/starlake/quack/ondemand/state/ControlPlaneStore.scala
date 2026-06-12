@@ -184,3 +184,9 @@ trait ControlPlaneStore:
     * answer effective_pools / effective_roles without per-request joins.
     */
   def snapshot(): ControlPlaneSnapshot
+
+  /** Release any pooled connections / heap resources. Default impl is a no-op (in-memory stores
+    * hold no I/O resources); [[PostgresControlPlaneStore.close]] drains the Hikari pool. Called
+    * from Main's shutdown hook so JVM exit returns connections cleanly to the broker.
+    */
+  def close(): Unit = ()
