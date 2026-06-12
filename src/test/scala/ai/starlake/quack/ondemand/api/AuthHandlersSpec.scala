@@ -115,7 +115,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val result = h.login(req).unsafeRunSync()
 
     result shouldBe a[Right[?, ?]]
-    val resp = result.toOption.get
+    // login now returns (Set-Cookie, LoginResponse); the cookie part is
+    // exercised in the cookie-specific spec, here we just unpack the body.
+    val (_, resp) = result.toOption.get
     // The session scope is now the source of truth; the response carries
     // tenant=None and surfaces the tenant via manageableTenants.
     resp.tenant            shouldBe None
@@ -139,7 +141,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val h     = makeHandlers(Right(profile), calls)
     val req   = LoginRequest("root", "pass", tenant = None)
 
-    val resp = h.login(req).unsafeRunSync().toOption.get
+    val (_, resp) = h.login(req).unsafeRunSync().toOption.get
 
     calls.head._1     shouldBe AuthScope.System
     resp.superuser    shouldBe true
@@ -181,7 +183,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val calls      = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val hWithStore = makeHandlers(Right(profile), calls, store)
 
-    val result = hWithStore.whoami(token).unsafeRunSync()
+    // whoami now accepts (apiKey, cookie); test exercises the header path.
+    val result = hWithStore.whoami(Some(token), None).unsafeRunSync()
 
     result shouldBe a[Right[?, ?]]
     val resp = result.toOption.get
@@ -229,7 +232,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val h   = oidcHandlers(directory = Map("alice@corp" -> List(UserGrant(None, "admin"))))
     val out = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
     out shouldBe a[Right[?, ?]]
-    val r = out.toOption.get
+    val (_, r) = out.toOption.get
     r.superuser         shouldBe true
     r.manageableTenants shouldBe empty
     r.tenant            shouldBe None
@@ -244,7 +247,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    val r = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
+    val (_, r) = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
     r.superuser              shouldBe false
     r.manageableTenants.toSet shouldBe Set("t-a", "t-b")
   }
@@ -262,7 +265,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       directory = Map("alice@corporate.example" -> List(UserGrant(None, "admin"))),
       profile  = profile
     )
-    val r = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
+    val (_, r) = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
     r.superuser shouldBe true
   }
 

@@ -242,7 +242,7 @@ object Endpoints:
 
   // ----- UI login -----
   // Login also sets the qod_session cookie (HttpOnly, SameSite=Lax) so the
-  // browser auto-attaches the JWT on subsequent /api/* calls without the
+  // browser auto-attaches the JWT on subsequent `/api/...` calls without the
   // UI having to stash a token in localStorage. CLI / static-key callers
   // still get `LoginResponse.token` in the JSON body and can send it via
   // X-API-Key as before.
