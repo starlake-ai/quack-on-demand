@@ -648,9 +648,10 @@ final class PoolSupervisor(
           )
         )
       case Some(td) =>
-        val merged     = effectiveMetastoreFor(td)
-        val kindWire   = td.kind.wireValue
-        val extraBlob  = federationBlobOf(td.id).unsafeRunSync().getOrElse("")
+        val merged   = effectiveMetastoreFor(td)
+        val kindWire = td.kind.wireValue
+        federationBlobOf(td.id).flatMap { blobOpt =>
+        val extraBlob  = blobOpt.getOrElse("")
         val poolEntity = Pool(
           id = newId("p"),
           tenantId = td.tenantId,
@@ -713,6 +714,7 @@ final class PoolSupervisor(
                 )
                 .as(running)
             }
+        }
         }
   }
 

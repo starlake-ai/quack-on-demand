@@ -45,15 +45,15 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [x] **Add HikariCP to `PostgresControlPlaneStore.withConn`** ~~(single biggest perf gain in the codebase).~~ Fixed 2026-06-12: HikariCP pool (size 20, configurable later) on both `PostgresControlPlaneStore` and `UserStore`. `close()` added to `ControlPlaneStore` trait (no-op default) so Main's shutdown hook drains both pools cleanly. Handshake path goes from 5 fresh TCP+TLS+auth handshakes per request to 5 borrow-from-idle.
 
-- [ ] **Fix `unsafeRunSync()` inside `IO.defer`** at `PoolSupervisor.scala:633`. Replace with `flatMap`. Blocks a cats-effect compute-pool thread under load.
+- [x] **Fix `unsafeRunSync()` inside `IO.defer`** at `PoolSupervisor.scala:633`. ~~Blocks a cats-effect compute-pool thread under load.~~ Fixed 2026-06-12: `federationBlobOf(td.id).flatMap { blobOpt => ... }` wraps the rest of the pool-create path properly.
 
-- [ ] **Replace K8s `waitReady` busy-poll** at `runtime/KubernetesQuackBackend.scala:196-203` (`Thread.sleep(500)` inside `IO.blocking`) with `fabric8 pods().withName(...).waitUntilCondition(...)`. 120 unnecessary API calls per 60 s startup → ~zero.
+- [x] **Replace K8s `waitReady` busy-poll** at `runtime/KubernetesQuackBackend.scala:196-203`. ~~`Thread.sleep(500)` inside `IO.blocking` -- 120 unnecessary API calls per 60s startup.~~ Fixed 2026-06-12: now uses `client.pods.withName(...).waitUntilCondition(predicate, timeout, SECONDS)` which sits on a watch instead of polling. Same `readPodReady` predicate so the readiness contract is unchanged.
 
 - [ ] **Cache `EffectiveSet` per `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`** with Caffeine, invalidated on RBAC mutations (`putRole`, `putRolePermission`, `addUserRole`, etc.). Today recomputed for every new FlightSQL connection. PoolSupervisor.scala:1167.
 
-- [ ] **Snapshot maps once in `ManifestImporter.apply`** instead of re-fetching per iteration. N+1 reads at `manifest/ManifestImporter.scala:186, 194, 214, 216, 317, 343, 353, 369-374`. Compounds with the no-pool penalty above. 10–50× speedup expected.
+- [x] **Snapshot maps once in `ManifestImporter.apply`.** ~~N+1 reads compounding with per-call connection cost.~~ Fixed 2026-06-12: a single `store.snapshot()` at the top of `apply` seeds 4 mutable name→entity maps (tenant-dbs/pools/roles/groups), each updated in lock-step with every upsert so downstream loops see the live state. User pool-grant lookup now walks the local maps instead of `listTenantDbs(t).flatMap(d => listPools(d.id))` per grant per user.
 
-- [ ] **Switch `ManifestExporter.build` to `store.snapshot()`** and walk in memory. Same N+1 shape at `manifest/ManifestExporter.scala:37, 111, 130, 134, 137, 170`. `ControlPlaneStore.snapshot()` already exists.
+- [x] **Switch `ManifestExporter.build` to `store.snapshot()`.** ~~Same N+1 shape as the importer.~~ Fixed 2026-06-12: one `snapshot()` call seeds 9 derived indexes (`dbsByTenant`, `poolsByDb`, `rolesByT`, `groupsByT`, `rolePermsByRole`, `rolesByGroup`, `rolesByUser`, `groupsByUser`, `poolPermsByUser`, `usersByTenant`); every per-tenant subquery now reads from those maps. User lookup unions `Some(t.id)` + `Some(t.name)` to handle both production (id-keyed) and legacy fixture (name-keyed) shapes.
 
 - [ ] **Evict + close cached `DuckLakeCatalogReader`** on `deleteTenantDb` and on auth-credential change. `catalog/DuckLakeCatalogReader.scala:174-183` opens a Hikari pool per `apply()`; cached by tenant-db in `Main.scala:286-291` and never evicted. Pool stays open with idle conns forever.
 

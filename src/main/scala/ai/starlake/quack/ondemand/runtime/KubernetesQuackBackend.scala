@@ -230,13 +230,23 @@ final class KubernetesQuackBackend(
   }
 
   private def waitReady(p: Pod): Unit =
-    val deadline = System.currentTimeMillis() + startupTimeoutSec * 1000L
-    var ready    = false
-    while !ready && System.currentTimeMillis() < deadline do
-      val latest = client.pods.inNamespace(namespace).withName(p.getMetadata.getName).get()
-      if latest != null && readPodReady(latest) then ready = true
-      else Thread.sleep(500)
-    if !ready then sys.error(s"pod ${p.getMetadata.getName} not ready in ${startupTimeoutSec}s")
+    // Previously busy-polled every 500ms via Thread.sleep + a fresh GET --
+    // ~120 needless API-server calls per 60s startup timeout. fabric8's
+    // waitUntilCondition uses a watch + readiness predicate, so the call
+    // returns as soon as the predicate flips. The `readPodReady` predicate
+    // is the same one used by `isAlive` so the readiness contract stays
+    // in sync.
+    val name = p.getMetadata.getName
+    try
+      client.pods
+        .inNamespace(namespace)
+        .withName(name)
+        .waitUntilCondition(pod => pod != null && readPodReady(pod),
+                            startupTimeoutSec.toLong,
+                            java.util.concurrent.TimeUnit.SECONDS)
+    catch
+      case _: io.fabric8.kubernetes.client.KubernetesClientTimeoutException =>
+        sys.error(s"pod $name not ready in ${startupTimeoutSec}s")
 
   def stop(nodeId: String): IO[Unit] = IO.blocking {
     // Capture the pod's pool labels before delete -- after the API call
