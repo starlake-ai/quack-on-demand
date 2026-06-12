@@ -250,10 +250,20 @@
 
 /* ---- closing band ---- */
 .closing {
+  /* Re-declare the brand vars here so .ctaPrimary's
+     `background: ... var(--green)` resolves in this scope too -- the .hero
+     scope above is the only other place they're defined. Without this the
+     gradient is invalid and the CTA renders transparent, hiding the dark
+     text against the navy band. */
+  --navy: #0e1b26;
+  --navy-2: #0a141d;
+  --green: #23b26d;
+  --orange: #f97316;
+  --cream: #fafaf7;
   background:
     radial-gradient(700px 300px at 90% 0%, rgba(35, 178, 109, 0.14), transparent 60%),
-    linear-gradient(180deg, #0e1b26 0%, #0a141d 100%);
-  color: #fafaf7;
+    linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%);
+  color: var(--cream);
   padding: 4rem 1.5rem;
 }
 .closingInner {
