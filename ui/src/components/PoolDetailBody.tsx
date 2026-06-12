@@ -146,8 +146,11 @@ export default function PoolDetailBody({
               role-respecting load balancing. Pass the target as
               {' '}<code>?tenant=…&amp;pool=…</code> URL params; the owning
               database is resolved server-side (pool names are unique per
-              tenant). You can also bypass the edge and talk to one specific
-              Quack node - see "Direct node URIs" below.
+              tenant). Superusers swap the {' '}<code>tenant</code> param for
+              {' '}<code>superuser=true</code> alongside {' '}<code>pool=…</code>;
+              the per-statement ACL gate is bypassed and the session can reach
+              any catalog. You can also bypass the edge and talk to one
+              specific Quack node - see "Direct node URIs" below.
             </p>
             <table>
               <tbody>
