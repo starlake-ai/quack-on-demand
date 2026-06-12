@@ -81,17 +81,6 @@ object Endpoints:
       )
       .out(jsonBody[PoolResponse])
 
-  val setRole: PublicEndpoint[
-    (SetRoleRequest, Option[String]),
-    (sttp.model.StatusCode, ErrorResponse),
-    Unit,
-    Any
-  ] =
-    base.post
-      .in("node" / "setRole")
-      .in(jsonBody[SetRoleRequest])
-      .in(header[Option[String]]("X-API-Key"))
-
   val setMaxConcurrent: PublicEndpoint[
     (SetMaxConcurrentRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),

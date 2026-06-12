@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{PoolKey, Role}
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -22,20 +22,6 @@ final class NodeHandlers(
       case None =>
         IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", "no such node"))))
       case Some(_) => f.map(Right(_))
-
-  def setRole(req: SetRoleRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
-  ): Out[Unit] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None =>
-        Role.parse(req.role) match
-          case Left(msg) =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_role", msg))))
-          case Right(_role) =>
-            // Role mutation is metadata-only at runtime (the router reads role from
-            // RunningNode). For v1 we don't restart the node - just acknowledge.
-            withNode(req.tenant, req.tenantDb, req.pool, req.nodeId)(IO.unit)
 
   def setMaxConcurrent(req: SetMaxConcurrentRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

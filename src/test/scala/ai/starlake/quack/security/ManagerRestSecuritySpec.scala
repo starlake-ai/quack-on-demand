@@ -152,7 +152,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
   // C. Login admin gate (AuthHandlers.login)
   // ------------------------------------------------------------------
 
-  "AuthHandlers.login" should "return 200 with token and role admin for root" in {
+  "AuthHandlers.login" should "return 200 with token + superuser=true for root" in {
     val fix  = SecurityFixtures.freshStore()
     val h    = ManagerServerHarness.boot(fix.store, staticApiKey = None)
     try
@@ -162,7 +162,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
         resp.statusCode() shouldBe 200
         val cursor = parse(resp.body()).toOption.get.hcursor
         cursor.get[String]("token").toOption.getOrElse("") should not be empty
-        cursor.get[String]("role").toOption should contain ("admin")
+        cursor.get[Boolean]("superuser").toOption should contain (true)
+        // role intentionally NOT in the response anymore; whoami carries it.
+        cursor.get[String]("role").toOption shouldBe None
       }
     finally h.shutdown()
   }

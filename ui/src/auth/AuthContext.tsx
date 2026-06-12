@@ -73,10 +73,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const r = await api.login({ username: u, password: p, tenant: t?.trim() || undefined });
     session.set(r.token);
     setUsername(r.username);
-    setRole(r.role);
     setTenant(r.tenant ?? null);
     setSuperuser(r.superuser ?? false);
     setManageableTenants(r.manageableTenants ?? []);
+    // /login no longer returns `role` (every minted session is admin by
+    // construction); fetch the descriptive role from /whoami so the badge
+    // reflects what the auth backend recorded (defaults to "admin" if the
+    // call fails so the nav doesn't render a stale label).
+    try {
+      const w = await api.whoami();
+      setRole(w.role);
+    } catch {
+      setRole('admin');
+    }
   }
 
   async function logout() {

@@ -345,7 +345,9 @@ export interface LoginRequest  { username: string; password: string; tenant?: st
 export interface LoginResponse {
   token: string;
   username: string;
-  role: string;
+  // `role` deliberately omitted: every minted session is admin by construction
+  // (the server gates anything else with 403 admin_required), so the field was
+  // a tautology. The descriptive role shown in the UI is sourced from /whoami.
   tenant?: string | null;
   superuser?: boolean;
   manageableTenants?: string[];
