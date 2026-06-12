@@ -27,7 +27,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 ## P0 — known limitations
 
-- [ ] **Cloud secret resolvers** (`Vault`, `Aws`, `Azure`, `Gcp`) are stubs raising `NotImplementedError`. Wired in `Main.scala:194-204`. Either implement, or gate the UI option as "not yet implemented" and refuse on config load.
+- [x] **Cloud secret resolvers** ~~(`Vault`, `Aws`, `Azure`, `Gcp`) are stubs raising `NotImplementedError`.~~ Gated 2026-06-12: `Main.scala` refuses `secretStore = aws-sm/gcp-sm/azure-kv/vault` at config load with a `sys.error` pointing at the working alternatives. `dispatch` mode keeps the stubs wired so postgres+env-only deployments stay up; only sources whose externalRef carries a stub prefix hit the runtime error, and that error now names the secret + the prefix the operator selected + the alternatives (`postgres` / `env:`). UI dropdown options for stub stores are `disabled` with a tooltip + an inline red notice explains they raise at node spawn until the SDK is wired. Coverage in `SecretResolverSpec` (each stub asserts the actionable error message).
 
 ## P1 — performance
 

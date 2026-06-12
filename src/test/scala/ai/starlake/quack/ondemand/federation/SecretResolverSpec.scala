@@ -50,16 +50,30 @@ class SecretResolverSpec extends AnyFlatSpec with Matchers {
     ex.getMessage should include("needs externalRef")
   }
 
-  // Stubs - assert they throw, so we notice if someone half-implements them
-  for ((label, mk) <- Seq(
-    "AwsSecretsManagerResolver"   -> (() => new AwsSecretsManagerResolver()),
-    "GcpSecretsManagerResolver"   -> (() => new GcpSecretsManagerResolver()),
-    "AzureSecretsManagerResolver" -> (() => new AzureSecretsManagerResolver()),
-    "VaultSecretResolver"         -> (() => new VaultSecretResolver())
+  // Stubs - assert they throw, AND that the error message points the operator
+  // at the supported alternatives so the runtime crash is actionable.
+  for ((label, mk, prefix) <- Seq(
+    ("AwsSecretsManagerResolver",   () => new AwsSecretsManagerResolver(),   "aws-sm"),
+    ("GcpSecretsManagerResolver",   () => new GcpSecretsManagerResolver(),   "gcp-sm"),
+    ("AzureSecretsManagerResolver", () => new AzureSecretsManagerResolver(), "azure-kv"),
+    ("VaultSecretResolver",         () => new VaultSecretResolver(),         "vault")
   )) {
     label should "be stubbed until SDK is wired" in {
       val s = FederatedSecret("id", "src", "PWD", None, Some("x:y"))
       a[NotImplementedError] should be thrownBy mk().resolve(s).unsafeRunSync()
+    }
+
+    it should "raise an actionable error naming the prefix + alternatives" in {
+      val s  = FederatedSecret("id", "src", "PWD", None, Some(s"$prefix:something"))
+      val ex = intercept[NotImplementedError] { mk().resolve(s).unsafeRunSync() }
+      // Names the secret so the operator can find the offending row.
+      ex.getMessage should include ("PWD")
+      // Points at the prefix the operator selected (so they see what to
+      // change in their qodstate_federated_secret row).
+      ex.getMessage should include (s"$prefix:")
+      // Tells the operator what to do instead.
+      ex.getMessage should include ("postgres")
+      ex.getMessage should include ("env:")
     }
   }
 }

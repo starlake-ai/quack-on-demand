@@ -182,6 +182,14 @@ object Main extends IOApp with LazyLogging:
     // externalRef prefix -> matching cloud / env / vault resolver). Other
     // values force a single backend; useful only when an operator wants to
     // hard-restrict the manager to one secret store.
+    // `dispatch` keeps the stub resolvers wired so a deployment that only
+    // uses postgres/env secrets still comes up; runtime errors surface
+    // only for secrets that actually carry a stub-backed externalRef
+    // prefix (aws-sm: / gcp-sm: / azure-kv: / vault:). Selecting a stub
+    // directly is refused here because every secret resolved through it
+    // would crash at handshake time -- caller's mistake should fail at
+    // boot, not in production.
+    val UnimplementedSingleBackends = Set("aws-sm", "gcp-sm", "azure-kv", "vault")
     val secretResolver: SecretResolver = mgrCfg.federation.secretStore match {
       case "dispatch" | "auto" =>
         new DispatchingSecretResolver(
@@ -194,11 +202,15 @@ object Main extends IOApp with LazyLogging:
         )
       case "postgres" => new PostgresSecretResolver
       case "env"      => new EnvSecretResolver()
-      case "aws-sm"   => new AwsSecretsManagerResolver
-      case "gcp-sm"   => new GcpSecretsManagerResolver
-      case "azure-kv" => new AzureSecretsManagerResolver
-      case "vault"    => new VaultSecretResolver
-      case other      => sys.error(s"unknown federation.secretStore: '$other'")
+      case s if UnimplementedSingleBackends.contains(s) =>
+        sys.error(
+          s"federation.secretStore = '$s' is not implemented (the resolver is a stub). " +
+            "Set QOD_FEDERATION_SECRET_STORE to 'postgres' (inline secret values), " +
+            "'env' (resolve \\$VARS), or 'dispatch' (route per-secret by externalRef " +
+            s"prefix -- the dispatch mode keeps the $s stub wired; only sources whose " +
+            s"secrets actually carry an '$s:' externalRef will fail at resolve time)."
+        )
+      case other => sys.error(s"unknown federation.secretStore: '$other'")
     }
     logger.info(
       s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}"
