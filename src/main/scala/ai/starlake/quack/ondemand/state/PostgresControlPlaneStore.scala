@@ -13,30 +13,54 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.parser.parse
 import io.circe.syntax._
 import io.circe.Json
 
-import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, Timestamp, Types}
+import java.sql.{Connection, PreparedStatement, ResultSet, Timestamp, Types}
 import java.time.Instant
 import scala.collection.mutable.ListBuffer
 
 /** Postgres-backed [[ControlPlaneStore]] for the normalized schema produced by changelog
   * `0001-normalized-schema.yaml`. Assumes the schema is already in place -- the caller (typically
   * `Main`) runs [[LiquibaseRunner]] first.
+  *
+  * Connections come from a HikariCP pool (size [[poolSize]], default 10). Before this lived behind
+  * a per-call `DriverManager.getConnection` which paid a fresh TCP + TLS + auth handshake on every
+  * read/write -- 5 connections per FlightSQL handshake, 4 per `/user/list`. The pool drops that to
+  * borrow-from-idle. Call [[close]] on shutdown to release the pool's idle connections.
   */
 final class PostgresControlPlaneStore(
     jdbcUrl: String,
     user: String,
-    password: String
+    password: String,
+    poolSize: Int = 20
 ) extends ControlPlaneStore:
 
   Class.forName("org.postgresql.Driver")
 
+  private val dataSource: HikariDataSource =
+    val hc = new HikariConfig()
+    hc.setJdbcUrl(jdbcUrl)
+    hc.setUsername(user)
+    hc.setPassword(password)
+    hc.setMaximumPoolSize(poolSize)
+    hc.setMinimumIdle(math.min(2, poolSize))
+    hc.setConnectionTimeout(5000)
+    hc.setPoolName("qod-control-plane")
+    new HikariDataSource(hc)
+
   private def withConn[A](f: Connection => A): A =
-    val c = DriverManager.getConnection(jdbcUrl, user, password)
+    val c = dataSource.getConnection
     try f(c)
     finally c.close()
+
+  /** Release the pool's idle connections. Idempotent. Should be called from the manager shutdown
+    * hook before JVM exit; outstanding `withConn` callers fail with the standard HikariCP
+    * `pool has been shut down` error.
+    */
+  override def close(): Unit = if !dataSource.isClosed then dataSource.close()
 
   // ---------------- Tenant ----------------
 

@@ -2,8 +2,9 @@ package ai.starlake.quack.ondemand.state
 
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
+import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
-import java.sql.{Connection, DriverManager, Types}
+import java.sql.{Connection, Types}
 
 /** Manages the `qodstate_user` table -- the principal directory used by
   * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] and as the FK target for the RBAC
@@ -30,15 +31,34 @@ import java.sql.{Connection, DriverManager, Types}
   * principals carry a non-empty tenant. The `pool` column from the pre-RBAC schema is gone -- pool
   * access lives in [[PoolPermission]] now.
   */
-final class UserStore(jdbcUrl: String, dbUser: String, dbPassword: String) extends LazyLogging:
+final class UserStore(
+    jdbcUrl: String,
+    dbUser: String,
+    dbPassword: String,
+    poolSize: Int = 10
+) extends LazyLogging:
 
   // Force driver registration for the same reason as PostgresStateStore.
   Class.forName("org.postgresql.Driver")
 
+  private val dataSource: HikariDataSource =
+    val hc = new HikariConfig()
+    hc.setJdbcUrl(jdbcUrl)
+    hc.setUsername(dbUser)
+    hc.setPassword(dbPassword)
+    hc.setMaximumPoolSize(poolSize)
+    hc.setMinimumIdle(math.min(2, poolSize))
+    hc.setConnectionTimeout(5000)
+    hc.setPoolName("qod-user-store")
+    new HikariDataSource(hc)
+
   private def withConn[A](f: Connection => A): A =
-    val c = DriverManager.getConnection(jdbcUrl, dbUser, dbPassword)
+    val c = dataSource.getConnection
     try f(c)
     finally c.close()
+
+  /** Release the pool's idle connections. Idempotent. Called from Main's shutdown hook. */
+  def close(): Unit = if !dataSource.isClosed then dataSource.close()
 
   /** Upsert a user identified by `(tenant, username)`. `tenant = None` is a superuser. Returns the
     * persisted row (with id assigned if the row is new, or reused if it already existed).

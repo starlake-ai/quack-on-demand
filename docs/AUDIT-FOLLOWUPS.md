@@ -43,10 +43,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 ## P1 — performance cheap wins (each <1 day)
 
-- [ ] **Add HikariCP to `PostgresControlPlaneStore.withConn`** (`state/PostgresControlPlaneStore.scala:36-39`). Single biggest perf gain in the codebase. Fixes:
-  - Handshake: 5 fresh JDBC connections per FlightSQL handshake (PoolSupervisor.scala:1121, 1167) → 15–25 ms local, 150–500 ms remote/TLS today.
-  - REST: every list endpoint pays the same per-call connection cost; `listUsers` alone takes 4 conns.
-  - Also wrap `state/UserStore.scala` the same way.
+- [x] **Add HikariCP to `PostgresControlPlaneStore.withConn`** ~~(single biggest perf gain in the codebase).~~ Fixed 2026-06-12: HikariCP pool (size 20, configurable later) on both `PostgresControlPlaneStore` and `UserStore`. `close()` added to `ControlPlaneStore` trait (no-op default) so Main's shutdown hook drains both pools cleanly. Handshake path goes from 5 fresh TCP+TLS+auth handshakes per request to 5 borrow-from-idle.
 
 - [ ] **Fix `unsafeRunSync()` inside `IO.defer`** at `PoolSupervisor.scala:633`. Replace with `flatMap`. Blocks a cats-effect compute-pool thread under load.
 
