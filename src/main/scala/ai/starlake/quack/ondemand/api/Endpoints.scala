@@ -274,12 +274,19 @@ object Endpoints:
     base.get.in("auth" / "whoami").in(header[String]("X-API-Key")).out(jsonBody[WhoamiResponse])
 
   // Recent statement history (newest first), bounded by `limit` (default 50).
-  val statementHistory: PublicEndpoint[Option[
-    Int
-  ], (sttp.model.StatusCode, ErrorResponse), StatementHistoryResponse, Any] =
+  // Tenant-scoped: the handler clamps the response to rows whose tenant is in
+  // the calling session's `manageableTenants` (superuser / static-key / open
+  // mode return the unfiltered window).
+  val statementHistory: PublicEndpoint[
+    (Option[Int], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    StatementHistoryResponse,
+    Any
+  ] =
     base.get
       .in("node" / "statements")
       .in(query[Option[Int]]("limit"))
+      .in(header[Option[String]]("X-API-Key"))
       .out(jsonBody[StatementHistoryResponse])
 
   // ----- Federated sources -----

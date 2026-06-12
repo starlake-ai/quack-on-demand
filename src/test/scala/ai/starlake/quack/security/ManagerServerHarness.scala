@@ -171,6 +171,7 @@ object ManagerServerHarness:
       baseUrl:    String,
       tokens:     SessionTokenStore,
       httpClient: HttpClient,
+      stmtHistory: ai.starlake.quack.edge.StatementHistoryStore,
       shutdown:   () => Unit
   ):
 
@@ -252,8 +253,8 @@ object ManagerServerHarness:
       grantsForIdentity = (_, _) => Nil
     )
 
-    val stmtHistory     = new StatementHistoryStore()
-    val historyHandlers = new StatementHistoryHandlers(stmtHistory)
+    val statementStore  = new StatementHistoryStore()
+    val historyHandlers = new StatementHistoryHandlers(statementStore, sup)
 
     val pools     = new PoolHandlers(sup, tracker)
     val nodes     = new NodeHandlers(sup, tracker, backend)
@@ -333,10 +334,11 @@ object ManagerServerHarness:
       catch case _: Throwable => ()
 
     Harness(
-      baseUrl    = baseUrl,
-      tokens     = sessions,
-      httpClient = httpClient,
-      shutdown   = () => {
+      baseUrl     = baseUrl,
+      tokens      = sessions,
+      httpClient  = httpClient,
+      stmtHistory = statementStore,
+      shutdown    = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which
         // makes the test suite unacceptably slow. We run the release on a

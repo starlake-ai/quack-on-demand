@@ -310,7 +310,7 @@ object Main extends IOApp with LazyLogging:
       grantsForIdentity = grantsForIdentity
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
-    val historyHandlers = new StatementHistoryHandlers(stmtHistory)
+    val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
     val sessions        = new SessionRegistry
     val arrowAllocator  = new org.apache.arrow.memory.RootAllocator()
     val client          = new QuackHttpClient(
