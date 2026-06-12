@@ -132,7 +132,9 @@ final class ManagerServer(
       Endpoints.login.serverLogic(auth.login),
       Endpoints.logout.serverLogic(auth.logout),
       Endpoints.whoami.serverLogic(auth.whoami),
-      Endpoints.statementHistory.serverLogic(statementHistory.recent)
+      Endpoints.statementHistory.serverLogic { case (limit, key) =>
+        statementHistory.recent(limit, key)(sessions.scopeOf)
+      }
     )
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
