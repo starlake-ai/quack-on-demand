@@ -101,10 +101,12 @@ final case class ManagementAuthConfig(
     @field @ConfigField(
       envVar = "QOD_SESSION_COOKIE_SECURE",
       description =
-        "Set the Secure flag on the qod_session cookie. Default true; set to false only for " +
-          "plaintext-HTTP dev deployments."
+        "Whether the qod_session cookie carries the `Secure` flag. Accepts 'auto' (default, " +
+          "derives from the request's X-Forwarded-Proto -- https=Secure, http or absent=not " +
+          "Secure), 'true' (force Secure regardless of request scheme; use behind a TLS " +
+          "ingress that strips X-Forwarded-Proto), or 'false' (force not Secure)."
     )
-    sessionCookieSecure: Boolean,
+    sessionCookieSecure: String,
     @field @ConfigField(
       envVar = "QOD_SESSION_COOKIE_PATH",
       description =

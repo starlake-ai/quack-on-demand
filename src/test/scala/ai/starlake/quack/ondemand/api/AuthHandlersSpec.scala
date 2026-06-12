@@ -80,7 +80,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   private def makeHandlers(
       result: Either[String, AuthenticatedProfile],
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
-      tokens: SessionTokenStore = new SessionTokenStore
+      tokens: SessionTokenStore = new SessionTokenStore,
+      cookieSecureOverride: Option[Boolean] = None
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -93,10 +94,11 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         result
 
     new AuthHandlers(
-      authService       = fakeSvc,
-      tokens            = tokens,
-      identitySource    = ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil // unused in Db mode
+      authService          = fakeSvc,
+      tokens               = tokens,
+      identitySource       = ManagementIdentitySource.Db,
+      grantsForIdentity    = (_, _) => Nil, // unused in Db mode
+      cookieSecureOverride = cookieSecureOverride
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -192,6 +194,106 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     resp.username          shouldBe "alice"
     resp.superuser         shouldBe false
     resp.manageableTenants shouldBe List("t-abc123")
+  }
+
+  it should "return a no_session error when neither header nor cookie carries a token" in {
+    val store      = new SessionTokenStore
+    val calls      = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val handlers   = makeHandlers(Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)), calls, store)
+    val result     = handlers.whoami(None, None).unsafeRunSync()
+    result shouldBe a[Left[?, ?]]
+    val (status, err) = result.swap.toOption.get
+    status     shouldBe StatusCode.Unauthorized
+    err.error  shouldBe "no_session"
+  }
+
+  it should "return an invalid error when the token is malformed" in {
+    val store    = new SessionTokenStore
+    val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val handlers = makeHandlers(Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)), calls, store)
+    val result   = handlers.whoami(Some("definitely-not-a-jwt"), None).unsafeRunSync()
+    val (status, err) = result.swap.toOption.get
+    status     shouldBe StatusCode.Unauthorized
+    err.error  shouldBe "invalid"
+  }
+
+  it should "return an invalid error when the token's signature does not verify" in {
+    // Token minted by a DIFFERENT secret -- the most common real-world cause of confusion,
+    // which used to surface as "expired" and mislead operators.
+    val foreign = new SessionTokenStore(secret = "stranger-secret-padding-padding-padding-padding=")
+    val token   = foreign.mintWithScope(
+      AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None),
+      SessionScope(superuser = true, manageableTenants = Set.empty)
+    )
+    val store    = new SessionTokenStore
+    val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val handlers = makeHandlers(Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)), calls, store)
+    val result   = handlers.whoami(Some(token), None).unsafeRunSync()
+    result.swap.toOption.get._2.error shouldBe "invalid"
+  }
+
+  it should "return a revoked error when the jti is on the denylist" in {
+    val store   = new SessionTokenStore
+    val profile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)
+    val token   = store.mintWithScope(profile, SessionScope(superuser = true, manageableTenants = Set.empty))
+    store.revoke(token)
+    val calls    = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val handlers = makeHandlers(Right(profile), calls, store)
+    val result   = handlers.whoami(Some(token), None).unsafeRunSync()
+    result.swap.toOption.get._2.error shouldBe "revoked"
+  }
+
+  // ----- cookie Secure auto-derive from request scheme -----
+  //
+  // Default behaviour (no operator override): pick `secure=true` only when the request actually
+  // arrived over HTTPS, as evidenced by the `X-Forwarded-Proto` header injected by a TLS-terminating
+  // ingress. Plaintext HTTP requests (no header, or `http`) get `secure=false` so the browser
+  // doesn't silently drop the Set-Cookie. This makes `run-jar.sh` on HTTP and helm behind a TLS
+  // ingress both Just Work without an env var.
+
+  private val testProfile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", None)
+  private val testReq     = LoginRequest("alice", "secret", tenant = None)
+
+  "login cookie Secure flag" should "derive secure=true from X-Forwarded-Proto: https when no override is set" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = None)
+    val (cookie, _) = h.login(testReq, forwardedProto = Some("https")).unsafeRunSync().toOption.get
+    cookie.secure shouldBe true
+  }
+
+  it should "derive secure=false from X-Forwarded-Proto: http when no override is set" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = None)
+    val (cookie, _) = h.login(testReq, forwardedProto = Some("http")).unsafeRunSync().toOption.get
+    cookie.secure shouldBe false
+  }
+
+  it should "default secure=false when no override AND no X-Forwarded-Proto (run-jar.sh on http://localhost)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = None)
+    val (cookie, _) = h.login(testReq, forwardedProto = None).unsafeRunSync().toOption.get
+    cookie.secure shouldBe false
+  }
+
+  it should "honor Some(true) override regardless of the request scheme" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = Some(true))
+    val (cookie, _) = h.login(testReq, forwardedProto = Some("http")).unsafeRunSync().toOption.get
+    cookie.secure shouldBe true
+  }
+
+  it should "honor Some(false) override even when the request was https" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = Some(false))
+    val (cookie, _) = h.login(testReq, forwardedProto = Some("https")).unsafeRunSync().toOption.get
+    cookie.secure shouldBe false
+  }
+
+  it should "match scheme case-insensitively (HTTPS / Https / https all imply secure)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(testProfile), calls, cookieSecureOverride = None)
+    val (cookie, _) = h.login(testReq, forwardedProto = Some("HTTPS")).unsafeRunSync().toOption.get
+    cookie.secure shouldBe true
   }
 
   // ----- OIDC management identity source -----

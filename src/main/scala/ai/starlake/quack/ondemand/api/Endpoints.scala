@@ -246,8 +246,14 @@ object Endpoints:
   // UI having to stash a token in localStorage. CLI / static-key callers
   // still get `LoginResponse.token` in the JSON body and can send it via
   // X-API-Key as before.
+  //
+  // `X-Forwarded-Proto` (injected by any TLS-terminating ingress) feeds the
+  // handler's auto-derive for the cookie's `Secure` flag: present + `https`
+  // -> Secure cookie; absent or `http` -> non-Secure (so plaintext local-jar
+  // runs don't silently drop the Set-Cookie). The operator can still force
+  // either value via `QOD_SESSION_COOKIE_SECURE`.
   val login: PublicEndpoint[
-    LoginRequest,
+    (LoginRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     (sttp.model.headers.CookieValueWithMeta, LoginResponse),
     Any
@@ -255,15 +261,19 @@ object Endpoints:
     base.post
       .in("auth" / "login")
       .in(jsonBody[LoginRequest])
+      .in(header[Option[String]]("X-Forwarded-Proto"))
       .out(setCookie(SessionTokenStore.CookieName))
       .out(jsonBody[LoginResponse])
 
   // Logout accepts the token via cookie OR header so the browser path works
   // even though JS can't read the HttpOnly cookie. The response always
   // clears the cookie (Max-Age=0); the handler also adds the jti to the
-  // denylist while the manager process stays up.
+  // denylist while the manager process stays up. Same `X-Forwarded-Proto`
+  // gate as `login` so the clear-cookie response carries the same `Secure`
+  // attribute the browser saw at set time (mismatched attributes prevent
+  // the clear from landing on some browsers).
   val logout: PublicEndpoint[
-    (Option[String], Option[String]),
+    (Option[String], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     sttp.model.headers.CookieValueWithMeta,
     Any
@@ -272,6 +282,7 @@ object Endpoints:
       .in("auth" / "logout")
       .in(header[Option[String]]("X-API-Key"))
       .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
       .out(setCookie(SessionTokenStore.CookieName))
 
   val whoami: PublicEndpoint[
