@@ -248,14 +248,26 @@ if [[ -n "$LOAD_TPC" ]]; then
       -l "app=postgres" \
       -o jsonpath='{.items[0].metadata.name}')
 
-    # Pre-create both tenant databases (idempotent).
+    # Pre-create both tenant databases (idempotent). The manager's
+    # bootstrap pre-init (PostgresDbAdmin.createDatabase) also creates
+    # these on demand at boot, so this loop is belt-and-suspenders for
+    # cases where the loader runs against a freshly-rolled manager whose
+    # bootstrap hasn't reached the create-database step yet.
+    # Shell-level idempotency: query first, then CREATE only if absent.
+    # `\gexec` (the original idiom) is a psql meta-command processed by
+    # the interactive parser, NOT by the server -- passing it through
+    # `psql -c` makes the `\` part of the SQL and yields a syntax error.
     echo "[5/5] pre-creating acme_tpch and globex_tpcds databases in Postgres..."
-    kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
-      psql -U postgres -c \
-        "SELECT 'CREATE DATABASE acme_tpch' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='acme_tpch')\gexec"
-    kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
-      psql -U postgres -c \
-        "SELECT 'CREATE DATABASE globex_tpcds' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='globex_tpcds')\gexec"
+    for db in acme_tpch globex_tpcds; do
+      exists=$(kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
+        psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'" | tr -d '[:space:]')
+      if [[ -z "$exists" ]]; then
+        kubectl -n "$NAMESPACE" exec "$PG_POD" -- \
+          psql -U postgres -c "CREATE DATABASE $db"
+      else
+        echo "  $db already exists, skipping"
+      fi
+    done
 
     # --- TPC-H loader: acme_tpch.tpch1 ---
     echo "[5/5] running TPC-H loader (acme_tpch.tpch1, SF=$LOAD_TPC)..."
