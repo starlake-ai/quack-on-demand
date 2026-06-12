@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { ClientConfigResponse, PoolResponse } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 import Tabs from './Tabs';
 
 /** Header (title + Back / Scale / Delete pool actions) + the four-tab
@@ -18,8 +19,6 @@ export default function PoolDetailBody({
   tenant:    string;
   tenantDb:  string;
   pool:      string;
-  /** Reserved for callers that still navigate on stop; the detail view
-    * no longer renders a Stop/Drain button so it's never invoked here. */
   onStopped?: () => void;
   /** Custom Back-button handler. When provided, the header renders a
     * "Back to pools" button that calls this (used by PoolSection to
@@ -28,6 +27,8 @@ export default function PoolDetailBody({
     * `/pool/...` route). */
   onBack?:   () => void;
 }) {
+
+  const { superuser: isSuperuser } = useAuth();
   const [data, setData] = useState<PoolResponse | null>(null);
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,31 +115,42 @@ export default function PoolDetailBody({
       {!cfg ? (
         <p className="subtle">Loading client config…</p>
       ) : (() => {
+        // System-realm users (qodstate_user.tenant IS NULL) must additionally
+        // pass `superuser=true` on every FlightSQL connection. The flag picks
+        // the realm; the tenant and pool params still drive query routing.
+        // When the operator viewing this page is a superuser themselves, the
+        // recipes below pre-fill superuser=true so the copy/paste URL works.
         const host = effectiveHost(cfg.flightSqlHost);
         const port = cfg.flightSqlPort;
         const scheme = 'arrow-flight-sql';
         const tlsQuery = cfg.flightSqlTls
           ? 'useEncryption=true&disableCertificateVerification=true'
           : 'useEncryption=false';
+        const superuserQuery = isSuperuser ? '&superuser=true' : '';
         const jdbc =
           `jdbc:${scheme}://${host}:${port}?${tlsQuery}` +
           `&tenant=${encodeURIComponent(tenant)}` +
           `&pool=${encodeURIComponent(pool)}` +
+          superuserQuery +
           `&user=<user>&password=<password>`;
         const adbcScheme = cfg.flightSqlTls ? 'grpc+tls' : 'grpc';
         const adbcUri = `${adbcScheme}://${host}:${port}`;
+        const odbcSuperuser = isSuperuser ? ';superuser=true' : '';
         const odbc =
           `Driver={Arrow Flight SQL ODBC Driver};Host=${host};Port=${port}` +
           `;UseEncryption=${cfg.flightSqlTls ? '1' : '0'}` +
-          `;tenant=${tenant};pool=${pool};UID=<user>;PWD=<password>`;
+          `;tenant=${tenant};pool=${pool}${odbcSuperuser};UID=<user>;PWD=<password>`;
         const tlsKwarg = cfg.flightSqlTls
           ? `, "adbc.flight.sql.client_option.tls_skip_verify": "true"`
+          : '';
+        const adbcSuperuserKwarg = isSuperuser
+          ? `, "adbc.flight.sql.rpc.call_header.superuser": "true"`
           : '';
         const adbcSnippet =
           `adbc_driver_flightsql.connect(uri="${adbcUri}", db_kwargs={` +
           `"username": "<user>", "password": "<password>", ` +
           `"adbc.flight.sql.rpc.call_header.tenant": "${tenant}", ` +
-          `"adbc.flight.sql.rpc.call_header.pool": "${pool}"${tlsKwarg}})`;
+          `"adbc.flight.sql.rpc.call_header.pool": "${pool}"${adbcSuperuserKwarg}${tlsKwarg}})`;
         return (
           <>
             <p style={{ color: '#888', marginTop: 0 }}>
@@ -146,11 +158,14 @@ export default function PoolDetailBody({
               role-respecting load balancing. Pass the target as
               {' '}<code>?tenant=…&amp;pool=…</code> URL params; the owning
               database is resolved server-side (pool names are unique per
-              tenant). Superusers swap the {' '}<code>tenant</code> param for
-              {' '}<code>superuser=true</code> alongside {' '}<code>pool=…</code>;
-              the per-statement ACL gate is bypassed and the session can reach
-              any catalog. You can also bypass the edge and talk to one
-              specific Quack node - see "Direct node URIs" below.
+              tenant). System-realm superusers add
+              {' '}<code>&amp;superuser=true</code> alongside {' '}<code>tenant</code>
+              {' '}and {' '}<code>pool</code> (the tenant/pool params still
+              drive query routing; the flag only picks which realm validates
+              the credential and bypasses the per-statement ACL gate). The
+              recipes below pre-fill the flag when the operator viewing this
+              page is a superuser. You can also bypass the edge and talk to
+              one specific Quack node - see "Direct node URIs" below.
             </p>
             <table>
               <tbody>

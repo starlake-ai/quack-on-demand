@@ -7,8 +7,9 @@ import cats.effect.{IO, Resource}
 import cats.implicits._
 import com.comcast.ip4s.{Host, Port}
 import com.typesafe.scalalogging.LazyLogging
-import org.http4s.{HttpRoutes, Response, StaticFile, Status}
+import org.http4s.{HttpRoutes, Method, Response, StaticFile, Status, Uri}
 import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.headers.Location
 import org.http4s.server.{staticcontent, Router}
 import org.typelevel.ci.CIString
 import sttp.tapir.server.ServerEndpoint
@@ -276,9 +277,20 @@ final class ManagerServer(
     }
     val uiRoutes = Router("/ui" -> (uiAssets <+> spaFallback))
 
+    // Redirect the bare root (`/`) to `/ui/` so visiting the manager host
+    // lands on the admin UI instead of a 404. The React SPA itself lives
+    // under basename="/ui" (see ui/src/App.tsx).
+    val rootRedirect: HttpRoutes[IO] = HttpRoutes.of[IO] {
+      case req if req.method == Method.GET && req.uri.path == Uri.Path.Root =>
+        IO.pure(
+          Response[IO](Status.Found)
+            .putHeaders(Location(Uri.unsafeFromString("/ui/")))
+        )
+    }
+
     EmberServerBuilder
       .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
-      .withHttpApp((apiKeyGuard(apiRoutes) <+> uiRoutes).orNotFound)
+      .withHttpApp((apiKeyGuard(apiRoutes) <+> uiRoutes <+> rootRedirect).orNotFound)
       .build
