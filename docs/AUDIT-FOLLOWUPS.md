@@ -17,7 +17,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [x] **`NodeHandlers.setRole` silently no-ops.** ~~Endpoint is registered, parses input, returns 204 without persisting.~~ Removed 2026-06-12: per-user decision (option 1) — the endpoint, handler, DTO + codec, and ManagerServer binding all dropped. `PoolSupervisor.scale` is the right primitive for rebalancing a pool's role distribution.
 
-- [ ] **`NodeHandlers.restartNode` does not restart.** Only stops the node (`api/NodeHandlers.scala:80-91`). Rename to `stopNode` or finish the restart loop.
+- [x] **`NodeHandlers.restartNode` does not restart.** ~~Only stops the node.~~ Removed 2026-06-12: same pattern as `setRole` — endpoint, handler, ManagerServer binding all dropped; `NodeHandlers` lost the `backend` constructor param it only needed for this method. `quarantineNode` covers the "drain without killing" use case; `scale` covers the "respawn" use case. A scheduled reconcile (P2) would be the way to make a future `restart` actually restart.
 
 - [x] **`LoginResponse.role` hardcodes `"admin"`** ~~while `WhoamiResponse.role` reflects the actual profile.~~ Fixed 2026-06-12 (folded into the setRole removal commit): dropped `role` from `LoginResponse` case class + hand-rolled codec + `AuthHandlers.login`; matching TS type + `AuthContext.login` updated to fetch role from `/whoami` after a successful login. `WhoamiResponse.role` remains the single source of truth for the descriptive label.
 

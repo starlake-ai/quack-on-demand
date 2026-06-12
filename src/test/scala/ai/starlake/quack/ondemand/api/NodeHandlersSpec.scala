@@ -39,7 +39,7 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.createPool(PoolKey("acme", "acme_default", "sales"),
                    RoleDistribution(0, 1, 1)).unsafeRunSync()
-    (sup, tracker, new NodeHandlers(sup, tracker, backend))
+    (sup, tracker, new NodeHandlers(sup, tracker))
 
   "quarantineNode" should "mark the node unhealthy" in:
     val (sup, tracker, h) = fixture

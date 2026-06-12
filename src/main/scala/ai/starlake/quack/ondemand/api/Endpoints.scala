@@ -103,17 +103,6 @@ object Endpoints:
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
-  val restartNode: PublicEndpoint[
-    (NodeOpRequest, Option[String]),
-    (sttp.model.StatusCode, ErrorResponse),
-    Unit,
-    Any
-  ] =
-    base.post
-      .in("node" / "restart")
-      .in(jsonBody[NodeOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-
   val health: PublicEndpoint[Unit, Unit, HealthResponse, Any] =
     endpoint.get.in("health").out(jsonBody[HealthResponse])
 
