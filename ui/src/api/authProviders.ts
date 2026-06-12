@@ -13,34 +13,50 @@ export interface ProviderField {
   optional?:   boolean;
 }
 
+// Per-tenant OIDC overrides are all-or-nothing: TenantOidcRegistry only
+// builds a per-tenant authenticator when EVERY required field is present;
+// otherwise it falls back to the global `quack-flightsql.auth.<provider>.*`
+// config from application.conf. So we mark every per-tenant OIDC field as
+// `optional` (a blank form is valid -- means "use the global client") and
+// rely on the operator filling out the whole group when they intend to
+// override. Field names match the keys the registry reads from
+// `qodstate_tenant.authConfig` (see
+// src/main/scala/ai/starlake/quack/edge/auth/TenantOidcRegistry.scala).
 export const PROVIDER_FIELDS: Record<AuthProvider, ProviderField[]> = {
   db: [],
   keycloak: [
-    { key: 'issuer', label: 'Issuer URL',
-      placeholder: 'https://keycloak.example.com/realms/<realm>' },
-    { key: 'realm',  label: 'Realm name',     placeholder: 'tpch' },
+    { key: 'baseUrl',         label: 'Base URL (optional)',
+      placeholder: 'https://keycloak.example.com', optional: true },
+    { key: 'realm',           label: 'Realm (optional)',
+      placeholder: '<realm>', optional: true },
+    { key: 'clientId',        label: 'Client ID (optional)',
+      placeholder: '<client-id>', optional: true },
+    { key: 'clientSecretRef', label: 'Client secret ref (optional)',
+      placeholder: 'env:KC_CS_<tenant>', optional: true },
   ],
   google: [
-    { key: 'issuer', label: 'Issuer URL',       placeholder: 'accounts.google.com' },
-    { key: 'hd',     label: 'Workspace domain', placeholder: 'example.com' },
-    // Optional per-tenant OAuth client. Leaving both blank falls back to
-    // `quack-flightsql.auth.google` from application.conf -- so existing
-    // tenants keep working without any UI change. Setting BOTH overrides
-    // the global client for this tenant.
     { key: 'clientId',        label: 'OAuth client ID (optional)',
       placeholder: '<your-tenant>.apps.googleusercontent.com', optional: true },
     { key: 'clientSecretRef', label: 'OAuth client secret ref (optional)',
       placeholder: 'env:GOOGLE_CS_<tenant>', optional: true },
   ],
   azure: [
-    { key: 'issuer',   label: 'Issuer URL',
-      placeholder: 'https://login.microsoftonline.com/<tenant-id>/v2.0' },
-    { key: 'tenantId', label: 'AD tenant id',   placeholder: '<directory-id>' },
+    { key: 'tenantId',        label: 'AD tenant ID (optional)',
+      placeholder: '<directory-id>', optional: true },
+    { key: 'clientId',        label: 'Client ID (optional)',
+      placeholder: '<app-registration-id>', optional: true },
+    { key: 'clientSecretRef', label: 'Client secret ref (optional)',
+      placeholder: 'env:AZURE_CS_<tenant>', optional: true },
   ],
   aws: [
-    { key: 'issuer',     label: 'Issuer URL',
-      placeholder: 'https://cognito-idp.<region>.amazonaws.com/<userpool>' },
-    { key: 'userPoolId', label: 'User pool id', placeholder: '<userpool-id>' },
+    // AWS Cognito JWT validation only needs the JWKS URL (region +
+    // userPoolId) and the app client id; no client secret is required.
+    { key: 'region',     label: 'AWS region (optional)',
+      placeholder: 'eu-west-1', optional: true },
+    { key: 'userPoolId', label: 'User pool ID (optional)',
+      placeholder: '<userpool-id>', optional: true },
+    { key: 'clientId',   label: 'App client ID (optional)',
+      placeholder: '<app-client-id>', optional: true },
   ],
 };
 
