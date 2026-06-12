@@ -13,11 +13,15 @@ import cats.effect.IO
 /** Carries a streaming result back through the router. The caller MUST invoke `close()` once all
   * batches have been consumed. `nodeId` is the Quack node that produced the stream, exposed so the
   * Flight producer can soft-pin a prepared statement's later Execute back to the same node.
+  * `durationMs` is the wall-clock latency the adapter measured on the node call; the Flight
+  * producer captures it during the Prepare-time probe and threads it onto the matching Execute
+  * record as `prepareDurationMs` so the UI can render "57 ms / prep 28 ms" on a single row.
   */
 final case class QueryResult(
     rows: org.apache.arrow.vector.ipc.ArrowReader,
     close: () => Unit,
-    nodeId: String
+    nodeId: String,
+    durationMs: Long
 )
 
 /** Routing core extracted from the Arrow Flight surface so it can be unit-tested. The Flight
@@ -41,7 +45,8 @@ final class FlightSqlRouter(
       sql: String,
       durationMs: Long,
       status: String,
-      error: Option[String]
+      error: Option[String],
+      prepareDurationMs: Option[Long] = None
   ): Unit =
     history.record(
       StatementRecord(
@@ -53,7 +58,8 @@ final class FlightSqlRouter(
         sql = sql,
         durationMs = durationMs,
         status = status,
-        error = error
+        error = error,
+        prepareDurationMs = prepareDurationMs
       )
     )
     stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
@@ -73,6 +79,14 @@ final class FlightSqlRouter(
     * still overrides. When the preferred node has disappeared, fall back to the load-aware pick.
     * Used by the FlightSQL prepared-statement path to keep Prepare + Execute on the same Quack
     * process so DuckDB-side caches stay warm across the two halves of one client `execute()`.
+    *
+    * `recordExecution=false` suppresses the in-memory history + metrics emission for this call.
+    * The FlightSQL Prepare-time LIMIT-0 probe uses this so the UI shows ONE history row per
+    * user-visible query instead of two; the probe's duration is then attached to the matching
+    * Execute record via [[prepareDurationMs]] so operators can still see it.
+    *
+    * `prepareDurationMs` is folded into the resulting [[StatementRecord]] so the UI can render
+    * it as subtext under the Execute duration ("57 ms / prep 28 ms").
     */
   def execute(
       connectionId: String,
@@ -80,7 +94,9 @@ final class FlightSqlRouter(
       poolKey: PoolKey,
       sql: String,
       effectiveSet: Option[EffectiveSet] = None,
-      preferredNode: Option[String] = None
+      preferredNode: Option[String] = None,
+      recordExecution: Boolean = true,
+      prepareDurationMs: Option[Long] = None
   ): IO[Either[String, QueryResult]] =
     val s    = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
     val kind = classifier.classify(sql)
@@ -112,31 +128,26 @@ final class FlightSqlRouter(
       defaultSchema = maybeState.flatMap(_.defaultSchema).orElse(perKindSchema),
       effectiveSet = effectiveSet
     )
+    // No-op variant when the caller is the Prepare-time probe -- we don't want the LIMIT-0
+    // wrapper to clutter the operator's history view or skew the per-pool metrics.
+    def maybeRecord(
+        nodeId: String,
+        durationMs: Long,
+        status: String,
+        error: Option[String],
+        prepMs: Option[Long] = prepareDurationMs
+    ): Unit =
+      if recordExecution then record(user, poolKey, nodeId, sql, durationMs, status, error, prepMs)
+
     validator.validate(ctx) match
       case Denied(reason) =>
-        record(
-          user,
-          poolKey,
-          nodeId = "-",
-          sql = sql,
-          durationMs = 0,
-          status = "denied",
-          error = Some(reason)
-        )
+        maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
         return IO.pure(Left(s"access denied: $reason"))
       case Allowed => () // fall through
     supervisor.snapshot(poolKey) match
       case None =>
         if s.txOpen then sessions.invalidatePin(connectionId)
-        record(
-          user,
-          poolKey,
-          nodeId = "-",
-          sql = sql,
-          durationMs = 0,
-          status = "no-pool",
-          error = None
-        )
+        maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
         IO.pure(Left(s"pool not found: $poolKey"))
       case Some(snap) =>
         // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
@@ -150,28 +161,12 @@ final class FlightSqlRouter(
         val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
-            record(
-              user,
-              poolKey,
-              nodeId = "-",
-              sql = sql,
-              durationMs = 0,
-              status = "no-node",
-              error = Some(reason)
-            )
+            maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
             IO.pure(Left(reason))
 
           case RoutingDecision.PinnedNodeGone(_) =>
             sessions.invalidatePin(connectionId)
-            record(
-              user,
-              poolKey,
-              nodeId = "-",
-              sql = sql,
-              durationMs = 0,
-              status = "pin-lost",
-              error = None
-            )
+            maybeRecord(nodeId = "-", durationMs = 0, status = "pin-lost", error = None)
             IO.pure(Left("pinned node disappeared; transaction lost"))
 
           case RoutingDecision.Use(nodeId) =>
@@ -182,18 +177,18 @@ final class FlightSqlRouter(
                 adapter.send(node, wrappedSql, session = None).flatMap {
                   case QuackResponse.Ok(reader, latency, close) =>
                     sessions.onStatement(connectionId, kind, nodeId)
-                    record(user, poolKey, nodeId, sql, latency, "ok", None)
-                    IO.pure(Right(QueryResult(reader, close, nodeId)))
+                    maybeRecord(nodeId, latency, "ok", None)
+                    IO.pure(Right(QueryResult(reader, close, nodeId, latency)))
 
                   case QuackResponse.Failed(QuackError.Transient(m), latency) =>
-                    record(user, poolKey, nodeId, sql, latency, "transient", Some(m))
+                    maybeRecord(nodeId, latency, "transient", Some(m))
                     if s.txOpen then
                       sessions.invalidatePin(connectionId)
                       IO.pure(Left(s"transient failure inside transaction: $m"))
                     else retryOnce(connectionId, poolKey, kind, sql, exclude = nodeId)
 
                   case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
-                    record(user, poolKey, nodeId, sql, latency, "permanent", Some(m))
+                    maybeRecord(nodeId, latency, "permanent", Some(m))
                     IO.pure(Left(s"permanent failure: $m"))
                 }
 
@@ -246,14 +241,14 @@ final class FlightSqlRouter(
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
                 adapter.send(n, wrapped, None).map {
-                  case QuackResponse.Ok(reader, _, close) =>
+                  case QuackResponse.Ok(reader, latency, close) =>
                     // Pin the session on the retry node so a follow-up
                     // COMMIT/ROLLBACK lands on the same Quack instance.
                     // Without this, a BEGIN that retried onto node B
                     // would have its COMMIT routed by load and likely
                     // hit node A - breaking transaction consistency.
                     sessions.onStatement(connectionId, kind, nodeId)
-                    Right(QueryResult(reader, close, nodeId))
+                    Right(QueryResult(reader, close, nodeId, latency))
                   case QuackResponse.Failed(QuackError.Transient(m), _) =>
                     Left(s"retry failed (transient): $m")
                   case QuackResponse.Failed(QuackError.Permanent(m), _) =>

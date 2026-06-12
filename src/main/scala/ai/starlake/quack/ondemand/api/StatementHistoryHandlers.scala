@@ -65,5 +65,6 @@ final class StatementHistoryHandlers(
       sql = r.sql,
       durationMs = r.durationMs,
       status = r.status,
-      error = r.error
+      error = r.error,
+      prepareDurationMs = r.prepareDurationMs
     )

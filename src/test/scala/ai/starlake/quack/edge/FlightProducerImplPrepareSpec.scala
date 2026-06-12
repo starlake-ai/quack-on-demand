@@ -24,8 +24,9 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
   private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
 
   /** Build a real FlightSqlRouter + FlightProducerImpl backed by a stubbed QuackHttpClient that
-    * records every (sql, nodeId) pair sent. Returns the producer, the recording buffer, and the
-    * fixed peer string the test will use as `peerIdentity`. */
+    * records every (sql, nodeId) pair sent. Returns the producer, the recording buffer, the
+    * underlying router (so tests can inspect the history store), and the fixed peer string the
+    * test will use as `peerIdentity`. */
   private def setupProducer() =
     val backend = new QuackBackend:
       private val n = TrieMap.empty[String, RunningNode]
@@ -63,7 +64,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
 
     val peer = s"peer-${java.util.UUID.randomUUID()}"
     ConnectionContext.bind(peer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "alice")
-    (producer, sent, peer)
+    (producer, sent, router, peer)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:
     def get(k: String): String                                            = null
@@ -110,14 +111,14 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
 
   "FlightProducerImpl.createPreparedStatement" should
     "skip the node call entirely for an INSERT (fixes today's double-INSERT hazard)" in:
-      val (producer, sent, peer) = setupProducer()
+      val (producer, sent, _, peer) = setupProducer()
       val listener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
       listener.onErrorRef.get() shouldBe null
       listener.completed shouldBe true
       sent shouldBe empty
 
   it should "send a wrapped LIMIT-0 probe (not the original SELECT) so Prepare is cheap" in:
-    val (producer, sent, peer) = setupProducer()
+    val (producer, sent, _, peer) = setupProducer()
     val listener = runPrepare(producer, peer, "SELECT a FROM t")
     listener.onErrorRef.get() shouldBe null
     sent.size shouldBe 1
@@ -127,13 +128,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     core shouldBe "SELECT * FROM (SELECT a FROM t) AS _qod_probe LIMIT 0"
 
   it should "return a non-empty dataset_schema for SELECT (clients dispatch as query)" in:
-    val (producer, _, peer) = setupProducer()
+    val (producer, _, _, peer) = setupProducer()
     val listener = runPrepare(producer, peer, "SELECT a FROM t")
     val result   = decodePrepareResult(listener.onNextValue.get())
     result.getDatasetSchema.size() should be > 0
 
   it should "return an EMPTY dataset_schema for INSERT (clients dispatch as update)" in:
-    val (producer, _, peer) = setupProducer()
+    val (producer, _, _, peer) = setupProducer()
     val listener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
     val result   = decodePrepareResult(listener.onNextValue.get())
     // An empty Arrow schema still serializes to some IPC bytes (the framing); the test that the
@@ -145,3 +146,51 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       )
     )
     schema.getFields.size() shouldBe 0
+
+  // ---- Prepare + Execute merge into a single history row ----
+
+  /** Walk through the FlightSQL Prepare action + the subsequent Execute, and return whatever
+    * the router's history store recorded across both halves. */
+  private def runPrepareThenExecute(producer: FlightProducerImpl, peer: String, sql: String): Unit =
+    val prepListener = runPrepare(producer, peer, sql)
+    val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
+    val handle       = prepResult.getPreparedStatementHandle.toStringUtf8
+    val command      = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(com.google.protobuf.ByteString.copyFromUtf8(handle))
+      .build()
+    val execListener = new org.apache.arrow.flight.FlightProducer.ServerStreamListener:
+      // Only the abstract methods need implementations; the Java defaults cover the rest.
+      def isCancelled(): Boolean                                                       = false
+      def isReady(): Boolean                                                            = true
+      def setOnCancelHandler(h: Runnable): Unit                                        = ()
+      def start(
+          root: org.apache.arrow.vector.VectorSchemaRoot,
+          provider: org.apache.arrow.vector.dictionary.DictionaryProvider,
+          options: org.apache.arrow.vector.ipc.message.IpcOption
+      ): Unit = ()
+      def putNext(): Unit                                                              = ()
+      def putNext(metadata: org.apache.arrow.memory.ArrowBuf): Unit                    = ()
+      def putMetadata(metadata: org.apache.arrow.memory.ArrowBuf): Unit                = ()
+      def error(throwable: Throwable): Unit                                            = ()
+      def completed(): Unit                                                            = ()
+    producer.getStreamPreparedStatement(command, fakeCallContext(peer), execListener)
+
+  it should "record ONE history row per SELECT (Prepare suppressed) with prepareDurationMs set" in:
+    val (producer, _, router, peer) = setupProducer()
+    val historyBefore = router.history.size
+    runPrepareThenExecute(producer, peer, "SELECT a FROM t")
+    val added = router.history.snapshot(8).take(router.history.size - historyBefore)
+    added.size shouldBe 1
+    added.head.prepareDurationMs shouldBe defined
+    // The original SELECT (not the wrapped probe) is what the operator sees.
+    added.head.sql shouldBe "SELECT a FROM t"
+
+  it should "record ONE history row per INSERT with prepareDurationMs absent (Prepare skipped)" in:
+    val (producer, _, router, peer) = setupProducer()
+    val historyBefore = router.history.size
+    runPrepareThenExecute(producer, peer, "INSERT INTO t VALUES (1)")
+    val added = router.history.snapshot(8).take(router.history.size - historyBefore)
+    added.size shouldBe 1
+    added.head.prepareDurationMs shouldBe None
+    added.head.sql shouldBe "INSERT INTO t VALUES (1)"

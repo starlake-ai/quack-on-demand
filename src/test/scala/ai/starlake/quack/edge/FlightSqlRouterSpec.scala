@@ -282,6 +282,22 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         qr.close()
       case Left(msg) => fail(s"expected Right, got Left($msg)")
 
+  it should "skip history recording when recordExecution=false (Prepare-time probe)" in:
+    val (router, _, _, key) = setupMultiNode(1)
+    val historyBefore = router.history.size
+    router
+      .execute("rec-1", "alice", key, "SELECT 1", recordExecution = false)
+      .unsafeRunSync()
+    router.history.size shouldBe historyBefore
+
+  it should "attach prepareDurationMs to the recorded StatementRecord when supplied" in:
+    val (router, _, _, key) = setupMultiNode(1)
+    router
+      .execute("rec-2", "alice", key, "SELECT 1", prepareDurationMs = Some(42L))
+      .unsafeRunSync()
+    val latest = router.history.snapshot(1).head
+    latest.prepareDurationMs shouldBe Some(42L)
+
   it should "let the transaction pin override preferredNode" in:
     val (router, sessions, nodes, key) = setupMultiNode(3)
     // BEGIN pins to whichever node served it; pick a DIFFERENT node as the preferredNode

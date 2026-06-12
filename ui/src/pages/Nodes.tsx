@@ -349,7 +349,17 @@ export default function Nodes() {
                         </Link>
                       </td>
                       <td><StatusBadge status={h.status} /></td>
-                      <td style={{ textAlign: 'right' }}>{h.durationMs} ms</td>
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <div>{h.durationMs} ms</div>
+                        {h.prepareDurationMs != null && (
+                          <div
+                            style={{ fontSize: '.78em', opacity: 0.6 }}
+                            title="FlightSQL Prepare-time LIMIT-0 probe duration"
+                          >
+                            prep {h.prepareDurationMs} ms
+                          </div>
+                        )}
+                      </td>
                       <td>
                         <div className="sql-cell">
                           <pre style={{
