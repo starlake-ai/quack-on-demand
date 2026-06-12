@@ -62,18 +62,24 @@ import type {
 } from './types';
 
 const BASE = '/api';
-const TOKEN_KEY = 'quack-on-demand-session';
 
+// Auth transport: the manager sets an HttpOnly qod_session cookie on
+// /api/auth/login that the browser auto-attaches on every same-origin
+// request. JavaScript can NOT read or write that cookie -- /api/auth/whoami
+// is the canonical "am I logged in?" check, and /api/auth/logout is the only
+// way to clear the cookie. The legacy localStorage token path is gone; CLI
+// clients still go through X-API-Key separately.
 export const session = {
-  get: (): string | null => localStorage.getItem(TOKEN_KEY),
-  set: (token: string) => localStorage.setItem(TOKEN_KEY, token),
-  clear: () => localStorage.removeItem(TOKEN_KEY),
+  /** Kept as a stub so any straggler callers compile; the real session is
+   * the HttpOnly cookie which JS cannot read. */
+  get: (): string | null => null,
+  set: (_: string) => { /* no-op; cookie is server-set */ },
+  clear: () => { /* no-op; cookie is server-cleared via /api/auth/logout */ },
 };
 
-function authHeaders(): Record<string, string> {
-  const token = session.get();
-  return token ? { 'X-API-Key': token } : {};
-}
+/** fetch options shared by every authed call. `credentials: 'same-origin'`
+ * is the default but spelling it out documents intent. */
+const FETCH_OPTS: RequestInit = { credentials: 'same-origin' };
 
 /** API error with a normalized message + HTTP status so callers can branch
  * on 401 (login-page redirect) vs. other failures. */
@@ -98,15 +104,16 @@ async function handle<T>(r: Response): Promise<T> {
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
+    ...FETCH_OPTS,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return handle<T>(r);
 }
 
 async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const r = await fetch(`${BASE}${path}`, FETCH_OPTS);
   return handle<T>(r);
 }
 
@@ -121,14 +128,15 @@ export const api = {
   clientConfig:  () => get<ClientConfigResponse>('/config/client'),
   serverConfig:  () => get<ConfigListResponse>('/config/server'),
   exportManifest: async (): Promise<string> => {
-    const r = await fetch(`${BASE}/manifest/export`, { headers: authHeaders() });
+    const r = await fetch(`${BASE}/manifest/export`, FETCH_OPTS);
     if (!r.ok) throw new ApiError(r.status, await r.text());
     return await r.text();
   },
   importManifest: async (yaml: string): Promise<ManifestImportSummary> => {
     const r = await fetch(`${BASE}/manifest/import`, {
+      ...FETCH_OPTS,
       method: 'POST',
-      headers: { 'Content-Type': 'application/yaml', ...authHeaders() },
+      headers: { 'Content-Type': 'application/yaml' },
       body: yaml,
     });
     return handle<ManifestImportSummary>(r);
@@ -174,7 +182,7 @@ export const api = {
   deleteFederatedSource: async (tenant: string, tenantDb: string, alias: string): Promise<void> => {
     const r = await fetch(
       `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}`,
-      { method: 'DELETE', headers: authHeaders() }
+      { ...FETCH_OPTS, method: 'DELETE' }
     );
     return handle<void>(r);
   },
@@ -193,8 +201,9 @@ export const api = {
     const r = await fetch(
       `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}/secrets`,
       {
+        ...FETCH_OPTS,
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req),
       }
     );
@@ -209,7 +218,7 @@ export const api = {
   ): Promise<void> => {
     const r = await fetch(
       `${BASE}/tenants/${encodeURIComponent(tenant)}/tenant-dbs/${encodeURIComponent(tenantDb)}/federated-sources/${encodeURIComponent(alias)}/secrets/${encodeURIComponent(name)}`,
-      { method: 'DELETE', headers: authHeaders() }
+      { ...FETCH_OPTS, method: 'DELETE' }
     );
     return handle<void>(r);
   },

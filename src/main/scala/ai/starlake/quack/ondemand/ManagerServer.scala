@@ -76,8 +76,15 @@ final class ManagerServer(
       if !path.startsWith("/api/") && path != "/api" then routes(req)
       else if isPublicApi(path) then routes(req)
       else
-        val provided = req.headers.get(CIString("X-API-Key")).map(_.head.value)
-        val staticMatch  = staticConfigured.exists(expected => provided.contains(expected))
+        // Admit on X-API-Key header OR on the qod_session cookie. The cookie
+        // is the browser path (HttpOnly so JS can't read it; SameSite=Lax so
+        // it doesn't leak cross-origin); the header is the CLI / static-key
+        // path. A request can present either; the static key only ever
+        // matches via the header.
+        val headerToken = req.headers.get(CIString("X-API-Key")).map(_.head.value)
+        val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
+        val provided    = headerToken.orElse(cookieToken)
+        val staticMatch  = staticConfigured.exists(expected => headerToken.contains(expected))
         val sessionAdmin = provided.exists(sessions.isAdmin)
         val openMode     = staticConfigured.isEmpty
 
@@ -130,8 +137,8 @@ final class ManagerServer(
 
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       Endpoints.login.serverLogic(auth.login),
-      Endpoints.logout.serverLogic(auth.logout),
-      Endpoints.whoami.serverLogic(auth.whoami),
+      Endpoints.logout.serverLogic { case (apiKey, cookie) => auth.logout(apiKey, cookie) },
+      Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
       Endpoints.statementHistory.serverLogic { case (limit, key) =>
         statementHistory.recent(limit, key)(sessions.scopeOf)
       }

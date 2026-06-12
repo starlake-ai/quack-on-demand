@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { api, session, ApiError } from '../api/client';
+import { api, ApiError } from '../api/client';
 
 interface AuthState {
   username: string | null;
@@ -49,8 +49,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
         setAuthEnabled(true);
-        const t = session.get();
-        if (!t) { setLoading(false); return; }
+        // No client-side session token to consult: the qod_session cookie is
+        // HttpOnly. Always ask whoami -- the browser auto-attaches the
+        // cookie if there is one. 401 = no live session, fall through to
+        // the login screen.
         api.whoami()
           .then(w => {
             setUsername(w.username);
@@ -59,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setSuperuser(w.superuser ?? false);
             setManageableTenants(w.manageableTenants ?? []);
           })
-          .catch((e: ApiError) => { if (e.status === 401) session.clear(); })
+          .catch((_: ApiError) => { /* no live session; render login */ })
           .finally(() => setLoading(false));
       })
       .catch(() => {
@@ -70,16 +72,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function login(u: string, p: string, t?: string) {
+    // Server sets the HttpOnly qod_session cookie on a successful response;
+    // the JS-visible `token` field in the body is for CLI callers, not us.
     const r = await api.login({ username: u, password: p, tenant: t?.trim() || undefined });
-    session.set(r.token);
     setUsername(r.username);
     setTenant(r.tenant ?? null);
     setSuperuser(r.superuser ?? false);
     setManageableTenants(r.manageableTenants ?? []);
     // /login no longer returns `role` (every minted session is admin by
     // construction); fetch the descriptive role from /whoami so the badge
-    // reflects what the auth backend recorded (defaults to "admin" if the
-    // call fails so the nav doesn't render a stale label).
+    // reflects what the auth backend recorded.
     try {
       const w = await api.whoami();
       setRole(w.role);
@@ -91,8 +93,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   async function logout() {
     // No-op when auth is disabled - there's no session to revoke.
     if (!authEnabled) return;
+    // Server-side: clear the qod_session cookie + denylist the jti for the
+    // remaining lifetime. JS can't clear an HttpOnly cookie, so this hop
+    // is required.
     try { await api.logout(); } catch { /* best effort */ }
-    session.clear();
     setUsername(null);
     setRole(null);
     setTenant(null);

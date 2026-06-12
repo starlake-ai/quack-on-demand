@@ -241,15 +241,50 @@ object Endpoints:
       .in(header[Option[String]]("X-API-Key"))
 
   // ----- UI login -----
-  val login
-      : PublicEndpoint[LoginRequest, (sttp.model.StatusCode, ErrorResponse), LoginResponse, Any] =
-    base.post.in("auth" / "login").in(jsonBody[LoginRequest]).out(jsonBody[LoginResponse])
+  // Login also sets the qod_session cookie (HttpOnly, SameSite=Lax) so the
+  // browser auto-attaches the JWT on subsequent /api/* calls without the
+  // UI having to stash a token in localStorage. CLI / static-key callers
+  // still get `LoginResponse.token` in the JSON body and can send it via
+  // X-API-Key as before.
+  val login: PublicEndpoint[
+    LoginRequest,
+    (sttp.model.StatusCode, ErrorResponse),
+    (sttp.model.headers.CookieValueWithMeta, LoginResponse),
+    Any
+  ] =
+    base.post
+      .in("auth" / "login")
+      .in(jsonBody[LoginRequest])
+      .out(setCookie(SessionTokenStore.CookieName))
+      .out(jsonBody[LoginResponse])
 
-  val logout: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), Unit, Any] =
-    base.post.in("auth" / "logout").in(header[String]("X-API-Key"))
+  // Logout accepts the token via cookie OR header so the browser path works
+  // even though JS can't read the HttpOnly cookie. The response always
+  // clears the cookie (Max-Age=0); the handler also adds the jti to the
+  // denylist while the manager process stays up.
+  val logout: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    sttp.model.headers.CookieValueWithMeta,
+    Any
+  ] =
+    base.post
+      .in("auth" / "logout")
+      .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .out(setCookie(SessionTokenStore.CookieName))
 
-  val whoami: PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), WhoamiResponse, Any] =
-    base.get.in("auth" / "whoami").in(header[String]("X-API-Key")).out(jsonBody[WhoamiResponse])
+  val whoami: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    WhoamiResponse,
+    Any
+  ] =
+    base.get
+      .in("auth" / "whoami")
+      .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .out(jsonBody[WhoamiResponse])
 
   // Recent statement history (newest first), bounded by `limit` (default 50).
   // Tenant-scoped: the handler clamps the response to rows whose tenant is in
