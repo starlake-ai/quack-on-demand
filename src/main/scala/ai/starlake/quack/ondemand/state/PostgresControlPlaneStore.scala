@@ -453,7 +453,7 @@ final class PostgresControlPlaneStore(
         finally rs.close()
       finally lookup.close()
 
-    val id = existingId.getOrElse(s"u-${java.util.UUID.randomUUID().toString.take(8)}")
+    val id = existingId.getOrElse(ai.starlake.quack.model.Names.newSurrogateId("u"))
 
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, updated_at)

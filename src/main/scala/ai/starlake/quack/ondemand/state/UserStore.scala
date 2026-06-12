@@ -4,7 +4,6 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 
 import java.sql.{Connection, DriverManager, Types}
-import java.util.UUID
 
 /** Manages the `qodstate_user` table -- the principal directory used by
   * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] and as the FK target for the RBAC
@@ -149,7 +148,7 @@ object UserStore:
     */
   final case class Upsert(id: String, inserted: Boolean)
 
-  private def newId(): String = s"u-${UUID.randomUUID().toString.take(8)}"
+  private def newId(): String = ai.starlake.quack.model.Names.newSurrogateId("u")
 
   /** Build a store from the global `defaultMetastore` map. Same shape as
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next to the state table by
