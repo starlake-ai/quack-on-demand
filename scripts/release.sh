@@ -257,6 +257,11 @@ sbt -no-colors \
   "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
   "$sbt_release_cmd"
 
+  gh release create "v$release_version" \
+    --title "v$release_version" \
+    --generate-notes \
+    distrib/quack-on-demand-assembly-${release_version}.jar
+
 # Bump libquackwire to next snapshot AFTER the manager release succeeded.
 echo "bumping libquackwire build.sbt: $libq_release -> $libq_next"
 sed -i.bak -E "s|^val libquackwireVersion = \".*\"$|val libquackwireVersion = \"${libq_next}\"|" build.sbt
