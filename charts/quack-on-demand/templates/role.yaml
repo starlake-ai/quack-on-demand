@@ -19,6 +19,9 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
 {{- end }}
 ---
 {{- if .Values.rbac.create }}
