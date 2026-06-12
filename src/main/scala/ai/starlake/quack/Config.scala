@@ -121,8 +121,8 @@ final case class ManagerAuthConfig(
 )
 
 /** Typed view of the `quack-on-demand.defaultMetastore` block. Every scalar maps to an env-var
-  * override the spawn-quack-node.sh contract passes through to child nodes. `asMap` reproduces the
-  * legacy `Map[String, String]` shape that backends + state stores still consume.
+  * override the spawn-quack-node.sh contract passes through to child nodes. `asMap` projects the
+  * fields into the `Map[String, String]` shape consumed by backends and state stores.
   */
 final case class DefaultMetastoreConfig(
     @field @ConfigField(

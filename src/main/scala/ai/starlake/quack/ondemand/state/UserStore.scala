@@ -28,8 +28,8 @@ import java.sql.{Connection, Types}
   * }}}
   *
   * A user is identified by `(tenant, username)`. `(NULL, name)` is a superuser; tenant-scoped
-  * principals carry a non-empty tenant. The `pool` column from the pre-RBAC schema is gone -- pool
-  * access lives in [[PoolPermission]] now.
+  * principals carry a non-empty tenant. Pool access is granted through [[PoolPermission]] rows,
+  * not on the user row itself.
   */
 final class UserStore(
     jdbcUrl: String,
@@ -38,7 +38,8 @@ final class UserStore(
     poolSize: Int = 10
 ) extends LazyLogging:
 
-  // Force driver registration for the same reason as PostgresStateStore.
+  // Force driver registration so the JDBC URL resolves before HikariCP
+  // probes the connection.
   Class.forName("org.postgresql.Driver")
 
   private val dataSource: HikariDataSource =

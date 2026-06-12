@@ -230,12 +230,9 @@ final class KubernetesQuackBackend(
   }
 
   private def waitReady(p: Pod): Unit =
-    // Previously busy-polled every 500ms via Thread.sleep + a fresh GET --
-    // ~120 needless API-server calls per 60s startup timeout. fabric8's
-    // waitUntilCondition uses a watch + readiness predicate, so the call
-    // returns as soon as the predicate flips. The `readPodReady` predicate
-    // is the same one used by `isAlive` so the readiness contract stays
-    // in sync.
+    // fabric8's waitUntilCondition sits on a watch + readiness predicate
+    // and returns as soon as the predicate flips. Shares `readPodReady`
+    // with `isAlive` so the readiness contract is consistent.
     val name = p.getMetadata.getName
     try
       client.pods
@@ -381,9 +378,8 @@ final class KubernetesQuackBackend(
       val nodeId  = p.getMetadata.getName
       // Recover the bearer token from the per-pod Secret so a manager
       // restart doesn't wedge every Flight call to this pod on 401. Pods
-      // without a matching Secret (legacy + pre-Secret deployments)
-      // surface the empty string the way they always did, with a warn
-      // so the operator knows to scale.replace those pods.
+      // without a matching Secret keep the empty token they had before;
+      // a warn nudges the operator to scale/replace those pods.
       val recoveredToken =
         Option(client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(nodeId)).get())
           .flatMap(s => readTokenFromSecret(s))

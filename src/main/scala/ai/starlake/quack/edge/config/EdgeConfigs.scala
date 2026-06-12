@@ -31,8 +31,8 @@ object AclConfig:
   )(AclConfig.apply)
 
 /** Pre-statement SQL validation knobs. Loaded reflectively by the config-page registry; not wired
-  * to runtime today (the legacy file-store validator was retired with the RBAC cutover). Kept as a
-  * typed class so the configurable env-var contract stays visible in the admin UI.
+  * to runtime today. Kept as a typed class so the configurable env-var contract stays visible in
+  * the admin UI.
   */
 case class ValidationConfig(
     @field @ConfigField(

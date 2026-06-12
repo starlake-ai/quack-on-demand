@@ -29,11 +29,8 @@ object ManifestExporter:
       federatedStore: Option[FederatedSourceStore] = None
   ): ConfigManifest =
 
-    // Pull the whole graph in one round-trip. Previously the per-tenant
-    // loop below issued listTenantDbs / listPools / listRoles / listGroups
-    // for every tenant -- O(tenants) extra Postgres handshakes that the
-    // HikariCP pool turns into borrow-from-idle, but still latency that's
-    // pure waste when snapshot() already returns everything.
+    // Pull the whole graph in one round-trip; the per-tenant loop below
+    // walks the in-memory index maps instead of going back to the store.
     val snap         = store.snapshot()
     val dbsByTenant  = snap.tenantDbs.groupBy(_.tenantId)
     val poolsByDb    = snap.pools.groupBy(_.tenantDbId)
@@ -151,11 +148,8 @@ object ManifestExporter:
         )
       }
 
-      // User rows reference their tenant by id in production (PoolSupervisor
-      // resolves displayName -> id before write) but the test fixtures here
-      // seed users keyed by displayName. Union both keys so either shape
-      // round-trips. Dedup by user id to avoid double-counting in the rare
-      // case both columns happen to match.
+      // Users may be keyed by tenant id or tenant displayName depending on
+      // how they were seeded; union both keys and dedup by user id.
       val tenantUsers = (
         usersByTenant.getOrElse(Some(t.id),   Nil) ++
         usersByTenant.getOrElse(Some(t.name), Nil)

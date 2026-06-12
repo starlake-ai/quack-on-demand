@@ -14,9 +14,12 @@ class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
   given ProductHint[ManagementAuthConfig] = ProductHint[ManagementAuthConfig](camel)
   given ConfigReader[ManagementAuthConfig] = deriveReader[ManagementAuthConfig]
 
+  private val sessionFields =
+    """sessionJwtSecret = "", sessionCookieSecure = true, sessionCookiePath = "/api""""
+
   "ManagementAuthConfig" should "default to db identity source and preferred_username claim" in {
     val cfg = ConfigFactory.parseString(
-      """auth.management { identitySource = "db", identityClaim = "preferred_username" }"""
+      s"""auth.management { identitySource = "db", identityClaim = "preferred_username", $sessionFields }"""
     )
     val mac = ConfigSource.fromConfig(cfg).at("auth.management").loadOrThrow[ManagementAuthConfig]
     mac.identitySource shouldBe "db"
@@ -25,7 +28,7 @@ class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
 
   it should "parse oidc identity source" in {
     val cfg = ConfigFactory.parseString(
-      """auth.management { identitySource = "oidc", identityClaim = "email" }"""
+      s"""auth.management { identitySource = "oidc", identityClaim = "email", $sessionFields }"""
     )
     val mac = ConfigSource.fromConfig(cfg).at("auth.management").loadOrThrow[ManagementAuthConfig]
     mac.identitySource shouldBe "oidc"

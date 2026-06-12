@@ -29,9 +29,6 @@ final class ManagerServer(
     statementHistory: StatementHistoryHandlers,
     catalog: Option[CatalogHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
-    // Phase B: RBAC handlers. All mounted unconditionally -- the
-    // legacy ACL endpoints (above) are still mounted alongside until
-    // Phase C drops them.
     users: UserHandlers,
     roles: RoleHandlers,
     groups: GroupHandlers,

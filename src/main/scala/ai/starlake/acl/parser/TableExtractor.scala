@@ -58,10 +58,10 @@ private[parser] class TableExtractorVisitor:
       case psel: ParenthesedSelect => visitParenthesedSelect(psel)
       case fq: net.sf.jsqlparser.statement.piped.FromQuery =>
         // DuckDB / BigQuery FROM-first shorthand: `FROM t [pipe ops...]`.
-        // FromQuery extends Select but does not match any of the legacy
-        // subtypes above; without this arm the table ref would silently
-        // drop and the validator would admit the query unconditionally
-        // (same shape of bug as the legacy DML allow-by-empty-set path).
+        // FromQuery extends Select but does not match the PlainSelect /
+        // SetOperationList / ParenthesedSelect arms above, so handle it
+        // explicitly or the table ref would silently drop and the validator
+        // would admit the query unconditionally.
         val fromItem = fq.getFromItem
         if fromItem != null then visitFromItem(fromItem)
         val joins = fq.getJoins

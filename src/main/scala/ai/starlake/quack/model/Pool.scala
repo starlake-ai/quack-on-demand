@@ -19,8 +19,8 @@ final case class Pool(
     disabled: Boolean = false,
     // Optional placement plan: when non-empty, the per-cohort
     // RoleDistributions must sum to `distribution` and the total node
-    // count must equal `size`. When empty (legacy default), the
-    // supervisor schedules every node with no placement constraint.
+    // count must equal `size`. When empty, the supervisor schedules
+    // every node with no placement constraint.
     cohorts: List[PoolCohort] = Nil
 ):
   /** Effective scheduling plan: either the explicit cohorts, or one synthesized placement-less
