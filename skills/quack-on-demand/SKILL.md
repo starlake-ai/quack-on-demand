@@ -270,18 +270,31 @@ Per-node fields surfaced via `/api/pool/list`:
 
 ## Load testing
 
+`--tenant` and `--pool` are REQUIRED on every invocation (or set `LT_TENANT` / `LT_POOL`). The demo bootstrap creates tenants `acme` + `globex` with pool `bi`.
+
 ```bash
 # Defaults: 8 workers × 100 iterations against the live edge (TLS on)
-./scripts/loadtest/loadtest.py
+./scripts/loadtest/loadtest.py --tenant acme --pool bi
 
 # Higher concurrency
-./scripts/loadtest/loadtest.py --workers 24 --iterations 50 --warmup 5
+./scripts/loadtest/loadtest.py --tenant acme --pool bi \
+  --workers 24 --iterations 50 --warmup 5
 
 # Custom credentials / URL
-LT_USER=alice LT_PASSWORD=secret ./scripts/loadtest/loadtest.py
+LT_USER=alice LT_PASSWORD=secret \
+  ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+
+# Or pin tenant/pool via env vars
+LT_TENANT=acme LT_POOL=bi ./scripts/loadtest/loadtest.py
 
 # Single query repeated
-LT_QUERY='SELECT count(*) FROM lineitem' ./scripts/loadtest/loadtest.py
+LT_QUERY='SELECT count(*) FROM lineitem' \
+  ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+
+# System-realm login (bootstrap `admin`, qodstate_user.tenant IS NULL).
+# Adds the `superuser=true` gRPC header; tenant/pool still drive routing.
+./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
+LT_SUPERUSER=true LT_TENANT=acme LT_POOL=bi ./scripts/loadtest/loadtest.py
 ```
 
 Reports throughput, success rate, latency percentiles (p50/p95/p99). Default workload is a TPCH-H subset (Q1, Q3, Q5, Q6, Q10, Q12, Q14) using the standard spec parameters.

@@ -113,11 +113,12 @@ Run the bundled load tester as a one-shot client:
 ```bash
 python3 ./scripts/loadtest/loadtest.py \
   --url grpc+tls://localhost:31338 --insecure \
-  --user admin --password admin \
+  --user admin --password admin --superuser \
+  --tenant acme --pool bi \
   -w 1 -i 1 --warmup 0
 ```
 
-The `--insecure` flag skips certificate verification for the auto-generated self-signed cert. The tester defaults to `tenant=tpch` and `pool=sales`, matching the bootstrap configuration.
+`--tenant` and `--pool` are required (or set `LT_TENANT` / `LT_POOL`); the demo bootstrap creates tenants `acme` and `globex`, each with a pool named `bi`. The `--insecure` flag skips certificate verification for the auto-generated self-signed cert. The `--superuser` flag adds the `superuser=true` gRPC header so the bootstrap `admin` user (which lives in `qodstate_user` with `tenant IS NULL`) authenticates against the system realm; drop it when running as a tenant-scoped user.
 
 ### Example SQL
 

@@ -10,11 +10,13 @@ we report throughput, success rate, and latency percentiles.
 Dependencies:
     pip install adbc_driver_flightsql adbc_driver_manager
 
-Usage:
-    ./scripts/loadtest/loadtest.py                          # defaults: 8 x 100
-    ./scripts/loadtest/loadtest.py -w 32 -i 500
-    LT_QUERY='SELECT 1' ./scripts/loadtest/loadtest.py
-    ./scripts/loadtest/loadtest.py --url grpc+tls://localhost:31338 --insecure
+Usage (tenant + pool are required; pass them or set LT_TENANT / LT_POOL):
+    ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+    ./scripts/loadtest/loadtest.py --tenant acme --pool bi -w 32 -i 500
+    LT_QUERY='SELECT 1' ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+    ./scripts/loadtest/loadtest.py --tenant acme --pool bi \
+        --url grpc+tls://localhost:31338 --insecure
+    ./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
 """
 from __future__ import annotations
 
@@ -167,13 +169,21 @@ def parse_args() -> argparse.Namespace:
                    default=os.environ.get("LT_SCHEMA", "tpch1"),
                    help="schema to prefix the default TPC-H mix with (ignored with -q)")
     p.add_argument("--tenant",
-                   default=os.environ.get("LT_TENANT", "tpch"),
-                   help="tenant gRPC header for FlightSQL routing (defaults to "
-                        "the bootstrap tenant); empty string skips the header")
+                   required=not os.environ.get("LT_TENANT"),
+                   default=os.environ.get("LT_TENANT"),
+                   help="tenant gRPC header for FlightSQL routing (required; "
+                        "or set LT_TENANT)")
     p.add_argument("--pool",
-                   default=os.environ.get("LT_POOL", "sales"),
-                   help="pool gRPC header for FlightSQL routing (defaults to "
-                        "the bootstrap pool); empty string skips the header")
+                   required=not os.environ.get("LT_POOL"),
+                   default=os.environ.get("LT_POOL"),
+                   help="pool gRPC header for FlightSQL routing (required; "
+                        "or set LT_POOL)")
+    p.add_argument("--superuser", action="store_true",
+                   default=os.environ.get("LT_SUPERUSER", "false").lower() == "true",
+                   help="add the `superuser=true` gRPC header so the user is "
+                        "authenticated against the system realm (qodstate_user "
+                        "rows with tenant IS NULL); tenant/pool still drive "
+                        "query routing. Required for the bootstrap admin user")
     p.add_argument("--insecure", action="store_true",
                    default=os.environ.get("LT_INSECURE", "true").lower() == "true",
                    help="skip TLS certificate verification (dev only)")
@@ -204,10 +214,13 @@ def connect(args: argparse.Namespace):
     # router can pick the right (tenant, pool) of Quack nodes. Translate
     # into ADBC's per-RPC call-header db_kwarg.
     hdr = DatabaseOptions.RPC_CALL_HEADER_PREFIX.value
-    if args.tenant:
-        db_kwargs[hdr + "tenant"] = args.tenant
-    if args.pool:
-        db_kwargs[hdr + "pool"] = args.pool
+    db_kwargs[hdr + "tenant"] = args.tenant
+    db_kwargs[hdr + "pool"]   = args.pool
+    # `superuser=true` switches the auth realm to the system realm so the
+    # edge looks up the user in qodstate_user rows with tenant IS NULL.
+    # tenant/pool still drive query routing.
+    if args.superuser:
+        db_kwargs[hdr + "superuser"] = "true"
     # Strip the placeholder None key (set above for clarity)
     db_kwargs = {k: v for k, v in db_kwargs.items() if v is not None}
 
@@ -283,10 +296,11 @@ def main() -> int:
     queries = [args.query] if args.query else default_queries(args.schema)
     mix_label = "custom -q" if args.query else f"default TPC-H mix [schema={args.schema}]"
 
-    scope = "/".join(p for p in (args.tenant, args.pool) if p) or "<no tenant/pool headers>"
+    scope = f"{args.tenant}/{args.pool}"
+    realm = "system" if args.superuser else "tenant"
     print(
         f"Load test: {args.workers} workers x {args.iterations} iterations "
-        f"(+{args.warmup} warmup) against {args.url} as {args.user} -> {scope}"
+        f"(+{args.warmup} warmup) against {args.url} as {args.user} -> {scope} ({realm} realm)"
     )
     print(f"Workload:  {mix_label}")
 
