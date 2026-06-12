@@ -65,20 +65,13 @@ final case class ManifestPool(
     cohorts: List[ManifestPoolCohort] = Nil
 )
 
-final case class ManifestIdentity(
-    username: String,
-    externalId: Option[String] = None,
-    attributes: Map[String, String] = Map.empty
-)
-
 final case class ManifestTenant(
     name: String,
     disabled: Boolean = false,
     authProvider: String = "db",
     authConfig: Map[String, String] = Map.empty,
     tenantDbs: List[ManifestTenantDb] = Nil,
-    pools: List[ManifestPool] = Nil,
-    identities: List[ManifestIdentity] = Nil
+    pools: List[ManifestPool] = Nil
 )
 
 final case class ManifestTablePermission(
@@ -240,17 +233,6 @@ object ConfigManifest:
     deriveEncoder[ManifestPool]
   )
 
-  given Codec[ManifestIdentity] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        username   <- c.get[String]("username")
-        externalId <- c.getOrElse[Option[String]]("externalId")(None)
-        attributes <- c.getOrElse[Map[String, String]]("attributes")(Map.empty)
-      yield ManifestIdentity(username, externalId, attributes)
-    },
-    deriveEncoder[ManifestIdentity]
-  )
-
   given Codec[ManifestTenant] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
@@ -260,8 +242,7 @@ object ConfigManifest:
         authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
         tenantDbs    <- c.getOrElse[List[ManifestTenantDb]]("tenantDbs")(Nil)
         pools        <- c.getOrElse[List[ManifestPool]]("pools")(Nil)
-        identities   <- c.getOrElse[List[ManifestIdentity]]("identities")(Nil)
-      yield ManifestTenant(name, disabled, authProvider, authConfig, tenantDbs, pools, identities)
+      yield ManifestTenant(name, disabled, authProvider, authConfig, tenantDbs, pools)
     },
     deriveEncoder[ManifestTenant]
   )

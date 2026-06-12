@@ -47,8 +47,6 @@ object ManagerServerHarness:
     minPort               = 40000,
     maxPort               = 41000,
     maxNodesTotal         = 0,
-    statePath             = "",
-    stateStorage          = "file",        // no Liquibase, no Postgres bootstrap
     nativeClient          = false,
     nodeDisableSsl        = true,
     spawnScript           = "",

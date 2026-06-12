@@ -187,8 +187,7 @@ object ManifestExporter:
           authProvider = t.authProvider,
           authConfig = t.authConfig,
           tenantDbs = manifestDbs,
-          pools = manifestPools,
-          identities = Nil
+          pools = manifestPools
         ),
         manifestRoles,
         manifestGroups,

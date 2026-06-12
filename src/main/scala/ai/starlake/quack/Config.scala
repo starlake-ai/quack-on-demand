@@ -207,16 +207,6 @@ final case class ManagerConfig(
     )
     maxNodesTotal: Int,
     @field @ConfigField(
-      envVar = "QOD_STATE_PATH",
-      description = "File-mode state path (only used when stateStorage=file)."
-    )
-    statePath: String,
-    @field @ConfigField(
-      envVar = "QOD_STATE_STORAGE",
-      description = "Control-plane store: 'postgres' (qodstate_* tables) or 'file' (JSON blob)."
-    )
-    stateStorage: String,
-    @field @ConfigField(
       envVar = "QOD_NATIVE_CLIENT",
       description =
         "Use the JNI-backed native Quack wire client. False falls back to the embedded path."

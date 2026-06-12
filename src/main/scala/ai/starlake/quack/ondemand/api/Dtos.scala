@@ -269,11 +269,6 @@ final case class FederatedSecretResponse(
 
 final case class FederatedSecretListResponse(secrets: List[FederatedSecretResponse])
 
-final case class FederationImportSummary(
-    sources: Int,
-    secrets: Int
-)
-
 // ----- UI login -----
 /** `tenant` is the optional tenant id (e.g. `t-02d0e86e`). Leave it `None`/blank for a system-admin
   * login (`qodstate_user.tenant IS NULL`). Tenant-scoped users (`qodstate_user.tenant = ?`) must
@@ -909,4 +904,3 @@ object Dtos:
   given Codec[FederatedSecretUpsertRequest] = deriveCodec
   given Codec[FederatedSecretResponse]      = deriveCodec
   given Codec[FederatedSecretListResponse]  = deriveCodec
-  given Codec[FederationImportSummary]      = deriveCodec
