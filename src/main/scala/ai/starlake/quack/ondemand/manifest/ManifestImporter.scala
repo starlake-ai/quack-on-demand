@@ -4,6 +4,7 @@ package ai.starlake.quack.ondemand.manifest
 import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
+  Names,
   NodePlacement,
   NodeToleration,
   Pool,
@@ -22,7 +23,6 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission
 }
 
-import java.util.UUID
 
 object ManifestImporter:
 
@@ -154,7 +154,7 @@ object ManifestImporter:
       // 2. Tenants + their nested collections (tenant-dbs, pools).
       m.tenants.foreach { mt =>
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
-          val newId = s"t-${UUID.randomUUID().toString.take(8)}"
+          val newId = Names.newSurrogateId("t")
           store.upsertTenant(
             Tenant(
               id = newId,
@@ -192,7 +192,7 @@ object ManifestImporter:
               errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
             case Right(dbKind) =>
               val existing = store.listTenantDbs(tenantId).find(_.name == mtd.name)
-              val tdId = existing.map(_.id).getOrElse(s"td-${UUID.randomUUID().toString.take(8)}")
+              val tdId = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
               store.upsertTenantDb(
                 TenantDb(
                   id = tdId,
@@ -227,7 +227,7 @@ object ManifestImporter:
           }
           if dbId.nonEmpty then
             val existing = store.listPools(dbId).find(_.name == mp.name)
-            val poolId   = existing.map(_.id).getOrElse(s"p-${UUID.randomUUID().toString.take(8)}")
+            val poolId   = existing.map(_.id).getOrElse(Names.newSurrogateId("p"))
             val dist     = RoleDistribution(
               writeonly = mp.roleDistribution.writeonly,
               readonly = mp.roleDistribution.readonly,
@@ -273,7 +273,7 @@ object ManifestImporter:
             errs += s"role '${mr.name}': tenant '${mr.tenant}' not found after tenant pass"
           case Some(tenantId) =>
             val existing = store.listRoles(tenantId).find(_.name == mr.name)
-            val roleId   = existing.map(_.id).getOrElse(s"r-${UUID.randomUUID().toString.take(8)}")
+            val roleId   = existing.map(_.id).getOrElse(Names.newSurrogateId("r"))
             store.upsertRole(
               RbacRole(
                 id = roleId,
@@ -287,7 +287,7 @@ object ManifestImporter:
             mr.permissions.foreach { perm =>
               store.insertRolePermission(
                 RolePermission(
-                  id = s"rp-${UUID.randomUUID().toString.take(8)}",
+                  id = Names.newSurrogateId("rp"),
                   roleId = roleId,
                   catalogName = perm.catalog,
                   schemaName = perm.schema,
@@ -305,7 +305,7 @@ object ManifestImporter:
             errs += s"group '${mg.name}': tenant '${mg.tenant}' not found after tenant pass"
           case Some(tenantId) =>
             val existing = store.listGroups(tenantId).find(_.name == mg.name)
-            val groupId  = existing.map(_.id).getOrElse(s"g-${UUID.randomUUID().toString.take(8)}")
+            val groupId  = existing.map(_.id).getOrElse(Names.newSurrogateId("g"))
             store.upsertGroup(
               RbacGroup(
                 id = groupId,
@@ -375,7 +375,7 @@ object ManifestImporter:
               }
               store.insertPoolPermission(
                 PoolPermission(
-                  id = s"pp-${UUID.randomUUID().toString.take(8)}",
+                  id = Names.newSurrogateId("pp"),
                   tenantId = tenantId.getOrElse(""),
                   poolId = poolId,
                   userId = Some(userId),
@@ -434,7 +434,7 @@ object ManifestImporter:
           .collectFirst {
             case ((alias, _), sec) if alias == msrc.alias => sec.federatedSourceId
           }
-          .getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
+          .getOrElse(Names.newSurrogateId("fs"))
 
         fs.upsertSource(
           FederatedSource(
@@ -468,7 +468,7 @@ object ManifestImporter:
             val secId = existing
               .get((msrc.alias, msec.name))
               .map(_.id)
-              .getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
+              .getOrElse(Names.newSurrogateId("fsec"))
             fs.upsertSecret(
               FederatedSecret(
                 id = secId,

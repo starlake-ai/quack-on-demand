@@ -5,7 +5,6 @@ import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import cats.effect.IO
 import sttp.model.StatusCode
 
-import java.util.UUID
 
 /** REST handlers for FederatedSource + FederatedSecret rows.
   *
@@ -71,7 +70,7 @@ final class FederatedSourceHandlers(
         case Right(tenantDbId) =>
           // Try an upsert by alias: if one already exists reuse its id.
           val existing = fedStore.getSource(tenantDbId, req.alias)
-          val id       = existing.map(_.id).getOrElse(s"fs-${UUID.randomUUID().toString.take(8)}")
+          val id       = existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fs"))
           fedStore.upsertSource(
             FederatedSource(
               id = id,
@@ -187,7 +186,7 @@ final class FederatedSourceHandlers(
                 case _ =>
                   val existing = fedStore.getSecret(s.id, req.name)
                   val id       =
-                    existing.map(_.id).getOrElse(s"fsec-${UUID.randomUUID().toString.take(8)}")
+                    existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fsec"))
                   val sec = FederatedSecret(
                     id = id,
                     federatedSourceId = s.id,

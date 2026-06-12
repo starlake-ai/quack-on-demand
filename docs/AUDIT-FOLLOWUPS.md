@@ -25,7 +25,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [x] **`FederationBlobBuilder.substitute` is not SQL-safe** ~~against a hostile secret value.~~ Fixed 2026-06-12: every resolved secret value and the expanded alias now go through `sqlEscapeSingleQuote` (doubles `'` → `''`) before splicing. Safe inside the operator template's `'{{secret.X}}'` wrap (standard SQL literal escape), no-op for values without apostrophes. The honest-brokenness case (real apostrophe in a password breaks the ATTACH) is fixed; the defense-in-depth case (hostile value escaping the literal) is closed. Trust model documented in the file's preamble. Coverage in `test/.../federation/FederationBlobBuilderSpec.scala`.
 
-- [ ] **Manifest UUIDs truncated to 8 hex chars** (~10 sites in `manifest/ManifestImporter.scala`). Birthday collision at ~77K rows would surface as PK violations on import. Use full UUIDs.
+- [x] **Manifest UUIDs truncated to 8 hex chars** ~~(~10 sites in `manifest/ManifestImporter.scala`).~~ Fixed 2026-06-12: extracted `Names.newSurrogateId(prefix)` returning prefix + 32-hex (UUID with dashes stripped, ~128 bits of entropy). Replaced all 15 truncation sites across `PoolSupervisor`, `UserStore`, `PostgresControlPlaneStore`, `ManifestImporter` (9), and `FederatedSourceHandlers` (2). Loosened `Names.TenantIdPattern` to `^t-[0-9a-f]{8,}$` so legacy 8-char ids in existing rows continue to match. `NamesSpec` gains 4 cases including a 10K-id non-collision check.
 
 ---
 

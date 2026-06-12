@@ -87,3 +87,30 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     val names = List("tpch", "acme", "_internal", "t1", "tenant1")
     ids.foreach(s   => withClue(s)(Names.isValid(s)          shouldBe false))
     names.foreach(s => withClue(s)(Names.looksLikeTenantId(s) shouldBe false))
+
+  it should "still accept the new 32-hex form alongside legacy 8-hex ids" in:
+    // Migrated 2026-06-12 from 8-char (32 bits, ~77K rows to 50% collision) to
+    // the full UUID hex form (128 bits, effectively no collisions). Both must
+    // continue to match so existing rows stay addressable.
+    Names.looksLikeTenantId("t-abc12345abc12345abc12345abc12345") shouldBe true
+    Names.looksLikeTenantId("t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e") shouldBe true
+
+  "Names.newSurrogateId" should "produce a prefix + 32 lowercase hex chars" in:
+    val id = Names.newSurrogateId("t")
+    id should fullyMatch regex "^t-[0-9a-f]{32}$"
+    Names.looksLikeTenantId(id) shouldBe true
+
+  it should "honour the requested prefix" in:
+    Names.newSurrogateId("td")   should startWith ("td-")
+    Names.newSurrogateId("p")    should startWith ("p-")
+    Names.newSurrogateId("rp")   should startWith ("rp-")
+    Names.newSurrogateId("pp")   should startWith ("pp-")
+    Names.newSurrogateId("g")    should startWith ("g-")
+    Names.newSurrogateId("fsec") should startWith ("fsec-")
+
+  it should "not collide across a reasonable batch (128-bit entropy)" in:
+    // Birthday math: 128-bit entropy hits 50% collision around 2^64 ids -- a
+    // batch of 10K should never collide. (The legacy 32-bit form collided at
+    // ~77K, sanity check that we're not back there.)
+    val ids = (1 to 10000).map(_ => Names.newSurrogateId("t")).toSet
+    ids.size shouldBe 10000

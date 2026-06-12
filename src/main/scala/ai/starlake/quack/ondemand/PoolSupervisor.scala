@@ -31,7 +31,6 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.slf4j.LoggerFactory
 
-import java.util.UUID
 import scala.collection.concurrent.TrieMap
 
 /** Owns the in-memory topology and mediates every mutation through [[ControlPlaneStore]]:
@@ -1251,7 +1250,7 @@ final class PoolSupervisor(
 
   // ---------- helpers ----------
 
-  private def newId(prefix: String): String = s"$prefix-${UUID.randomUUID().toString.take(8)}"
+  private def newId(prefix: String): String = ai.starlake.quack.model.Names.newSurrogateId(prefix)
 
   private def updatePoolEntityDist(key: PoolKey, dist: RoleDistribution, size: Int): Unit =
     poolIdByKey.get(key).flatMap(poolRows.get).foreach { p =>
