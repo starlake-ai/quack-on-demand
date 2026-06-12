@@ -87,7 +87,33 @@ final case class ManagementAuthConfig(
       description =
         "JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback)."
     )
-    identityClaim: String
+    identityClaim: String,
+    @field @ConfigField(
+      envVar = "QOD_SESSION_JWT_SECRET",
+      description =
+        "HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make " +
+          "sessions survive manager restart and to share session state across replicas. Empty " +
+          "= autogenerate a fresh 32-byte secret at boot (sessions die on restart, no horizontal " +
+          "scale).",
+      sensitive = true
+    )
+    sessionJwtSecret: String,
+    @field @ConfigField(
+      envVar = "QOD_SESSION_COOKIE_SECURE",
+      description =
+        "Set the Secure flag on the qod_session cookie. Default true; set to false only for " +
+          "plaintext-HTTP dev deployments."
+    )
+    sessionCookieSecure: Boolean,
+    @field @ConfigField(
+      envVar = "QOD_SESSION_COOKIE_PATH",
+      description =
+        "Path attribute on the qod_session cookie. Default '/api'. Override when the manager " +
+          "sits behind a path-rewriting reverse proxy: the value must match the BROWSER-visible " +
+          "URL prefix, not the backend's. E.g. proxy at https://platform/quack/api/* -> " +
+          "QOD_SESSION_COOKIE_PATH=/quack/api."
+    )
+    sessionCookiePath: String
 )
 
 final case class ManagerAuthConfig(

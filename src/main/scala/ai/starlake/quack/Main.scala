@@ -294,8 +294,16 @@ object Main extends IOApp with LazyLogging:
         Some(new CatalogHandlers(reader, kindOf))
       else None
 
-    val sessionTokens  = new SessionTokenStore(
-      idleTtl = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
+    val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
+    if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
+      logger.warn(
+        "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
+          "sessions on this manager. Override QOD_SESSION_JWT_SECRET before exposing the " +
+          "manager beyond localhost."
+      )
+    val sessionTokens = new SessionTokenStore(
+      secret      = mgrCfg.auth.management.sessionJwtSecret,
+      maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
     )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
     val authUserStore: Option[UserStore] =
@@ -309,7 +317,9 @@ object Main extends IOApp with LazyLogging:
       authService       = authService,
       tokens            = sessionTokens,
       identitySource    = identitySource,
-      grantsForIdentity = grantsForIdentity
+      grantsForIdentity = grantsForIdentity,
+      cookieSecure      = mgrCfg.auth.management.sessionCookieSecure,
+      cookiePath        = mgrCfg.auth.management.sessionCookiePath
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

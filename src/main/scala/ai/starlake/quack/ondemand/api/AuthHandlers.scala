@@ -5,6 +5,7 @@ import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, 
 import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
 import sttp.model.StatusCode
+import sttp.model.headers.{Cookie, CookieValueWithMeta}
 
 /** REST endpoints driving the UI's login lifecycle.
   *
@@ -16,17 +17,56 @@ import sttp.model.StatusCode
   *
   * Either path collapses to a [[SessionScope]] carrying `superuser` and `manageableTenants`. Empty
   * grants => `403 not_provisioned`; no admin grant => `403 admin_required` (the UI is admin-only).
+  *
+  * Transport: on successful login the handler sets a `qod_session` cookie carrying the same JWT
+  * returned in `LoginResponse.token`. The browser auto-attaches the cookie on subsequent /api/*
+  * calls; CLI / static-key callers stay on the X-API-Key header path. Logout always clears the
+  * cookie and (process-locally) marks the jti revoked until its natural exp.
   */
 final class AuthHandlers(
     authService: AuthenticationService,
     tokens: SessionTokenStore,
     identitySource: ManagementIdentitySource,
-    grantsForIdentity: GrantsLookup
+    grantsForIdentity: GrantsLookup,
+    cookieSecure: Boolean = true,
+    cookiePath: String = "/api"
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  def login(req: LoginRequest): Out[LoginResponse] = IO.blocking {
+  // sttp.model represents SameSite as Cookie.SameSite (sealed trait with
+  // Lax / Strict / None case objects). Lax matches all top-level GETs but
+  // blocks cross-origin POST/PUT/DELETE -- the right default for an admin
+  // REST surface.
+  private val sameSiteLax: Option[Cookie.SameSite] = Some(Cookie.SameSite.Lax)
+
+  private def sessionCookie(token: String): CookieValueWithMeta =
+    CookieValueWithMeta.unsafeApply(
+      value           = token,
+      maxAge          = Some(tokens.maxAgeSeconds),
+      path            = Some(cookiePath),
+      domain          = None,
+      secure          = cookieSecure,
+      httpOnly        = true,
+      sameSite        = sameSiteLax,
+      expires         = None,
+      otherDirectives = Map.empty
+    )
+
+  private def clearCookie: CookieValueWithMeta =
+    CookieValueWithMeta.unsafeApply(
+      value           = "",
+      maxAge          = Some(0L),
+      path            = Some(cookiePath),
+      domain          = None,
+      secure          = cookieSecure,
+      httpOnly        = true,
+      sameSite        = sameSiteLax,
+      expires         = None,
+      otherDirectives = Map.empty
+    )
+
+  def login(req: LoginRequest): Out[(CookieValueWithMeta, LoginResponse)] = IO.blocking {
     if req.username.isEmpty || req.password.isEmpty then
       Left(
         (
@@ -93,23 +133,29 @@ final class AuthHandlers(
           else
             val sessionScope = SessionScope(superuser, manageableTenants)
             val token        = tokens.mintWithScope(profile, sessionScope)
-            Right(
-              LoginResponse(
-                token             = token,
-                username          = profile.username,
-                tenant            = None,
-                superuser         = superuser,
-                manageableTenants = manageableTenants.toList.sorted
-              )
+            val resp = LoginResponse(
+              token             = token,
+              username          = profile.username,
+              tenant            = None,
+              superuser         = superuser,
+              manageableTenants = manageableTenants.toList.sorted
             )
+            Right((sessionCookie(token), resp))
   }
 
-  def logout(token: String): Out[Unit] = IO.delay {
-    tokens.revoke(token)
-    Right(())
-  }
+  /** Logout. Accepts the token via X-API-Key header OR qod_session cookie -- the UI uses the
+    * cookie (JS can't read HttpOnly cookies); CLI uses the header. The response always emits a
+    * clear-cookie so the browser drops its copy.
+    */
+  def logout(apiKey: Option[String], cookie: Option[String]): Out[CookieValueWithMeta] =
+    IO.delay {
+      apiKey.orElse(cookie).foreach(tokens.revoke)
+      Right(clearCookie)
+    }
 
-  def whoami(token: String): Out[WhoamiResponse] = IO.delay {
+  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT. */
+  def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] = IO.delay {
+    val token = apiKey.orElse(cookie).getOrElse("")
     tokens.get(token) match
       case Some(s) =>
         Right(
