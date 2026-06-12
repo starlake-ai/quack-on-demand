@@ -18,7 +18,7 @@ Every scalar configuration key in `src/main/resources/application.conf` can be o
 | Static admin key | `QOD_API_KEY` | *(unset)* | Static admin token sent as `X-API-Key`. If unset, the REST namespace is open and Main emits a startup warning. |
 | Session JWT secret | `QOD_SESSION_JWT_SECRET` | dev default | HS256 secret used to sign UI session JWTs. **Override in production** — the `application.conf` default is a well-known dev string; Main emits a startup warning if it's not overridden. |
 | Session cookie path | `QOD_SESSION_COOKIE_PATH` | `/api` | Path attribute on the `qod_session` cookie. Override behind a path-rewriting reverse proxy. |
-| Session cookie Secure | `QOD_SESSION_COOKIE_SECURE` | `true` | Set to `false` only for plaintext-HTTP dev. |
+| Session cookie Secure | `QOD_SESSION_COOKIE_SECURE` | `auto` | `auto` derives `Secure` from `X-Forwarded-Proto` per request (https → Secure, http or absent → not Secure); `true` / `false` force one value regardless of scheme. |
 | Session idle TTL | `QOD_SESSION_IDLE_TTL_SEC` | `28800` (8h) | Absolute JWT lifetime. |
 | Admin usernames | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` | Comma-separated admin usernames seeded at boot |
 | Admin password | `QOD_ADMIN_PASSWORD` | `admin` | Re-hashed on every boot — change + restart rotates |
