@@ -85,10 +85,24 @@ final class KubernetesQuackBackend(
     kindEnv.setName("kind")
     kindEnv.setValue(spec.kindWire)
     envs.add(kindEnv)
-    // TODO(federation): propagate spec.extraSetupSql as an env var or K8s
-    // Secret mount for federation E2E on the K8s backend. Currently only
-    // the Local backend receives extraSetupSql; K8s federation is a
-    // follow-up task.
+    // Federation: when the pool has any extraSetupSql, point the pod's
+    // `extraSetupSql` env var at the per-pool Secret instead of inlining
+    // the value. Same env var name as LocalQuackBackend's
+    // env.put("extraSetupSql", ...) so spawn-quack-node.sh:200 reads it
+    // identically. Putting it in a Secret keeps the (potentially long,
+    // potentially credential-bearing) SQL out of `kubectl describe pod`
+    // output and out of the pod object's etcd record. The Secret itself
+    // is created in start() by ensureFederationSecret.
+    if spec.extraSetupSql.nonEmpty then
+      val fedEnv = new EnvVar()
+      fedEnv.setName("extraSetupSql")
+      val source = new EnvVarSource()
+      val ref    = new SecretKeySelector()
+      ref.setName(secretNameFor(spec.poolKey))
+      ref.setKey(KubernetesQuackBackend.FederationSecretKey)
+      source.setSecretKeyRef(ref)
+      fedEnv.setValueFrom(source)
+      envs.add(fedEnv)
     val tokenEnv = new EnvVar()
     tokenEnv.setName("QOD_NODE_TOKEN")
     tokenEnv.setValue(token)
@@ -172,6 +186,15 @@ final class KubernetesQuackBackend(
     val token = LocalQuackBackend.randomToken()
     tokens.put(spec.nodeId, token)
 
+    // The per-pool federation Secret has to exist BEFORE the pod is
+    // created -- kubelet rejects a pod whose env.valueFrom references
+    // a missing Secret. Idempotent: same content -> no-op; new SQL ->
+    // updated bytes (kubelet does NOT re-inject env values into running
+    // containers, so an existing pod still sees the old SQL until it
+    // restarts, matching the local backend's "once at startup" model).
+    if spec.extraSetupSql.nonEmpty then
+      ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+
     val pod     = buildPod(spec, token)
     val created = client.pods.inNamespace(namespace).resource(pod).create()
     waitReady(created)
@@ -203,11 +226,91 @@ final class KubernetesQuackBackend(
     if !ready then sys.error(s"pod ${p.getMetadata.getName} not ready in ${startupTimeoutSec}s")
 
   def stop(nodeId: String): IO[Unit] = IO.blocking {
+    // Capture the pod's pool labels before delete -- after the API call
+    // the pod object may be gone or in a Terminating state.
+    val poolKeyOpt = readPoolKey(nodeId)
+
     client.services.inNamespace(namespace).withName(nodeId).delete()
     client.pods.inNamespace(namespace).withName(nodeId).delete()
     tokens.remove(nodeId)
+
+    // If this was the last live pod for the pool, GC the federation
+    // Secret. Filter out the just-deleted pod (still in the list if the
+    // apiserver hasn't propagated yet) and anything in Terminating
+    // state. The Secret is created lazily on start so its absence here
+    // is normal for pools with no federation -- the delete() call is
+    // idempotent and returns false for missing.
+    poolKeyOpt.foreach { key =>
+      val remaining = client.pods
+        .inNamespace(namespace)
+        .withLabel("quack-tenant", key.tenant)
+        .withLabel("quack-tenant-db", key.tenantDb)
+        .withLabel("quack-pool", key.pool)
+        .list()
+        .getItems
+        .asScala
+        .toList
+        .filterNot(p => p.getMetadata.getName == nodeId)
+        .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
+      if remaining.isEmpty then
+        client.secrets
+          .inNamespace(namespace)
+          .withName(secretNameFor(key))
+          .delete()
+    }
     ()
   }
+
+  /** Reconstruct a [[PoolKey]] from a pod's labels. Returns `None` if the pod is gone or its
+    * label set is incomplete (older labelling scheme or hand-edited pod).
+    */
+  private def readPoolKey(nodeId: String): Option[PoolKey] =
+    Option(client.pods.inNamespace(namespace).withName(nodeId).get()).flatMap { p =>
+      val labels = Option(p.getMetadata.getLabels)
+        .map(_.asScala)
+        .getOrElse(scala.collection.mutable.Map.empty)
+      for
+        tenant   <- labels.get("quack-tenant")
+        tenantDb <- labels.get("quack-tenant-db")
+        pool     <- labels.get("quack-pool")
+      yield PoolKey(tenant, tenantDb, pool)
+    }
+
+  /** K8s Secret name for a pool's federation SQL. Hyphenizes the `tenantDb` underscore the same
+    * way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does so the result is RFC-1123
+    * compatible. All segments are already Postgres-identifier-safe so no further escaping needed.
+    */
+  private def secretNameFor(key: PoolKey): String =
+    val safeDb = key.tenantDb.replace('_', '-')
+    s"qod-fedsql-${key.tenant}-$safeDb-${key.pool}"
+
+  /** Create-or-replace the per-pool federation Secret. Content is `stringData` (UTF-8, kubelet
+    * base64-encodes); kubelet rejects pods that reference a missing Secret so this MUST run
+    * before pod create. Idempotent -- fabric8's `resource(...).createOr(replace)` mirrors a
+    * kubectl-apply, so concurrent ensure-calls for the same pool either both succeed (latest
+    * wins) or one races on resourceVersion (auto-retried by fabric8).
+    */
+  private def ensureFederationSecret(key: PoolKey, sql: String): Unit =
+    val name = secretNameFor(key)
+    val meta = new ObjectMeta()
+    meta.setName(name)
+    val labels = new java.util.HashMap[String, String]()
+    labels.put(labelKey, labelValue)
+    labels.put("quack-tenant", key.tenant)
+    labels.put("quack-tenant-db", key.tenantDb)
+    labels.put("quack-pool", key.pool)
+    meta.setLabels(labels)
+    val secret = new Secret()
+    secret.setMetadata(meta)
+    val data = new java.util.HashMap[String, String]()
+    data.put(KubernetesQuackBackend.FederationSecretKey, sql)
+    secret.setStringData(data)
+    val ops = client.secrets.inNamespace(namespace).resource(secret)
+    // fabric8 6.x replaced createOrReplace with createOr(r => r.update())
+    // for explicit conflict semantics. The first call creates; subsequent
+    // calls update the existing object's stringData in place.
+    ops.createOr(r => r.update())
+    ()
 
   def isAlive(nodeId: String): Boolean =
     Option(client.pods.inNamespace(namespace).withName(nodeId).get()).exists(readPodReady)
@@ -250,6 +353,14 @@ final class KubernetesQuackBackend(
 end KubernetesQuackBackend
 
 object KubernetesQuackBackend:
+
+  /** Key inside the per-pool federation Secret holding the resolved SQL. Same string as the env
+    * var name [[buildPod]] sets on the pod, so an operator who shells into the pod and runs
+    * `env | grep extraSetupSql` sees a familiar value -- the kubelet-injected env mirrors the
+    * Secret's keyed payload.
+    */
+  val FederationSecretKey: String = "extraSetupSql"
+
   /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
     * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.
     * Keep in sync with the `QOD_*` keys read by `scripts/spawn-quack-node.sh`.
