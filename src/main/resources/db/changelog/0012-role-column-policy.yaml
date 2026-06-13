@@ -1,0 +1,42 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0012-qodstate-role-column-policy
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_role_column_policy
+            columns:
+              - column: { name: id,            type: TEXT,        constraints: { primaryKey: true, nullable: false } }
+              - column: { name: role_id,       type: TEXT,        constraints: { nullable: false } }
+              - column: { name: catalog_name,  type: TEXT,        constraints: { nullable: false } }
+              - column: { name: schema_name,   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: table_name,    type: TEXT,        constraints: { nullable: false } }
+              - column: { name: column_name,   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: action,        type: TEXT,        constraints: { nullable: false } }
+              - column: { name: transform_sql, type: TEXT,        constraints: { nullable: true  } }
+              - column:
+                  name: created_at
+                  type: TIMESTAMP WITH TIME ZONE
+                  defaultValueComputed: now()
+                  constraints: { nullable: false }
+        - addForeignKeyConstraint:
+            baseTableName: qodstate_role_column_policy
+            baseColumnNames: role_id
+            referencedTableName: qodstate_role
+            referencedColumnNames: id
+            constraintName: qodstate_role_column_policy_role_fk
+            onDelete: CASCADE
+        - addUniqueConstraint:
+            tableName: qodstate_role_column_policy
+            columnNames: role_id, catalog_name, schema_name, table_name, column_name
+            constraintName: qodstate_role_column_policy_uniq
+        - sql:
+            sql: >
+              ALTER TABLE qodstate_role_column_policy
+              ADD CONSTRAINT qodstate_role_column_policy_action_chk
+              CHECK (action IN ('deny','mask'))
+        - createIndex:
+            tableName: qodstate_role_column_policy
+            indexName: qodstate_role_column_policy_role_idx
+            columns:
+              - column: { name: role_id }
