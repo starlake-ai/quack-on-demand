@@ -154,3 +154,46 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     r.rewrite("SELECT * FROM tpch1.customer",
               StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe Passthrough
   }
+
+  // -------- deny semantics --------
+
+  private val denySsn = RoleColumnPolicy("cp-2", "r-1", "*", "tpch1", "customer",
+                                          "c_ssn", "deny", None)
+
+  it should "deny SELECT c_ssn FROM customer when the policy is deny" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")))
+    val out = r.rewrite("SELECT c_ssn FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
+    out match
+      case Denied(reason) => reason.toLowerCase should include ("c_ssn")
+      case other          => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny SELECT * when expansion uncovers a denied column" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")))
+    val out = r.rewrite("SELECT * FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
+    out match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "rewrite a covered column inside a WHERE predicate" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val out = r.rewrite("SELECT c_id FROM tpch1.customer WHERE c_email LIKE '%@acme.com'",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include ("'***'")
+      case other          => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "rewrite covered columns inside composite expressions in projection" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val out = r.rewrite("SELECT length(c_email) FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql.toLowerCase should include ("length")
+        sql             should include ("'***'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
