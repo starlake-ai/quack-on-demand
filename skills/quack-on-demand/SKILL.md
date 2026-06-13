@@ -295,9 +295,19 @@ LT_QUERY='SELECT count(*) FROM lineitem' \
 # Adds the `superuser=true` gRPC header; tenant/pool still drive routing.
 ./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
 LT_SUPERUSER=true LT_TENANT=acme LT_POOL=bi ./scripts/loadtest/loadtest.py
+
+# TPC-DS workload (requires `scripts/load-tpcds-dbgen.sh` to have seeded the
+# globex_tpcds tenant-db; --schema defaults to tpcds1 to match the SF=1 seed).
+./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi
+LT_WORKLOAD=tpcds LT_TENANT=globex LT_POOL=bi ./scripts/loadtest/loadtest.py
 ```
 
-Reports throughput, success rate, latency percentiles (p50/p95/p99). Default workload is a TPCH-H subset (Q1, Q3, Q5, Q6, Q10, Q12, Q14) using the standard spec parameters.
+Reports throughput, success rate, latency percentiles (p50/p95/p99). Two curated workloads ship:
+
+- `--workload tpch` (default) - TPC-H subset (Q1, Q3, Q5, Q6, Q10, Q12, Q14) against schema `tpch1`.
+- `--workload tpcds` - TPC-DS subset (Q3, Q7, Q19, Q42, Q52, Q55, Q98) against schema `tpcds1`. Mixes per-group aggregation, 5- and 6-way joins, top-N, and a window function (Q98's `OVER (PARTITION BY i_class)`).
+
+Override `--schema` (or `$LT_SCHEMA`) when the target tenant-db was seeded at a non-1 scale factor (e.g. `--schema tpcds10`).
 
 The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager pyarrow`. The auto-install on first run prints the right command if anything is missing.
 

@@ -17,6 +17,10 @@ Usage (tenant + pool are required; pass them or set LT_TENANT / LT_POOL):
     ./scripts/loadtest/loadtest.py --tenant acme --pool bi \
         --url grpc+tls://localhost:31338 --insecure
     ./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
+
+    # TPC-DS workload against the globex demo (schema=tpcds1, populated by
+    # scripts/load-tpcds-dbgen.sh):
+    ./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi
 """
 from __future__ import annotations
 
@@ -42,7 +46,7 @@ from typing import List
 # session's default schema happens to be. This lets the load tester point
 # at TPC-H seeded into tpch.tpch1.* without the server having to default
 # its session schema there.
-def default_queries(schema: str) -> List[str]:
+def default_queries_tpch(schema: str) -> List[str]:
     s = schema
     return [
         # --- Q1: Pricing Summary Report ---
@@ -142,6 +146,132 @@ def default_queries(schema: str) -> List[str]:
     ]
 
 
+# Default TPC-DS workload: a curated, varied-shape subset of the 99-query
+# benchmark. Picked to exercise the same plan-shape range as the TPC-H mix
+# (per-group aggregation, multi-way joins, top-N, CASE expressions, window
+# functions, date-range filters) against the standard 24 TPC-DS tables that
+# scripts/load-tpcds-dbgen.sh seeds into `globex_tpcds.tpcds1.*`.
+#
+# Queries match the official spec at https://www.tpc.org/tpc_documents_current_versions/pdf/tpc-ds_v3.2.0.pdf
+# but use static parameter values (no RngenerateData step) for reproducibility.
+# Each table reference is schema-prefixed at runtime via --schema / $LT_SCHEMA.
+def default_queries_tpcds(schema: str) -> List[str]:
+    s = schema
+    return [
+        # --- Q3: store_sales x date_dim x item, monthly-brand revenue rollup ---
+        f"""SELECT d_year, i_brand_id AS brand_id, i_brand AS brand,
+                  sum(ss_ext_sales_price) AS sum_agg
+           FROM {s}.date_dim, {s}.store_sales, {s}.item
+           WHERE d_date_sk    = ss_sold_date_sk
+             AND ss_item_sk   = i_item_sk
+             AND i_manufact_id = 128
+             AND d_moy         = 11
+           GROUP BY d_year, i_brand, i_brand_id
+           ORDER BY d_year, sum_agg DESC, brand_id
+           LIMIT 100""",
+
+        # --- Q7: 5-way join with demographics + promotion filter ---
+        f"""SELECT i_item_id,
+                  avg(ss_quantity)        AS agg1,
+                  avg(ss_list_price)      AS agg2,
+                  avg(ss_coupon_amt)      AS agg3,
+                  avg(ss_sales_price)     AS agg4
+           FROM {s}.store_sales, {s}.customer_demographics, {s}.date_dim,
+                {s}.item, {s}.promotion
+           WHERE ss_sold_date_sk = d_date_sk
+             AND ss_item_sk      = i_item_sk
+             AND ss_cdemo_sk     = cd_demo_sk
+             AND ss_promo_sk     = p_promo_sk
+             AND cd_gender         = 'M'
+             AND cd_marital_status = 'S'
+             AND cd_education_status = 'College'
+             AND (p_channel_email = 'N' OR p_channel_event = 'N')
+             AND d_year = 2000
+           GROUP BY i_item_id
+           ORDER BY i_item_id
+           LIMIT 100""",
+
+        # --- Q19: 6-way join, group + top-N ---
+        f"""SELECT i_brand_id AS brand_id, i_brand AS brand,
+                  i_manufact_id, i_manufact,
+                  sum(ss_ext_sales_price) AS ext_price
+           FROM {s}.date_dim, {s}.store_sales, {s}.item,
+                {s}.customer, {s}.customer_address, {s}.store
+           WHERE d_date_sk    = ss_sold_date_sk
+             AND ss_item_sk   = i_item_sk
+             AND i_manager_id = 8
+             AND d_moy        = 11
+             AND d_year       = 1998
+             AND ss_customer_sk = c_customer_sk
+             AND c_current_addr_sk = ca_address_sk
+             AND substr(ca_zip, 1, 5) <> substr(s_zip, 1, 5)
+             AND ss_store_sk  = s_store_sk
+           GROUP BY i_brand, i_brand_id, i_manufact_id, i_manufact
+           ORDER BY ext_price DESC, i_brand, i_brand_id, i_manufact_id, i_manufact
+           LIMIT 100""",
+
+        # --- Q42: store_sales filter + 3-way join + small group ---
+        f"""SELECT dt.d_year, item.i_category_id, item.i_category,
+                  sum(ss_ext_sales_price) AS rev
+           FROM {s}.date_dim dt, {s}.store_sales, {s}.item
+           WHERE dt.d_date_sk    = store_sales.ss_sold_date_sk
+             AND store_sales.ss_item_sk = item.i_item_sk
+             AND item.i_manager_id  = 1
+             AND dt.d_moy           = 11
+             AND dt.d_year          = 2000
+           GROUP BY dt.d_year, item.i_category_id, item.i_category
+           ORDER BY rev DESC, dt.d_year, item.i_category_id, item.i_category
+           LIMIT 100""",
+
+        # --- Q52: brand-level revenue rollup, same shape family as Q42 ---
+        f"""SELECT dt.d_year, item.i_brand_id AS brand_id, item.i_brand AS brand,
+                  sum(ss_ext_sales_price) AS ext_price
+           FROM {s}.date_dim dt, {s}.store_sales, {s}.item
+           WHERE dt.d_date_sk    = store_sales.ss_sold_date_sk
+             AND store_sales.ss_item_sk = item.i_item_sk
+             AND item.i_manager_id  = 1
+             AND dt.d_moy           = 11
+             AND dt.d_year          = 2000
+           GROUP BY dt.d_year, item.i_brand, item.i_brand_id
+           ORDER BY dt.d_year, ext_price DESC, brand_id
+           LIMIT 100""",
+
+        # --- Q55: small 3-way join, brand top-N ---
+        f"""SELECT i_brand_id AS brand_id, i_brand AS brand,
+                  sum(ss_ext_sales_price) AS ext_price
+           FROM {s}.date_dim, {s}.store_sales, {s}.item
+           WHERE d_date_sk    = ss_sold_date_sk
+             AND ss_item_sk   = i_item_sk
+             AND i_manager_id = 28
+             AND d_moy        = 11
+             AND d_year       = 1999
+           GROUP BY i_brand, i_brand_id
+           ORDER BY ext_price DESC, i_brand_id
+           LIMIT 100""",
+
+        # --- Q98: per-class share-of-revenue with a window function ---
+        f"""SELECT i_item_id, i_item_desc, i_category, i_class, i_current_price,
+                  sum(ss_ext_sales_price) AS itemrevenue,
+                  sum(ss_ext_sales_price) * 100.0
+                    / sum(sum(ss_ext_sales_price)) OVER (PARTITION BY i_class)
+                    AS revenueratio
+           FROM {s}.store_sales, {s}.item, {s}.date_dim
+           WHERE ss_item_sk = i_item_sk
+             AND i_category IN ('Sports', 'Books', 'Home')
+             AND ss_sold_date_sk = d_date_sk
+             AND d_date BETWEEN DATE '1999-02-22'
+                            AND DATE '1999-02-22' + INTERVAL '30' DAY
+           GROUP BY i_item_id, i_item_desc, i_category, i_class, i_current_price
+           ORDER BY i_category, i_class, i_item_id, i_item_desc, revenueratio""",
+    ]
+
+
+WORKLOADS = {
+    "tpch":  ("tpch1",  default_queries_tpch),
+    "tpcds": ("tpcds1", default_queries_tpcds),
+}
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="FlightSQL load tester for quack-on-demand",
@@ -164,10 +294,18 @@ def parse_args() -> argparse.Namespace:
                    help="throwaway iterations per worker before counting")
     p.add_argument("-q", "--query",
                    default=os.environ.get("LT_QUERY"),
-                   help="single SQL to repeat (else cycles the default mix)")
+                   help="single SQL to repeat (else cycles the workload mix)")
+    p.add_argument("--workload",
+                   choices=sorted(WORKLOADS.keys()),
+                   default=os.environ.get("LT_WORKLOAD", "tpch"),
+                   help="which curated benchmark to cycle (ignored with -q). "
+                        "Each workload also sets a sensible default --schema "
+                        "(tpch1 / tpcds1) unless --schema is given explicitly.")
     p.add_argument("--schema",
-                   default=os.environ.get("LT_SCHEMA", "tpch1"),
-                   help="schema to prefix the default TPC-H mix with (ignored with -q)")
+                   default=os.environ.get("LT_SCHEMA"),
+                   help="schema to prefix the workload queries with (ignored "
+                        "with -q). Defaults to the workload's canonical "
+                        "schema (tpch1 for tpch, tpcds1 for tpcds).")
     p.add_argument("--tenant",
                    required=not os.environ.get("LT_TENANT"),
                    default=os.environ.get("LT_TENANT"),
@@ -293,8 +431,13 @@ def pct(sorted_values: List[float], p: float) -> float:
 
 def main() -> int:
     args = parse_args()
-    queries = [args.query] if args.query else default_queries(args.schema)
-    mix_label = "custom -q" if args.query else f"default TPC-H mix [schema={args.schema}]"
+    default_schema, builder = WORKLOADS[args.workload]
+    schema = args.schema or default_schema
+    queries = [args.query] if args.query else builder(schema)
+    mix_label = (
+        "custom -q" if args.query
+        else f"default {args.workload.upper()} mix [schema={schema}]"
+    )
 
     scope = f"{args.tenant}/{args.pool}"
     realm = "system" if args.superuser else "tenant"
