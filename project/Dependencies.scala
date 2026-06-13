@@ -78,4 +78,7 @@ object Dependencies {
   val micrometerCloudwatch  = "io.micrometer" % "micrometer-registry-cloudwatch2"   % Versions.micrometer
   val micrometerAzure       = "io.micrometer" % "micrometer-registry-azure-monitor" % Versions.micrometer
   val micrometerStackdriver = "io.micrometer" % "micrometer-registry-stackdriver"   % Versions.micrometer
+
+  // Caffeine cache (for column catalog caching)
+  val caffeine              = "com.github.ben-manes.caffeine" % "caffeine" % Versions.caffeine
 }
