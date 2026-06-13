@@ -351,3 +351,111 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         router.execute("d-3", "alice", key, "SELECT 1").unsafeRunSync()
         capturer.lastCtx.defaultDatabase shouldBe Some("delta_lake")
         capturer.lastCtx.defaultSchema   shouldBe Some("myschema")
+
+  // ---- ColumnPolicyRewriter integration tests ----
+
+  private val tenantUser = ai.starlake.quack.ondemand.state.RbacUser(
+    "u-1", Some("acme"), "alice", "user"
+  )
+
+  private def effWithPolicies(
+      ps: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy]
+  ): ai.starlake.quack.ondemand.rbac.EffectiveSet =
+    ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
+
+  /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter.
+    * Returns (router, lastSqlSentToBackend ref, node). */
+  private def setupWithRewriter(
+      rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter
+  ) =
+    val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
+      private val n = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
+                            24000 + n.size, "tok", Some(4L), None, java.time.Instant.EPOCH,
+                            maxConcurrent = s.maxConcurrent)
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)   = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting() = IO.pure(n.values.toList)
+      def cleanup()          = IO { n.clear() }
+    val tracker   = new NodeLoadTracker
+    val sup       = new ai.starlake.quack.ondemand.PoolSupervisor(
+      backend, tracker, new ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore()
+    )
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val node = sup.get(poolKey).get.nodes.head
+
+    // Mutable cell that the override captures.
+    var capturedSql: String = ""
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient   = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        capturedSql = sql
+        IO.pure(TestArrow.okResponse())
+
+    val adapter  = new QuackHttpAdapter(client, tracker)
+    val sessions = new SessionRegistry
+    val router   = new FlightSqlRouter(
+      sup, sessions, tracker, adapter,
+      columnPolicyRewriter = rewriter
+    )
+    (router, () => capturedSql, node)
+
+  it should "rewrite a SELECT c_email projection through to the backend masked" in:
+    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+      "cp-1", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'")
+    ))
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+    )
+    val (router, capturedSql, _) = setupWithRewriter(rewriter)
+    val out = router.execute(
+      "cls-1", "alice", poolKey,
+      "SELECT c_email FROM main.customer",
+      effectiveSet = Some(effWithPolicies(policies))
+    ).unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("'***'")
+
+  it should "expand SELECT * via the catalog and mask covered columns" in:
+    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+      "cp-2", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'")
+    ))
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_email"))
+      )
+    )
+    val (router, capturedSql, _) = setupWithRewriter(rewriter)
+    val out = router.execute(
+      "cls-2", "alice", poolKey,
+      "SELECT * FROM main.customer",
+      effectiveSet = Some(effWithPolicies(policies))
+    ).unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    // The star was expanded; the masked column carries the literal, not the column name.
+    capturedSql() should include("c_id")
+    capturedSql() should include("'***'")
+
+  it should "deny a SELECT c_ssn when a deny policy matches" in:
+    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+      "cp-3", "r-1", "*", "main", "customer", "c_ssn", "deny", None
+    ))
+    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+    )
+    val (router, _, _) = setupWithRewriter(rewriter)
+    val out = router.execute(
+      "cls-3", "alice", poolKey,
+      "SELECT c_ssn FROM main.customer",
+      effectiveSet = Some(effWithPolicies(policies))
+    ).unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    out.left.get should include("access denied")
