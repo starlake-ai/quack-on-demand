@@ -52,7 +52,7 @@ function Hero() {
           </h1>
           <p className={styles.subtitle}>
             Runs fleets of DuckDB Quack nodes on your own Kubernetes. Per-tenant
-            isolation, table-level ACLs, federated queries. Query it from any
+            isolation,  fine-grained ACLs, federated queries. Query it from any
             ODBC/JDBC/ADBC client. Works with any ETL.
           </p>
           <div className={styles.ctaRow}>
