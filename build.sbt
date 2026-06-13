@@ -206,6 +206,7 @@ lazy val root = (project in file("."))
       Dependencies.micrometerCloudwatch,
       Dependencies.micrometerAzure,
       Dependencies.micrometerStackdriver,
+      Dependencies.caffeine,
       Dependencies.scalaTest,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test
