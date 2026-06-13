@@ -46,14 +46,14 @@ function Hero() {
         <div className={styles.heroCopy}>
           <span className={styles.kicker}>Arrow Flight SQL gateway</span>
           <h1 className={styles.title}>
-            Multi-tenant, federated DuckDB,
+            Autoscale DuckDB fleets
             <br />
-            <span className={styles.titleAccent}>client-server by Quack.</span>
+            <span className={styles.titleAccent}>on demand.</span>
           </h1>
           <p className={styles.subtitle}>
-            Quack on Demand turns embedded DuckDB into a client-server engine. One Arrow
-            Flight SQL endpoint fronts a pool of Quack nodes, with tenant isolation,
-            per-query access control, and federation to external sources.
+            Runs fleets of DuckDB Quack nodes on your own Kubernetes. Per-tenant
+            isolation, table-level ACLs, federated queries. Query it from any
+            ODBC/JDBC/ADBC client. Works with any ETL.
           </p>
           <div className={styles.ctaRow}>
             <Link className={styles.ctaPrimary} to="/getting-started/quickstart">
