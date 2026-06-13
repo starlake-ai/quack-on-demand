@@ -183,7 +183,21 @@ final class ColumnPolicyRewriter(catalog: ColumnCatalog):
       }
     })
 
-    // (3) Walk projection items (now fully expanded - no stars remain).
+    // (3) WHERE clause.
+    Option(ps.getWhere).foreach { w =>
+      val local = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val rewritten = walkAndReplace(w, tableMap, eff, ctx, local, changed)
+      if local.get then ps.setWhere(rewritten)
+    }
+
+    // (4) HAVING clause.
+    Option(ps.getHaving).foreach { h =>
+      val local = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val rewritten = walkAndReplace(h, tableMap, eff, ctx, local, changed)
+      if local.get then ps.setHaving(rewritten)
+    }
+
+    // (5) Walk projection items (now fully expanded - no stars remain).
     val items = ps.getSelectItems
     if items != null && !items.isEmpty then
       val it = items.listIterator()
