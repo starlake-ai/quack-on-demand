@@ -4,11 +4,13 @@ import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
 import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.statement.select.{
-  ParenthesedSelect, PlainSelect, Select, SelectItem, SetOperationList, WithItem
+  AllColumns, AllTableColumns, ParenthesedSelect, PlainSelect, Select, SelectItem,
+  SetOperationList, WithItem
 }
 
 import scala.jdk.CollectionConverters._
@@ -107,6 +109,10 @@ final class ColumnPolicyRewriter(catalog: ColumnCatalog):
       case _                     => ()
     }
 
+  /** Wraps a Column in a SelectItem (no alias). */
+  private def buildSelectItem(col: net.sf.jsqlparser.schema.Column): SelectItem[?] =
+    new SelectItem(col)
+
   /** Rewrite the projection items of a PlainSelect and recurse into FROM-item subqueries. */
   private def applyToPlainSelect(
       ps:      PlainSelect,
@@ -116,7 +122,56 @@ final class ColumnPolicyRewriter(catalog: ColumnCatalog):
   ): Unit =
     val tableMap = resolveTables(ps, ctx)
 
-    // (1) Recurse into FROM-item subqueries before walking the projection.
+    // (1) STAR EXPANSION: expand `*` and `t.*` via the catalog BEFORE the projection walk.
+    //     Build a replacement list; bail out (leaving items unchanged) if the catalog has no
+    //     entry or the table cannot be resolved unambiguously.
+    val rawItems = ps.getSelectItems
+    if rawItems != null && !rawItems.isEmpty then
+      val expanded = new java.util.ArrayList[SelectItem[?]](rawItems.size)
+      var sawStar  = false
+      var bail     = false
+      val it0 = rawItems.iterator()
+      while it0.hasNext && !bail do
+        val si  = it0.next()
+        val ex  = si.getExpression
+        ex match
+          case atc: AllTableColumns =>
+            // `t.*` - look up the alias / table name in tableMap
+            sawStar = true
+            val key = Option(atc.getTable).map(_.getName).getOrElse("")
+            tableMap.get(key) match
+              case Some((cat, sch, tab)) =>
+                val cols = catalog.columnsOf(cat, sch, tab).unsafeRunSync()
+                if cols.isEmpty then bail = true
+                else cols.foreach { name =>
+                  val col = new net.sf.jsqlparser.schema.Column(
+                    new net.sf.jsqlparser.schema.Table(key), name
+                  )
+                  expanded.add(buildSelectItem(col))
+                }
+              case None => bail = true
+          case _: AllColumns =>
+            // Unqualified `*` - only expand when there is exactly one FROM table
+            sawStar = true
+            if tableMap.size != 1 then bail = true
+            else
+              val (cat, sch, tab) = tableMap.values.head
+              val cols = catalog.columnsOf(cat, sch, tab).unsafeRunSync()
+              if cols.isEmpty then bail = true
+              else cols.foreach { name =>
+                expanded.add(buildSelectItem(new net.sf.jsqlparser.schema.Column(name)))
+              }
+          case _ =>
+            expanded.add(si)
+
+      // Only swap in the expanded list when we actually saw a star AND the expansion succeeded.
+      if bail then return    // caller sees no changed.set(true) and ends up with Passthrough
+      if sawStar then
+        ps.setSelectItems(expanded.asInstanceOf[java.util.List[SelectItem[?]]])
+        changed.set(true)
+    // END STAR EXPANSION
+
+    // (2) Recurse into FROM-item subqueries before walking the projection.
     Option(ps.getFromItem).foreach {
       case sub: ParenthesedSelect => applyToSelectBody(sub, eff, ctx, changed)
       case _                      => ()
@@ -128,7 +183,7 @@ final class ColumnPolicyRewriter(catalog: ColumnCatalog):
       }
     })
 
-    // (2) Walk projection items.
+    // (3) Walk projection items (now fully expanded - no stars remain).
     val items = ps.getSelectItems
     if items != null && !items.isEmpty then
       val it = items.listIterator()
