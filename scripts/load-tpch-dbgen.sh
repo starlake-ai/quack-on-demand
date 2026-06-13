@@ -59,6 +59,20 @@ DB_NAME="${DB_NAME:-acme_tpch}"
 SCHEMA_NAME="${SCHEMA_NAME:-tpch1}"
 SF="${SF:-1}"
 
+# DuckDB's default temp_directory is the cwd-relative `./.tmp/`. At SF>=10
+# dbgen() exceeds the default memory budget and DuckDB spills to disk; if
+# `.tmp/` doesn't exist the entire load aborts with
+#   IO Error: Cannot open file ".tmp/duckdb_temp_storage_DEFAULT-1.tmp"
+# and every subsequent `CREATE TABLE ... AS SELECT * FROM memory.main.<t>`
+# fails because the source tables were never populated. Anchor the temp
+# directory to an absolute path we control, mkdir it up-front, and let
+# DuckDB spill into it. Override via TEMP_DIR when running under a
+# read-only / quota'd filesystem.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMP_DIR="${TEMP_DIR:-$REPO_DIR/.tmp/duckdb-tpch-load}"
+mkdir -p "$TEMP_DIR"
+
 # Default DATA_PATH matches `scripts/run-docker.sh` (CWD-anchored, not
 # repo-anchored) so a native loader and a same-CWD `docker run` agree on
 # the same absolute string. Override DATA_PATH to point at any location
@@ -231,6 +245,11 @@ INIT_SQL="$(mktemp -t load-tpch-dbgen.XXXXXX.sql)"
 trap 'rm -f "$INIT_SQL"' EXIT
 
 cat > "$INIT_SQL" <<SQL
+-- Anchor temp_directory FIRST so any subsequent INSTALL / LOAD / CALL that
+-- needs to spill (dbgen at SF>=10 will) writes into a directory we know
+-- exists, rather than DuckDB's cwd-relative default ./.tmp/.
+SET temp_directory='$TEMP_DIR';
+
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
 INSTALL tpch;     LOAD tpch;
