@@ -120,3 +120,37 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       case Rewritten(sql) => sql should include ("'***'")  // at minimum the CTE body
       case other          => fail(s"expected Rewritten, got $other")
   }
+
+  // -------- SELECT * expansion --------
+
+  private def catWithCustomer(cols: List[String]): ColumnCatalog =
+    new ColumnCatalog.MapCatalog(Map(("acme_tpch", "tpch1", "customer") -> cols))
+
+  it should "expand SELECT * via the column catalog and mask covered columns" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email", "c_phone")))
+    val out = r.rewrite("SELECT * FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql.toLowerCase should include ("c_id")
+        sql             should include ("'***'")
+        sql.toLowerCase should include ("c_phone")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "expand a qualified t.* against the catalog" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val out = r.rewrite("SELECT c.* FROM tpch1.customer c",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql.toLowerCase should include ("c_id")
+        sql             should include ("'***'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "passthrough SELECT * when the catalog has no entry for the table" in {
+    val r = new ColumnPolicyRewriter(new ColumnCatalog.MapCatalog(Map.empty))
+    r.rewrite("SELECT * FROM tpch1.customer",
+              StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe Passthrough
+  }
