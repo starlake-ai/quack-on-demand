@@ -46,7 +46,7 @@ Either path brings up the same surface:
 - Admin REST + UI on `http://localhost:20900`
 - Arrow FlightSQL edge on `localhost:31338` (TLS on, self-signed cert auto-generated under `certs/`)
 - Two admin accounts seeded - `admin` and `admin@localhost.local` - both with password `admin`
-- Bootstrap tenant `tpch`, tenant-db `tpch1`, pool `sales` created (idempotent on restart)
+- Two bootstrap tenants seeded from `src/main/resources/bootstrap-demo.yaml`: `acme` (tenant-db `acme_tpch`, pools `bi` + `etl`) and `globex` (tenant-db `globex_tpcds`, pool `bi`). Idempotent on restart.
 
 ### Boot flags
 
@@ -82,7 +82,7 @@ Browse to `http://localhost:20900` and log in with:
 - Username: `admin`
 - Password: `admin`
 
-The Tenants page shows the bootstrap tenant `tpch`. Opening it reveals the Databases, Pools, and Auth provider tabs. The Nodes page shows the live cluster dashboard and the recent-statements history.
+The Tenants page shows the two bootstrap tenants, `acme` and `globex`. Opening either reveals the Databases, Pools, and Auth provider tabs. The Nodes page shows the live cluster dashboard and the recent-statements history.
 
 ## Run your first query
 
@@ -91,14 +91,14 @@ The Tenants page shows the bootstrap tenant `tpch`. Opening it reveals the Datab
 Install the Apache Arrow Flight SQL JDBC driver (`org.apache.arrow:flight-sql-jdbc-driver`, available on Maven Central). In DBeaver, create a new connection and paste this URL directly into the JDBC URL field:
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
 ```
 
 Set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
 
 The `disableCertificateVerification=true` parameter is required because the gateway starts with an auto-generated self-signed certificate (see the TLS guide for how to supply a CA-signed cert and remove that flag).
 
-The `tenant=tpch&pool=sales` parameters are routing headers: the FlightSQL edge requires both to resolve which pool services the connection.
+The `tenant=acme&pool=bi` parameters are routing headers: the FlightSQL edge requires both to resolve which pool services the connection. Swap in `tenant=globex&pool=bi` to drive the TPC-DS demo instead.
 
 ### Python (ADBC)
 

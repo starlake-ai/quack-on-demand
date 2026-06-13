@@ -105,7 +105,7 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete
 
 ## ACL grants (Postgres-relational)
 
-Grants live in `slkstate_acl_grant` in the same Postgres database as DuckLake's metadata. Endpoints are mounted only when `stateStorage=postgres` (the default).
+Grants live in `slkstate_acl_grant` in the same Postgres database as DuckLake's metadata. The endpoints are always mounted (Postgres is the only control-plane store since 2026-06-12).
 
 ```bash
 # Grant RO (read-only) on tpch.tpch1.customer to user:alice
