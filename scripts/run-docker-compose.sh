@@ -17,13 +17,17 @@
 #   QOD_VERSION       image tag                 (default latest)
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
-#   LOAD_TPC            Demo seed: unset = skip; numeric value = scale
-#                       factor for BOTH TPC-H and TPC-DS (e.g. LOAD_TPC=1,
-#                       LOAD_TPC=10). Sets QOD_BOOTSTRAP_YAML=classpath:
-#                       bootstrap-demo.yaml in the quack container so the JVM
-#                       imports the bundled manifest. Then runs both
-#                       load-tpch-dbgen.sh and load-tpcds-dbgen.sh inside the
-#                       container.
+#   LOAD_TPCH           Demo seed: unset/0/false = skip; positive integer =
+#                       TPC-H scale factor loaded into acme/acme_tpch via
+#                       load-tpch-dbgen.sh inside the container.
+#   LOAD_TPCDS          Same shape as LOAD_TPCH for TPC-DS into
+#                       globex/globex_tpcds via load-tpcds-dbgen.sh.
+#   LOAD_TPC            Legacy shortcut: equivalent to setting both
+#                       LOAD_TPCH=N and LOAD_TPCDS=N. Explicit per-bench
+#                       vars override. Either being set enables
+#                       QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml in
+#                       the quack container so the JVM imports the bundled
+#                       manifest on first boot.
 #   NUKE                "1" tears down any existing stack and wipes
 #                       ./pgdata, ./ducklake, ./certs before starting.
 #                       Irreversible.            (default 0)
@@ -42,8 +46,10 @@
 #   ./scripts/run-docker-compose.sh                            # latest
 #   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh          # pinned
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
-#   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + TPC-H + TPC-DS SF=1
-#   LOAD_TPC=10 ./scripts/run-docker-compose.sh                # + TPC-H + TPC-DS SF=10
+#   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H only SF=1
+#   LOAD_TPCDS=10 ./scripts/run-docker-compose.sh              # + TPC-DS only SF=10
+#   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + both SF=1 (legacy)
+#   LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh  # + both, independent SFs
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
 #   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
 
@@ -104,6 +110,10 @@ fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
 LOAD_TPC="${LOAD_TPC:-}"
+# Per-benchmark opt-ins; explicit values win over LOAD_TPC. Either being set
+# enables the bootstrap YAML import below + the matching seed step.
+LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
+LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -270,9 +280,11 @@ for p in "${!_profile_set[@]}"; do
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
-# ---- Inject QOD_BOOTSTRAP_YAML before up when LOAD_TPC is requested ----
+# ---- Inject QOD_BOOTSTRAP_YAML before up when either bench is requested ----
 # The JVM reads this at startup, so it must be in .env before `docker compose up`.
-if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
+_want_tpch=0; [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]] && _want_tpch=1
+_want_tpcds=0; [[ -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]] && _want_tpcds=1
+if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
   if ! grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
     printf '\nQOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml  # added by run-docker-compose.sh\n' >> "$ENV_FILE"
     echo "injected QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml into $ENV_FILE"
@@ -306,16 +318,23 @@ until code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:20900/api/
 done
 echo " ok (HTTP $code)"
 
-# ---- Optional demo seed (LOAD_TPC=N) ----
-# LOAD_TPC is presence-triggered with the value doubling as the scale factor
-# for BOTH TPC-H and TPC-DS. Accepts positive integers (LOAD_TPC=1,
-# LOAD_TPC=10, ...). Unset / empty / 0 / false skips the seed.
-if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
-  if ! [[ "$LOAD_TPC" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPC" -lt 1 ]]; then
-    echo "ERROR: LOAD_TPC must be a positive integer scale factor (got: '$LOAD_TPC')." >&2
-    exit 1
-  fi
-  tpc_sf="$LOAD_TPC"
+# ---- Optional demo seed (LOAD_TPCH / LOAD_TPCDS) ----
+# Each var is presence-triggered with the value doubling as that bench's
+# scale factor. Positive integers only; unset / empty / 0 / false skips.
+# LOAD_TPC=N from the legacy contract pre-populates both (see top-of-file
+# resolution); explicit per-bench vars override.
+if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
+  for _var in LOAD_TPCH LOAD_TPCDS; do
+    _val="${!_var}"
+    if [[ -n "$_val" && "$_val" != "0" && "$_val" != "false" ]]; then
+      if ! [[ "$_val" =~ ^[0-9]+$ ]] || [[ "$_val" -lt 1 ]]; then
+        echo "ERROR: $_var must be a positive integer scale factor (got: '$_val')." >&2
+        exit 1
+      fi
+    fi
+  done
+  unset _var _val
+
   read_env() {
     local key="$1" default="$2"
     if [[ -f "$ENV_FILE" ]]; then
@@ -329,12 +348,15 @@ if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
 
-  # The manager image is JRE-only and does not ship psql. Pre-create
-  # both demo tenant-db Postgres databases from the postgres container
-  # (where psql is present) so duckdb ATTACH does not fail on a missing
-  # database. Idempotent: the \gexec form only runs CREATE DATABASE when
-  # pg_database.datname is absent.
-  for demo_db in acme_tpch globex_tpcds; do
+  # The manager image is JRE-only and does not ship psql. Pre-create only
+  # the demo tenant-db Postgres databases we are actually going to seed,
+  # from the postgres container (where psql is present), so duckdb ATTACH
+  # does not fail on a missing database. Idempotent: the \gexec form only
+  # runs CREATE DATABASE when pg_database.datname is absent.
+  demo_dbs=()
+  [[ "$_want_tpch"  == "1" ]] && demo_dbs+=( acme_tpch )
+  [[ "$_want_tpcds" == "1" ]] && demo_dbs+=( globex_tpcds )
+  for demo_db in "${demo_dbs[@]}"; do
     echo "ensuring demo database '$demo_db' exists on the postgres container..."
     docker compose -f "$COMPOSE_FILE" exec -T \
       -e PGPASSWORD="$pg_pass" \
@@ -346,29 +368,33 @@ if [[ -n "$LOAD_TPC" && "$LOAD_TPC" != "0" && "$LOAD_TPC" != "false" ]]; then
           postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
   done
 
-  echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$tpc_sf) via docker compose exec quack ..."
-  docker compose -f "$COMPOSE_FILE" exec \
-    -e PG_HOST=postgres \
-    -e PG_PORT=5432 \
-    -e PG_USER="$pg_user" \
-    -e PG_PASS="$pg_pass" \
-    -e DB_NAME="acme_tpch" \
-    -e SCHEMA_NAME="tpch1" \
-    -e DATA_PATH="/app/ducklake/acme_tpch" \
-    -e SF="$tpc_sf" \
-    quack /app/scripts/load-tpch-dbgen.sh
+  if [[ "$_want_tpch" == "1" ]]; then
+    echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$LOAD_TPCH) via docker compose exec quack ..."
+    docker compose -f "$COMPOSE_FILE" exec \
+      -e PG_HOST=postgres \
+      -e PG_PORT=5432 \
+      -e PG_USER="$pg_user" \
+      -e PG_PASS="$pg_pass" \
+      -e DB_NAME="acme_tpch" \
+      -e SCHEMA_NAME="tpch1" \
+      -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e SF="$LOAD_TPCH" \
+      quack /app/scripts/load-tpch-dbgen.sh
+  fi
 
-  echo "seeding TPC-DS (db=globex_tpcds, schema=tpcds1, SF=$tpc_sf) via docker compose exec quack ..."
-  docker compose -f "$COMPOSE_FILE" exec \
-    -e PG_HOST=postgres \
-    -e PG_PORT=5432 \
-    -e PG_USER="$pg_user" \
-    -e PG_PASS="$pg_pass" \
-    -e DB_NAME="globex_tpcds" \
-    -e SCHEMA_NAME="tpcds1" \
-    -e DATA_PATH="/app/ducklake/globex_tpcds" \
-    -e SF="$tpc_sf" \
-    quack /app/scripts/load-tpcds-dbgen.sh
+  if [[ "$_want_tpcds" == "1" ]]; then
+    echo "seeding TPC-DS (db=globex_tpcds, schema=tpcds1, SF=$LOAD_TPCDS) via docker compose exec quack ..."
+    docker compose -f "$COMPOSE_FILE" exec \
+      -e PG_HOST=postgres \
+      -e PG_PORT=5432 \
+      -e PG_USER="$pg_user" \
+      -e PG_PASS="$pg_pass" \
+      -e DB_NAME="globex_tpcds" \
+      -e SCHEMA_NAME="tpcds1" \
+      -e DATA_PATH="/app/ducklake/globex_tpcds" \
+      -e SF="$LOAD_TPCDS" \
+      quack /app/scripts/load-tpcds-dbgen.sh
+  fi
 fi
 
 # ---- Summary ----
