@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore}
+import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -376,3 +376,31 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("legacy")).unsafeRunSync()
     sup.createTenantDb("legacy", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.effectiveMetastoreFor("legacy", "legacy_default")("dataPath") shouldBe "/data/global"
+
+  // ---------- effectiveSetForUser: column policies ----------
+
+  "effectiveSetForUser" should "include column policies attached to the user's roles" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val t     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    // createRole registers the role in the rbacResolver so effectiveSetForUser can resolve it.
+    val role  = sup.createRole(t.id, "analyst").unsafeRunSync().toOption.get
+    // Insert the user directly (createUser requires a UserStore; for this test we bypass it).
+    val user  = RbacUser(id = "u-cp1", tenant = Some(t.id), username = "alice", role = "user")
+    store.upsertUserIdentity(user)
+    // addUserRole goes through the supervisor so the effective-set cache is cleared.
+    sup.addUserRole(user.id, role.id).unsafeRunSync()
+    store.insertColumnPolicy(
+      RoleColumnPolicy(
+        id           = "cp-1",
+        roleId       = role.id,
+        catalogName  = "*",
+        schemaName   = "tpch1",
+        tableName    = "customer",
+        columnName   = "c_email",
+        action       = "mask",
+        transformSql = Some("'***'")
+      )
+    )
+    val eff = sup.effectiveSetForUser(user.id)
+    eff.map(_.columnPolicies.map(_.columnName)) shouldBe Some(List("c_email"))
