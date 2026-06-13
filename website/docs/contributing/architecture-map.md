@@ -51,7 +51,7 @@ The routing core (`FlightSqlRouter`, `Router`, `StatementClassifier`, `RoleMatch
 
 ## State and storage
 
-`Main.scala` picks the control-plane store from `quack-on-demand.stateStorage` (default `postgres`): the normalized `qodstate_*` tables managed by Liquibase, or the legacy single-blob `file` store. See [State storage](/concepts/state-storage). Each managed tenant-db is a separate Postgres database holding its DuckLake catalog; see [DuckLake catalogs](/concepts/catalogs).
+`Main.scala` wires the Postgres-only control-plane store: the normalized `qodstate_*` tables managed by Liquibase (the legacy single-blob `file` store and its `stateStorage` / `statePath` config keys were dropped 2026-06-12). See [State storage](/concepts/state-storage). Each managed tenant-db is a separate Postgres database holding its DuckLake catalog; see [DuckLake catalogs](/concepts/catalogs).
 
 ## Extending
 
