@@ -45,3 +45,78 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     rw.rewrite("SELEC' WRONG", StatementKind.Select, eff(tenantUser, policies), ctx)
       .unsafeRunSync() shouldBe Passthrough
   }
+
+  private val maskEmail = RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
+                                            "c_email", "mask", Some("'***'"))
+
+  it should "rewrite a direct column reference in the projection to the transform" in {
+    val out = rw.rewrite("SELECT c_id, c_email FROM tpch1.customer",
+                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql              should include ("'***'")
+        sql.toLowerCase  should include ("c_id")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "preserve a user-supplied projection alias" in {
+    val out = rw.rewrite("SELECT c_email AS e FROM tpch1.customer",
+                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql               should include ("'***'")
+        sql.toLowerCase   should include (" e")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "leave projections that don't touch covered columns alone" in {
+    val out = rw.rewrite("SELECT c_id FROM tpch1.customer",
+                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    // Either Passthrough (nothing changed) OR Rewritten with the same projection. Both are OK
+    // for this case as long as the SQL doesn't contain the transform expression.
+    out match
+      case Passthrough        => succeed
+      case Rewritten(sql)     => sql should not include "'***'"
+      case Denied(reason)     => fail(s"unexpected deny: $reason")
+  }
+
+  // -------- nested SELECTs --------
+
+  it should "rewrite the inner SELECT of a scalar subquery in the projection" in {
+    val out = rw.rewrite(
+      "SELECT (SELECT c_email FROM tpch1.customer LIMIT 1) AS e FROM tpch1.customer",
+      StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include ("'***'")
+      case other          => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "rewrite a subquery used as a FROM item" in {
+    val out = rw.rewrite(
+      "SELECT c_email FROM (SELECT c_email FROM tpch1.customer) sub",
+      StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        // Both the outer projection and the inner projection should now reference the mask.
+        sql.split("'\\*\\*\\*'").length - 1 should be >= 2
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "rewrite each arm of a UNION" in {
+    val out = rw.rewrite(
+      "SELECT c_email FROM tpch1.customer UNION SELECT c_email FROM tpch1.customer",
+      StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql.split("'\\*\\*\\*'").length - 1 should be >= 2
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "rewrite a CTE body" in {
+    val out = rw.rewrite(
+      "WITH x AS (SELECT c_email FROM tpch1.customer) SELECT c_email FROM x",
+      StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include ("'***'")  // at minimum the CTE body
+      case other          => fail(s"expected Rewritten, got $other")
+  }
