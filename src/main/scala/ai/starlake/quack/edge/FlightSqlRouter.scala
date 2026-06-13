@@ -35,7 +35,11 @@ final class FlightSqlRouter(
     val validator: StatementValidator = StatementValidator.allowAll,
     val history: StatementHistoryStore = new StatementHistoryStore(),
     val stmtInstruments: StatementInstruments = StatementInstruments.noop,
-    val classifier: StatementClassifier = StatementClassifier.default
+    val classifier: StatementClassifier = StatementClassifier.default,
+    val columnPolicyRewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
+      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+      )
 ):
 
   private def record(
@@ -144,6 +148,24 @@ final class FlightSqlRouter(
         maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
         return IO.pure(Left(s"access denied: $reason"))
       case Allowed => () // fall through
+
+    // Column-level security: enforce per-column policies before routing.
+    val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
+      defaultDatabase = ctx.defaultDatabase,
+      defaultSchema   = ctx.defaultSchema
+    )
+    import cats.effect.unsafe.implicits.global
+    val rewrittenSql: String = effectiveSet match
+      case None =>
+        sql // no RBAC principal bound; rewriter would deny anything tenant-scoped
+      case Some(eff) =>
+        columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync() match
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough  => sql
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) => s
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+            return IO.pure(Left(s"access denied: $reason"))
+
     supervisor.snapshot(poolKey) match
       case None =>
         if s.txOpen then sessions.invalidatePin(connectionId)
@@ -158,7 +180,7 @@ final class FlightSqlRouter(
         // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
         // initial schema) when the pool's metastore advertises a dbName.
-        val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
+        val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), rewrittenSql)
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
             maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
@@ -185,7 +207,7 @@ final class FlightSqlRouter(
                     if s.txOpen then
                       sessions.invalidatePin(connectionId)
                       IO.pure(Left(s"transient failure inside transaction: $m"))
-                    else retryOnce(connectionId, poolKey, kind, sql, exclude = nodeId)
+                    else retryOnce(connectionId, poolKey, kind, rewrittenSql, exclude = nodeId)
 
                   case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
                     maybeRecord(nodeId, latency, "permanent", Some(m))

@@ -452,6 +452,10 @@ object Main extends IOApp with LazyLogging:
       )
       val classifier = new StatementClassifier(classifierCfg)
 
+      val columnCatalog: ai.starlake.quack.edge.cls.ColumnCatalog =
+        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty) // TODO: wire DuckLakeCatalogReader
+      val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(columnCatalog)
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -460,7 +464,8 @@ object Main extends IOApp with LazyLogging:
         aclValidator,
         stmtHistory,
         stmtInstruments,
-        classifier
+        classifier,
+        columnPolicyRewriter
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
