@@ -1,7 +1,7 @@
 # Design: Multi-tenant control plane - storage refactor + minimal tenant resolution
 
 **Status:** ready for implementation
-**Target:** `quack-on-demand` (Scala 3.7 / JDK 17, sbt, Postgres + file state backends)
+**Target:** `quack-on-demand` (Scala 3.7 / JDK 21, sbt, Postgres + file state backends)
 **Executor:** Claude Code
 **Shape:** two ordered phases in one document. Phase 1 is a pure storage refactor; Phase 2 is the minimal auth/tenant-resolution slice that makes the multi-tenant model actually function. Phase 2 depends on Phase 1 and must be implemented after it.
 
