@@ -76,6 +76,12 @@ distrib/
 ducklake/
 certs/
 
+# DuckDB CLI + libduckdb self-installed by scripts/run-jar.sh, plus the
+# spill scratch dirs the load-{tpch,tpcds}-dbgen.sh scripts anchor for
+# SF>=10 dsdgen / dbgen runs. Both regenerate on demand from the network.
+.duckdb/
+.tmp/
+
 datasets/
 project/.bloop/
 project/project/
