@@ -54,7 +54,7 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Either this or `LOAD_TPCDS` being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `run-jar.sh` on first boot, see [Native run](/getting-started/install#path-1)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Either this or `LOAD_TPCDS` being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
 | `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
 | `LOAD_TPC=N` | Legacy shortcut: equivalent to setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N`. Explicit per-bench vars override it. |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |

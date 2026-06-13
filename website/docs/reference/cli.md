@@ -33,7 +33,9 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 | `LOAD_TPCH` | unset | Positive integer scale factor: seeds TPC-H sf=N into `acme/acme_tpch`. |
 | `LOAD_TPCDS` | unset | Positive integer scale factor: seeds TPC-DS sf=N into `globex/globex_tpcds`. |
 | `LOAD_TPC` | unset | Legacy shortcut: equivalent to setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N`. Explicit per-bench vars override it. Setting any of the three exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
-| `NUKE` | `0` | `1` drops the control-plane DB and wipes local state dirs first. Irreversible. |
+| `DUCKDB_VERSION` | derived from `libquackwireVersion` in `build.sbt` | Pin a specific DuckDB release for the self-install (`run-jar.sh` always provisions the CLI + `libduckdb`). Pinning a version that disagrees with libquackwire's ABI can crash node spawn with an `UnsatisfiedLinkError`. |
+| `DUCKDB_CACHE_DIR` | `$REPO_DIR/.duckdb` | Relocate the DuckDB cache root. Each pinned version lives under `$DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}`. Pre-populating these for air-gapped / CI runs lets the fast-path skip the network fetch. |
+| `NUKE` | `0` | `1` drops the control-plane DB and wipes local state dirs first. Does NOT wipe the DuckDB cache. Irreversible. |
 
 ```bash
 ./scripts/run-jar.sh
