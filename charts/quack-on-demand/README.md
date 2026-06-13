@@ -24,7 +24,9 @@ cd quack-on-demand
 
 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 # NUKE=1            wipe the namespace before reinstalling
-# LOAD_TPC=1        seed the bundled demo (acme + globex)
+# LOAD_TPCH=1       seed TPC-H into acme/acme_tpch at SF=1
+# LOAD_TPCDS=1      seed TPC-DS into globex/globex_tpcds at SF=1
+# LOAD_TPC=1        legacy shortcut for both (LOAD_TPCH=1 LOAD_TPCDS=1)
 # BUILD=1           rebuild the manager + Quack-node images from the tree
 ```
 

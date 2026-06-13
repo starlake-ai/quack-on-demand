@@ -1,28 +1,31 @@
 ---
 id: demo
-title: Demo bootstrap (LOAD_TPC)
+title: Demo bootstrap (LOAD_TPCH / LOAD_TPCDS)
 ---
 
-`LOAD_TPC=N` is the single flag that turns a fresh install into a self-contained, fully populated multi-tenant demo. One command, two tenants, two real datasets, a complete RBAC graph, and a cross-tenant federated catalog, all reproducible and all live against a real Postgres + DuckDB stack.
+`LOAD_TPCH=N` and `LOAD_TPCDS=N` turn a fresh install into a self-contained, fully populated multi-tenant demo. One command, the tenants you ask for, real datasets, a complete RBAC graph, and a cross-tenant federated catalog, all reproducible and all live against a real Postgres + DuckDB stack.
 
 ```bash
-# native
-NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh
+# native, both benchmarks at SF=1
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
 
-# docker compose
-BUILD=1 NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
+# native, TPC-H only (fast path, ~10 s)
+NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
 
-# kubernetes (local stack)
-NUKE=1 LOAD_TPC=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+# docker compose, TPC-DS only at SF=10
+BUILD=1 NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh
+
+# kubernetes (local stack), both at independent scale factors
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
-The `N` is the TPC scale factor; `LOAD_TPC=1` is the fast path (~10 seconds of TPC-H + ~30 seconds of TPC-DS). Use `LOAD_TPC=10` for a bigger workload.
+Each `N` is that benchmark's TPC scale factor. SF=1 is the fast path (~10 s of TPC-H + ~30 s of TPC-DS); SF=10 is ~5-10 minutes; SF=100+ takes hours and spills to disk. The legacy `LOAD_TPC=N` env var still works as a shortcut for setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N` at the same SF; explicit per-benchmark vars override it.
 
 ## What gets created
 
 | Component | Where it comes from |
 |---|---|
-| Bundled manifest at `src/main/resources/bootstrap-demo.yaml` | Loaded into the JVM classpath; imported on boot via `DemoBootstrapHook` when `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is set (the launcher script sets this automatically when `LOAD_TPC` is non-empty). |
+| Bundled manifest at `src/main/resources/bootstrap-demo.yaml` | Loaded into the JVM classpath; imported on boot via `DemoBootstrapHook` when `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is set (the launcher script sets this automatically whenever `LOAD_TPCH` or `LOAD_TPCDS` is non-empty). |
 | `acme_tpch` Postgres database, seeded with TPC-H | `scripts/load-tpch-dbgen.sh` forked by the launcher; runs DuckDB's `dbgen(sf=N)` and copies the 8 TPC-H tables into the DuckLake catalog. |
 | `globex_tpcds` Postgres database, seeded with TPC-DS | `scripts/load-tpcds-dbgen.sh` forked by the launcher; runs DuckDB's `dsdgen(sf=N)` and copies the 24 TPC-DS tables. |
 | Two tenants, three pools, six quack nodes, an RBAC graph, a federated catalog | The bootstrap manifest is applied to the control plane, then `PoolSupervisor.reconcile` spawns nodes from each pool's role distribution. |
@@ -68,7 +71,7 @@ The four verb classes are exercised explicitly. See [Access control model](/oper
 
 ## Users
 
-All passwords are plaintext in the bundled manifest and are bcrypted by `ManifestImporter` at import time. Anyone reading the file in the jar sees the credentials, which is the point of a demo. The file is opt-in: nothing imports it unless `LOAD_TPC` (or `QOD_BOOTSTRAP_YAML`) is set.
+All passwords are plaintext in the bundled manifest and are bcrypted by `ManifestImporter` at import time. Anyone reading the file in the jar sees the credentials, which is the point of a demo. The file is opt-in: nothing imports it unless `LOAD_TPCH`, `LOAD_TPCDS`, the legacy `LOAD_TPC`, or `QOD_BOOTSTRAP_YAML` is set.
 
 | Username | Tenant | Password | Role-grant path | Pool grant |
 |---|---|---|---|---|
@@ -170,11 +173,11 @@ Replace `tenant`, `pool`, `username`, `password` with the personas from the tabl
 - Walk through the [Access control model](/operating/rbac-model) with concrete tenants in front of you.
 - Add a new role to `globex.cross_tenant_analyst` via the [Administering access](/operating/rbac-admin) page and watch carol's effective set widen on the next handshake.
 - Read [Federation](/operating/federation) to see how `acme_pg`'s `setupSql` is composed and how secrets are resolved.
-- Strip the demo out: run without `LOAD_TPC`, get an empty manager, build your own tenants via REST/UI.
+- Strip the demo out: run without any `LOAD_TPC*` var, get an empty manager, build your own tenants via REST/UI.
 
 ## Cleanup
 
-`NUKE=1` (without `LOAD_TPC`) tears down state and boots empty:
+`NUKE=1` (without any `LOAD_TPC*` var) tears down state and boots empty:
 
 ```bash
 NUKE=1 ./scripts/run-jar.sh

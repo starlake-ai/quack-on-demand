@@ -54,26 +54,33 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPC=N` | Scale factor N seeds the demo: TPC-H sf=N into `acme/acme_tpch`, TPC-DS sf=N into `globex/globex_tpcds`. Also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. (`LOAD_TPC=1` is about 6 M lineitem rows for TPC-H; `LOAD_TPC=10` about 60 M.) The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. |
+| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path needs the `duckdb` CLI on PATH; the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Either this or `LOAD_TPCDS` being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
+| `LOAD_TPC=N` | Legacy shortcut: equivalent to setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N`. Explicit per-bench vars override it. |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
 | `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
 
-For a clean, freshly seeded environment in one shot, combine them - this wipes any previous state and boots with a scale-factor-1 demo dataset:
+For a clean, freshly seeded environment in one shot, combine them. This wipes any previous state and boots with both demo datasets at scale-factor 1:
 
 ```bash
-NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-docker-compose.sh
 ```
 
-`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+Either flag (or the legacy `LOAD_TPC=1` shortcut) imports the bundled manifest under `src/main/resources/bootstrap-demo.yaml`, which declares the tenants, roles, groups, and users for both `acme` and `globex`; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
-The jar path takes the same combination:
+Pick one benchmark to keep boot snappy:
 
 ```bash
-NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh        # TPC-H only, ~10 s seed
+NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh      # TPC-DS only, SF=10
 ```
 
-`LOAD_TPC=1` seeds two demo tenants: `acme` loaded with TPC-H (8 tables in schema `tpch1`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+The jar path takes the same flags:
+
+```bash
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
+```
 
 ## Open the admin console
 
