@@ -404,3 +404,27 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )
     val eff = sup.effectiveSetForUser(user.id)
     eff.map(_.columnPolicies.map(_.columnName)) shouldBe Some(List("c_email"))
+
+  // ---------- column policy mutators + cache invalidation ----------
+
+  it should "invalidate the EffectiveSet cache when a column policy is created" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val t     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val role  = sup.createRole(t.id, "analyst").unsafeRunSync().toOption.get
+    val user  = RbacUser(id = "u-cp2", tenant = Some(t.id), username = "bob", role = "user")
+    store.upsertUserIdentity(user)
+    sup.addUserRole(user.id, role.id).unsafeRunSync()
+
+    // Warm the cache with no policies.
+    sup.effectiveSetForUser(user.id).map(_.columnPolicies) shouldBe Some(Nil)
+
+    // Create via the supervisor (the path that must invalidate the cache).
+    val created = sup
+      .createColumnPolicy(role.id, "*", "tpch1", "customer", "c_email", "mask", Some("'***'"))
+      .unsafeRunSync()
+    created shouldBe a[Right[?, ?]]
+
+    // Without cache invalidation we would still see Nil; with it the new policy is visible.
+    sup.effectiveSetForUser(user.id).map(_.columnPolicies.map(_.columnName)) shouldBe
+      Some(List("c_email"))

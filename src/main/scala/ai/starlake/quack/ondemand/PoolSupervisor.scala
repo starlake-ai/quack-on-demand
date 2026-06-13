@@ -1009,6 +1009,75 @@ final class PoolSupervisor(
   def listRolePermissions(roleId: String): List[RolePermission] =
     store.listRolePermissions(roleId)
 
+  // ---------- RBAC: column policies ----------
+
+  /** Resolve a column-policy id to its owning tenant via the parent role.
+    * Used by `TenantScopeCheck` to refuse cross-tenant calls without a separate join. */
+  def tenantForColumnPolicy(id: String): Option[String] =
+    store.getColumnPolicy(id).flatMap(p => rbacResolver.role(p.roleId).map(_.tenantId))
+
+  def createColumnPolicy(
+      roleId:       String,
+      catalogName:  String,
+      schemaName:   String,
+      tableName:    String,
+      columnName:   String,
+      action:       String,
+      transformSql: Option[String]
+  ): IO[Either[String, state.RoleColumnPolicy]] = IO.blocking {
+    val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
+    if !state.RoleColumnPolicy.ValidActions.contains(action) then
+      Left(s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}")
+    else if columnName == state.RoleColumnPolicy.Wildcard || columnName.trim.isEmpty then
+      Left("columnName is required and must not be '*'")
+    else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
+      Left("transformSql is required when action='mask'")
+    else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
+      Left("transformSql must be empty when action='deny'")
+    else
+      // TODO Task 9: validate normalisedTransform via TransformSqlValidator
+      val p = state.RoleColumnPolicy(
+        id           = newId("cp"),
+        roleId       = roleId,
+        catalogName  = catalogName,
+        schemaName   = schemaName,
+        tableName    = tableName,
+        columnName   = columnName,
+        action       = action,
+        transformSql = normalisedTransform
+      )
+      val persisted = store.insertColumnPolicy(p)
+      invalidateEffectiveCache()
+      Right(persisted)
+  }
+
+  def updateColumnPolicy(
+      id:           String,
+      action:       String,
+      transformSql: Option[String]
+  ): IO[Either[String, Unit]] = IO.blocking {
+    val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
+    if !state.RoleColumnPolicy.ValidActions.contains(action) then
+      Left(s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}")
+    else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
+      Left("transformSql is required when action='mask'")
+    else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
+      Left("transformSql must be empty when action='deny'")
+    else
+      // TODO Task 9: validate normalisedTransform via TransformSqlValidator
+      val ok = store.updateColumnPolicy(id, action, normalisedTransform)
+      if ok then { invalidateEffectiveCache(); Right(()) }
+      else Left(s"column policy $id not found")
+  }
+
+  def deleteColumnPolicy(id: String): IO[Either[String, Unit]] = IO.blocking {
+    if store.deleteColumnPolicy(id) then { invalidateEffectiveCache(); Right(()) }
+    else Left(s"column policy $id not found")
+  }
+
+  def listColumnPoliciesByRole(roleId: String): IO[List[state.RoleColumnPolicy]] =
+    IO.blocking(store.listColumnPolicies(roleId))
+
   // ---------- RBAC: groups ----------
 
   def createGroup(
