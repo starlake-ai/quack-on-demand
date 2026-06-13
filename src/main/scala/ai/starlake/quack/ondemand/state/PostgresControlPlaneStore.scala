@@ -245,8 +245,8 @@ final class PostgresControlPlaneStore(
       """INSERT INTO qodstate_pool
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
-        |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+        |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -258,7 +258,8 @@ final class PostgresControlPlaneStore(
         |  max_concurrent_per_node = EXCLUDED.max_concurrent_per_node,
         |  idle_timeout_sec        = EXCLUDED.idle_timeout_sec,
         |  disabled                = EXCLUDED.disabled,
-        |  cohorts                 = EXCLUDED.cohorts""".stripMargin
+        |  cohorts                 = EXCLUDED.cohorts,
+        |  init_sql                = EXCLUDED.init_sql""".stripMargin
     )
     try
       ps.setString(1, p.id)
@@ -275,6 +276,7 @@ final class PostgresControlPlaneStore(
         case None    => ps.setNull(10, Types.INTEGER)
       ps.setBoolean(11, p.disabled)
       ps.setString(12, PostgresControlPlaneStore.cohortsToJson(p.cohorts))
+      ps.setString(13, p.initSql)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -283,7 +285,7 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
-        |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts
+        |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -312,7 +314,9 @@ final class PostgresControlPlaneStore(
       maxConcurrentPerNode = rs.getInt("max_concurrent_per_node"),
       idleTimeoutSec = Option(idle).map(_.asInstanceOf[Number].intValue),
       disabled = rs.getBoolean("disabled"),
-      cohorts = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts"))
+      cohorts = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts")),
+      // Column added in changeset 27; NULL on older rows -> default to "".
+      initSql = Option(rs.getString("init_sql")).getOrElse("")
     )
 
   // ---------------- Node ----------------
@@ -1088,7 +1092,7 @@ final class PostgresControlPlaneStore(
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(

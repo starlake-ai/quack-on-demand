@@ -45,6 +45,9 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   // rejects fresh handshakes until the operator enables it. Useful for
   // pre-provisioning a pool before its tenant goes live.
   const [createDisabled, setCreateDisabled] = useState(false);
+  // Operator-authored per-pool init SQL prepended to the federation blob
+  // at node spawn (PRAGMAs / SET / INSTALL / LOAD). Empty by default.
+  const [initSql, setInitSql] = useState('');
 
   // Placement plan. Always available; on non-K8s backends the cohorts
   // are persisted so a YAML export still survives, but the runtime
@@ -137,6 +140,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     setUseCohorts(false);
     setCohorts([emptyCohort()]);
     setCreateDisabled(false);
+    setInitSql('');
     setError(null);
     if (tenantDbs.length > 0) setTenantDb(tenantDbs[0].name);
   }
@@ -186,6 +190,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         maxConcurrentPerNode: maxConcurrent,
         ...(wireCohorts ? { cohorts: wireCohorts } : {}),
         ...(createDisabled ? { disabled: true } : {}),
+        ...(initSql.trim() ? { initSql: initSql.trim() } : {}),
       });
       const justCreated = { tenantDb, pool: poolName };
       setAdding(false);

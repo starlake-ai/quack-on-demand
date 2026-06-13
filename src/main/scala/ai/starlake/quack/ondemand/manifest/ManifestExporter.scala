@@ -116,7 +116,8 @@ object ManifestExporter:
                 dual = c.distribution.dual
               )
             )
-          }
+          },
+          initSql = p.initSql
         )
       }
 
