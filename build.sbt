@@ -177,6 +177,7 @@ lazy val root = (project in file("."))
       Dependencies.javaJwt,
       Dependencies.nimbusJoseJwt,
       Dependencies.jsqlParser,
+      Dependencies.jsqlTranspiler,
       Dependencies.kubernetesClient,
       Dependencies.kubernetesServerMock,
       Dependencies.junit4,
