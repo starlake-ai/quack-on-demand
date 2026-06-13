@@ -27,3 +27,5 @@ databaseChangeLog:
       file: db/changelog/0010-rbac-verbs-collapse.yaml
   - include:
       file: db/changelog/0011-pool-init-sql.yaml
+  - include:
+      file: db/changelog/0012-role-column-policy.yaml
