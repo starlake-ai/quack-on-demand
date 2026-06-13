@@ -237,6 +237,31 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       .toList
       .groupBy(_.userId.get)
 
+  // ---------------- Column policies ----------------
+  private val columnPolicies = TrieMap.empty[String, RoleColumnPolicy]
+
+  def insertColumnPolicy(p: RoleColumnPolicy): RoleColumnPolicy = {
+    columnPolicies.put(p.id, p); p
+  }
+
+  def updateColumnPolicy(id: String, action: String, transformSql: Option[String]): Boolean =
+    columnPolicies.get(id) match {
+      case Some(p) =>
+        columnPolicies.put(id, p.copy(action = action, transformSql = transformSql))
+        true
+      case None => false
+    }
+
+  def deleteColumnPolicy(id: String): Boolean = columnPolicies.remove(id).isDefined
+
+  def getColumnPolicy(id: String): Option[RoleColumnPolicy] = columnPolicies.get(id)
+
+  def listColumnPolicies(roleId: String): List[RoleColumnPolicy] =
+    columnPolicies.values.filter(_.roleId == roleId).toList.sortBy(_.id)
+
+  def listAllColumnPolicies(): List[RoleColumnPolicy] =
+    columnPolicies.values.toList.sortBy(_.id)
+
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants         = listTenants(),
     tenantDbs       = tenantDbs.values.toList.sortBy(_.name),
