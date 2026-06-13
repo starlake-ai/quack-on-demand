@@ -1297,12 +1297,14 @@ final class PoolSupervisor(
       val effPerms      = rbacResolver.permissionsForRoles(allRoleIds)
       val directPools   = store.listPoolPermissionsForUser(u.id)
       val viaGroupPools = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
+      val columnPolicies = allRoleIds.toList.flatMap(store.listColumnPolicies)
       ai.starlake.quack.ondemand.rbac.EffectiveSet(
         u,
         effRoles,
         effGroups,
         effPerms,
-        directPools ++ viaGroupPools
+        directPools ++ viaGroupPools,
+        columnPolicies
       )
     }
 
