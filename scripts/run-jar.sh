@@ -50,6 +50,19 @@
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
 #
+#   DUCKDB_VERSION                pin a specific DuckDB release (e.g. 1.5.3).
+#                                 Default = derived from build.sbt's
+#                                 libquackwireVersion so the CLI and libquackwire
+#                                 stay ABI-compatible. The script always installs
+#                                 duckdb + libduckdb (no skip flag) -- an ABI
+#                                 mismatch with the operator's system duckdb
+#                                 crashes node spawn with a confusing dlopen
+#                                 error.                                (default auto)
+#   DUCKDB_CACHE_DIR              where to cache duckdb across runs. Air-gapped
+#                                 / CI: pre-populate $DUCKDB_CACHE_DIR/$DUCKDB_VERSION/
+#                                 {bin,lib} and the fast path skips the network
+#                                 fetch.                                (default $REPO_DIR/.duckdb)
+#
 # Usage:
 #   ./scripts/run-jar.sh                                   # latest release
 #   QOD_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
@@ -84,6 +97,119 @@ NUKE="${NUKE:-0}"
 GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
+
+# ---- DuckDB CLI + libduckdb self-install ---------------------------------
+# The bare-jar path needs two DuckDB artifacts on the host:
+#   1. `duckdb` CLI on PATH:
+#        - spawn-quack-node.sh exec's it for every Quack node the manager
+#          spawns via LocalQuackBackend
+#        - scripts/load-{tpch,tpcds}-dbgen.sh shell out to it for demo seeds
+#   2. libduckdb.{so,dylib} on the JVM's library path:
+#        - the JNI native client (QOD_NATIVE_CLIENT=true, default) dlopens
+#          libquackwire which itself links against libduckdb at the ABI
+#          pinned in build.sbt's libquackwireVersion
+#
+# Mandatory by design: even when the operator has a system duckdb on PATH,
+# an ABI mismatch against libquackwire's libduckdb crashes at first node
+# spawn with a confusing dlopen / NoSuchMethodError. Pinning both binaries
+# to the libquackwire-ABI version eliminates that footgun.
+#
+# Air-gapped / CI: pre-populate $DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}
+# with the right binaries; the fast-path check will see them and skip the
+# network fetch. Override the pinned version with DUCKDB_VERSION (defaults
+# to libquackwireVersion's first 3 segments).
+DUCKDB_CACHE_DIR="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}"
+
+ensure_duckdb() {
+  local version="${DUCKDB_VERSION:-}"
+  if [[ -z "$version" && -f "$REPO_DIR/build.sbt" ]]; then
+    version="$(grep -E '^val libquackwireVersion' "$REPO_DIR/build.sbt" \
+      | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+  fi
+  version="${version:-1.5.3}"
+
+  local cache="$DUCKDB_CACHE_DIR/$version"
+  local bin_dir="$cache/bin"
+  local lib_dir="$cache/lib"
+
+  # Always expose the cache to PATH + dynamic-loader so the spawn script
+  # and the JVM resolve duckdb / libduckdb from the cache instead of the
+  # operator's system install (which may be ABI-incompatible).
+  case ":$PATH:" in *":$bin_dir:"*) ;; *) export PATH="$bin_dir:$PATH" ;; esac
+  case "$(uname -s)" in
+    Darwin) export DYLD_LIBRARY_PATH="$lib_dir:${DYLD_LIBRARY_PATH:-}" ;;
+    Linux)  export LD_LIBRARY_PATH="$lib_dir:${LD_LIBRARY_PATH:-}"     ;;
+  esac
+
+  # Fast path: cached binary matches the pinned version (covers air-gapped
+  # operators who pre-populated the cache dir).
+  if [[ -x "$bin_dir/duckdb" ]] && "$bin_dir/duckdb" -version 2>/dev/null \
+      | head -1 | grep -q "v$version"; then
+    return 0
+  fi
+
+  # Detect platform; map to DuckDB's release asset names.
+  local plat
+  case "$(uname -s)" in
+    Darwin) plat="osx-universal" ;;
+    Linux)
+      case "$(uname -m)" in
+        x86_64|amd64)  plat="linux-amd64" ;;
+        aarch64|arm64) plat="linux-arm64" ;;
+        *)
+          echo "ERROR: unsupported arch $(uname -m) for duckdb self-install." >&2
+          echo "       Pre-populate $bin_dir + $lib_dir with a duckdb v$version" >&2
+          echo "       built for this arch, then re-run." >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "ERROR: unsupported OS $(uname -s) for duckdb self-install." >&2
+      echo "       Pre-populate $bin_dir + $lib_dir with a duckdb v$version build, then re-run." >&2
+      exit 1
+      ;;
+  esac
+
+  if ! command -v unzip >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl + unzip are required for the duckdb self-install." >&2
+    echo "       Install them (e.g. brew install curl unzip / apt install curl unzip), or" >&2
+    echo "       pre-populate $bin_dir + $lib_dir with the v$version binaries by hand." >&2
+    exit 1
+  fi
+
+  echo "duckdb: installing v$version ($plat) into $cache"
+  mkdir -p "$bin_dir" "$lib_dir"
+  local tmp
+  tmp="$(mktemp -d -t qod-duckdb.XXXXXX)"
+  # shellcheck disable=SC2064  # expand $tmp now so the trap sees the right dir
+  trap "rm -rf '$tmp'" RETURN
+
+  local base="https://github.com/duckdb/duckdb/releases/download/v$version"
+
+  echo "  fetching duckdb CLI from $base/duckdb_cli-$plat.zip"
+  if ! curl -fsSL -o "$tmp/cli.zip" "$base/duckdb_cli-$plat.zip"; then
+    echo "ERROR: failed to download $base/duckdb_cli-$plat.zip" >&2
+    echo "       Air-gapped? Pre-populate $bin_dir/duckdb + $lib_dir/libduckdb.{so,dylib}" >&2
+    echo "       with v$version artifacts and re-run." >&2
+    exit 1
+  fi
+  unzip -q -o "$tmp/cli.zip" -d "$bin_dir"
+  chmod +x "$bin_dir/duckdb"
+
+  echo "  fetching libduckdb from $base/libduckdb-$plat.zip"
+  if ! curl -fsSL -o "$tmp/lib.zip" "$base/libduckdb-$plat.zip"; then
+    echo "ERROR: failed to download $base/libduckdb-$plat.zip" >&2
+    echo "       The JNI native client requires libduckdb at the same ABI as libquackwire." >&2
+    echo "       Pre-populate $lib_dir with libduckdb v$version, or set QOD_NATIVE_CLIENT=false" >&2
+    echo "       on the JVM side to fall back to the embedded (slower) path." >&2
+    exit 1
+  fi
+  unzip -q -o "$tmp/lib.zip" -d "$lib_dir"
+
+  echo "duckdb: ready -> $bin_dir/duckdb (v$version)"
+}
+ensure_duckdb
 
 # Demo seed controls. LOAD_TPC=N is the legacy shortcut that seeds BOTH
 # benchmarks at the same scale factor; LOAD_TPCH / LOAD_TPCDS let you opt

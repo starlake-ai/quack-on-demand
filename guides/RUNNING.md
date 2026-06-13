@@ -21,9 +21,9 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 
 ### Prerequisites
 - JDK 21+ (to run the jar)
-- `duckdb` CLI on `$PATH` (each Quack node is a duckdb process)
 - `psql` on `$PATH` (the start script probes Postgres and `CREATE DATABASE`s the catalog DB if missing)
 - `openssl` (auto-generates the FlightSQL self-signed TLS cert on first boot)
+- `curl` + `unzip` on `$PATH` (used by `run-jar.sh` to self-install the DuckDB CLI + libduckdb on first run; see below)
 - A reachable **PostgreSQL 16+** - the control-plane DB (`qod` by default) hosts the
   Liquibase-managed `qodstate_*` tables (tenants, pools, nodes, users, RBAC graph);
   each tenant-db (e.g. `tpch_tpch1`) is auto-provisioned next to it and holds the
@@ -35,7 +35,27 @@ is already populated, so it's safe to leave the seeding flag on across reboots.
 
 `run-jar.sh` resolves the jar in one of two ways, then anchors the working
 directory at the repo root, probes Postgres, and exec's `java -jar` with
-Arrow's allocator pinned:
+Arrow's allocator pinned.
+
+On first run the script also **self-installs the DuckDB CLI + `libduckdb`
+shared library** into `$REPO_DIR/.duckdb/<version>/` and prepends the
+`bin/` to `$PATH` plus the `lib/` to `LD_LIBRARY_PATH` (Linux) /
+`DYLD_LIBRARY_PATH` (macOS), so the bare-jar path doesn't require
+operator-level DuckDB plumbing. The pinned version is derived from
+`build.sbt`'s `libquackwireVersion` so the JNI native client
+(`QOD_NATIVE_CLIENT=true`, default) dlopens an ABI-matched `libduckdb`.
+The install is mandatory by design: an ABI mismatch against a system
+duckdb crashes the first node spawn with a confusing dlopen error, and
+the cached binaries are trivial to keep across runs (the cache survives
+`NUKE=1`).
+
+Overrides:
+
+- `DUCKDB_VERSION=1.5.3` to pin a specific DuckDB release explicitly.
+- `DUCKDB_CACHE_DIR=/var/cache/qod-duckdb` to relocate the cache.
+- For air-gapped / CI runs: pre-populate
+  `$DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}` with the right binaries
+  and the fast-path check skips the network fetch.
 
 ```bash
 # Default: download latest release from Maven Central, cache under
