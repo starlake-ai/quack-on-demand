@@ -1035,20 +1035,32 @@ final class PoolSupervisor(
     else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
       Left("transformSql must be empty when action='deny'")
     else
-      // TODO Task 9: validate normalisedTransform via TransformSqlValidator
-      val p = state.RoleColumnPolicy(
-        id           = newId("cp"),
-        roleId       = roleId,
-        catalogName  = catalogName,
-        schemaName   = schemaName,
-        tableName    = tableName,
-        columnName   = columnName,
-        action       = action,
-        transformSql = normalisedTransform
-      )
-      val persisted = store.insertColumnPolicy(p)
-      invalidateEffectiveCache()
-      Right(persisted)
+      val validatedTransform: Either[String, Option[String]] =
+        if action == state.RoleColumnPolicy.ActionMask then
+          normalisedTransform.toRight("transformSql is required when action='mask'").flatMap { raw =>
+            ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, columnName) match
+              case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
+                Left(s"invalid transformSql: $reason")
+              case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
+                Right(Some(canon))
+          }
+        else Right(None)
+      validatedTransform match
+        case Left(err) => Left(err)
+        case Right(canonTransform) =>
+          val p = state.RoleColumnPolicy(
+            id           = newId("cp"),
+            roleId       = roleId,
+            catalogName  = catalogName,
+            schemaName   = schemaName,
+            tableName    = tableName,
+            columnName   = columnName,
+            action       = action,
+            transformSql = canonTransform
+          )
+          val persisted = store.insertColumnPolicy(p)
+          invalidateEffectiveCache()
+          Right(persisted)
   }
 
   def updateColumnPolicy(
@@ -1064,10 +1076,26 @@ final class PoolSupervisor(
     else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
       Left("transformSql must be empty when action='deny'")
     else
-      // TODO Task 9: validate normalisedTransform via TransformSqlValidator
-      val ok = store.updateColumnPolicy(id, action, normalisedTransform)
-      if ok then { invalidateEffectiveCache(); Right(()) }
-      else Left(s"column policy $id not found")
+      val validatedTransform: Either[String, Option[String]] =
+        if action == state.RoleColumnPolicy.ActionMask then
+          normalisedTransform.toRight("transformSql is required when action='mask'").flatMap { raw =>
+            // updateColumnPolicy does not know the columnName; fetch it from the store to validate.
+            store.getColumnPolicy(id) match
+              case None => Left(s"column policy $id not found")
+              case Some(existing) =>
+                ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, existing.columnName) match
+                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
+                    Left(s"invalid transformSql: $reason")
+                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
+                    Right(Some(canon))
+          }
+        else Right(None)
+      validatedTransform match
+        case Left(err) => Left(err)
+        case Right(canonTransform) =>
+          val ok = store.updateColumnPolicy(id, action, canonTransform)
+          if ok then { invalidateEffectiveCache(); Right(()) }
+          else Left(s"column policy $id not found")
   }
 
   def deleteColumnPolicy(id: String): IO[Either[String, Unit]] = IO.blocking {
