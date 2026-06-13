@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0011-qodstate-pool-init-sql
+      author: quack-on-demand
+      changes:
+        # Free-form per-pool init SQL prepended to the resolved federation
+        # blob at node spawn. PRAGMAs / SET / INSTALL / LOAD live here;
+        # ATTACH aliases live on federation sources. Default '' so existing
+        # rows keep their current behavior.
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name:         init_sql
+                  type:         TEXT
+                  defaultValue: ""
+                  constraints:
+                    nullable: false

@@ -21,7 +21,12 @@ final case class Pool(
     // RoleDistributions must sum to `distribution` and the total node
     // count must equal `size`. When empty, the supervisor schedules
     // every node with no placement constraint.
-    cohorts: List[PoolCohort] = Nil
+    cohorts: List[PoolCohort] = Nil,
+    /** Operator-authored per-pool init SQL. PoolSupervisor concatenates this with the resolved
+      * federation blob and ships the result via NodeSpec.extraSetupSql, so spawn-quack-node.sh
+      * sees one SQL stream. PRAGMAs / SET / INSTALL / LOAD live here; ATTACH aliases live on
+      * federation sources. Empty by default for backward compat. */
+    initSql: String = ""
 ):
   /** Effective scheduling plan: either the explicit cohorts, or one synthesized placement-less
     * cohort carrying the flat distribution.

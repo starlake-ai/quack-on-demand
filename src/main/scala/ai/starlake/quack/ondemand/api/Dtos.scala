@@ -57,7 +57,14 @@ final case class CreatePoolRequest(
     // FlightSQL edge rejects fresh handshakes until enabled. Nodes are
     // still spawned (the pool is "warm but not serving"); this matches
     // the semantics of `setPoolDisabled` applied after the fact.
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    /** Free-form per-pool SQL prepended to the resolved federation blob and shipped to
+      * spawn-quack-node.sh via the node's `$extraSetupSql` env var. PRAGMAs / SET / INSTALL /
+      * LOAD live here ("SET memory_limit='8GB'", "INSTALL httpfs", etc.); ATTACH aliases live
+      * on federation sources. Empty by default. Editing on a running pool takes effect on the
+      * NEXT node spawn (scale-up, crash-recovery, manual restart); running nodes keep their
+      * old setup. */
+    initSql: Option[String] = None
 )
 
 final case class NodeInfo(
@@ -91,7 +98,8 @@ final case class PoolResponse(
       Map.empty, // effective metastore inherited from the tenant-db, password redacted
     disabled: Boolean = false, // when true, the edge rejects fresh handshakes targeting this pool
     id: String = "", // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
-    cohorts: List[PoolCohortDto] = Nil // persisted placement plan, empty when none was supplied
+    cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
+    initSql: String = ""                // operator-authored init SQL; empty when none was supplied
 )
 
 final case class ScalePoolRequest(

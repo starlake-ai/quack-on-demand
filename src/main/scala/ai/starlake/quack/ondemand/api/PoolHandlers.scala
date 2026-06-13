@@ -50,7 +50,8 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
         metastore = redact(p.metastore),
         disabled = p.disabled,
         id = sup.poolId(key).getOrElse(""),
-        cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel)
+        cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
+        initSql = p.initSql
       )
     }
 
@@ -109,7 +110,8 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
                   req.roleDistribution,
                   req.maxConcurrentPerNode,
                   cohorts,
-                  req.disabled
+                  req.disabled,
+                  req.initSql.getOrElse("")
                 )
                 .map(_ =>
                   Right(

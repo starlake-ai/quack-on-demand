@@ -114,6 +114,42 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     )
 
+  // ---- initSql: free-form per-pool SQL prepended to the federation blob ----
+  //
+  // Operators set things like `SET memory_limit='8GB';` or `INSTALL httpfs;`
+  // here. spawn-quack-node.sh just dumps $extraSetupSql into the init pipe, so
+  // the per-pool initSql rides the same env var; PoolSupervisor concatenates
+  // initSql FIRST then the resolved federation blob so PRAGMAs are in effect
+  // before any federation ATTACH runs.
+
+  it should "prepend initSql to NodeSpec.extraSetupSql when no federation blob is present" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val pragma = "SET memory_limit='8GB';"
+    sup.createPool(key, RoleDistribution(0, 0, 1), initSql = pragma).unsafeRunSync()
+    backend.specs.size shouldBe 1
+    backend.specs.head.extraSetupSql.trim shouldBe pragma
+
+  it should "expose initSql on the PoolState so the UI can render it later" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1),
+                   initSql = "SET threads=2;").unsafeRunSync()
+    sup.get(key).map(_.initSql) shouldBe Some("SET threads=2;")
+
+  it should "default initSql to the empty string for backward compat" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.get(key).map(_.initSql) shouldBe Some("")
+    backend.specs.head.extraSetupSql shouldBe ""
+
   "PoolSupervisor.scale" should "add nodes when target > current" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 1, 0)).unsafeRunSync()

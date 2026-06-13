@@ -297,7 +297,8 @@ object ManifestImporter:
               distribution = dist,
               maxConcurrentPerNode = mp.maxConcurrentPerNode,
               disabled = mp.disabled,
-              cohorts = cohorts
+              cohorts = cohorts,
+              initSql = mp.initSql
             )
             store.upsertPool(upserted)
             localPools.put(mp.name, upserted)

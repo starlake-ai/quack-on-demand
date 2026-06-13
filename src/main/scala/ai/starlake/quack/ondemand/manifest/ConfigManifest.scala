@@ -62,7 +62,11 @@ final case class ManifestPool(
     // pool with no cohorts (single placement-less group). The
     // supervisor ignores cohorts when the runtime backend can't
     // honor placement (e.g. local mode).
-    cohorts: List[ManifestPoolCohort] = Nil
+    cohorts: List[ManifestPoolCohort] = Nil,
+    /** Operator-authored per-pool init SQL prepended to the resolved federation blob and
+      * shipped to spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL / LOAD
+      * live here; ATTACH aliases live on federated sources. Empty by default. */
+    initSql: String = ""
 )
 
 final case class ManifestTenant(
@@ -228,7 +232,8 @@ object ConfigManifest:
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
         cohorts              <- c.getOrElse[List[ManifestPoolCohort]]("cohorts")(Nil)
-      yield ManifestPool(name, tenantDb, roleDistribution, maxConcurrentPerNode, disabled, cohorts)
+        initSql              <- c.getOrElse[String]("initSql")("")
+      yield ManifestPool(name, tenantDb, roleDistribution, maxConcurrentPerNode, disabled, cohorts, initSql)
     },
     deriveEncoder[ManifestPool]
   )

@@ -148,7 +148,8 @@ final class PoolSupervisor(
             metastore = merged,
             s3 = td.objectStore,
             maxConcurrentPerNode = p.maxConcurrentPerNode,
-            disabled = p.disabled
+            disabled = p.disabled,
+            initSql = p.initSql
           )
         )
       }
@@ -219,7 +220,8 @@ final class PoolSupervisor(
                     s3 = state.s3,
                     maxConcurrent = n.maxConcurrent,
                     kindWire = state.kindWire,
-                    extraSetupSql = state.extraSetupSql,
+                    // initSql + federation blob concatenated fresh.
+                    extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
                     // Recover the original cohort placement from the node's
                     // 1-based suffix index. Falls back to no placement when
                     // the pool was created without explicit cohorts or when
@@ -253,6 +255,7 @@ final class PoolSupervisor(
         p.effectiveCohorts.flatMap(c => c.distribution.asRoleList.map(r => (r, c.placement)))
       case None =>
         state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
+    val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
     val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
       NodeSpec(
         key,
@@ -262,7 +265,7 @@ final class PoolSupervisor(
         state.s3,
         maxConcurrent = state.maxConcurrentPerNode,
         kindWire = state.kindWire,
-        extraSetupSql = state.extraSetupSql,
+        extraSetupSql = nodeExtra,
         placement = placement
       )
     }
@@ -625,7 +628,13 @@ final class PoolSupervisor(
       // until the operator explicitly enables the pool. Nodes are still
       // spawned -- same semantics as calling setPoolDisabled(true) right
       // after a normal create.
-      disabled: Boolean = false
+      disabled: Boolean = false,
+      // Free-form per-pool SQL prepended to the federation blob and shipped
+      // to spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL /
+      // LOAD live here; ATTACH aliases live on federation sources. Order
+      // matters at node-init time: initSql runs FIRST so PRAGMAs are in
+      // effect before any federation source's ATTACH.
+      initSql: String = ""
   ): IO[List[RunningNode]] = IO.defer {
     val size = dist.total
     require(
@@ -685,7 +694,15 @@ final class PoolSupervisor(
         val merged   = effectiveMetastoreFor(td)
         val kindWire = td.kind.wireValue
         federationBlobOf(td.id).flatMap { blobOpt =>
-        val extraBlob  = blobOpt.getOrElse("")
+        // initSql runs first so PRAGMAs/INSTALL land before the federation
+        // blob's ATTACHes; both get shipped via NodeSpec.extraSetupSql.
+        val fedBlob   = blobOpt.getOrElse("")
+        // What the node actually gets at spawn = initSql + "\n" + federation blob.
+        // `state.extraSetupSql` keeps the federation blob ONLY so a manager
+        // restart that re-projects PoolState from persisted rows still has the
+        // operator-authored initSql available separately (and respawn can
+        // re-concatenate without double-prepending).
+        val nodeExtra = PoolSupervisor.joinInitAndBlob(initSql, fedBlob)
         val poolEntity = Pool(
           id = newId("p"),
           tenantId = td.tenantId,
@@ -695,7 +712,8 @@ final class PoolSupervisor(
           distribution = dist,
           maxConcurrentPerNode = maxConcurrentPerNode,
           disabled = disabled,
-          cohorts = cohorts
+          cohorts = cohorts,
+          initSql = initSql
         )
         IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
           poolRows.put(poolEntity.id, poolEntity)
@@ -717,7 +735,7 @@ final class PoolSupervisor(
               td.objectStore,
               maxConcurrent = maxConcurrentPerNode,
               kindWire = kindWire,
-              extraSetupSql = extraBlob,
+              extraSetupSql = nodeExtra,
               placement = placement
             )
           }
@@ -737,7 +755,9 @@ final class PoolSupervisor(
                 maxConcurrentPerNode,
                 disabled = disabled,
                 kindWire = kindWire,
-                extraSetupSql = extraBlob,
+                // Federation blob only; respawn concatenates with initSql fresh.
+                extraSetupSql = fedBlob,
+                initSql = initSql,
                 defaultDatabase = td.defaultDatabase,
                 defaultSchema = td.defaultSchema
               )
@@ -792,6 +812,7 @@ final class PoolSupervisor(
         if targetSize > state.size then
           val toAdd = targetSize - state.size
           val roles = newDist.asRoleList.drop(state.size).take(toAdd)
+          val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
           val specs = roles.zipWithIndex.map { case (role, i) =>
             NodeSpec(
               key,
@@ -801,7 +822,7 @@ final class PoolSupervisor(
               state.s3,
               maxConcurrent = state.maxConcurrentPerNode,
               kindWire = state.kindWire,
-              extraSetupSql = state.extraSetupSql
+              extraSetupSql = nodeExtra
             )
           }
           specs
@@ -1333,6 +1354,25 @@ final class PoolSupervisor(
 
 object PoolSupervisor:
   val AdminRoleName: String = "admin"
+
+  /** Concatenate the per-pool [[ai.starlake.quack.ondemand.PoolState.initSql]] with the resolved
+    * federation blob for shipment as a single `extraSetupSql` to spawn-quack-node.sh.
+    *
+    * Order: `initSql` FIRST (so PRAGMAs / SET / INSTALL land before any federation ATTACH that
+    * depends on them), federation blob SECOND. A trailing newline is forced between the two
+    * non-empty fragments because spawn-quack-node.sh echoes the value verbatim into a `duckdb`
+    * pipe, and DuckDB needs the statement terminator to parse them as separate statements.
+    * Empty fragments are dropped so the resulting string contains no leading / trailing blank
+    * lines (cleaner UI display + simpler tests).
+    */
+  def joinInitAndBlob(initSql: String, federationBlob: String): String =
+    val a = Option(initSql).getOrElse("").trim
+    val b = Option(federationBlob).getOrElse("").trim
+    (a, b) match
+      case ("", "")    => ""
+      case (i, "")     => i
+      case ("", f)     => f
+      case (i, f)      => s"$i\n$f"
 
   /** Compose a node id that is safe as a Kubernetes pod + service name.
     *
