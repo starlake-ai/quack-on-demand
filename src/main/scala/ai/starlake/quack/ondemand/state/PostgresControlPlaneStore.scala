@@ -1076,6 +1076,26 @@ final class PostgresControlPlaneStore(
       grantedAt = Option(rs.getTimestamp("granted_at")).map(_.toInstant)
     )
 
+  // ---------------- Column policies (stub -- Postgres DDL in Task 5) ----------------
+
+  def insertColumnPolicy(p: RoleColumnPolicy): RoleColumnPolicy =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
+  def updateColumnPolicy(id: String, action: String, transformSql: Option[String]): Boolean =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
+  def deleteColumnPolicy(id: String): Boolean =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
+  def getColumnPolicy(id: String): Option[RoleColumnPolicy] =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
+  def listColumnPolicies(roleId: String): List[RoleColumnPolicy] =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
+  def listAllColumnPolicies(): List[RoleColumnPolicy] =
+    throw new NotImplementedError("column policy Postgres backend not yet implemented")
+
   // ---------------- Snapshot ----------------
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
