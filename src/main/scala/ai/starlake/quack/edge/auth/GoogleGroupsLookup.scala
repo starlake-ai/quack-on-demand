@@ -31,9 +31,17 @@ class GoogleGroupsLookup(
 ) extends AutoCloseable,
       LazyLogging:
 
-  private case class CachedGroups(groups: Set[String], fetchedAt: Instant)
-
-  private val groupsCache = new java.util.concurrent.ConcurrentHashMap[String, CachedGroups]()
+  /** Caffeine-backed cache of resolved Google group memberships per user email. Caffeine handles
+    * the TTL (`expireAfterWrite`) and bounds memory (`maximumSize`) so historical users
+    * accumulated over the manager's lifetime can't leak. The previous hand-rolled
+    * ConcurrentHashMap + fetchedAt form did neither.
+    */
+  private val groupsCache: com.github.benmanes.caffeine.cache.Cache[String, Set[String]] =
+    com.github.benmanes.caffeine.cache.Caffeine
+      .newBuilder()
+      .expireAfterWrite(java.time.Duration.ofSeconds(cacheTtlSeconds))
+      .maximumSize(10_000L)
+      .build[String, Set[String]]()
 
   private val httpClient = HttpClient
     .newBuilder()
@@ -49,16 +57,13 @@ class GoogleGroupsLookup(
     * cacheTtlSeconds. Returns an empty set on failure (non-blocking).
     */
   def getGroupsForUser(userEmail: String): Set[String] =
-    val key = userEmail.toLowerCase
-    val now = Instant.now()
-
-    Option(groupsCache.get(key)) match
-      case Some(cached) if now.isBefore(cached.fetchedAt.plusSeconds(cacheTtlSeconds)) =>
-        cached.groups
-      case _ =>
-        val groups = fetchGroups(key)
-        groupsCache.put(key, CachedGroups(groups, now))
-        groups
+    val key    = userEmail.toLowerCase
+    val cached = groupsCache.getIfPresent(key)
+    if cached != null then cached
+    else
+      val groups = fetchGroups(key)
+      groupsCache.put(key, groups)
+      groups
 
   private def fetchGroups(userEmail: String): Set[String] =
     try
