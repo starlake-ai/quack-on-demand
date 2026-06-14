@@ -84,13 +84,13 @@ final class FlightSqlRouter(
     * Used by the FlightSQL prepared-statement path to keep Prepare + Execute on the same Quack
     * process so DuckDB-side caches stay warm across the two halves of one client `execute()`.
     *
-    * `recordExecution=false` suppresses the in-memory history + metrics emission for this call.
-    * The FlightSQL Prepare-time LIMIT-0 probe uses this so the UI shows ONE history row per
+    * `recordExecution=false` suppresses the in-memory history + metrics emission for this call. The
+    * FlightSQL Prepare-time LIMIT-0 probe uses this so the UI shows ONE history row per
     * user-visible query instead of two; the probe's duration is then attached to the matching
     * Execute record via [[prepareDurationMs]] so operators can still see it.
     *
-    * `prepareDurationMs` is folded into the resulting [[StatementRecord]] so the UI can render
-    * it as subtext under the Execute duration ("57 ms / prep 28 ms").
+    * `prepareDurationMs` is folded into the resulting [[StatementRecord]] so the UI can render it
+    * as subtext under the Execute duration ("57 ms / prep 28 ms").
     */
   def execute(
       connectionId: String,
@@ -152,26 +152,40 @@ final class FlightSqlRouter(
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = ctx.defaultDatabase,
-      defaultSchema   = ctx.defaultSchema
+      defaultSchema = ctx.defaultSchema
     )
     import cats.effect.unsafe.implicits.global
     val rewrittenSql: String = effectiveSet match
       case None =>
         sql // no RBAC principal bound; rewriter would deny anything tenant-scoped
       case Some(eff) =>
-        val t0      = System.nanoTime()
-        val outcome = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
+        val t0        = System.nanoTime()
+        val outcome   = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
         val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
         stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
             sql
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
+            // Inner rewriter couldn't parse - emit a distinct tag so dashboards can split
+            // "rewriter blind" from "no policy applied", then route the original SQL like
+            // a regular Passthrough.
+            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
+            sql
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             s
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "denied")
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+            return IO.pure(Left(s"access denied: $reason"))
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
+            // Deny path where the cause was an unresolved table/schema/catalog coordinate
+            // rather than a policy match. Same wire error as Denied but tagged separately.
+            stmtInstruments
+              .recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "unresolved_deny")
+            val reason = "unresolved table"
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             return IO.pure(Left(s"access denied: $reason"))
 
@@ -183,7 +197,7 @@ final class FlightSqlRouter(
       case Some(snap) =>
         // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
         // current snapshot; otherwise None lets Router.pick run its load-aware choice.
-        val txPin = s.pinnedNodeId.filter(_ => s.txOpen)
+        val txPin  = s.pinnedNodeId.filter(_ => s.txOpen)
         val pinned = txPin.orElse(preferredNode.filter(id => snap.nodes.exists(_.nodeId == id)))
         // Each quack_query lands in a fresh DuckDB session on the remote, so
         // an unqualified `SELECT * FROM customer` would 404 - we wrap the user

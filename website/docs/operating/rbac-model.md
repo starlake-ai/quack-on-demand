@@ -181,6 +181,60 @@ The rewriter only runs for SELECT-shaped statements; DML and DDL pass through un
 
 Superusers bypass the rewriter, matching the bypass behaviour of the table-level ACL.
 
+### Column-level security guarantees
+
+The rewriter walks every projection-eligible JSqlParser node kind: direct column references,
+CASE arms, CAST inner, IN list members, BETWEEN bounds, EXTRACT inner, window PARTITION BY and
+ORDER BY expressions, LIKE patterns, and row constructors. Star (`*`) projections are expanded
+against the DuckLake catalog before the policy walk, so multi-table joins and qualified `t.*`
+both apply per-column policies. CTE, FROM-item subqueries, scalar subqueries in projection, and
+UNION / INTERSECT / EXCEPT arms are all recursed into; the v1 bypass list is closed.
+
+CTE and view indirection are resolved at the physical (table, column) level via jsqltranspiler's
+lineage tree. A column projected through `WITH x AS (SELECT c_email FROM customer) SELECT c_email
+FROM x` is masked according to the base table's policy. For FROM-item subqueries
+(`SELECT c_email FROM (SELECT c_email FROM customer) sub`) the rewriter synthesises a transient
+outer-scope policy keyed on `(subAlias, exposedName)` so the outer projection is masked too,
+since jsqltranspiler's lineage stops at the FROM boundary.
+
+### Kill switch (feature flag — EXPERIMENTAL)
+
+Column-level security is **experimental** and ships **disabled by default**. Operators opt in
+by setting `quack-on-demand.cls.enabled = true` (or env `QOD_CLS_ENABLED=true`). When disabled,
+every statement bypasses the rewriter completely: no FROM-table catalog lookup, no
+jsqltranspiler call, no per-statement overhead. The behaviour matches a build with column
+policies absent. Treat the toggle as a kill switch you can flip off in an incident: change
+the env var and restart the manager.
+
+While the feature is experimental, expect rough edges around federated sources,
+`LateralSubSelect` / `TableFunction` FROM items, and the 5-second catalog cache TTL race
+documented below. Standard SELECT, JOIN, CTE, UNION, subquery, CASE, CAST, IN, BETWEEN,
+EXTRACT, window, and LIKE constructs are covered by tests and considered ready for staging
+trials.
+
+### Unresolved-table behaviour
+
+When the rewriter encounters a table the DuckLake catalog cannot enumerate (federated alias
+the catalog does not expose, metadata fetch raced a DDL), the request falls back per
+`QOD_CLS_UNRESOLVED_TABLE`:
+
+- `pass` (default): forward the unrewritten SQL to DuckDB. Matches v1 behaviour.
+- `deny`: refuse the statement with an "unknown table" error. Safer; recommended for
+  production tenants where any unexpected SQL is suspicious.
+
+### Catalog cache and schema evolution (known limitation)
+
+`DuckLakeColumnCatalog` caches column-name lookups at a 5-second TTL. After a `CREATE / ALTER /
+DROP TABLE` or column DDL, the rewriter sees a stale column list for up to 5 seconds. Concrete
+race: a freshly-added column plus a freshly-added policy on it leaves a window where the policy
+lookup runs but the resolver does not see the new column. In `pass` mode the unmasked SQL
+reaches DuckDB during this window; in `deny` mode the statement is denied. Operators expecting
+simultaneous DDL + RBAC changes should pin tenants to `deny` mode, or accept the 5-second
+exposure on `pass`.
+
+A future release will hook DDL classification into cache invalidation so the window closes to
+under one statement; until then this is operator-visible.
+
 ### Action: deny
 
 A `deny` policy refuses any query that references the protected column anywhere — projection, WHERE clause, HAVING, GROUP BY, ORDER BY, JOIN condition, subquery, CTE body — and short-circuits with a 403 carrying the column qualifier. `SELECT *` deny is fail-closed: if star expansion uncovers a denied column, the query is refused rather than silently dropping the column from the projection.
@@ -224,9 +278,21 @@ Three Micrometer metrics expose the rewriter's behaviour:
 
 | Metric | Tags | Use |
 |---|---|---|
-| `column_policy_rewrites_total`       | `tenant`, `pool`, `outcome` ∈ `{rewritten, denied, passthrough}` | Fraction of reads paying the rewrite cost; spot policy regressions. |
+| `column_policy_rewrites_total`       | `tenant`, `pool`, `outcome` ∈ `{rewritten, denied, unresolved_deny, parse_failed, passthrough}` | Fraction of reads paying the rewrite cost; spot policy regressions. |
 | `column_policy_catalog_lookups_total` | `tenant`, `pool`, `result` ∈ `{hit, miss, error}` | `ColumnCatalog` cache effectiveness; alert on `error > 0` to catch federation breakage. |
 | `column_policy_rewrite_duration_seconds` | `tenant`, `pool` | Histogram of rewrite step wall time; alert on percentile regressions. |
+
+The `column_policy_rewrites_total{outcome=...}` counter emits five outcomes:
+
+- `rewritten`: at least one projection or predicate column was replaced with a mask transform.
+- `denied`: a deny policy matched a referenced column.
+- `unresolved_deny`: `QOD_CLS_UNRESOLVED_TABLE=deny` refused a query because the catalog did
+  not know the referenced table.
+- `parse_failed`: jsqltranspiler could not parse / resolve the SQL; the original statement is
+  forwarded unchanged. Distinct from `passthrough` so operators can tell "rewriter inactive
+  because nothing to rewrite" from "rewriter inactive because it gave up".
+- `passthrough`: the rewriter inspected the SQL and decided no rewrite was needed (no covered
+  column referenced; non-SELECT; superuser; user has no column policies).
 
 `Denied` outcomes also surface in the statement-history view (with `status=denied` and the offending column qualifier in the error message) and in the audit log line `column policy denied: user=… column=… role=… statement=…`.
 
