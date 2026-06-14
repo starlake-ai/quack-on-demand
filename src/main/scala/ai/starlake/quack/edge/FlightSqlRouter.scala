@@ -167,11 +167,25 @@ final class FlightSqlRouter(
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
             sql
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
+            // Inner rewriter couldn't parse - emit a distinct tag so dashboards can split
+            // "rewriter blind" from "no policy applied", then route the original SQL like
+            // a regular Passthrough.
+            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
+            sql
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             s
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "denied")
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+            return IO.pure(Left(s"access denied: $reason"))
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
+            // Deny path where the cause was an unresolved table/schema/catalog coordinate
+            // rather than a policy match. Same wire error as Denied but tagged separately.
+            stmtInstruments
+              .recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "unresolved_deny")
+            val reason = "unresolved table"
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             return IO.pure(Left(s"access denied: $reason"))
 

@@ -26,6 +26,26 @@ object ColumnPolicyRewriter:
   final case class Denied(reason: String) extends Outcome
   case object Passthrough                  extends Outcome
 
+  /** Inner rewriter could not parse the SQL. Routed identically to [[Passthrough]] (the original
+    * SQL is forwarded to the node) but tagged separately on the `column_policy_rewrites_total`
+    * counter so dashboards can distinguish "no policy applied" from "rewriter blind".
+    */
+  case object PassthroughParseFailed extends Outcome
+
+  /** Inner rewriter raised a deny because the table/schema/catalog could not be resolved, not
+    * because a policy matched. Same wire-level error as [[Denied]] but tagged separately so
+    * dashboards can split policy denies from missing-coordinate denies.
+    */
+  case object DeniedUnresolvedTable extends Outcome
+
+  /** Heuristic for spotting a deny that originated from jsqltranspiler's
+    * Table/Schema/Catalog/ColumnNotFound* exceptions: their messages contain "not found", "not
+    * declared", or "unknown". Anything else falls through to a regular policy-driven [[Denied]].
+    */
+  private[cls] def looksUnresolvedTable(reason: String): Boolean =
+    val r = reason.toLowerCase
+    r.contains("not found") || r.contains("not declared") || r.contains("unknown")
+
 /** Thin facade around a [[SchemaAwareSqlRewriter]]. Handles the IO surface (catalog lookups for
   * the FROM-item tables) plus the early-exit conditions (superuser, non-SELECT, no policies) and
   * delegates the actual SQL walk to the inner rewriter.
@@ -56,10 +76,11 @@ final class ColumnPolicyRewriter(
           defaultSchema  = ctx.defaultSchema,
           unresolvedMode = unresolvedMode
         ) match
-          case RewriteOutcome.Rewritten(s)   => Rewritten(s)
-          case RewriteOutcome.Denied(reason) => Denied(reason)
-          case RewriteOutcome.Passthrough    => Passthrough
-          case RewriteOutcome.ParseFailed    => Passthrough
+          case RewriteOutcome.Rewritten(s) => Rewritten(s)
+          case RewriteOutcome.Denied(reason) =>
+            if looksUnresolvedTable(reason) then DeniedUnresolvedTable else Denied(reason)
+          case RewriteOutcome.Passthrough => Passthrough
+          case RewriteOutcome.ParseFailed => PassthroughParseFailed
       }
 
   /** Pre-parse to enumerate FROM-item tables and fetch their column lists from the catalog.
