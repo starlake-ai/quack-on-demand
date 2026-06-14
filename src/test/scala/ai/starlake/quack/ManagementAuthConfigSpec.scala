@@ -10,8 +10,8 @@ import pureconfig.generic.ProductHint
 
 class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
 
-  private val camel = ConfigFieldMapping(CamelCase, CamelCase)
-  given ProductHint[ManagementAuthConfig] = ProductHint[ManagementAuthConfig](camel)
+  private val camel                        = ConfigFieldMapping(CamelCase, CamelCase)
+  given ProductHint[ManagementAuthConfig]  = ProductHint[ManagementAuthConfig](camel)
   given ConfigReader[ManagementAuthConfig] = deriveReader[ManagementAuthConfig]
 
   private val sessionFields =

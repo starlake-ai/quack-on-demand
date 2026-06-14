@@ -2,8 +2,8 @@ package ai.starlake.quack.edge.auth
 
 /** Auth realm the caller is targeting.
   *
-  *   - [[AuthScope.System]] -- manager UI login with empty tenant field, OR FlightSQL handshake with
-  *     `?superuser=true`. Credentials are validated against the global realm (HOCON
+  *   - [[AuthScope.System]] -- manager UI login with empty tenant field, OR FlightSQL handshake
+  *     with `?superuser=true`. Credentials are validated against the global realm (HOCON
   *     `quack-flightsql.auth.*` + `quack-on-demand.auth.management`). The matching `qodstate_user`
   *     row must have `tenant IS NULL`.
   *   - [[AuthScope.Tenant]] -- manager UI login with a tenant filled in, OR FlightSQL handshake

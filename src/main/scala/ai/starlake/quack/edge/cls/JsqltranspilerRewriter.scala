@@ -56,7 +56,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           case _: Throwable                                        => Left(ParseFailed)
 
       resolveAttempt match
-        case Left(failure)      => failure
+        case Left(failure)       => failure
         case Right(resolvedText) =>
           val rsMeta                                          = resolver.getResultSetMetaData(sql)
           val projectionOrigins: IndexedSeq[(String, String)] =
@@ -72,7 +72,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             catch case _: Throwable => Left(ParseFailed)
 
           parseAttempt match
-            case Left(failure)  => failure
+            case Left(failure) => failure
             case Right(parsed) =>
               parsed match
                 case sel: Select =>

@@ -8,9 +8,9 @@ import cats.effect.IO
 import sttp.model.StatusCode
 
 /** `onAuthChanged` is called after every successful `setTenantAuth` so the edge's
-  * [[TenantOidcRegistry]] can drop its cached per-tenant authenticator and rebuild from the
-  * updated `qodstate_tenant.authConfig` on the next handshake. Optional so unit tests that don't
-  * need the registry can pass a no-op.
+  * [[TenantOidcRegistry]] can drop its cached per-tenant authenticator and rebuild from the updated
+  * `qodstate_tenant.authConfig` on the next handshake. Optional so unit tests that don't need the
+  * registry can pass a no-op.
   */
 final class TenantHandlers(
     sup: PoolSupervisor,
@@ -29,8 +29,8 @@ final class TenantHandlers(
       authConfig = t.authConfig
     )
 
-  /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope), so
-    * it is restricted to superusers. Static `QOD_API_KEY` callers (no session row) are admitted.
+  /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope),
+    * so it is restricted to superusers. Static `QOD_API_KEY` callers (no session row) are admitted.
     */
   def createTenant(req: TenantRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -82,11 +82,11 @@ final class TenantHandlers(
   def listTenants(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantListResponse] = IO.delay {
-    val all = sup.listTenants().map(toResponse)
+    val all      = sup.listTenants().map(toResponse)
     val filtered = apiKey.flatMap(scopeOf) match
-      case None              => all
+      case None                   => all
       case Some(s) if s.superuser => all
-      case Some(s)           => all.filter(r => s.manageableTenants.contains(r.id))
+      case Some(s)                => all.filter(r => s.manageableTenants.contains(r.id))
     Right(TenantListResponse(filtered))
   }
 
@@ -100,7 +100,7 @@ final class TenantHandlers(
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.deleteTenant(req.name).map {
           case Right(_)  => Right(())
           case Left(msg) =>
@@ -114,7 +114,7 @@ final class TenantHandlers(
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.setTenantDisabled(req.name, req.disabled).map {
           case Right(t)  => Right(toResponse(t))
           case Left(msg) =>
@@ -128,7 +128,7 @@ final class TenantHandlers(
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
           case Right(t) =>
             onAuthChanged(t.id)

@@ -26,7 +26,7 @@ final class NodeHandlers(
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         if req.max < 0 then
           IO.pure(
             Left(
@@ -37,27 +37,28 @@ final class NodeHandlers(
             )
           )
         else
-          sup.setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max).map {
-            case Some(_) => Right(())
-            case None    =>
-              Left(
-                (
-                  StatusCode.NotFound,
-                  ErrorResponse(
-                    "not_found",
-                    s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}"
+          sup
+            .setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max)
+            .map {
+              case Some(_) => Right(())
+              case None    =>
+                Left(
+                  (
+                    StatusCode.NotFound,
+                    ErrorResponse(
+                      "not_found",
+                      s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}"
+                    )
                   )
                 )
-              )
-          }
+            }
 
   def quarantineNode(req: NodeOpRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
           IO.delay(tracker.setHealthy(req.nodeId, false))
         }
-

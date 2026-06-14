@@ -34,8 +34,8 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
             req.transformSql
           )
           .map {
-            case Right(p)      => Right(toDto(p))
-            case Left(reason)  =>
+            case Right(p)     => Right(toDto(p))
+            case Left(reason) =>
               Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", reason)))
           }
 
@@ -49,7 +49,7 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
           case Right(())                          => Right(())
           case Left(r) if r.endsWith("not found") =>
             Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
-          case Left(r)                            =>
+          case Left(r) =>
             Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", r)))
         }
 
@@ -70,9 +70,9 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
     TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(roleId))(scopeOf) match
       case Some(err) => IO.pure(Left(err))
       case None      =>
-        sup.listColumnPoliciesByRole(roleId).map(ps =>
-          Right(ColumnPolicyListResponse(ps.map(toDto)))
-        )
+        sup
+          .listColumnPoliciesByRole(roleId)
+          .map(ps => Right(ColumnPolicyListResponse(ps.map(toDto))))
 
   private def toDto(p: RoleColumnPolicy): ColumnPolicyDto =
     ColumnPolicyDto(

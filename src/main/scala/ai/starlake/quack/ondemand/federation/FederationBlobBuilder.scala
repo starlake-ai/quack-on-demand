@@ -14,8 +14,8 @@ import cats.syntax.all.*
   *   - [[logSafePreview]] returns the same blob but with `{{secret.NAME}}` placeholders preserved
   *     (the alias placeholder IS expanded). Safe to log for diagnostics.
   *
-  * **SQL-safety of substituted values.** Operator templates routinely wrap secret placeholders in
-  * a single-quoted string literal -- the production tpch template literally writes
+  * **SQL-safety of substituted values.** Operator templates routinely wrap secret placeholders in a
+  * single-quoted string literal -- the production tpch template literally writes
   * `PASSWORD '{{secret.PG_PWD}}'`. A naive replacement would break (or silently injection-attack)
   * the moment a value contained an apostrophe: `O'Brien` ⇒ `PASSWORD 'O'Brien'` ⇒ DuckDB parses the
   * literal as `O`, then chokes on `Brien'`. To prevent both the breakage and the injection vector,
@@ -24,7 +24,8 @@ import cats.syntax.all.*
   * string literal, while remaining a no-op for values that don't contain apostrophes.
   *
   * The escape is SAFE for the only two contexts a placeholder can legitimately appear in:
-  *   - Inside a SQL string literal (`'{{secret.X}}'`): `''` is the standard escape, value is intact.
+  *   - Inside a SQL string literal (`'{{secret.X}}'`): `''` is the standard escape, value is
+  *     intact.
   *   - Bare (e.g. `PORT {{secret.X}}`): values without apostrophes pass through unchanged; a value
   *     WITH an apostrophe was already a malformed identifier/numeric, so the doubled form is no
   *     worse.

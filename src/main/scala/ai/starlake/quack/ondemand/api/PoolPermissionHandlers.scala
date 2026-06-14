@@ -68,8 +68,8 @@ final class PoolPermissionHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   )(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolPermissionListResponse] = IO.blocking {
-    val tenantId = tenant.flatMap(resolveTenantId)
-    val scope    = apiKey.flatMap(scopeOf)
+    val tenantId                                  = tenant.flatMap(resolveTenantId)
+    val scope                                     = apiKey.flatMap(scopeOf)
     val gate: Option[(StatusCode, ErrorResponse)] = (scope, tenantId) match
       case (Some(s), Some(t)) if !s.superuser && !s.manageableTenants.contains(t) =>
         Some(
@@ -82,7 +82,7 @@ final class PoolPermissionHandlers(sup: PoolSupervisor, mappers: UserHandlers):
     gate match
       case Some(err) => Left(err)
       case None      =>
-        val perms = sup.listPoolPermissions(tenantId, userId, groupId)
+        val perms    = sup.listPoolPermissions(tenantId, userId, groupId)
         val filtered = scope match
           case Some(s) if !s.superuser =>
             perms.filter(p => s.manageableTenants.contains(p.tenantId))

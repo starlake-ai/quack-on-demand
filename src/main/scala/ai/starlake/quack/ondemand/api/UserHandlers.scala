@@ -93,7 +93,7 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
         TenantScopeCheck.reject(apiKey, canonical)(scopeOf)
     scopeGate match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
           case Right(u) =>
             toResponseFor(u.id) match
@@ -115,7 +115,7 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   ): Out[UserResponse] =
     TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
           case Right(u) =>
             toResponseFor(u.id) match
@@ -136,7 +136,7 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   ): Out[Unit] =
     TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.deleteUser(req.id).map {
           case Right(_)  => Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
@@ -151,11 +151,11 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
     // clamp to the requested tenant if it is in `manageableTenants`,
     // otherwise constrain the listing to the union of manageable tenants
     // (collected after the listUsers call below).
-    val sessionScope = apiKey.flatMap(scopeOf)
+    val sessionScope                          = apiKey.flatMap(scopeOf)
     val (effectiveTenant, filterToManageable) = sessionScope match
-      case None              => (tenant, false)
+      case None                   => (tenant, false)
       case Some(s) if s.superuser => (tenant, false)
-      case Some(s) =>
+      case Some(s)                =>
         tenant match
           case Some(t) if s.manageableTenants.contains(t) => (Some(t), false)
           // Asking for a tenant we don't manage => empty result.
@@ -186,7 +186,7 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   ): Out[EffectivePermissionsResponse] =
     TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(id))(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         IO.blocking {
           sup.effectiveSetForUser(id) match
             case None =>

@@ -32,9 +32,9 @@ class GoogleGroupsLookup(
       LazyLogging:
 
   /** Caffeine-backed cache of resolved Google group memberships per user email. Caffeine handles
-    * the TTL (`expireAfterWrite`) and bounds memory (`maximumSize`) so historical users
-    * accumulated over the manager's lifetime can't leak. The previous hand-rolled
-    * ConcurrentHashMap + fetchedAt form did neither.
+    * the TTL (`expireAfterWrite`) and bounds memory (`maximumSize`) so historical users accumulated
+    * over the manager's lifetime can't leak. The previous hand-rolled ConcurrentHashMap + fetchedAt
+    * form did neither.
     */
   private val groupsCache: com.github.benmanes.caffeine.cache.Cache[String, Set[String]] =
     com.github.benmanes.caffeine.cache.Caffeine

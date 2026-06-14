@@ -16,10 +16,11 @@ final case class StatementRecord(
     durationMs: Long,
     status: String, // "ok" | "denied" | "transient" | "permanent" | "no-node"
     error: Option[String],
-    /** Time the FlightSQL Prepare step (DESCRIBE-style LIMIT-0 probe) spent on the node, when
-      * this Execute belongs to a prepared-statement round. `None` for one-shot statements or
-      * for the SkipExecute prepare path (DML/DDL emit no probe). Surfaced by the UI as subtext
-      * under the Execute duration. */
+    /** Time the FlightSQL Prepare step (DESCRIBE-style LIMIT-0 probe) spent on the node, when this
+      * Execute belongs to a prepared-statement round. `None` for one-shot statements or for the
+      * SkipExecute prepare path (DML/DDL emit no probe). Surfaced by the UI as subtext under the
+      * Execute duration.
+      */
     prepareDurationMs: Option[Long] = None
 )
 
