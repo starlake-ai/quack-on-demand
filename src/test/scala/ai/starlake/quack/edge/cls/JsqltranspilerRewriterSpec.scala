@@ -164,3 +164,18 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
         sql.toLowerCase should include ("o_id")
       case other => fail(s"expected Rewritten, got $other")
   }
+
+  it should "resolve unqualified c_email in a multi-join to the customer table" in {
+    val multi = Map(
+      "customer" -> List("c_id", "c_email"),
+      "orders"   -> List("o_id", "o_customer")
+    )
+    val out = rw.rewrite(
+      "SELECT c_email FROM customer JOIN orders ON c_id = o_customer",
+      multi, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }
