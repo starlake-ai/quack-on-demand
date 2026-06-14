@@ -36,12 +36,63 @@ final class StatementInstruments(registry: MeterRegistry):
           .register(registry)
     )
 
+  private val rewriteTimerCache =
+    new java.util.concurrent.ConcurrentHashMap[(String, String), Timer]()
+
+  private def resolveRewriteTimer(tenant: String, pool: String): Timer =
+    rewriteTimerCache.computeIfAbsent(
+      (tenant, pool),
+      _ =>
+        Timer
+          .builder("column_policy_rewrite_duration_seconds")
+          .tag("tenant", tenant)
+          .tag("pool", pool)
+          .register(registry)
+    )
+
   /** Record one completed statement: increment the counter, observe the timer. */
   def record(tenant: String, pool: String, status: String, durationMs: Long): Unit =
     registry
       .counter("statements_total", "tenant", tenant, "pool", pool, "status", status)
       .increment()
     resolveTimer(tenant, pool, status).record(Duration.ofMillis(durationMs))
+
+  /** Increment the column-policy rewrite counter. `outcome` is one of: `rewritten`, `denied`,
+    * `passthrough`.
+    */
+  def recordColumnPolicyRewrite(tenant: String, pool: String, outcome: String): Unit =
+    registry
+      .counter(
+        "column_policy_rewrites_total",
+        "tenant",
+        tenant,
+        "pool",
+        pool,
+        "outcome",
+        outcome
+      )
+      .increment()
+
+  /** Increment the column-policy catalog lookup counter. `result` is one of: `hit`, `miss`,
+    * `error`. `tenant` and `pool` may be empty strings when the catalog layer lacks per-statement
+    * context (placeholder; a follow-up task threads proper (tenant, pool) into the catalog).
+    */
+  def recordColumnPolicyCatalogLookup(tenant: String, pool: String, result: String): Unit =
+    registry
+      .counter(
+        "column_policy_catalog_lookups_total",
+        "tenant",
+        tenant,
+        "pool",
+        pool,
+        "result",
+        result
+      )
+      .increment()
+
+  /** Observe the wall-clock duration of a column-policy rewrite pass. */
+  def recordColumnPolicyRewriteDuration(tenant: String, pool: String, ms: Long): Unit =
+    resolveRewriteTimer(tenant, pool).record(Duration.ofMillis(ms))
 
 object StatementInstruments:
 
