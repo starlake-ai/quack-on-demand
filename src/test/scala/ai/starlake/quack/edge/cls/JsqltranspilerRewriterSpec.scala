@@ -101,3 +101,27 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
       case other                          => fail(s"expected Rewritten, got $other")
   }
+
+  it should "mask c_email inside window PARTITION BY" in {
+    // jsqltranspiler 1.9's resolver throws NPE on AnalyticExpression with no inner expression
+    // (e.g. row_number()), so use sum(c_id) which has an arg the resolver can walk.
+    val out = rw.rewrite(
+      "SELECT sum(c_id) OVER (PARTITION BY c_email) FROM customer",
+      schema, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "mask c_email inside window ORDER BY" in {
+    val out = rw.rewrite(
+      "SELECT sum(c_id) OVER (ORDER BY c_email) FROM customer",
+      schema, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }
