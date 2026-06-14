@@ -452,8 +452,28 @@ object Main extends IOApp with LazyLogging:
       )
       val classifier = new StatementClassifier(classifierCfg)
 
+      // Resolve a DuckDB-side catalog name to its DuckLakeCatalogReader by looking up the
+      // tenant-db owning that catalog and reusing the cache populated by `catalogHandlers`.
+      // Returns Nil for unknown catalogs; the rewriter's unresolvedMode then decides whether
+      // to deny or pass through.
       val columnCatalog: ai.starlake.quack.edge.cls.ColumnCatalog =
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty) // TODO: wire DuckLakeCatalogReader
+        new ai.starlake.quack.edge.cls.DuckLakeColumnCatalog(
+          fetch = (cat, sch, tab) =>
+            IO.blocking {
+              sup.findTenantDbByCatalogName(cat) match
+                case None     => Nil
+                case Some(td) =>
+                  sup.getTenantById(td.tenantId) match
+                    case None    => Nil
+                    case Some(t) =>
+                      val reader = catalogReaderCache.computeIfAbsent(
+                        (t.displayName, td.name),
+                        { case (tn, dn) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn)) }
+                      )
+                      reader.columnNames(sch, tab)
+            },
+          instruments = Some(stmtInstruments)
+        )
       val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(columnCatalog)
 
       val fsRouter = new FlightSqlRouter(
