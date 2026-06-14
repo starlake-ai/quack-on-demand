@@ -225,6 +225,19 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           topLevelOverride = saved
           p
 
+        case el: net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList[
+              Expression
+            ] @unchecked =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          val it = el.listIterator()
+          while it.hasNext do
+            val cur = it.next()
+            val nxt = visit(cur)
+            if nxt ne cur then it.set(nxt)
+          topLevelOverride = saved
+          el
+
         case ae: net.sf.jsqlparser.expression.AnalyticExpression =>
           val saved = topLevelOverride
           topLevelOverride = None
