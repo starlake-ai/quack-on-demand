@@ -201,6 +201,29 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           topLevelOverride = saved
           p
 
+        case ce: net.sf.jsqlparser.expression.CaseExpression =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          Option(ce.getSwitchExpression).foreach { sw =>
+            val nxt = visit(sw)
+            if nxt ne sw then ce.setSwitchExpression(nxt)
+          }
+          Option(ce.getWhenClauses).foreach { clauses =>
+            val it = clauses.iterator()
+            while it.hasNext do
+              val wc = it.next()
+              val w  = visit(wc.getWhenExpression)
+              if w ne wc.getWhenExpression then wc.setWhenExpression(w)
+              val t  = visit(wc.getThenExpression)
+              if t ne wc.getThenExpression then wc.setThenExpression(t)
+          }
+          Option(ce.getElseExpression).foreach { el =>
+            val nxt = visit(el)
+            if nxt ne el then ce.setElseExpression(nxt)
+          }
+          topLevelOverride = saved
+          ce
+
         case other => other
 
   private def matchingPolicy(
