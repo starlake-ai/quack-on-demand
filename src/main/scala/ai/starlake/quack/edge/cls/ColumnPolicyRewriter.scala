@@ -5,9 +5,7 @@ import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import cats.effect.IO
 import cats.syntax.traverse._
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
-import net.sf.jsqlparser.statement.select.{
-  ParenthesedSelect, PlainSelect, Select, SetOperationList
-}
+import net.sf.jsqlparser.statement.select.{ParenthesedSelect, PlainSelect, Select, SetOperationList}
 
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
@@ -17,14 +15,14 @@ import scala.util.{Failure, Success, Try}
   */
 final case class SchemaContext(
     defaultDatabase: Option[String],
-    defaultSchema:   Option[String]
+    defaultSchema: Option[String]
 )
 
 object ColumnPolicyRewriter:
   sealed trait Outcome
   final case class Rewritten(sql: String) extends Outcome
   final case class Denied(reason: String) extends Outcome
-  case object Passthrough                  extends Outcome
+  case object Passthrough                 extends Outcome
 
   /** Inner rewriter could not parse the SQL. Routed identically to [[Passthrough]] (the original
     * SQL is forwarded to the node) but tagged separately on the `column_policy_rewrites_total`
@@ -46,37 +44,37 @@ object ColumnPolicyRewriter:
     val r = reason.toLowerCase
     r.contains("not found") || r.contains("not declared") || r.contains("unknown")
 
-/** Thin facade around a [[SchemaAwareSqlRewriter]]. Handles the IO surface (catalog lookups for
-  * the FROM-item tables) plus the early-exit conditions (superuser, non-SELECT, no policies) and
+/** Thin facade around a [[SchemaAwareSqlRewriter]]. Handles the IO surface (catalog lookups for the
+  * FROM-item tables) plus the early-exit conditions (superuser, non-SELECT, no policies) and
   * delegates the actual SQL walk to the inner rewriter.
   */
 final class ColumnPolicyRewriter(
-    catalog:        ColumnCatalog,
-    inner:          SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
-    unresolvedMode: UnresolvedMode         = UnresolvedMode.Pass
+    catalog: ColumnCatalog,
+    inner: SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
+    unresolvedMode: UnresolvedMode = UnresolvedMode.Pass
 ):
   import ColumnPolicyRewriter._
 
   def rewrite(
-      sql:  String,
+      sql: String,
       kind: StatementKind,
-      eff:  EffectiveSet,
-      ctx:  SchemaContext
+      eff: EffectiveSet,
+      ctx: SchemaContext
   ): IO[Outcome] =
-    if eff.user.tenant.isEmpty            then IO.pure(Passthrough)
-    else if kind != StatementKind.Select  then IO.pure(Passthrough)
-    else if eff.columnPolicies.isEmpty    then IO.pure(Passthrough)
+    if eff.user.tenant.isEmpty then IO.pure(Passthrough)
+    else if kind != StatementKind.Select then IO.pure(Passthrough)
+    else if eff.columnPolicies.isEmpty then IO.pure(Passthrough)
     else
       buildSchema(sql, ctx).map { schema =>
         inner.rewrite(
-          sql            = sql,
-          schema         = schema,
-          policies       = eff.columnPolicies,
+          sql = sql,
+          schema = schema,
+          policies = eff.columnPolicies,
           defaultCatalog = ctx.defaultDatabase,
-          defaultSchema  = ctx.defaultSchema,
+          defaultSchema = ctx.defaultSchema,
           unresolvedMode = unresolvedMode
         ) match
-          case RewriteOutcome.Rewritten(s) => Rewritten(s)
+          case RewriteOutcome.Rewritten(s)   => Rewritten(s)
           case RewriteOutcome.Denied(reason) =>
             if looksUnresolvedTable(reason) then DeniedUnresolvedTable else Denied(reason)
           case RewriteOutcome.Passthrough => Passthrough
@@ -89,7 +87,7 @@ final class ColumnPolicyRewriter(
     */
   private def buildSchema(sql: String, ctx: SchemaContext): IO[Map[String, List[String]]] =
     Try(CCJSqlParserUtil.parse(sql)) match
-      case Failure(_) => IO.pure(Map.empty)
+      case Failure(_)            => IO.pure(Map.empty)
       case Success(stmt: Select) =>
         val tables = schemaKeys(collectTables(stmt, ctx))
         tables.toList
@@ -101,7 +99,7 @@ final class ColumnPolicyRewriter(
 
   private def collectTables(
       stmt: Select,
-      ctx:  SchemaContext
+      ctx: SchemaContext
   ): Map[String, (String, String, String)] =
     val acc = scala.collection.mutable.Map.empty[String, (String, String, String)]
     def visitSel(sel: Select): Unit = sel match
@@ -109,31 +107,31 @@ final class ColumnPolicyRewriter(
         Option(ps.getFromItem).foreach {
           case t: net.sf.jsqlparser.schema.Table => indexTable(t, ctx, acc)
           case sub: ParenthesedSelect            => visitSel(sub.getSelect)
-          case _                                  => ()
+          case _                                 => ()
         }
         Option(ps.getJoins).foreach(_.asScala.foreach { j =>
           Option(j.getRightItem).foreach {
             case t: net.sf.jsqlparser.schema.Table => indexTable(t, ctx, acc)
             case sub: ParenthesedSelect            => visitSel(sub.getSelect)
-            case _                                  => ()
+            case _                                 => ()
           }
         })
-      case ps: ParenthesedSelect  => visitSel(ps.getSelect)
+      case ps: ParenthesedSelect => visitSel(ps.getSelect)
       case sol: SetOperationList =>
         Option(sol.getSelects).foreach(_.asScala.foreach(visitSel))
       case _ => ()
     Option(stmt.getWithItemsList).foreach(_.asScala.foreach { wi =>
       Option(wi.getParenthesedStatement).foreach {
         case ps: ParenthesedSelect => visitSel(ps.getSelect)
-        case _                      => ()
+        case _                     => ()
       }
     })
     visitSel(stmt)
     acc.toMap
 
   /** Key the schema map by the raw table name AND by each alias pointing at it, so the resolver
-    * accepts both `SELECT * FROM customer` and `SELECT c.* FROM customer c`. JSQLColumResolver
-    * uses the row's first element as the table-name match key.
+    * accepts both `SELECT * FROM customer` and `SELECT c.* FROM customer c`. JSQLColumResolver uses
+    * the row's first element as the table-name match key.
     */
   private def schemaKeys(
       tables: Map[String, (String, String, String)]
@@ -145,13 +143,14 @@ final class ColumnPolicyRewriter(
     tables.values.map { case (cat, sch, tab) => tab -> (cat, sch, tab) }.toMap
 
   private def indexTable(
-      t:   net.sf.jsqlparser.schema.Table,
+      t: net.sf.jsqlparser.schema.Table,
       ctx: SchemaContext,
       acc: scala.collection.mutable.Map[String, (String, String, String)]
   ): Unit =
     val rawName    = t.getName
     val schemaName = Option(t.getSchemaName).getOrElse(ctx.defaultSchema.getOrElse(""))
-    val catalog    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName))
-                       .getOrElse(ctx.defaultDatabase.getOrElse(""))
-    val key        = Option(t.getAlias).map(_.getName).getOrElse(rawName)
+    val catalog    = Option(t.getDatabase)
+      .flatMap(d => Option(d.getDatabaseName))
+      .getOrElse(ctx.defaultDatabase.getOrElse(""))
+    val key = Option(t.getAlias).map(_.getName).getOrElse(rawName)
     acc(key) = (catalog, schemaName, rawName)

@@ -37,8 +37,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       schemaDef
     )
     resolver.setErrorMode(unresolvedMode match
-      case UnresolvedMode.Deny        => JdbcMetaData.ErrorMode.STRICT
-      case UnresolvedMode.Pass        => JdbcMetaData.ErrorMode.LENIENT)
+      case UnresolvedMode.Deny => JdbcMetaData.ErrorMode.STRICT
+      case UnresolvedMode.Pass => JdbcMetaData.ErrorMode.LENIENT)
 
     val resolvedText: String =
       try resolver.getResolvedStatementText(sql)
@@ -148,8 +148,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         // Augment the visitor's policies with any synthesized ones so the outer projection sees
         // `sub.c_email` (or alias.colalias) as covered. The synthesized policies use the FROM-item
         // alias as the tableName, so resolveTable's alias-equality fallback can match them.
-        if derivedPolicies.nonEmpty then
-          visitor.extraPolicies = derivedPolicies.toList
+        if derivedPolicies.nonEmpty then visitor.extraPolicies = derivedPolicies.toList
         val items = ps.getSelectItems
         if items != null then
           val it  = items.listIterator()
@@ -165,7 +164,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
               if origins.indices.contains(idx) then Some(origins(idx)) else None
             val expr     = si.getExpression
             val replaced = visitor.visit(expr)
-            if (replaced ne expr) then
+            if replaced ne expr then
               si.asInstanceOf[SelectItem[Expression]].setExpression(replaced)
               changed.set(true)
             visitor.topLevelOverride = None
@@ -210,9 +209,9 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     def addSub(sub: net.sf.jsqlparser.statement.select.ParenthesedSelect): Unit =
       Option(sub.getAlias).map(_.getName).foreach(name => buf += (name -> name))
     Option(ps.getFromItem).foreach {
-      case t: net.sf.jsqlparser.schema.Table                          => add(t)
-      case s: net.sf.jsqlparser.statement.select.ParenthesedSelect    => addSub(s)
-      case _                                                          => ()
+      case t: net.sf.jsqlparser.schema.Table                       => add(t)
+      case s: net.sf.jsqlparser.statement.select.ParenthesedSelect => addSub(s)
+      case _                                                       => ()
     }
     Option(ps.getJoins).foreach { joins =>
       val it = joins.iterator()
@@ -228,9 +227,9 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   /** Pre-scan a FROM-item subquery and synthesize policies for the outer scope. For each inner
     * SelectItem whose source column is covered by a base-table policy, emit a transient policy
     * keyed on `(subqueryAlias, projectedName)` so the outer projection masks `sub.x` references.
-    * The projectedName is the user-supplied alias if any, else the inner Column's name. Items
-    * that are not bare Columns (functions, expressions) are skipped - those don't expose a
-    * cleanly maskable identity to the outer scope.
+    * The projectedName is the user-supplied alias if any, else the inner Column's name. Items that
+    * are not bare Columns (functions, expressions) are skipped - those don't expose a cleanly
+    * maskable identity to the outer scope.
     */
   private def deriveOuterPolicies(
       sub: net.sf.jsqlparser.statement.select.ParenthesedSelect,
@@ -254,7 +253,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                   innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
                 case None =>
                   if innerFromTables.size == 1 then innerFromTables.head._2 else ""
-              val baseCol = col.getColumnName
+              val baseCol     = col.getColumnName
               val exposedName =
                 Option(si.getAlias).map(_.getName).getOrElse(baseCol)
               matchingPolicy(baseTable, baseCol, policies).foreach { p =>
@@ -268,9 +267,9 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy],
       changed: java.util.concurrent.atomic.AtomicBoolean
   ):
-    var topLevelOverride: Option[(String, String)] = None
-    var fromTables: List[(String, String)]         = Nil
-    var extraPolicies: List[RoleColumnPolicy]      = Nil
+    var topLevelOverride: Option[(String, String)]  = None
+    var fromTables: List[(String, String)]          = Nil
+    var extraPolicies: List[RoleColumnPolicy]       = Nil
     private def allPolicies: List[RoleColumnPolicy] = extraPolicies ::: policies
 
     /** Resolve the physical table for a Column reference. */
@@ -429,7 +428,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
               val wc = it.next()
               val w  = visit(wc.getWhenExpression)
               if w ne wc.getWhenExpression then wc.setWhenExpression(w)
-              val t  = visit(wc.getThenExpression)
+              val t = visit(wc.getThenExpression)
               if t ne wc.getThenExpression then wc.setThenExpression(t)
           }
           Option(ce.getElseExpression).foreach { el =>

@@ -57,7 +57,6 @@ import pureconfig._
 import pureconfig.generic.ProductHint
 import pureconfig.generic.semiauto.deriveReader
 
-
 object Main extends IOApp with LazyLogging:
 
   // Match the camelCase keys used in application.conf rather than pureconfig's
@@ -189,7 +188,7 @@ object Main extends IOApp with LazyLogging:
     // directly is refused here because every secret resolved through it
     // would crash at handshake time -- caller's mistake should fail at
     // boot, not in production.
-    val UnimplementedSingleBackends = Set("aws-sm", "gcp-sm", "azure-kv", "vault")
+    val UnimplementedSingleBackends    = Set("aws-sm", "gcp-sm", "azure-kv", "vault")
     val secretResolver: SecretResolver = mgrCfg.federation.secretStore match {
       case "dispatch" | "auto" =>
         new DispatchingSecretResolver(
@@ -200,8 +199,8 @@ object Main extends IOApp with LazyLogging:
           azureKv = new AzureSecretsManagerResolver,
           vault = new VaultSecretResolver
         )
-      case "postgres" => new PostgresSecretResolver
-      case "env"      => new EnvSecretResolver()
+      case "postgres"                                   => new PostgresSecretResolver
+      case "env"                                        => new EnvSecretResolver()
       case s if UnimplementedSingleBackends.contains(s) =>
         sys.error(
           s"federation.secretStore = '$s' is not implemented (the resolver is a stub). " +
@@ -281,8 +280,8 @@ object Main extends IOApp with LazyLogging:
     // to the manager-wide `quack-flightsql.auth.google` block.
     val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
       loadTenant = id => sup.getTenantById(id),
-      secrets    = ai.starlake.quack.secrets.SecretRefResolver.default,
-      roleClaim  = authCfg.roleClaim
+      secrets = ai.starlake.quack.secrets.SecretRefResolver.default,
+      roleClaim = authCfg.roleClaim
     )
     val authService = new AuthenticationService(
       authCfg,
@@ -320,15 +319,14 @@ object Main extends IOApp with LazyLogging:
           "manager beyond localhost."
       )
     val sessionTokens = new SessionTokenStore(
-      secret      = mgrCfg.auth.management.sessionJwtSecret,
+      secret = mgrCfg.auth.management.sessionJwtSecret,
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
     )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
     val authUserStore: Option[UserStore] =
       Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
     val grantsForIdentity: GrantsLookup =
-      (identity, email) =>
-        authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
+      (identity, email) => authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
     // 'auto' -> None (handler derives Secure from X-Forwarded-Proto per request); 'true' / 'false'
     // -> explicit override. Unknown values fall back to auto with a warning so a typo in the env
     // var doesn't accidentally weaken the cookie.
@@ -344,12 +342,12 @@ object Main extends IOApp with LazyLogging:
           )
           None
     val authHandlers = new AuthHandlers(
-      authService          = authService,
-      tokens               = sessionTokens,
-      identitySource       = identitySource,
-      grantsForIdentity    = grantsForIdentity,
+      authService = authService,
+      tokens = sessionTokens,
+      identitySource = identitySource,
+      grantsForIdentity = grantsForIdentity,
       cookieSecureOverride = cookieSecureOverride,
-      cookiePath           = mgrCfg.auth.management.sessionCookiePath
+      cookiePath = mgrCfg.auth.management.sessionCookiePath
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
@@ -379,16 +377,17 @@ object Main extends IOApp with LazyLogging:
         )
         new PostgresAclValidator(
           defaultDatabase = defaultDb,
-          defaultSchema   = defaultSchema,
-          dialect         = aclCfg.dialect,
+          defaultSchema = defaultSchema,
+          dialect = aclCfg.dialect,
           // Scope wildcard catalog grants to the session's tenant. Maps
           // qodstate_tenant.id -> the set of tenant_db.name's the tenant
           // owns; the validator's `catalogMatch` consults this to decide
           // whether `*.*.*` admits a referenced catalog. Empty set = no
           // catalog matches via wildcard (fail-closed). Explicit named
           // grants bypass this and still cross tenants on purpose.
-          tenantCatalogs  = tenantId =>
-            sup.getTenantById(tenantId)
+          tenantCatalogs = tenantId =>
+            sup
+              .getTenantById(tenantId)
               .map(t => sup.listTenantDbsByTenant(t.displayName).map(_.name).toSet)
               .getOrElse(Set.empty)
         )
@@ -443,11 +442,11 @@ object Main extends IOApp with LazyLogging:
       val classifierRoot =
         com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.statementClassifier")
       val classifierCfg = StatementClassifierConfig(
-        select   = StatementClassifierConfig.parseCsv(classifierRoot.getString("select")),
-        dml      = StatementClassifierConfig.parseCsv(classifierRoot.getString("dml")),
-        ddl      = StatementClassifierConfig.parseCsv(classifierRoot.getString("ddl")),
-        begin    = StatementClassifierConfig.parseCsv(classifierRoot.getString("begin")),
-        commit   = StatementClassifierConfig.parseCsv(classifierRoot.getString("commit")),
+        select = StatementClassifierConfig.parseCsv(classifierRoot.getString("select")),
+        dml = StatementClassifierConfig.parseCsv(classifierRoot.getString("dml")),
+        ddl = StatementClassifierConfig.parseCsv(classifierRoot.getString("ddl")),
+        begin = StatementClassifierConfig.parseCsv(classifierRoot.getString("begin")),
+        commit = StatementClassifierConfig.parseCsv(classifierRoot.getString("commit")),
         rollback = StatementClassifierConfig.parseCsv(classifierRoot.getString("rollback"))
       )
       val classifier = new StatementClassifier(classifierCfg)
@@ -481,14 +480,16 @@ object Main extends IOApp with LazyLogging:
                     case Some(t) =>
                       val reader = catalogReaderCache.computeIfAbsent(
                         (t.displayName, td.name),
-                        { case (tn, dn) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn)) }
+                        { case (tn, dn) =>
+                          DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
+                        }
                       )
                       reader.columnNames(sch, tab)
             },
           instruments = Some(stmtInstruments)
         )
       val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        catalog        = columnCatalog,
+        catalog = columnCatalog,
         unresolvedMode = unresolvedTableMode
       )
 
@@ -565,7 +566,7 @@ object Main extends IOApp with LazyLogging:
       // and the in-memory RbacResolver cache stay in lockstep. The user
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
-      val userStoreForRbac   = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+      val userStoreForRbac     = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
       val userHandlers         = new UserHandlers(sup, userStoreForRbac)
       val roleHandlers         = new RoleHandlers(sup, userHandlers)
       val groupHandlers        = new GroupHandlers(sup, userHandlers)
@@ -651,15 +652,17 @@ object Main extends IOApp with LazyLogging:
       // those pools and can spawn nodes. Inverting the order leaves the
       // REST/UI reading from an empty cache after a fresh boot.
       DemoBootstrapHook.run(
-        env      = sys.env.get,
+        env = sys.env.get,
         readFile = path =>
           if path.startsWith("classpath:") then
             val resource = path.stripPrefix("classpath:")
             scala.util.Try {
               val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
-                .getOrElse(throw new java.io.FileNotFoundException(
-                  s"classpath resource not found: $resource"
-                ))
+                .getOrElse(
+                  throw new java.io.FileNotFoundException(
+                    s"classpath resource not found: $resource"
+                  )
+                )
               scala.util.Using.resource(stream)(s =>
                 scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
               )
@@ -667,8 +670,9 @@ object Main extends IOApp with LazyLogging:
           else
             scala.util.Using(
               scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
-            )(_.getLines().mkString("\n")),
-        store    = store,
+            )(_.getLines().mkString("\n"))
+        ,
+        store = store,
         fedStore = manifestFedStore
       ) *>
         IO.delay(sup.restore()) *>
@@ -695,15 +699,15 @@ object Main extends IOApp with LazyLogging:
                   catch case _: Throwable => ()
                   try backend.cleanup().unsafeRunSync()
                   catch case _: Throwable => ()
-                  // Drain the JDBC connection pools. Both close()s are
-                  // idempotent + no-op if already closed.
+                    // Drain the JDBC connection pools. Both close()s are
+                    // idempotent + no-op if already closed.
                   try store.close()
                   catch case _: Throwable => ()
                   try authUserStore.foreach(_.close())
                   catch case _: Throwable => ()
-                  // Close every cached catalog reader's Hikari pool. The
-                  // map shouldn't see new entries past this point because
-                  // serve() has already returned, but iterate defensively.
+                    // Close every cached catalog reader's Hikari pool. The
+                    // map shouldn't see new entries past this point because
+                    // serve() has already returned, but iterate defensively.
                   val it = catalogReaderCache.values.iterator()
                   while it.hasNext do
                     val r = it.next()

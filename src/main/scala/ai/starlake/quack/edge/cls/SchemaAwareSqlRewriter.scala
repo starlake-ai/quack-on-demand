@@ -19,8 +19,8 @@ enum UnresolvedMode:
   * (no I/O): all schema lookups have already been done by the caller and handed in via `schema`.
   *
   * `schema` maps each FROM-item alias OR base table name the SQL references to its column list.
-  * Empty list means "table exists but no columns known"; missing key means "table not in
-  * catalog at all" and triggers `unresolvedMode`.
+  * Empty list means "table exists but no columns known"; missing key means "table not in catalog at
+  * all" and triggers `unresolvedMode`.
   *
   * `policies` is the EffectiveSet's columnPolicies list, already filtered to the session tenant.
   *
@@ -29,10 +29,10 @@ enum UnresolvedMode:
   */
 trait SchemaAwareSqlRewriter:
   def rewrite(
-      sql:            String,
-      schema:         Map[String, List[String]],
-      policies:       List[RoleColumnPolicy],
+      sql: String,
+      schema: Map[String, List[String]],
+      policies: List[RoleColumnPolicy],
       defaultCatalog: Option[String],
-      defaultSchema:  Option[String],
+      defaultSchema: Option[String],
       unresolvedMode: UnresolvedMode = UnresolvedMode.Deny
   ): RewriteOutcome
