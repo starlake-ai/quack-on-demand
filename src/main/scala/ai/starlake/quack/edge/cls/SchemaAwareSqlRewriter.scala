@@ -12,7 +12,7 @@ enum RewriteOutcome:
 /** How the rewriter handles a table the SQL references that the schema map does not cover. */
 enum UnresolvedMode:
   case Deny
-  case Passthrough
+  case Pass
 
 /** Rewrites a SQL statement so every reference to a covered column is replaced with its mask
   * transform, or refuses with `Denied` if any reference matches a deny policy. The trait is pure

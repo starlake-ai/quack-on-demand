@@ -38,7 +38,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     )
     resolver.setErrorMode(unresolvedMode match
       case UnresolvedMode.Deny        => JdbcMetaData.ErrorMode.STRICT
-      case UnresolvedMode.Passthrough => JdbcMetaData.ErrorMode.LENIENT)
+      case UnresolvedMode.Pass        => JdbcMetaData.ErrorMode.LENIENT)
 
     val resolvedText: String =
       try resolver.getResolvedStatementText(sql)
