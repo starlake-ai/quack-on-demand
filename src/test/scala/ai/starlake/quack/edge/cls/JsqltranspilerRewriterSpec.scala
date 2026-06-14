@@ -66,3 +66,14 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
       case other                          => fail(s"expected Rewritten, got $other")
   }
+
+  it should "mask c_email inside IN list" in {
+    val out = rw.rewrite(
+      "SELECT c_id FROM customer WHERE c_email IN ('a@x', 'b@x')",
+      schema, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }

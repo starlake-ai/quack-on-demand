@@ -114,6 +114,30 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
               changed.set(true)
             visitor.topLevelOverride = None
             idx += 1
+        Option(ps.getWhere).foreach { w =>
+          val nxt = visitor.visit(w)
+          if nxt ne w then { ps.setWhere(nxt); changed.set(true) }
+        }
+        Option(ps.getHaving).foreach { h =>
+          val nxt = visitor.visit(h)
+          if nxt ne h then { ps.setHaving(nxt); changed.set(true) }
+        }
+        Option(ps.getGroupBy).foreach { gb =>
+          val gbList = gb.getGroupByExpressionList
+          if gbList != null then
+            val it = gbList.listIterator()
+            while it.hasNext do
+              val cur = it.next()
+              val nxt = visitor.visit(cur)
+              if nxt ne cur then { it.set(nxt); changed.set(true) }
+        }
+        Option(ps.getOrderByElements).foreach { obs =>
+          val it = obs.iterator()
+          while it.hasNext do
+            val ob  = it.next()
+            val nxt = visitor.visit(ob.getExpression)
+            if nxt ne ob.getExpression then { ob.setExpression(nxt); changed.set(true) }
+        }
       case _ => ()
     (changed.get, sel)
 
@@ -200,6 +224,24 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           p.setExpression(visit(p.getExpression))
           topLevelOverride = saved
           p
+
+        case ix: net.sf.jsqlparser.expression.operators.relational.InExpression =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          val l = visit(ix.getLeftExpression)
+          if l ne ix.getLeftExpression then ix.setLeftExpression(l)
+          ix.getRightExpression match
+            case el: net.sf.jsqlparser.expression.operators.relational.ExpressionList[
+                  Expression
+                ] @unchecked =>
+              val it = el.listIterator()
+              while it.hasNext do
+                val cur = it.next()
+                val nxt = visit(cur)
+                if nxt ne cur then it.set(nxt)
+            case _ => ()
+          topLevelOverride = saved
+          ix
 
         case cx: net.sf.jsqlparser.expression.CastExpression =>
           val saved = topLevelOverride
