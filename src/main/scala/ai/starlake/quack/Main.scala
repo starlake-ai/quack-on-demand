@@ -452,6 +452,19 @@ object Main extends IOApp with LazyLogging:
       )
       val classifier = new StatementClassifier(classifierCfg)
 
+      val unresolvedTableMode: ai.starlake.quack.edge.cls.UnresolvedMode =
+        com.typesafe.config.ConfigFactory
+          .load()
+          .getString("quack-on-demand.cls.unresolvedTable")
+          .toLowerCase match
+          case "deny"        => ai.starlake.quack.edge.cls.UnresolvedMode.Deny
+          case "passthrough" => ai.starlake.quack.edge.cls.UnresolvedMode.Passthrough
+          case other         =>
+            logger.warn(
+              s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to passthrough"
+            )
+            ai.starlake.quack.edge.cls.UnresolvedMode.Passthrough
+
       // Resolve a DuckDB-side catalog name to its DuckLakeCatalogReader by looking up the
       // tenant-db owning that catalog and reusing the cache populated by `catalogHandlers`.
       // Returns Nil for unknown catalogs; the rewriter's unresolvedMode then decides whether
@@ -474,7 +487,10 @@ object Main extends IOApp with LazyLogging:
             },
           instruments = Some(stmtInstruments)
         )
-      val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(columnCatalog)
+      val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+        catalog        = columnCatalog,
+        unresolvedMode = unresolvedTableMode
+      )
 
       val fsRouter = new FlightSqlRouter(
         sup,
