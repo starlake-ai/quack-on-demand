@@ -291,6 +291,37 @@ export interface RolePermissionGrantRequest {
 export interface RolePermissionRevokeRequest { id: string; }
 export interface RolePermissionListResponse { permissions: RolePermissionResponse[]; }
 
+// ----- RBAC: column-level policies -----
+export interface ColumnPolicyDto {
+  id:           string;
+  roleId:       string;
+  catalogName:  string;
+  schemaName:   string;
+  tableName:    string;
+  columnName:   string;
+  action:       string;                    // 'deny' | 'mask'
+  transformSql: string | null;
+}
+
+export interface CreateColumnPolicyRequest {
+  roleId:       string;
+  catalogName:  string;
+  schemaName:   string;
+  tableName:    string;
+  columnName:   string;
+  action:       string;                    // 'deny' | 'mask'
+  transformSql?: string | null;
+}
+
+export interface UpdateColumnPolicyRequest {
+  id:           string;
+  action:       string;                    // 'deny' | 'mask'
+  transformSql?: string | null;
+}
+
+export interface DeleteColumnPolicyRequest { id: string; }
+export interface ColumnPolicyListResponse { policies: ColumnPolicyDto[]; }
+
 // ----- RBAC: groups -----
 export interface GroupResponse {
   id:          string;
