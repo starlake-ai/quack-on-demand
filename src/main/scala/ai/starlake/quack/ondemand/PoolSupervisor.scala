@@ -86,19 +86,28 @@ final class PoolSupervisor(
     * even within the TTL.
     */
   private final case class EffectiveCacheKey(userId: String, jwtRolesHash: Int, jwtGroupsHash: Int)
-  private final case class EffectiveCacheEntry(
-      expiresAt: java.time.Instant,
-      value: ai.starlake.quack.ondemand.rbac.EffectiveSet
-  )
-  private val effectiveCache =
-    new java.util.concurrent.ConcurrentHashMap[EffectiveCacheKey, EffectiveCacheEntry]()
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
+
+  /** Caffeine-backed cache of resolved EffectiveSets. Caffeine handles the TTL
+    * (`expireAfterWrite`) and bounds memory (`maximumSize`) so distinct (userId, jwtRolesHash,
+    * jwtGroupsHash) combinations accumulated over the manager's lifetime can't leak. The previous
+    * hand-rolled `ConcurrentHashMap + expiresAt` form did neither.
+    */
+  private val effectiveCache: com.github.benmanes.caffeine.cache.Cache[
+    EffectiveCacheKey,
+    ai.starlake.quack.ondemand.rbac.EffectiveSet
+  ] =
+    com.github.benmanes.caffeine.cache.Caffeine
+      .newBuilder()
+      .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
+      .maximumSize(10_000L)
+      .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
 
   /** Drop every cached `EffectiveSet`. Called from every RBAC mutator so a freshly-granted role or
     * pool permission takes effect on the next handshake, not after a TTL window.
     */
-  private def invalidateEffectiveCache(): Unit = effectiveCache.clear()
+  private def invalidateEffectiveCache(): Unit = effectiveCache.invalidateAll()
 
   // ---------- Bootstrap / replay ----------
 
@@ -1377,15 +1386,11 @@ final class PoolSupervisor(
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
     val key    = EffectiveCacheKey(userId, jwtRoles.hashCode, jwtGroups.hashCode)
-    val now    = java.time.Instant.now()
-    val cached = effectiveCache.get(key)
-    if cached != null && cached.expiresAt.isAfter(now) then Some(cached.value)
+    val cached = effectiveCache.getIfPresent(key)
+    if cached != null then Some(cached)
     else
       computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
-        effectiveCache.put(
-          key,
-          EffectiveCacheEntry(now.plusSeconds(EffectiveCacheTtl.toSeconds), computed)
-        )
+        effectiveCache.put(key, computed)
         computed
       }
 
