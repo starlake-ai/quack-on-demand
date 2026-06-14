@@ -218,3 +218,19 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Passthrough => succeed
       case other                      => fail(s"expected Passthrough, got $other")
   }
+
+  it should "not mask a same-named column on a table the policy doesn't target" in {
+    val multi = Map("other_table" -> List("c_id", "c_email"))
+    val out = rw.rewrite(
+      "SELECT c_email FROM other_table",
+      multi,
+      // Policy targets customer.c_email, not other_table.c_email
+      List(maskEmail.copy(tableName = "customer")),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Passthrough    => succeed
+      case RewriteOutcome.Rewritten(sql) =>
+        fail(s"v1 over-mask regression: policy on customer.c_email leaked to other_table.c_email: $sql")
+      case other                          => fail(s"expected Passthrough, got $other")
+  }
