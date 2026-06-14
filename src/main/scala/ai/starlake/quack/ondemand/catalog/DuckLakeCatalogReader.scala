@@ -94,7 +94,14 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
       )
     }
 
-  private def listColumns(schema: String, table: String): List[CatalogColumnEntry] =
+  /** Returns just the column names for (schema, table), in declaration order. Used by the
+    * column-level-security rewriter to expand `SELECT *`. Reuses the same metadata query as
+    * `listColumns` but skips the type / nullable fields.
+    */
+  def columnNames(schema: String, table: String): List[String] =
+    listColumns(schema, table).map(_.name)
+
+  def listColumns(schema: String, table: String): List[CatalogColumnEntry] =
     // DuckLake (as of v0.3, DuckDB 1.5.x) doesn't ship a
     // `ducklake_table_constraint` table - PRIMARY KEY / UNIQUE constraints
     // are rejected at CREATE TABLE time. Until the metadata schema gains a

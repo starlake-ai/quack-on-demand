@@ -50,8 +50,8 @@ final class PoolSupervisor(
     dbAdmin: DbAdmin = NoopDbAdmin,
     federationBlobOf: String => IO[Option[String]] = _ => IO.pure(None),
     /** Callback fired immediately after a tenant-db row is removed (either via [[deleteTenantDb]]
-      * or cascaded through [[deleteTenant]]). The default is a no-op; `Main` wires it to evict
-      * the [[ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader]] cache so the per-tenant-db
+      * or cascaded through [[deleteTenant]]). The default is a no-op; `Main` wires it to evict the
+      * [[ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader]] cache so the per-tenant-db
       * Hikari pool releases its connections + heap on delete.
       */
     onTenantDbDeleted: (String, String) => Unit = (_, _) => ()
@@ -82,34 +82,44 @@ final class PoolSupervisor(
     * collapses N handshakes' worth of work into 1. Invalidated wholesale on every RBAC mutation
     * (the graph cache that backs it is small + cheap to rebuild) and on `restore()`.
     *
-    * Cache key bakes in the JWT fingerprint so a JWT role/group claim flip is reflected
-    * immediately even within the TTL.
+    * Cache key bakes in the JWT fingerprint so a JWT role/group claim flip is reflected immediately
+    * even within the TTL.
     */
   private final case class EffectiveCacheKey(userId: String, jwtRolesHash: Int, jwtGroupsHash: Int)
-  private final case class EffectiveCacheEntry(
-      expiresAt: java.time.Instant,
-      value: ai.starlake.quack.ondemand.rbac.EffectiveSet
-  )
-  private val effectiveCache =
-    new java.util.concurrent.ConcurrentHashMap[EffectiveCacheKey, EffectiveCacheEntry]()
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
+
+  /** Caffeine-backed cache of resolved EffectiveSets. Caffeine handles the TTL
+    * (`expireAfterWrite`) and bounds memory (`maximumSize`) so distinct (userId, jwtRolesHash,
+    * jwtGroupsHash) combinations accumulated over the manager's lifetime can't leak. The previous
+    * hand-rolled `ConcurrentHashMap + expiresAt` form did neither.
+    */
+  private val effectiveCache: com.github.benmanes.caffeine.cache.Cache[
+    EffectiveCacheKey,
+    ai.starlake.quack.ondemand.rbac.EffectiveSet
+  ] =
+    com.github.benmanes.caffeine.cache.Caffeine
+      .newBuilder()
+      .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
+      .maximumSize(10_000L)
+      .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
 
   /** Drop every cached `EffectiveSet`. Called from every RBAC mutator so a freshly-granted role or
     * pool permission takes effect on the next handshake, not after a TTL window.
     */
-  private def invalidateEffectiveCache(): Unit = effectiveCache.clear()
+  private def invalidateEffectiveCache(): Unit = effectiveCache.invalidateAll()
 
   // ---------- Bootstrap / replay ----------
 
-  /** Per-tenant-db naming convention, applied ONLY to `kind=ducklake` because that's the kind
-    * where each tenant-db IS its own Postgres database (named after `td.name`) with parquet stored
+  /** Per-tenant-db naming convention, applied ONLY to `kind=ducklake` because that's the kind where
+    * each tenant-db IS its own Postgres database (named after `td.name`) with parquet stored
     * alongside it at `parent(defaultDataPath)/td.name`. Operators can override either by setting
     * `dbName`/`dataPath` in `td.metastore` or `td.dataPath` explicitly. Mirrors what the deleted
     * programmatic bootstrap did at create time and what the LOAD_TPC loader scripts write to.
     *
     * For `duckdb-file` and `memory` kinds the convention does not apply: those persistence layouts
-    * are operator-defined and we fall through to the plain `defaultMetastore ++ td.metastore` merge.
+    * are operator-defined and we fall through to the plain `defaultMetastore ++ td.metastore`
+    * merge.
     */
   private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
     val merged = defaultMetastore ++ td.metastore
@@ -117,7 +127,7 @@ final class PoolSupervisor(
     else
       val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
       val rootData = defaultMetastore.getOrElse("dataPath", "")
-      val tdData =
+      val tdData   =
         if td.dataPath.nonEmpty then td.dataPath
         else if td.metastore.contains("dataPath") then td.metastore("dataPath")
         else if rootData.isEmpty then ""
@@ -164,9 +174,9 @@ final class PoolSupervisor(
     * `ducklake_metadata` CREATE TABLE in Postgres. Idempotent.
     *
     * Intended to run after [[restore]] (so the tenant-dbs cache is populated) and BEFORE
-    * [[reconcile]] (so newly spawned nodes find a fully-initialized catalog). The YAML import
-    * path persists tenant-dbs directly via `ManifestImporter` without per-row bootstrap, so a
-    * fresh boot needs this dedicated init pass.
+    * [[reconcile]] (so newly spawned nodes find a fully-initialized catalog). The YAML import path
+    * persists tenant-dbs directly via `ManifestImporter` without per-row bootstrap, so a fresh boot
+    * needs this dedicated init pass.
     */
   def ensureDuckLakeInitialized(): IO[Unit] = IO.blocking {
     tenantDbs.values.toList.foreach { td =>
@@ -202,51 +212,52 @@ final class PoolSupervisor(
     else
       state.nodes
         .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
-        acc.flatMap { kept =>
-          if isReachable(n) then backend.adopt(n).as(kept :+ n)
-          else
-            logger.warn(
-              s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
-                "is dead; respawning"
-            )
-            IO.delay(tracker.remove(n.nodeId)) *>
-              backend
-                .start(
-                  NodeSpec(
-                    poolKey = key,
-                    nodeId = n.nodeId,
-                    role = n.role,
-                    metastore = state.metastore,
-                    s3 = state.s3,
-                    maxConcurrent = n.maxConcurrent,
-                    kindWire = state.kindWire,
-                    // initSql + federation blob concatenated fresh.
-                    extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
-                    // Recover the original cohort placement from the node's
-                    // 1-based suffix index. Falls back to no placement when
-                    // the pool was created without explicit cohorts or when
-                    // the id is in an unexpected shape.
-                    placement = placementForNodeId(key, n.nodeId)
+          acc.flatMap { kept =>
+            if isReachable(n) then backend.adopt(n).as(kept :+ n)
+            else
+              logger.warn(
+                s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
+                  "is dead; respawning"
+              )
+              IO.delay(tracker.remove(n.nodeId)) *>
+                backend
+                  .start(
+                    NodeSpec(
+                      poolKey = key,
+                      nodeId = n.nodeId,
+                      role = n.role,
+                      metastore = state.metastore,
+                      s3 = state.s3,
+                      maxConcurrent = n.maxConcurrent,
+                      kindWire = state.kindWire,
+                      // initSql + federation blob concatenated fresh.
+                      extraSetupSql =
+                        PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
+                      // Recover the original cohort placement from the node's
+                      // 1-based suffix index. Falls back to no placement when
+                      // the pool was created without explicit cohorts or when
+                      // the id is in an unexpected shape.
+                      placement = placementForNodeId(key, n.nodeId)
+                    )
                   )
-                )
-                .flatMap { fresh =>
-                  poolIdByKey.get(key) match
-                    case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
-                    case None      => IO.pure(kept :+ fresh)
-                }
+                  .flatMap { fresh =>
+                    poolIdByKey.get(key) match
+                      case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
+                      case None      => IO.pure(kept :+ fresh)
+                  }
+          }
         }
-      }
-      .flatMap { newNodes =>
-        if newNodes.zip(state.nodes).exists((a, b) => a ne b) then
-          val updated = state.copy(nodes = newNodes)
-          IO.delay(pools.put(key, updated)).as(updated)
-        else IO.pure(state)
-      }
+        .flatMap { newNodes =>
+          if newNodes.zip(state.nodes).exists((a, b) => a ne b) then
+            val updated = state.copy(nodes = newNodes)
+            IO.delay(pools.put(key, updated)).as(updated)
+          else IO.pure(state)
+        }
 
-  /** Spawn the full distribution for a pool whose persisted state has no nodes yet.
-    * Mirrors createPool's spawn block but operates on an existing PoolState rather than
-    * persisting a fresh Pool entity. Cohort placement is recovered from the pool's
-    * authored cohorts (via poolRows) when present; otherwise nodes spawn placement-less.
+  /** Spawn the full distribution for a pool whose persisted state has no nodes yet. Mirrors
+    * createPool's spawn block but operates on an existing PoolState rather than persisting a fresh
+    * Pool entity. Cohort placement is recovered from the pool's authored cohorts (via poolRows)
+    * when present; otherwise nodes spawn placement-less.
     */
   private def spawnFromDistribution(key: PoolKey, state: PoolState): IO[PoolState] =
     val poolEntity = poolIdByKey.get(key).flatMap(poolRows.get)
@@ -256,7 +267,7 @@ final class PoolSupervisor(
       case None =>
         state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
     val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
-    val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+    val specs     = plan.zipWithIndex.map { case ((role, placement), i) =>
       NodeSpec(
         key,
         PoolSupervisor.nodeId(key, i + 1),
@@ -271,9 +282,7 @@ final class PoolSupervisor(
     }
     specs
       .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-        acc.flatMap(rs =>
-          IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
-        )
+        acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
       }
       .flatMap { running =>
         val updated = state.copy(nodes = running)
@@ -358,8 +367,9 @@ final class PoolSupervisor(
     val n = name.toLowerCase
     tenants.values.find(_.displayName == n)
 
-  /** Lookup by surrogate id (`qodstate_tenant.id`, e.g. `t-02d0e86e`). The
-    * internal `tenants` map is already keyed by id, so this is a direct hit. */
+  /** Lookup by surrogate id (`qodstate_tenant.id`, e.g. `t-02d0e86e`). The internal `tenants` map
+    * is already keyed by id, so this is a direct hit.
+    */
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
 
   def listPoolsOfTenant(name: String): List[String] =
@@ -376,6 +386,21 @@ final class PoolSupervisor(
       tenantDbs.values.find(td => td.tenantId == t.id && td.name == nm)
     }
 
+  /** Find the (tenant, tenantDb) pair whose DuckDB-side catalog name (the composed Postgres
+    * `dbName` = `${tenant}_${tenantDb}`, lowercased) matches `catalog`. Used by the CLS rewriter's
+    * column-catalog fetcher to route a DuckDB catalog reference back to its tenant-db.
+    *
+    * The composed name is what `Names.normalizeTenantDbName` produces and is persisted into
+    * `TenantDb.name` (always lowercase via `Names.normalizeOrError`); matching against `td.name`
+    * with `equalsIgnoreCase` keeps this in sync with the SAME formula `spawn-quack-node.sh` /
+    * `effectiveMetastoreFor` use to spawn the node, with no risk of drift.
+    *
+    * Returns `None` if no matching tenant-db is registered.
+    */
+  def findTenantDbByCatalogName(catalog: String): Option[TenantDb] =
+    if catalog == null || catalog.isEmpty then None
+    else tenantDbs.values.find(_.name.equalsIgnoreCase(catalog))
+
   /** Resolve `(tenant, poolName) -> PoolKey` so the FlightSQL edge can route a connection that
     * addresses only `tenant` + `pool`. Pool names are unique within a tenant (enforced both by
     * `createPool` and the `qodstate_pool_tenant_name_unique` constraint), so at most one match
@@ -386,8 +411,8 @@ final class PoolSupervisor(
     pools.keys.find(k => k.tenant == t && k.pool == poolName)
 
   /** Effective metastore for a tenant-db: global defaults overlaid with the tenant-db's own params,
-    * then the per-tenant-db naming convention (dbName=td.name, dataPath alongside the root).
-    * Used by the catalog browser.
+    * then the per-tenant-db naming convention (dbName=td.name, dataPath alongside the root). Used
+    * by the catalog browser.
     */
   def effectiveMetastoreFor(tenantName: String, tenantDbName: String): Map[String, String] =
     findTenantDb(tenantName, tenantDbName)
@@ -694,81 +719,81 @@ final class PoolSupervisor(
         val merged   = effectiveMetastoreFor(td)
         val kindWire = td.kind.wireValue
         federationBlobOf(td.id).flatMap { blobOpt =>
-        // initSql runs first so PRAGMAs/INSTALL land before the federation
-        // blob's ATTACHes; both get shipped via NodeSpec.extraSetupSql.
-        val fedBlob   = blobOpt.getOrElse("")
-        // What the node actually gets at spawn = initSql + "\n" + federation blob.
-        // `state.extraSetupSql` keeps the federation blob ONLY so a manager
-        // restart that re-projects PoolState from persisted rows still has the
-        // operator-authored initSql available separately (and respawn can
-        // re-concatenate without double-prepending).
-        val nodeExtra = PoolSupervisor.joinInitAndBlob(initSql, fedBlob)
-        val poolEntity = Pool(
-          id = newId("p"),
-          tenantId = td.tenantId,
-          tenantDbId = td.id,
-          name = key.pool,
-          size = size,
-          distribution = dist,
-          maxConcurrentPerNode = maxConcurrentPerNode,
-          disabled = disabled,
-          cohorts = cohorts,
-          initSql = initSql
-        )
-        IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
-          poolRows.put(poolEntity.id, poolEntity)
-          poolIdByKey.put(key, poolEntity.id)
-        } *> {
-          // Walk cohorts in order; each role gets the cohort's placement.
-          // Empty `cohorts` falls back to a single placement-less cohort
-          // carrying `dist`, matching pre-cohort behavior exactly.
-          val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
-            poolEntity.effectiveCohorts.flatMap { c =>
-              c.distribution.asRoleList.map(role => (role, c.placement))
-            }
-          val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
-            NodeSpec(
-              key,
-              PoolSupervisor.nodeId(key, i + 1),
-              role,
-              merged,
-              td.objectStore,
-              maxConcurrent = maxConcurrentPerNode,
-              kindWire = kindWire,
-              extraSetupSql = nodeExtra,
-              placement = placement
-            )
-          }
-          specs
-            .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-              acc.flatMap(rs =>
-                IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
-              )
-            }
-            .flatMap { running =>
-              val state = PoolState(
+          // initSql runs first so PRAGMAs/INSTALL land before the federation
+          // blob's ATTACHes; both get shipped via NodeSpec.extraSetupSql.
+          val fedBlob = blobOpt.getOrElse("")
+          // What the node actually gets at spawn = initSql + "\n" + federation blob.
+          // `state.extraSetupSql` keeps the federation blob ONLY so a manager
+          // restart that re-projects PoolState from persisted rows still has the
+          // operator-authored initSql available separately (and respawn can
+          // re-concatenate without double-prepending).
+          val nodeExtra  = PoolSupervisor.joinInitAndBlob(initSql, fedBlob)
+          val poolEntity = Pool(
+            id = newId("p"),
+            tenantId = td.tenantId,
+            tenantDbId = td.id,
+            name = key.pool,
+            size = size,
+            distribution = dist,
+            maxConcurrentPerNode = maxConcurrentPerNode,
+            disabled = disabled,
+            cohorts = cohorts,
+            initSql = initSql
+          )
+          IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
+            poolRows.put(poolEntity.id, poolEntity)
+            poolIdByKey.put(key, poolEntity.id)
+          } *> {
+            // Walk cohorts in order; each role gets the cohort's placement.
+            // Empty `cohorts` falls back to a single placement-less cohort
+            // carrying `dist`, matching pre-cohort behavior exactly.
+            val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
+              poolEntity.effectiveCohorts.flatMap { c =>
+                c.distribution.asRoleList.map(role => (role, c.placement))
+              }
+            val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+              NodeSpec(
                 key,
-                running,
-                dist,
+                PoolSupervisor.nodeId(key, i + 1),
+                role,
                 merged,
                 td.objectStore,
-                maxConcurrentPerNode,
-                disabled = disabled,
+                maxConcurrent = maxConcurrentPerNode,
                 kindWire = kindWire,
-                // Federation blob only; respawn concatenates with initSql fresh.
-                extraSetupSql = fedBlob,
-                initSql = initSql,
-                defaultDatabase = td.defaultDatabase,
-                defaultSchema = td.defaultSchema
+                extraSetupSql = nodeExtra,
+                placement = placement
               )
-              pools.put(key, state)
-              running
-                .foldLeft(IO.unit)((acc, n) =>
-                  acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
-                )
-                .as(running)
             }
-        }
+            specs
+              .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
+                acc.flatMap(rs =>
+                  IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
+                )
+              }
+              .flatMap { running =>
+                val state = PoolState(
+                  key,
+                  running,
+                  dist,
+                  merged,
+                  td.objectStore,
+                  maxConcurrentPerNode,
+                  disabled = disabled,
+                  kindWire = kindWire,
+                  // Federation blob only; respawn concatenates with initSql fresh.
+                  extraSetupSql = fedBlob,
+                  initSql = initSql,
+                  defaultDatabase = td.defaultDatabase,
+                  defaultSchema = td.defaultSchema
+                )
+                pools.put(key, state)
+                running
+                  .foldLeft(IO.unit)((acc, n) =>
+                    acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
+                  )
+                  .as(running)
+              }
+          }
         }
   }
 
@@ -810,10 +835,10 @@ final class PoolSupervisor(
       case Some(state) =>
         val poolId = poolIdByKey.getOrElse(key, "")
         if targetSize > state.size then
-          val toAdd = targetSize - state.size
-          val roles = newDist.asRoleList.drop(state.size).take(toAdd)
+          val toAdd     = targetSize - state.size
+          val roles     = newDist.asRoleList.drop(state.size).take(toAdd)
           val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
-          val specs = roles.zipWithIndex.map { case (role, i) =>
+          val specs     = roles.zipWithIndex.map { case (role, i) =>
             NodeSpec(
               key,
               PoolSupervisor.nodeId(key, state.size + i + 1),
@@ -1011,18 +1036,19 @@ final class PoolSupervisor(
 
   // ---------- RBAC: column policies ----------
 
-  /** Resolve a column-policy id to its owning tenant via the parent role.
-    * Used by `TenantScopeCheck` to refuse cross-tenant calls without a separate join. */
+  /** Resolve a column-policy id to its owning tenant via the parent role. Used by
+    * `TenantScopeCheck` to refuse cross-tenant calls without a separate join.
+    */
   def tenantForColumnPolicy(id: String): Option[String] =
     store.getColumnPolicy(id).flatMap(p => rbacResolver.role(p.roleId).map(_.tenantId))
 
   def createColumnPolicy(
-      roleId:       String,
-      catalogName:  String,
-      schemaName:   String,
-      tableName:    String,
-      columnName:   String,
-      action:       String,
+      roleId: String,
+      catalogName: String,
+      schemaName: String,
+      tableName: String,
+      columnName: String,
+      action: String,
       transformSql: Option[String]
   ): IO[Either[String, state.RoleColumnPolicy]] = IO.blocking {
     val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
@@ -1046,16 +1072,16 @@ final class PoolSupervisor(
           }
         else Right(None)
       validatedTransform match
-        case Left(err) => Left(err)
+        case Left(err)             => Left(err)
         case Right(canonTransform) =>
           val p = state.RoleColumnPolicy(
-            id           = newId("cp"),
-            roleId       = roleId,
-            catalogName  = catalogName,
-            schemaName   = schemaName,
-            tableName    = tableName,
-            columnName   = columnName,
-            action       = action,
+            id = newId("cp"),
+            roleId = roleId,
+            catalogName = catalogName,
+            schemaName = schemaName,
+            tableName = tableName,
+            columnName = columnName,
+            action = action,
             transformSql = canonTransform
           )
           val persisted = store.insertColumnPolicy(p)
@@ -1064,8 +1090,8 @@ final class PoolSupervisor(
   }
 
   def updateColumnPolicy(
-      id:           String,
-      action:       String,
+      id: String,
+      action: String,
       transformSql: Option[String]
   ): IO[Either[String, Unit]] = IO.blocking {
     val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
@@ -1081,9 +1107,10 @@ final class PoolSupervisor(
           normalisedTransform.toRight("transformSql is required when action='mask'").flatMap { raw =>
             // updateColumnPolicy does not know the columnName; fetch it from the store to validate.
             store.getColumnPolicy(id) match
-              case None => Left(s"column policy $id not found")
+              case None           => Left(s"column policy $id not found")
               case Some(existing) =>
-                ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, existing.columnName) match
+                ai.starlake.quack.edge.cls.TransformSqlValidator
+                  .validate(raw, existing.columnName) match
                   case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
                     Left(s"invalid transformSql: $reason")
                   case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
@@ -1091,7 +1118,7 @@ final class PoolSupervisor(
           }
         else Right(None)
       validatedTransform match
-        case Left(err) => Left(err)
+        case Left(err)             => Left(err)
         case Right(canonTransform) =>
           val ok = store.updateColumnPolicy(id, action, canonTransform)
           if ok then { invalidateEffectiveCache(); Right(()) }
@@ -1269,11 +1296,10 @@ final class PoolSupervisor(
     *   1. resolve `(tenant, pool) -> PoolKey` + tenant/pool kill switches
     *   2. lookup the user via [[ControlPlaneStore.findUserForLogin]] -- this query also enforces
     *      the tenant scope: it returns rows where `tenant IS NULL` (superuser) OR
-    *      `tenant = <tenantId>`. Any user returned here is therefore already scoped correctly,
-    *      so we do NOT re-check `user.tenant == tenantRow.id` at the application layer.
-    *      If [[ControlPlaneStore.findUserForLogin]] is ever refactored to drop the tenant
-    *      filter (e.g. moving to a global-username model), reinstate the scope check between
-    *      gates 2 and 3.
+    *      `tenant = <tenantId>`. Any user returned here is therefore already scoped correctly, so
+    *      we do NOT re-check `user.tenant == tenantRow.id` at the application layer. If
+    *      [[ControlPlaneStore.findUserForLogin]] is ever refactored to drop the tenant filter (e.g.
+    *      moving to a global-username model), reinstate the scope check between gates 2 and 3.
     *   3. compute the effective set (groups, roles, permissions, pool grants)
     *   4. pool-access check (skipped for superusers): the effective pool grants must cover the
     *      addressed pool (pool_id NULL = "every pool in this tenant")
@@ -1359,17 +1385,14 @@ final class PoolSupervisor(
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
-    val key = EffectiveCacheKey(userId, jwtRoles.hashCode, jwtGroups.hashCode)
-    val now = java.time.Instant.now()
-    val cached = effectiveCache.get(key)
-    if cached != null && cached.expiresAt.isAfter(now) then Some(cached.value)
-    else computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
-      effectiveCache.put(
-        key,
-        EffectiveCacheEntry(now.plusSeconds(EffectiveCacheTtl.toSeconds), computed)
-      )
-      computed
-    }
+    val key    = EffectiveCacheKey(userId, jwtRoles.hashCode, jwtGroups.hashCode)
+    val cached = effectiveCache.getIfPresent(key)
+    if cached != null then Some(cached)
+    else
+      computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
+        effectiveCache.put(key, computed)
+        computed
+      }
 
   private def computeEffectiveSetForUser(
       userId: String,
@@ -1385,15 +1408,15 @@ final class PoolSupervisor(
       val jwtRoleIds  = u.tenant.toSet.flatMap(t => rbacResolver.rolesByNamesInTenant(t, jwtRoles))
       val jwtGroupIds =
         u.tenant.toSet.flatMap(t => rbacResolver.groupsByNamesInTenant(t, jwtGroups))
-      val directRoleIds = directRoleIdsLocal ++ jwtRoleIds
-      val groupIds      = groupIdsLocal ++ jwtGroupIds
-      val viaGroups     = groupIds.flatMap(rbacResolver.rolesForGroup)
-      val allRoleIds    = directRoleIds ++ viaGroups
-      val effRoles      = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
-      val effGroups     = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
-      val effPerms      = rbacResolver.permissionsForRoles(allRoleIds)
-      val directPools   = store.listPoolPermissionsForUser(u.id)
-      val viaGroupPools = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
+      val directRoleIds  = directRoleIdsLocal ++ jwtRoleIds
+      val groupIds       = groupIdsLocal ++ jwtGroupIds
+      val viaGroups      = groupIds.flatMap(rbacResolver.rolesForGroup)
+      val allRoleIds     = directRoleIds ++ viaGroups
+      val effRoles       = allRoleIds.flatMap(rbacResolver.role).toList.sortBy(_.name)
+      val effGroups      = groupIds.flatMap(rbacResolver.group).toList.sortBy(_.name)
+      val effPerms       = rbacResolver.permissionsForRoles(allRoleIds)
+      val directPools    = store.listPoolPermissionsForUser(u.id)
+      val viaGroupPools  = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
       val columnPolicies = allRoleIds.toList.flatMap(store.listColumnPolicies)
       ai.starlake.quack.ondemand.rbac.EffectiveSet(
         u,
@@ -1460,18 +1483,18 @@ object PoolSupervisor:
     * Order: `initSql` FIRST (so PRAGMAs / SET / INSTALL land before any federation ATTACH that
     * depends on them), federation blob SECOND. A trailing newline is forced between the two
     * non-empty fragments because spawn-quack-node.sh echoes the value verbatim into a `duckdb`
-    * pipe, and DuckDB needs the statement terminator to parse them as separate statements.
-    * Empty fragments are dropped so the resulting string contains no leading / trailing blank
-    * lines (cleaner UI display + simpler tests).
+    * pipe, and DuckDB needs the statement terminator to parse them as separate statements. Empty
+    * fragments are dropped so the resulting string contains no leading / trailing blank lines
+    * (cleaner UI display + simpler tests).
     */
   def joinInitAndBlob(initSql: String, federationBlob: String): String =
     val a = Option(initSql).getOrElse("").trim
     val b = Option(federationBlob).getOrElse("").trim
     (a, b) match
-      case ("", "")    => ""
-      case (i, "")     => i
-      case ("", f)     => f
-      case (i, f)      => s"$i\n$f"
+      case ("", "") => ""
+      case (i, "")  => i
+      case ("", f)  => f
+      case (i, f)   => s"$i\n$f"
 
   /** Compose a node id that is safe as a Kubernetes pod + service name.
     *
@@ -1486,15 +1509,13 @@ object PoolSupervisor:
 
   /** Replace the last segment of a dataPath with `newSegment`, used to derive a per-tenant-db
     * dataPath alongside the configured root. URI-style paths (`<scheme>://...`) are handled with
-    * string operations so we don't let `java.nio.file.Paths.get` collapse the scheme's `//` to
-    * `/` (which DuckLake's `__ducklake_metadata.data_path` check then rejects on re-ATTACH).
-    * Filesystem paths fall through to NIO so portability behavior is unchanged.
+    * string operations so we don't let `java.nio.file.Paths.get` collapse the scheme's `//` to `/`
+    * (which DuckLake's `__ducklake_metadata.data_path` check then rejects on re-ATTACH). Filesystem
+    * paths fall through to NIO so portability behavior is unchanged.
     *
-    * Examples (root + newSegment -> result):
-    *   ./ducklake/tpch          + acme_tpch -> ./ducklake/acme_tpch
-    *   /var/data/tpch           + acme_tpch -> /var/data/acme_tpch
-    *   s3://qod-ducklake/tpch   + acme_tpch -> s3://qod-ducklake/acme_tpch
-    *   gs://bucket/tpch         + acme_tpch -> gs://bucket/acme_tpch
+    * Examples (root + newSegment -> result): ./ducklake/tpch + acme_tpch -> ./ducklake/acme_tpch
+    * /var/data/tpch + acme_tpch -> /var/data/acme_tpch s3://qod-ducklake/tpch + acme_tpch ->
+    * s3://qod-ducklake/acme_tpch gs://bucket/tpch + acme_tpch -> gs://bucket/acme_tpch
     */
   private[ondemand] def replaceLastSegment(path: String, newSegment: String): String =
     // Strict URI scheme: a leading letter then letters/digits/+/-/. then `://`.

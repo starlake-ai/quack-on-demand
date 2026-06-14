@@ -16,11 +16,26 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   private def eff(user: RbacUser, policies: List[RoleColumnPolicy] = Nil): EffectiveSet =
     EffectiveSet(user, Nil, Nil, Nil, Nil, policies)
 
-  private val emptyCat: ColumnCatalog = new ColumnCatalog.MapCatalog(Map.empty)
-  private def rw: ColumnPolicyRewriter = new ColumnPolicyRewriter(emptyCat)
+  // v2 needs schema info for the resolver to walk column references. The default catalog
+  // covers `customer` with the columns referenced by the masking-exercising tests below.
+  // The `Map.empty` case is still tested explicitly via `passthrough SELECT * when the catalog
+  // has no entry for the table` which constructs its own rewriter.
+  private val defaultCat: ColumnCatalog =
+    new ColumnCatalog.MapCatalog(
+      Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_phone", "c_ssn"))
+    )
+  private def rw: ColumnPolicyRewriter = new ColumnPolicyRewriter(defaultCat, enabled = true)
   private val ctx = SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
 
-  "rewrite" should "passthrough for superusers" in {
+  "rewrite" should "passthrough when the feature is disabled" in {
+    val policies = List(RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
+                                          "c_email", "mask", Some("'***'")))
+    val disabled = new ColumnPolicyRewriter(defaultCat, enabled = false)
+    disabled.rewrite("SELECT c_email FROM tpch1.customer", StatementKind.Select,
+                     eff(tenantUser, policies), ctx).unsafeRunSync() shouldBe Passthrough
+  }
+
+  it should "passthrough for superusers" in {
     rw.rewrite("SELECT c_email FROM customer", StatementKind.Select, eff(superuser), ctx)
       .unsafeRunSync() shouldBe Passthrough
   }
@@ -39,11 +54,11 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     rw.rewrite("BEGIN",                        StatementKind.Begin, effSet, ctx).unsafeRunSync() shouldBe Passthrough
   }
 
-  it should "passthrough when the SQL fails to parse" in {
+  it should "emit PassthroughParseFailed (distinct from Passthrough) when the SQL fails to parse" in {
     val policies = List(RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
                                           "c_email", "mask", Some("'***'")))
     rw.rewrite("SELEC' WRONG", StatementKind.Select, eff(tenantUser, policies), ctx)
-      .unsafeRunSync() shouldBe Passthrough
+      .unsafeRunSync() shouldBe PassthroughParseFailed
   }
 
   private val maskEmail = RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
@@ -127,7 +142,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     new ColumnCatalog.MapCatalog(Map(("acme_tpch", "tpch1", "customer") -> cols))
 
   it should "expand SELECT * via the column catalog and mask covered columns" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email", "c_phone")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email", "c_phone")), enabled = true)
     val out = r.rewrite("SELECT * FROM tpch1.customer",
                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
@@ -139,7 +154,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "expand a qualified t.* against the catalog" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")), enabled = true)
     val out = r.rewrite("SELECT c.* FROM tpch1.customer c",
                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
@@ -150,9 +165,13 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "passthrough SELECT * when the catalog has no entry for the table" in {
-    val r = new ColumnPolicyRewriter(new ColumnCatalog.MapCatalog(Map.empty))
+    // With UnresolvedMode.Pass (the rewriter's default) plus an empty catalog, the inner
+    // jsqltranspiler can't resolve `tpch1.customer` and falls into the LENIENT/parse-failed arm.
+    // The rewriter surfaces this as PassthroughParseFailed (distinct from Passthrough since
+    // Task 9 split the metric tag); both are routed the same way - original SQL forwarded.
+    val r = new ColumnPolicyRewriter(new ColumnCatalog.MapCatalog(Map.empty), enabled = true)
     r.rewrite("SELECT * FROM tpch1.customer",
-              StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe Passthrough
+              StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe PassthroughParseFailed
   }
 
   // -------- deny semantics --------
@@ -161,7 +180,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
                                           "c_ssn", "deny", None)
 
   it should "deny SELECT c_ssn FROM customer when the policy is deny" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")), enabled = true)
     val out = r.rewrite("SELECT c_ssn FROM tpch1.customer",
                         StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
     out match
@@ -170,7 +189,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "deny SELECT * when expansion uncovers a denied column" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")), enabled = true)
     val out = r.rewrite("SELECT * FROM tpch1.customer",
                         StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
     out match
@@ -179,7 +198,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "rewrite a covered column inside a WHERE predicate" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")), enabled = true)
     val out = r.rewrite("SELECT c_id FROM tpch1.customer WHERE c_email LIKE '%@acme.com'",
                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
@@ -188,7 +207,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "rewrite covered columns inside composite expressions in projection" in {
-    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")))
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_email")), enabled = true)
     val out = r.rewrite("SELECT length(c_email) FROM tpch1.customer",
                         StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
@@ -196,4 +215,28 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         sql.toLowerCase should include ("length")
         sql             should include ("'***'")
       case other => fail(s"expected Rewritten, got $other")
+  }
+
+  // -------- outcome refinement: unresolved-table deny vs regular deny --------
+
+  it should "emit DeniedUnresolvedTable when the resolver can't find the table" in {
+    // Empty catalog + Deny mode forces a TableNotFoundException / TableNotDeclaredException from
+    // jsqltranspiler, whose message contains the "not found" / "not declared" heuristic marker.
+    val r = new ColumnPolicyRewriter(
+      catalog        = new ColumnCatalog.MapCatalog(Map.empty),
+      unresolvedMode = UnresolvedMode.Deny,
+      enabled        = true
+    )
+    val out = r.rewrite("SELECT c_email FROM tpch1.unknown_table",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out shouldBe DeniedUnresolvedTable
+  }
+
+  it should "still emit Denied (not DeniedUnresolvedTable) for a policy-based deny" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")), enabled = true)
+    val out = r.rewrite("SELECT c_ssn FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
+    out match
+      case Denied(reason) => reason.toLowerCase should include ("c_ssn")
+      case other          => fail(s"expected Denied, got $other")
   }

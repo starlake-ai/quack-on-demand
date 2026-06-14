@@ -9,8 +9,8 @@ import net.sf.jsqlparser.statement.select.Select
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
-/** Strict-containment validator for free-form transform expressions on column policies.
-  * Runs once at policy create/update time. Pure (no I/O, no DuckDB connection).
+/** Strict-containment validator for free-form transform expressions on column policies. Runs once
+  * at policy create/update time. Pure (no I/O, no DuckDB connection).
   *
   * A `transform_sql` value must be ONE scalar DuckDB expression that:
   *   1. Parses via JSqlParser's `parseExpression` entry point.
@@ -29,11 +29,22 @@ object TransformSqlValidator:
   private val MaxLen = 1024
 
   private val Denylist: Set[String] = Set(
-    "read_csv", "read_csv_auto", "read_parquet", "read_json", "read_json_auto",
-    "query", "sql",
-    "attach", "detach", "install", "load", "system",
-    "current_setting", "set_setting",
-    "pg_read_server_files", "pg_read_binary_file"
+    "read_csv",
+    "read_csv_auto",
+    "read_parquet",
+    "read_json",
+    "read_json_auto",
+    "query",
+    "sql",
+    "attach",
+    "detach",
+    "install",
+    "load",
+    "system",
+    "current_setting",
+    "set_setting",
+    "pg_read_server_files",
+    "pg_read_binary_file"
   )
 
   def validate(transformSql: String, protectedColumn: String): Result =
@@ -87,8 +98,7 @@ object TransformSqlValidator:
       if visit.isDefinedAt(node) then visit(node)
       node match
         case fn: SqlFunction =>
-          if fn.getParameters != null then
-            fn.getParameters.asScala.foreach(stack.push)
+          if fn.getParameters != null then fn.getParameters.asScala.foreach(stack.push)
         case b: net.sf.jsqlparser.expression.BinaryExpression =>
           stack.push(b.getLeftExpression); stack.push(b.getRightExpression)
         case u: net.sf.jsqlparser.expression.SignedExpression =>
@@ -97,8 +107,8 @@ object TransformSqlValidator:
           stack.push(p.getExpression)
         case c: net.sf.jsqlparser.expression.CaseExpression =>
           if c.getSwitchExpression != null then stack.push(c.getSwitchExpression)
-          if c.getElseExpression   != null then stack.push(c.getElseExpression)
-          if c.getWhenClauses      != null then
+          if c.getElseExpression != null then stack.push(c.getElseExpression)
+          if c.getWhenClauses != null then
             c.getWhenClauses.asScala.foreach { w =>
               stack.push(w.getWhenExpression)
               stack.push(w.getThenExpression)
