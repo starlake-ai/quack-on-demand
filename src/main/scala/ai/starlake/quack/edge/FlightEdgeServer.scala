@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, AuthScope}
+import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
 import ai.starlake.quack.model.{Names, Tenant}
 import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
@@ -206,11 +206,10 @@ final class FlightEdgeServer(
         // doesn't resolve to a known tenant we fall through with the raw
         // value -- the next stage will fail with the usual "pool not found"
         // error rather than masking the cause.
-        val resolvedTenant: Option[Tenant] = tenantHdr.flatMap(resolveTenant)
+        val resolvedTenant: Option[Tenant]   = tenantHdr.flatMap(resolveTenant)
         val tenantNormalized: Option[String] =
           tenantHdr.map { raw =>
-            if Names.looksLikeTenantId(raw) then
-              resolvedTenant.map(_.displayName).getOrElse(raw)
+            if Names.looksLikeTenantId(raw) then resolvedTenant.map(_.displayName).getOrElse(raw)
             else raw
           }
         val hdrs = poolHdr.map("pool" -> _).toMap ++

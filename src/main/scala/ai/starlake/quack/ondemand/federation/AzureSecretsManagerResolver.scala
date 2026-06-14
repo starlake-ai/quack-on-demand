@@ -3,8 +3,8 @@ package ai.starlake.quack.ondemand.federation
 import ai.starlake.quack.model.FederatedSecret
 import cats.effect.IO
 
-/** Stub. Wire the Azure Key Vault SDK call when ready. externalRef format:
-  * `azure-kv:<secretName>` (vault URL from config).
+/** Stub. Wire the Azure Key Vault SDK call when ready. externalRef format: `azure-kv:<secretName>`
+  * (vault URL from config).
   *
   * Co-wired in [[DispatchingSecretResolver]] under `dispatch` mode; only sources whose externalRef
   * actually begins with `azure-kv:` hit this resolver at runtime. See sibling

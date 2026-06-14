@@ -59,11 +59,11 @@ final case class CreatePoolRequest(
     // the semantics of `setPoolDisabled` applied after the fact.
     disabled: Boolean = false,
     /** Free-form per-pool SQL prepended to the resolved federation blob and shipped to
-      * spawn-quack-node.sh via the node's `$extraSetupSql` env var. PRAGMAs / SET / INSTALL /
-      * LOAD live here ("SET memory_limit='8GB'", "INSTALL httpfs", etc.); ATTACH aliases live
-      * on federation sources. Empty by default. Editing on a running pool takes effect on the
-      * NEXT node spawn (scale-up, crash-recovery, manual restart); running nodes keep their
-      * old setup. */
+      * spawn-quack-node.sh via the node's `$extraSetupSql` env var. PRAGMAs / SET / INSTALL / LOAD
+      * live here ("SET memory_limit='8GB'", "INSTALL httpfs", etc.); ATTACH aliases live on
+      * federation sources. Empty by default. Editing on a running pool takes effect on the NEXT
+      * node spawn (scale-up, crash-recovery, manual restart); running nodes keep their old setup.
+      */
     initSql: Option[String] = None
 )
 
@@ -287,11 +287,12 @@ final case class LoginRequest(
     password: String,
     tenant: Option[String] = None
 )
+
 /** Login response. Carries the session token + the authority bits the UI needs to decide what to
   * render. `role` is deliberately NOT here: every minted session is admin by construction (the
   * login handler 403s anything else), so the field was a tautology of the gate. UIs that want to
-  * show the user's authoritative role read [[WhoamiResponse.role]] (sourced from the auth
-  * backend's profile) instead.
+  * show the user's authoritative role read [[WhoamiResponse.role]] (sourced from the auth backend's
+  * profile) instead.
   */
 final case class LoginResponse(
     token: String,
@@ -319,10 +320,11 @@ final case class StatementHistoryEntry(
     durationMs: Long,
     status: String, // ok | denied | transient | permanent | no-node | no-pool | pin-lost
     error: Option[String],
-    /** Time the FlightSQL Prepare-time LIMIT-0 probe spent on the node, when this Execute
-      * belongs to a prepared-statement round. The UI renders it as subtext under the Execute
-      * duration ("57 ms / prep 28 ms"). Absent for one-shot statements and for SkipExecute
-      * Prepare paths (DML / DDL / transaction control). */
+    /** Time the FlightSQL Prepare-time LIMIT-0 probe spent on the node, when this Execute belongs
+      * to a prepared-statement round. The UI renders it as subtext under the Execute duration ("57
+      * ms / prep 28 ms"). Absent for one-shot statements and for SkipExecute Prepare paths (DML /
+      * DDL / transaction control).
+      */
     prepareDurationMs: Option[Long] = None
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
@@ -426,27 +428,27 @@ final case class GroupRoleMembershipRequest(groupId: String, roleId: String)
 // ----- RBAC: column policies ---------------------------------------------
 
 final case class ColumnPolicyDto(
-    id:           String,
-    roleId:       String,
-    catalogName:  String,
-    schemaName:   String,
-    tableName:    String,
-    columnName:   String,
-    action:       String,
+    id: String,
+    roleId: String,
+    catalogName: String,
+    schemaName: String,
+    tableName: String,
+    columnName: String,
+    action: String,
     transformSql: Option[String]
 )
 final case class CreateColumnPolicyRequest(
-    roleId:       String,
-    catalogName:  String,
-    schemaName:   String,
-    tableName:    String,
-    columnName:   String,
-    action:       String,
+    roleId: String,
+    catalogName: String,
+    schemaName: String,
+    tableName: String,
+    columnName: String,
+    action: String,
     transformSql: Option[String] = None
 )
 final case class UpdateColumnPolicyRequest(
-    id:           String,
-    action:       String,
+    id: String,
+    action: String,
     transformSql: Option[String] = None
 )
 final case class DeleteColumnPolicyRequest(id: String)
@@ -922,7 +924,15 @@ object Dtos:
         columnName   <- c.get[String]("columnName")
         action       <- c.get[String]("action")
         transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
-      yield CreateColumnPolicyRequest(roleId, catalogName, schemaName, tableName, columnName, action, transformSql)
+      yield CreateColumnPolicyRequest(
+        roleId,
+        catalogName,
+        schemaName,
+        tableName,
+        columnName,
+        action,
+        transformSql
+      )
     },
     Encoder.instance { r =>
       Json.fromJsonObject(

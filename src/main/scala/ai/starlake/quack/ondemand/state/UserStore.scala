@@ -28,8 +28,8 @@ import java.sql.{Connection, Types}
   * }}}
   *
   * A user is identified by `(tenant, username)`. `(NULL, name)` is a superuser; tenant-scoped
-  * principals carry a non-empty tenant. Pool access is granted through [[PoolPermission]] rows,
-  * not on the user row itself.
+  * principals carry a non-empty tenant. Pool access is granted through [[PoolPermission]] rows, not
+  * on the user row itself.
   */
 final class UserStore(
     jdbcUrl: String,
@@ -107,9 +107,9 @@ final class UserStore(
       finally ps.close()
     }
 
-  /** All management-plane grants for an OIDC-verified identity. Matches `username = identity` first;
-    * if that yields nothing AND `email` is given, retries with `username = email` so operators can
-    * provision either form. tenant=NULL rows are superuser grants.
+  /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
+    * first; if that yields nothing AND `email` is given, retries with `username = email` so
+    * operators can provision either form. tenant=NULL rows are superuser grants.
     *
     * Returns one `UserGrant` per row. Order is unspecified.
     */

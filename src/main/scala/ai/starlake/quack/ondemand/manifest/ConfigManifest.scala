@@ -63,9 +63,10 @@ final case class ManifestPool(
     // supervisor ignores cohorts when the runtime backend can't
     // honor placement (e.g. local mode).
     cohorts: List[ManifestPoolCohort] = Nil,
-    /** Operator-authored per-pool init SQL prepended to the resolved federation blob and
-      * shipped to spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL / LOAD
-      * live here; ATTACH aliases live on federated sources. Empty by default. */
+    /** Operator-authored per-pool init SQL prepended to the resolved federation blob and shipped to
+      * spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL / LOAD live here; ATTACH
+      * aliases live on federated sources. Empty by default.
+      */
     initSql: String = ""
 )
 
@@ -86,11 +87,11 @@ final case class ManifestTablePermission(
 )
 
 final case class ManifestRoleColumnPolicy(
-    catalog:      String = "*",
-    schema:       String,
-    table:        String,
-    column:       String,
-    action:       String,                  // "deny" | "mask"
+    catalog: String = "*",
+    schema: String,
+    table: String,
+    column: String,
+    action: String, // "deny" | "mask"
     transformSql: Option[String] = None
 )
 
@@ -257,7 +258,15 @@ object ConfigManifest:
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
         cohorts              <- c.getOrElse[List[ManifestPoolCohort]]("cohorts")(Nil)
         initSql              <- c.getOrElse[String]("initSql")("")
-      yield ManifestPool(name, tenantDb, roleDistribution, maxConcurrentPerNode, disabled, cohorts, initSql)
+      yield ManifestPool(
+        name,
+        tenantDb,
+        roleDistribution,
+        maxConcurrentPerNode,
+        disabled,
+        cohorts,
+        initSql
+      )
     },
     deriveEncoder[ManifestPool]
   )

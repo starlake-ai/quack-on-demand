@@ -46,7 +46,7 @@ final class TenantDbHandlers(
   ): Out[TenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         if req.tenant.isEmpty || req.name.isEmpty then
           IO.pure(
             Left(
@@ -92,7 +92,7 @@ final class TenantDbHandlers(
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         sup.deleteTenantDb(req.tenant, req.name).map {
           case Right(_)                                 => Right(())
           case Left(msg) if msg.contains("active pool") =>

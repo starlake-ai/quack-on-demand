@@ -27,14 +27,14 @@ object TenantSelector:
     if r == 0 then s else s + "=" * (4 - r)
 
   /** Resolve `(tenant, tenantDb, pool, user)` from the incoming credentials. The edge applies NO
-    * defaults: every client must address its target via the `tenant` and `pool` headers. The
-    * owning `tenantDb` is resolved server-side via `lookupPool`, which also enforces the
-    * `tenant.disabled` / `pool.disabled` kill switches: a Left propagates back as an
-    * UNAUTHENTICATED error at the FlightSQL edge.
+    * defaults: every client must address its target via the `tenant` and `pool` headers. The owning
+    * `tenantDb` is resolved server-side via `lookupPool`, which also enforces the `tenant.disabled`
+    * / `pool.disabled` kill switches: a Left propagates back as an UNAUTHENTICATED error at the
+    * FlightSQL edge.
     *
-    *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are
-    *     never trusted for routing). User comes from the `sub` claim, falling back to the bare
-    *     Basic username if both are present.
+    *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are never
+    *     trusted for routing). User comes from the `sub` claim, falling back to the bare Basic
+    *     username if both are present.
     *   - Basic path: bare username; `tenant` + `pool` headers required.
     *
     * Header names are plain (`tenant`, `pool`) so that Flight JDBC URL connection parameters route
