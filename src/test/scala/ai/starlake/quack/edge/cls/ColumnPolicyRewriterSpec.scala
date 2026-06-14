@@ -46,11 +46,11 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     rw.rewrite("BEGIN",                        StatementKind.Begin, effSet, ctx).unsafeRunSync() shouldBe Passthrough
   }
 
-  it should "passthrough when the SQL fails to parse" in {
+  it should "emit PassthroughParseFailed (distinct from Passthrough) when the SQL fails to parse" in {
     val policies = List(RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
                                           "c_email", "mask", Some("'***'")))
     rw.rewrite("SELEC' WRONG", StatementKind.Select, eff(tenantUser, policies), ctx)
-      .unsafeRunSync() shouldBe Passthrough
+      .unsafeRunSync() shouldBe PassthroughParseFailed
   }
 
   private val maskEmail = RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer",
@@ -157,9 +157,13 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "passthrough SELECT * when the catalog has no entry for the table" in {
+    // With UnresolvedMode.Passthrough (the rewriter's default) plus an empty catalog, the inner
+    // jsqltranspiler can't resolve `tpch1.customer` and falls into the LENIENT/parse-failed arm.
+    // The rewriter surfaces this as PassthroughParseFailed (distinct from Passthrough since
+    // Task 9 split the metric tag); both are routed the same way - original SQL forwarded.
     val r = new ColumnPolicyRewriter(new ColumnCatalog.MapCatalog(Map.empty))
     r.rewrite("SELECT * FROM tpch1.customer",
-              StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe Passthrough
+              StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync() shouldBe PassthroughParseFailed
   }
 
   // -------- deny semantics --------
@@ -203,4 +207,27 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         sql.toLowerCase should include ("length")
         sql             should include ("'***'")
       case other => fail(s"expected Rewritten, got $other")
+  }
+
+  // -------- outcome refinement: unresolved-table deny vs regular deny --------
+
+  it should "emit DeniedUnresolvedTable when the resolver can't find the table" in {
+    // Empty catalog + Deny mode forces a TableNotFoundException / TableNotDeclaredException from
+    // jsqltranspiler, whose message contains the "not found" / "not declared" heuristic marker.
+    val r = new ColumnPolicyRewriter(
+      catalog        = new ColumnCatalog.MapCatalog(Map.empty),
+      unresolvedMode = UnresolvedMode.Deny
+    )
+    val out = r.rewrite("SELECT c_email FROM tpch1.unknown_table",
+                        StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
+    out shouldBe DeniedUnresolvedTable
+  }
+
+  it should "still emit Denied (not DeniedUnresolvedTable) for a policy-based deny" in {
+    val r = new ColumnPolicyRewriter(catWithCustomer(List("c_id", "c_ssn")))
+    val out = r.rewrite("SELECT c_ssn FROM tpch1.customer",
+                        StatementKind.Select, eff(tenantUser, List(denySsn)), ctx).unsafeRunSync()
+    out match
+      case Denied(reason) => reason.toLowerCase should include ("c_ssn")
+      case other          => fail(s"expected Denied, got $other")
   }
