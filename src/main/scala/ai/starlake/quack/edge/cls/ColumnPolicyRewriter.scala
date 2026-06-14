@@ -45,13 +45,21 @@ object ColumnPolicyRewriter:
     r.contains("not found") || r.contains("not declared") || r.contains("unknown")
 
 /** Thin facade around a [[SchemaAwareSqlRewriter]]. Handles the IO surface (catalog lookups for the
-  * FROM-item tables) plus the early-exit conditions (superuser, non-SELECT, no policies) and
-  * delegates the actual SQL walk to the inner rewriter.
+  * FROM-item tables) plus the early-exit conditions (feature disabled, superuser, non-SELECT, no
+  * policies) and delegates the actual SQL walk to the inner rewriter.
+  *
+  * `enabled` is the kill switch. When false (the default), every call short-circuits to
+  * [[Passthrough]] without touching the catalog or the inner rewriter. Column-level security is
+  * EXPERIMENTAL: operators must opt in via `quack-on-demand.cls.enabled = true` (or
+  * `QOD_CLS_ENABLED=true`). Defaulting off avoids surprising existing deployments and lets us
+  * harden the rewriter against federated-source / LateralSubSelect / TableFunction edges in
+  * follow-up releases.
   */
 final class ColumnPolicyRewriter(
     catalog: ColumnCatalog,
     inner: SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
-    unresolvedMode: UnresolvedMode = UnresolvedMode.Pass
+    unresolvedMode: UnresolvedMode = UnresolvedMode.Pass,
+    enabled: Boolean = false
 ):
   import ColumnPolicyRewriter._
 
@@ -61,7 +69,8 @@ final class ColumnPolicyRewriter(
       eff: EffectiveSet,
       ctx: SchemaContext
   ): IO[Outcome] =
-    if eff.user.tenant.isEmpty then IO.pure(Passthrough)
+    if !enabled then IO.pure(Passthrough)
+    else if eff.user.tenant.isEmpty then IO.pure(Passthrough)
     else if kind != StatementKind.Select then IO.pure(Passthrough)
     else if eff.columnPolicies.isEmpty then IO.pure(Passthrough)
     else
