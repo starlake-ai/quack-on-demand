@@ -84,10 +84,13 @@ final class FlightSqlRouter(
     * Used by the FlightSQL prepared-statement path to keep Prepare + Execute on the same Quack
     * process so DuckDB-side caches stay warm across the two halves of one client `execute()`.
     *
-    * `recordExecution=false` suppresses the in-memory history + metrics emission for this call. The
-    * FlightSQL Prepare-time LIMIT-0 probe uses this so the UI shows ONE history row per
-    * user-visible query instead of two; the probe's duration is then attached to the matching
-    * Execute record via [[prepareDurationMs]] so operators can still see it.
+    * `recordExecution=false` suppresses the in-memory history record AND the per-node load /
+    * latency bookkeeping ([[ai.starlake.quack.edge.adapter.NodeLoadTracker]]: inFlight,
+    * totalServed, ewmaMs, p50/p95/p99). The FlightSQL Prepare-time LIMIT-0 probe uses this so the
+    * UI shows ONE history row per user-visible query instead of two, AND so the probe doesn't
+    * inflate the dashboard's Total Served / QPS / avg latency / percentiles. The probe's duration
+    * is then attached to the matching Execute record via [[prepareDurationMs]] so operators can
+    * still see it.
     *
     * `prepareDurationMs` is folded into the resulting [[StatementRecord]] so the UI can render it
     * as subtext under the Execute duration ("57 ms / prep 28 ms").
@@ -219,23 +222,33 @@ final class FlightSqlRouter(
               case None =>
                 IO.pure(Left(s"node $nodeId not in snapshot"))
               case Some(node) =>
-                adapter.send(node, wrappedSql, session = None).flatMap {
-                  case QuackResponse.Ok(reader, latency, close) =>
-                    sessions.onStatement(connectionId, kind, nodeId)
-                    maybeRecord(nodeId, latency, "ok", None)
-                    IO.pure(Right(QueryResult(reader, close, nodeId, latency)))
+                adapter
+                  .send(node, wrappedSql, session = None, recordLoad = recordExecution)
+                  .flatMap {
+                    case QuackResponse.Ok(reader, latency, close) =>
+                      sessions.onStatement(connectionId, kind, nodeId)
+                      maybeRecord(nodeId, latency, "ok", None)
+                      IO.pure(Right(QueryResult(reader, close, nodeId, latency)))
 
-                  case QuackResponse.Failed(QuackError.Transient(m), latency) =>
-                    maybeRecord(nodeId, latency, "transient", Some(m))
-                    if s.txOpen then
-                      sessions.invalidatePin(connectionId)
-                      IO.pure(Left(s"transient failure inside transaction: $m"))
-                    else retryOnce(connectionId, poolKey, kind, rewrittenSql, exclude = nodeId)
+                    case QuackResponse.Failed(QuackError.Transient(m), latency) =>
+                      maybeRecord(nodeId, latency, "transient", Some(m))
+                      if s.txOpen then
+                        sessions.invalidatePin(connectionId)
+                        IO.pure(Left(s"transient failure inside transaction: $m"))
+                      else
+                        retryOnce(
+                          connectionId,
+                          poolKey,
+                          kind,
+                          rewrittenSql,
+                          exclude = nodeId,
+                          recordLoad = recordExecution
+                        )
 
-                  case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
-                    maybeRecord(nodeId, latency, "permanent", Some(m))
-                    IO.pure(Left(s"permanent failure: $m"))
-                }
+                    case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
+                      maybeRecord(nodeId, latency, "permanent", Some(m))
+                      IO.pure(Left(s"permanent failure: $m"))
+                  }
 
   /** Prepend `USE <dbName>.<schemaName>;` so the remote DuckDB session lands in the pool's
     * catalog+schema, letting unqualified table names AND 2-part `"schema"."table"` paths resolve.
@@ -274,7 +287,8 @@ final class FlightSqlRouter(
       poolKey: PoolKey,
       kind: StatementKind,
       sql: String,
-      exclude: String
+      exclude: String,
+      recordLoad: Boolean = true
   ): IO[Either[String, QueryResult]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(s"pool not found: $poolKey"))
@@ -285,7 +299,7 @@ final class FlightSqlRouter(
             snap.nodes.find(_.nodeId == nodeId) match
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
-                adapter.send(n, wrapped, None).map {
+                adapter.send(n, wrapped, None, recordLoad = recordLoad).map {
                   case QuackResponse.Ok(reader, latency, close) =>
                     // Pin the session on the retry node so a follow-up
                     // COMMIT/ROLLBACK lands on the same Quack instance.
