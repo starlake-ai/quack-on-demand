@@ -413,7 +413,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "cp-1", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'")
     ))
     val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_email"))
+      )
     )
     val (router, capturedSql, _) = setupWithRewriter(rewriter)
     val out = router.execute(
@@ -449,7 +451,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "cp-3", "r-1", "*", "main", "customer", "c_ssn", "deny", None
     ))
     val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_ssn"))
+      )
     )
     val (router, _, _) = setupWithRewriter(rewriter)
     val out = router.execute(
