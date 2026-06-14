@@ -21,61 +21,67 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       defaultSchema: Option[String],
       unresolvedMode: UnresolvedMode = UnresolvedMode.Deny
   ): RewriteOutcome =
-    if policies.isEmpty then return Passthrough
-
-    val schemaDef: Array[Array[String]] = schema.toArray.map { case (tableKey, cols) =>
-      (tableKey +: cols).toArray
-    }
-
-    // Use the 3-arg constructor so SQL schema qualifiers (e.g. `tpch1.customer`) match the
-    // schemaless rows in `schemaDef`. The 1-arg form leaves currentSchema="" and silently
-    // mismatches every schema-qualified table ref. defaultCatalog/defaultSchema come from the
-    // caller's SchemaContext (the session-defaults pinned at handshake time).
-    val resolver = new JSQLColumResolver(
-      defaultCatalog.getOrElse(""),
-      defaultSchema.getOrElse(""),
-      schemaDef
-    )
-    resolver.setErrorMode(unresolvedMode match
-      case UnresolvedMode.Deny => JdbcMetaData.ErrorMode.STRICT
-      case UnresolvedMode.Pass => JdbcMetaData.ErrorMode.LENIENT)
-
-    val resolvedText: String =
-      try resolver.getResolvedStatementText(sql)
-      catch
-        // jsqltranspiler 1.9 does NOT ship a single `JSQLDataException` umbrella; it raises one
-        // of the table/column/schema/catalog-not-found exceptions under `ai.starlake.transpiler.*`.
-        // Treat any of these as the "unknown coordinate" case the spec calls out, and let the
-        // unresolvedMode arm decide deny vs passthrough.
-        case e: ai.starlake.transpiler.TableNotFoundException    => return Denied(e.getMessage)
-        case e: ai.starlake.transpiler.TableNotDeclaredException => return Denied(e.getMessage)
-        case e: ai.starlake.transpiler.ColumnNotFoundException   => return Denied(e.getMessage)
-        case e: ai.starlake.transpiler.SchemaNotFoundException   => return Denied(e.getMessage)
-        case e: ai.starlake.transpiler.CatalogNotFoundException  => return Denied(e.getMessage)
-        case _: net.sf.jsqlparser.JSQLParserException            => return ParseFailed
-        case _: Throwable                                        => return ParseFailed
-
-    val rsMeta                                          = resolver.getResultSetMetaData(sql)
-    val projectionOrigins: IndexedSeq[(String, String)] =
-      (1 to rsMeta.getColumnCount).toIndexedSeq.map { i =>
-        (
-          Option(rsMeta.getTableName(i)).getOrElse(""),
-          Option(rsMeta.getColumnName(i)).getOrElse("")
-        )
+    if policies.isEmpty then Passthrough
+    else
+      val schemaDef: Array[Array[String]] = schema.toArray.map { case (tableKey, cols) =>
+        (tableKey +: cols).toArray
       }
 
-    val parsed =
-      try CCJSqlParserUtil.parse(resolvedText)
-      catch case _: Throwable => return ParseFailed
+      // Use the 3-arg constructor so SQL schema qualifiers (e.g. `tpch1.customer`) match the
+      // schemaless rows in `schemaDef`. The 1-arg form leaves currentSchema="" and silently
+      // mismatches every schema-qualified table ref. defaultCatalog/defaultSchema come from the
+      // caller's SchemaContext (the session-defaults pinned at handshake time).
+      val resolver = new JSQLColumResolver(
+        defaultCatalog.getOrElse(""),
+        defaultSchema.getOrElse(""),
+        schemaDef
+      )
+      resolver.setErrorMode(unresolvedMode match
+        case UnresolvedMode.Deny => JdbcMetaData.ErrorMode.STRICT
+        case UnresolvedMode.Pass => JdbcMetaData.ErrorMode.LENIENT)
 
-    parsed match
-      case sel: Select =>
-        try
-          val (changed, _) = applyPolicies(sel, projectionOrigins, policies)
-          if changed then Rewritten(sel.toString) else Passthrough
-        catch case e: DenyException => Denied(e.reason)
-      case _ =>
-        Passthrough
+      // Capture try/catch outcomes as Either so the early-exit flows through a structured
+      // match instead of an exception. jsqltranspiler 1.9 does NOT ship a single
+      // `JSQLDataException` umbrella; it raises one of the table/column/schema/catalog-not-
+      // found exceptions under `ai.starlake.transpiler.*`.
+      val resolveAttempt: Either[RewriteOutcome, String] =
+        try Right(resolver.getResolvedStatementText(sql))
+        catch
+          case e: ai.starlake.transpiler.TableNotFoundException    => Left(Denied(e.getMessage))
+          case e: ai.starlake.transpiler.TableNotDeclaredException => Left(Denied(e.getMessage))
+          case e: ai.starlake.transpiler.ColumnNotFoundException   => Left(Denied(e.getMessage))
+          case e: ai.starlake.transpiler.SchemaNotFoundException   => Left(Denied(e.getMessage))
+          case e: ai.starlake.transpiler.CatalogNotFoundException  => Left(Denied(e.getMessage))
+          case _: net.sf.jsqlparser.JSQLParserException            => Left(ParseFailed)
+          case _: Throwable                                        => Left(ParseFailed)
+
+      resolveAttempt match
+        case Left(failure)      => failure
+        case Right(resolvedText) =>
+          val rsMeta                                          = resolver.getResultSetMetaData(sql)
+          val projectionOrigins: IndexedSeq[(String, String)] =
+            (1 to rsMeta.getColumnCount).toIndexedSeq.map { i =>
+              (
+                Option(rsMeta.getTableName(i)).getOrElse(""),
+                Option(rsMeta.getColumnName(i)).getOrElse("")
+              )
+            }
+
+          val parseAttempt: Either[RewriteOutcome, net.sf.jsqlparser.statement.Statement] =
+            try Right(CCJSqlParserUtil.parse(resolvedText))
+            catch case _: Throwable => Left(ParseFailed)
+
+          parseAttempt match
+            case Left(failure)  => failure
+            case Right(parsed) =>
+              parsed match
+                case sel: Select =>
+                  try
+                    val (changed, _) = applyPolicies(sel, projectionOrigins, policies)
+                    if changed then Rewritten(sel.toString) else Passthrough
+                  catch case e: DenyException => Denied(e.reason)
+                case _ =>
+                  Passthrough
 
   /** Walk the resolved statement's projection items and replace any Column whose physical (table,
     * column) lineage matches a policy. Full visitor surface (CASE / CAST / OVER / IN / BETWEEN /
@@ -236,32 +242,34 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy]
   ): List[RoleColumnPolicy] =
     val subAlias = Option(sub.getAlias).map(_.getName).getOrElse("")
-    if subAlias.isEmpty then return Nil
-    val inner = sub.getSelect
-    inner match
-      case ips: PlainSelect =>
-        val innerFromTables = collectFromTables(ips)
-        val items           = Option(ips.getSelectItems).getOrElse(return Nil)
-        val buf             = scala.collection.mutable.ListBuffer.empty[RoleColumnPolicy]
-        val it              = items.iterator()
-        while it.hasNext do
-          val si = it.next()
-          si.getExpression match
-            case col: net.sf.jsqlparser.schema.Column =>
-              val baseTable = Option(col.getTable).map(_.getName) match
-                case Some(key) =>
-                  innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
-                case None =>
-                  if innerFromTables.size == 1 then innerFromTables.head._2 else ""
-              val baseCol     = col.getColumnName
-              val exposedName =
-                Option(si.getAlias).map(_.getName).getOrElse(baseCol)
-              matchingPolicy(baseTable, baseCol, policies).foreach { p =>
-                buf += p.copy(tableName = subAlias, columnName = exposedName)
-              }
-            case _ => ()
-        buf.toList
-      case _ => Nil
+    if subAlias.isEmpty then Nil
+    else
+      sub.getSelect match
+        case ips: PlainSelect =>
+          Option(ips.getSelectItems) match
+            case None        => Nil
+            case Some(items) =>
+              val innerFromTables = collectFromTables(ips)
+              val buf             = scala.collection.mutable.ListBuffer.empty[RoleColumnPolicy]
+              val it              = items.iterator()
+              while it.hasNext do
+                val si = it.next()
+                si.getExpression match
+                  case col: net.sf.jsqlparser.schema.Column =>
+                    val baseTable = Option(col.getTable).map(_.getName) match
+                      case Some(key) =>
+                        innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+                      case None =>
+                        if innerFromTables.size == 1 then innerFromTables.head._2 else ""
+                    val baseCol     = col.getColumnName
+                    val exposedName =
+                      Option(si.getAlias).map(_.getName).getOrElse(baseCol)
+                    matchingPolicy(baseTable, baseCol, policies).foreach { p =>
+                      buf += p.copy(tableName = subAlias, columnName = exposedName)
+                    }
+                  case _ => ()
+              buf.toList
+        case _ => Nil
 
   private final class PolicyVisitor(
       policies: List[RoleColumnPolicy],
