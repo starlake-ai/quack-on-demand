@@ -88,3 +88,16 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
       case other                          => fail(s"expected Rewritten, got $other")
   }
+
+  it should "mask c_email inside EXTRACT" in {
+    // EXTRACT semantically expects a date/time, but the parser doesn't enforce that. Use it as a
+    // smoke test that the visitor descends into the inner expression.
+    val out = rw.rewrite(
+      "SELECT EXTRACT(YEAR FROM c_email) FROM customer",
+      schema, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }
