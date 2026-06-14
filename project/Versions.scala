@@ -21,7 +21,6 @@ object Versions {
   val postgresql     = "42.7.4"
   val wireMock       = "3.9.2"
   val blobstore      = "0.10.1"
-  val jsqlTranspiler = "1.8"
   val starlakeJdbc   = "0.7"
   val duckdb         = "1.5.3.0"
   val micrometer     = "1.13.6"
