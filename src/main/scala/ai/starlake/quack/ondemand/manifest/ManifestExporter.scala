@@ -36,8 +36,9 @@ object ManifestExporter:
     val poolsByDb    = snap.pools.groupBy(_.tenantDbId)
     val rolesByT     = snap.roles.groupBy(_.tenantId)
     val groupsByT    = snap.groups.groupBy(_.tenantId)
-    val rolePermsByRole = snap.rolePermissions.groupBy(_.roleId)
-    val rolesByGroup    = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
+    val rolePermsByRole    = snap.rolePermissions.groupBy(_.roleId)
+    val colPoliciesByRole  = snap.columnPolicies.groupBy(_.roleId)
+    val rolesByGroup       = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
     val rolesByUser     = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
     val groupsByUser    = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
     val poolPermsByUser =
@@ -135,6 +136,19 @@ object ManifestExporter:
                 schema = p.schemaName,
                 table = p.tableName,
                 verb = p.verb
+              )
+            },
+          columnPolicies = colPoliciesByRole
+            .getOrElse(r.id, Nil)
+            .sortBy(p => (p.catalogName, p.schemaName, p.tableName, p.columnName))
+            .map { p =>
+              ManifestRoleColumnPolicy(
+                catalog      = p.catalogName,
+                schema       = p.schemaName,
+                table        = p.tableName,
+                column       = p.columnName,
+                action       = p.action,
+                transformSql = p.transformSql
               )
             }
         )

@@ -85,11 +85,21 @@ final case class ManifestTablePermission(
     verb: String
 )
 
+final case class ManifestRoleColumnPolicy(
+    catalog:      String = "*",
+    schema:       String,
+    table:        String,
+    column:       String,
+    action:       String,                  // "deny" | "mask"
+    transformSql: Option[String] = None
+)
+
 final case class ManifestRole(
     tenant: String,
     name: String,
     description: Option[String] = None,
-    permissions: List[ManifestTablePermission] = Nil
+    permissions: List[ManifestTablePermission] = Nil,
+    columnPolicies: List[ManifestRoleColumnPolicy] = Nil
 )
 
 final case class ManifestGroup(
@@ -132,6 +142,20 @@ object ConfigManifest:
   given Codec[ManifestRoleDistribution] = deriveCodec
   given Codec[ManifestTablePermission]  = deriveCodec
   given Codec[ManifestPoolGrant]        = deriveCodec
+
+  given Codec[ManifestRoleColumnPolicy] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        catalog      <- c.getOrElse[String]("catalog")("*")
+        schema       <- c.get[String]("schema")
+        table        <- c.get[String]("table")
+        column       <- c.get[String]("column")
+        action       <- c.get[String]("action")
+        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
+      yield ManifestRoleColumnPolicy(catalog, schema, table, column, action, transformSql)
+    },
+    deriveEncoder[ManifestRoleColumnPolicy]
+  )
 
   // Placement codecs: every field but `key` (tolerations) and
   // `distribution` (cohorts) is optional in YAML.
@@ -255,11 +279,12 @@ object ConfigManifest:
   given Codec[ManifestRole] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        tenant      <- c.get[String]("tenant")
-        name        <- c.get[String]("name")
-        description <- c.getOrElse[Option[String]]("description")(None)
-        permissions <- c.getOrElse[List[ManifestTablePermission]]("permissions")(Nil)
-      yield ManifestRole(tenant, name, description, permissions)
+        tenant         <- c.get[String]("tenant")
+        name           <- c.get[String]("name")
+        description    <- c.getOrElse[Option[String]]("description")(None)
+        permissions    <- c.getOrElse[List[ManifestTablePermission]]("permissions")(Nil)
+        columnPolicies <- c.getOrElse[List[ManifestRoleColumnPolicy]]("columnPolicies")(Nil)
+      yield ManifestRole(tenant, name, description, permissions, columnPolicies)
     },
     deriveEncoder[ManifestRole]
   )
