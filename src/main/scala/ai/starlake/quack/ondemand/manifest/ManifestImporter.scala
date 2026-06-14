@@ -20,6 +20,7 @@ import ai.starlake.quack.ondemand.state.{
   PoolPermission,
   RbacGroup,
   RbacRole,
+  RoleColumnPolicy,
   RolePermission
 }
 
@@ -337,6 +338,22 @@ object ManifestImporter:
                   schemaName = perm.schema,
                   tableName = perm.table,
                   verb = perm.verb
+                )
+              )
+            }
+            // Replace column policies: delete every existing then re-insert.
+            store.listColumnPolicies(roleId).foreach(p => store.deleteColumnPolicy(p.id))
+            mr.columnPolicies.foreach { mcp =>
+              store.insertColumnPolicy(
+                RoleColumnPolicy(
+                  id           = Names.newSurrogateId("cp"),
+                  roleId       = roleId,
+                  catalogName  = mcp.catalog,
+                  schemaName   = mcp.schema,
+                  tableName    = mcp.table,
+                  columnName   = mcp.column,
+                  action       = mcp.action,
+                  transformSql = mcp.transformSql
                 )
               )
             }

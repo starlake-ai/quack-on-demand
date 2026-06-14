@@ -70,6 +70,8 @@ roles:
       - { catalog: acme_tpch, schema: tpch1, table: orders,   verb: RO }
       - { catalog: acme_tpch, schema: tpch1, table: nation,   verb: RO }
       - { catalog: acme_tpch, schema: tpch1, table: region,   verb: RO }
+    columnPolicies:
+      - { catalog: "*", schema: tpch1, table: customer, column: c_phone, action: mask, transformSql: "'***'" }
 
   - tenant: acme
     name: etl
