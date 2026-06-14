@@ -105,12 +105,51 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     }
 
     sel match
+      case sol: net.sf.jsqlparser.statement.select.SetOperationList =>
+        // UNION / INTERSECT / EXCEPT: recurse into every arm. Each arm has its own FROM clause
+        // and its own per-column policy lookup; outer-query origins don't apply.
+        Option(sol.getSelects).foreach(_.forEach { arm =>
+          val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies)
+          if armChanged then changed.set(true)
+        })
+      case wrap: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
+        // Top-level parenthesized SELECT: unwrap and recurse.
+        val (innerChanged, _) = applyPolicies(wrap.getSelect, IndexedSeq.empty, policies)
+        if innerChanged then changed.set(true)
       case ps: PlainSelect =>
         // FROM-tables of this select (key -> table). Single-table case lets the visitor resolve
         // an unqualified column reference to the implicit table. Used inside composite expressions
         // (function args, BETWEEN bounds, CASE arms, etc.) where the resolver doesn't expand the
         // qualifier.
         visitor.fromTables = collectFromTables(ps)
+        // FROM-item subquery: recurse so policies apply inside `FROM (SELECT ... FROM customer)`.
+        // The outer projection still references the subquery via its alias and the projected name.
+        // Before recursion (which would mutate inner Columns into transform literals) we snapshot
+        // the inner SELECT's exposed covered columns and synthesize transient policies so the outer
+        // projection masks `sub.c_email` too. The resolver's ResultSet lineage stops at the FROM
+        // boundary in jsqltranspiler 1.9, so we trace it ourselves.
+        val derivedPolicies = scala.collection.mutable.ListBuffer.empty[RoleColumnPolicy]
+        Option(ps.getFromItem).foreach {
+          case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
+            derivedPolicies ++= deriveOuterPolicies(sub, policies)
+            val (innerChanged, _) = applyPolicies(sub.getSelect, IndexedSeq.empty, policies)
+            if innerChanged then changed.set(true)
+          case _ => ()
+        }
+        Option(ps.getJoins).foreach(_.forEach { j =>
+          Option(j.getRightItem).foreach {
+            case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
+              derivedPolicies ++= deriveOuterPolicies(sub, policies)
+              val (innerChanged, _) = applyPolicies(sub.getSelect, IndexedSeq.empty, policies)
+              if innerChanged then changed.set(true)
+            case _ => ()
+          }
+        })
+        // Augment the visitor's policies with any synthesized ones so the outer projection sees
+        // `sub.c_email` (or alias.colalias) as covered. The synthesized policies use the FROM-item
+        // alias as the tableName, so resolveTable's alias-equality fallback can match them.
+        if derivedPolicies.nonEmpty then
+          visitor.extraPolicies = derivedPolicies.toList
         val items = ps.getSelectItems
         if items != null then
           val it  = items.listIterator()
@@ -158,26 +197,72 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       case _ => ()
     (changed.get, sel)
 
-  /** Build a list of (alias -> rawTableName) for the FROM + JOINs of a PlainSelect. */
+  /** Build a list of (alias -> rawTableName) for the FROM + JOINs of a PlainSelect. FROM-item
+    * subqueries are recorded as (alias -> alias) so synthetic policies keyed on the alias can be
+    * matched by the visitor's resolveTable fallback (single-FROM unqualified column case).
+    */
   private def collectFromTables(ps: PlainSelect): List[(String, String)] =
     val buf = scala.collection.mutable.ListBuffer.empty[(String, String)]
     def add(t: net.sf.jsqlparser.schema.Table): Unit =
       val raw = t.getName
       val key = Option(t.getAlias).map(_.getName).getOrElse(raw)
       buf += (key -> raw)
+    def addSub(sub: net.sf.jsqlparser.statement.select.ParenthesedSelect): Unit =
+      Option(sub.getAlias).map(_.getName).foreach(name => buf += (name -> name))
     Option(ps.getFromItem).foreach {
-      case t: net.sf.jsqlparser.schema.Table => add(t)
-      case _                                 => ()
+      case t: net.sf.jsqlparser.schema.Table                          => add(t)
+      case s: net.sf.jsqlparser.statement.select.ParenthesedSelect    => addSub(s)
+      case _                                                          => ()
     }
     Option(ps.getJoins).foreach { joins =>
       val it = joins.iterator()
       while it.hasNext do
         Option(it.next().getRightItem).foreach {
-          case t: net.sf.jsqlparser.schema.Table => add(t)
-          case _                                 => ()
+          case t: net.sf.jsqlparser.schema.Table                       => add(t)
+          case s: net.sf.jsqlparser.statement.select.ParenthesedSelect => addSub(s)
+          case _                                                       => ()
         }
     }
     buf.toList
+
+  /** Pre-scan a FROM-item subquery and synthesize policies for the outer scope. For each inner
+    * SelectItem whose source column is covered by a base-table policy, emit a transient policy
+    * keyed on `(subqueryAlias, projectedName)` so the outer projection masks `sub.x` references.
+    * The projectedName is the user-supplied alias if any, else the inner Column's name. Items
+    * that are not bare Columns (functions, expressions) are skipped - those don't expose a
+    * cleanly maskable identity to the outer scope.
+    */
+  private def deriveOuterPolicies(
+      sub: net.sf.jsqlparser.statement.select.ParenthesedSelect,
+      policies: List[RoleColumnPolicy]
+  ): List[RoleColumnPolicy] =
+    val subAlias = Option(sub.getAlias).map(_.getName).getOrElse("")
+    if subAlias.isEmpty then return Nil
+    val inner = sub.getSelect
+    inner match
+      case ips: PlainSelect =>
+        val innerFromTables = collectFromTables(ips)
+        val items           = Option(ips.getSelectItems).getOrElse(return Nil)
+        val buf             = scala.collection.mutable.ListBuffer.empty[RoleColumnPolicy]
+        val it              = items.iterator()
+        while it.hasNext do
+          val si = it.next()
+          si.getExpression match
+            case col: net.sf.jsqlparser.schema.Column =>
+              val baseTable = Option(col.getTable).map(_.getName) match
+                case Some(key) =>
+                  innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+                case None =>
+                  if innerFromTables.size == 1 then innerFromTables.head._2 else ""
+              val baseCol = col.getColumnName
+              val exposedName =
+                Option(si.getAlias).map(_.getName).getOrElse(baseCol)
+              matchingPolicy(baseTable, baseCol, policies).foreach { p =>
+                buf += p.copy(tableName = subAlias, columnName = exposedName)
+              }
+            case _ => ()
+        buf.toList
+      case _ => Nil
 
   private final class PolicyVisitor(
       policies: List[RoleColumnPolicy],
@@ -185,6 +270,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   ):
     var topLevelOverride: Option[(String, String)] = None
     var fromTables: List[(String, String)]         = Nil
+    var extraPolicies: List[RoleColumnPolicy]      = Nil
+    private def allPolicies: List[RoleColumnPolicy] = extraPolicies ::: policies
 
     /** Resolve the physical table for a Column reference. */
     private def resolveTable(col: net.sf.jsqlparser.schema.Column): String =
@@ -203,7 +290,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           val (tableName, columnName) = topLevelOverride.getOrElse {
             (resolveTable(col), col.getColumnName)
           }
-          matchingPolicy(tableName, columnName, policies) match
+          matchingPolicy(tableName, columnName, allPolicies) match
             case Some(p) if p.action == RoleColumnPolicy.ActionDeny =>
               throw DenyException(s"column $tableName.$columnName is denied")
             case Some(p) =>
@@ -351,6 +438,18 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           }
           topLevelOverride = saved
           ce
+
+        case ps: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
+          // Scalar subquery in expression position, e.g. `SELECT (SELECT c_email FROM customer)`.
+          // JSqlParser 5.x represents this as a ParenthesedSelect inside the expression tree.
+          // Select extends Expression in 5.x; the inner FROM clause and per-column policy lookup
+          // belong to the subquery itself, so the outer origins don't apply.
+          val saved = topLevelOverride
+          topLevelOverride = None
+          val (innerChanged, _) = applyPolicies(ps.getSelect, IndexedSeq.empty, policies)
+          if innerChanged then changed.set(true)
+          topLevelOverride = saved
+          ps
 
         case other => other
 

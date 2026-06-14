@@ -90,41 +90,33 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   // -------- nested SELECTs --------
 
   it should "rewrite the inner SELECT of a scalar subquery in the projection" in {
-    // v2 limitation: JsqltranspilerRewriter does not yet recurse into scalar subqueries in
-    // projection items. Documenting current behavior — the outer SELECT carries no covered
-    // column, so the rewrite is a passthrough. Tightening this is tracked as future work.
     val out = rw.rewrite(
       "SELECT (SELECT c_email FROM tpch1.customer LIMIT 1) AS e FROM tpch1.customer",
       StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
-      case Passthrough    => succeed
       case Rewritten(sql) => sql should include ("'***'")
-      case other          => fail(s"unexpected outcome: $other")
+      case other          => fail(s"expected Rewritten, got $other")
   }
 
   it should "rewrite a subquery used as a FROM item" in {
-    // v2 limitation: the resolver does not expose the inner SELECT of a FROM-item subquery as
-    // its own rewrite target. The outer projection still sees the unresolved alias and currently
-    // passes through. Tracked as future work.
     val out = rw.rewrite(
       "SELECT c_email FROM (SELECT c_email FROM tpch1.customer) sub",
       StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
-      case Passthrough    => succeed
-      case Rewritten(sql) => sql should include ("'***'")
-      case other          => fail(s"unexpected outcome: $other")
+      case Rewritten(sql) =>
+        // Both the outer projection and the inner projection should now reference the mask.
+        sql.split("'\\*\\*\\*'").length - 1 should be >= 2
+      case other => fail(s"expected Rewritten, got $other")
   }
 
   it should "rewrite each arm of a UNION" in {
-    // v2 limitation: SetOperationList is not yet walked arm-by-arm. Documenting current
-    // behavior — both arms reference c_email but neither is rewritten. Tracked as future work.
     val out = rw.rewrite(
       "SELECT c_email FROM tpch1.customer UNION SELECT c_email FROM tpch1.customer",
       StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx).unsafeRunSync()
     out match
-      case Passthrough    => succeed
-      case Rewritten(sql) => sql should include ("'***'")
-      case other          => fail(s"unexpected outcome: $other")
+      case Rewritten(sql) =>
+        sql.split("'\\*\\*\\*'").length - 1 should be >= 2
+      case other => fail(s"expected Rewritten, got $other")
   }
 
   it should "rewrite a CTE body" in {
