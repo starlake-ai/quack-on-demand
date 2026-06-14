@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { RolePermissionResponse, RoleResponse } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
+import RoleColumnPoliciesSection from './RoleColumnPoliciesSection';
+import Tabs from './Tabs';
 
 const VERBS = ['RO', 'RW', 'DDL', 'ALL'];
 
@@ -209,37 +211,54 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
           >
             <div className="card-title">Edit role <code>{selected.name}</code></div>
             <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
-              <form onSubmit={handleGrant} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
-                <input style={{ flex: 1, minWidth: 80 }} value={grantCatalog} onChange={ev => setGrantCatalog(ev.target.value)} placeholder="Catalog" />
-                <input style={{ flex: 1, minWidth: 80 }} value={grantSchema}  onChange={ev => setGrantSchema(ev.target.value)}  placeholder="Schema" />
-                <input style={{ flex: 1, minWidth: 80 }} value={grantTable}   onChange={ev => setGrantTable(ev.target.value)}   placeholder="Table" />
-                <select style={{ flex: '0 0 7rem' }} value={grantVerb} onChange={ev => setGrantVerb(ev.target.value)}>
-                  {VERBS.map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-                <button type="submit" style={{ whiteSpace: 'nowrap' }}>+ Grant</button>
-              </form>
-              {perms.length === 0 ? (
-                <div className="empty">(no permissions yet)</div>
-              ) : (
-                <table>
-                  <thead><tr>
-                    <th>Catalog</th><th>Schema</th><th>Table</th><th>Verb</th><th className="actions"></th>
-                  </tr></thead>
-                  <tbody>
-                    {perms.map(p => (
-                      <tr key={p.id}>
-                        <td><code>{p.catalogName}</code></td>
-                        <td><code>{p.schemaName}</code></td>
-                        <td><code>{p.tableName}</code></td>
-                        <td><code>{p.verb}</code></td>
-                        <td className="actions">
-                          <button className="icon-btn danger" title="Revoke" aria-label="Revoke" onClick={() => handleRevoke(p)}><DeleteIcon /></button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+              <Tabs
+                tabs={[
+                  {
+                    id: 'permissions',
+                    label: 'Permissions',
+                    body: (
+                      <>
+                        <form onSubmit={handleGrant} className="row" style={{ gap: 8, marginBottom: 8, alignItems: 'center' }}>
+                          <input style={{ flex: 1, minWidth: 80 }} value={grantCatalog} onChange={ev => setGrantCatalog(ev.target.value)} placeholder="Catalog" />
+                          <input style={{ flex: 1, minWidth: 80 }} value={grantSchema}  onChange={ev => setGrantSchema(ev.target.value)}  placeholder="Schema" />
+                          <input style={{ flex: 1, minWidth: 80 }} value={grantTable}   onChange={ev => setGrantTable(ev.target.value)}   placeholder="Table" />
+                          <select style={{ flex: '0 0 7rem' }} value={grantVerb} onChange={ev => setGrantVerb(ev.target.value)}>
+                            {VERBS.map(v => <option key={v} value={v}>{v}</option>)}
+                          </select>
+                          <button type="submit" style={{ whiteSpace: 'nowrap' }}>+ Grant</button>
+                        </form>
+                        {perms.length === 0 ? (
+                          <div className="empty">(no permissions yet)</div>
+                        ) : (
+                          <table>
+                            <thead><tr>
+                              <th>Catalog</th><th>Schema</th><th>Table</th><th>Verb</th><th className="actions"></th>
+                            </tr></thead>
+                            <tbody>
+                              {perms.map(p => (
+                                <tr key={p.id}>
+                                  <td><code>{p.catalogName}</code></td>
+                                  <td><code>{p.schemaName}</code></td>
+                                  <td><code>{p.tableName}</code></td>
+                                  <td><code>{p.verb}</code></td>
+                                  <td className="actions">
+                                    <button className="icon-btn danger" title="Revoke" aria-label="Revoke" onClick={() => handleRevoke(p)}><DeleteIcon /></button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </>
+                    ),
+                  },
+                  {
+                    id: 'column-policies',
+                    label: 'Column policies',
+                    body: <RoleColumnPoliciesSection roleId={selected.id} />,
+                  },
+                ]}
+              />
             </div>
             <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
               <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => setSelected(null)}>Close</button>
