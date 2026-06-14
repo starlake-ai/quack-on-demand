@@ -159,10 +159,19 @@ final class FlightSqlRouter(
       case None =>
         sql // no RBAC principal bound; rewriter would deny anything tenant-scoped
       case Some(eff) =>
-        columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync() match
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough  => sql
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) => s
+        val t0      = System.nanoTime()
+        val outcome = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
+        stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+        outcome match
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
+            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
+            sql
+          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
+            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
+            s
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
+            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "denied")
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             return IO.pure(Left(s"access denied: $reason"))
 
