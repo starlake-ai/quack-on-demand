@@ -530,11 +530,12 @@ object Main extends IOApp with LazyLogging:
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
       val userStoreForRbac   = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val userHandlers       = new UserHandlers(sup, userStoreForRbac)
-      val roleHandlers       = new RoleHandlers(sup, userHandlers)
-      val groupHandlers      = new GroupHandlers(sup, userHandlers)
-      val membershipHandlers = new MembershipHandlers(sup, userHandlers)
-      val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers)
+      val userHandlers         = new UserHandlers(sup, userStoreForRbac)
+      val roleHandlers         = new RoleHandlers(sup, userHandlers)
+      val groupHandlers        = new GroupHandlers(sup, userHandlers)
+      val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
+      val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
+      val columnPolicyHandlers = new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
@@ -600,7 +601,8 @@ object Main extends IOApp with LazyLogging:
         poolPermHandlers,
         serverConfigHandlers,
         manifestHandlers,
-        federatedSourceHandlers
+        federatedSourceHandlers,
+        columnPolicyHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

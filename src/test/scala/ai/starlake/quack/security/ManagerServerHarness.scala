@@ -244,11 +244,12 @@ object ManagerServerHarness:
     sup.restore()
 
     val userStore   = makeDuckDbUserStore()
-    val userHandlers       = new UserHandlers(sup, userStore)
-    val roleHandlers       = new RoleHandlers(sup, userHandlers)
-    val groupHandlers      = new GroupHandlers(sup, userHandlers)
-    val membershipHandlers = new MembershipHandlers(sup, userHandlers)
-    val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers)
+    val userHandlers         = new UserHandlers(sup, userStore)
+    val roleHandlers         = new RoleHandlers(sup, userHandlers)
+    val groupHandlers        = new GroupHandlers(sup, userHandlers)
+    val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
+    val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
+    val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
 
     val sessions   = new SessionTokenStore
     val authSvc    = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
@@ -302,7 +303,8 @@ object ManagerServerHarness:
       poolPermHandlers,
       serverConfigHandlers,
       manifestHandlers,
-      federatedSources = None
+      federatedSources = None,
+      columnPolicies   = columnPolicyHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port
