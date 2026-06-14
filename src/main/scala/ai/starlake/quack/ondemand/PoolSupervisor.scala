@@ -376,6 +376,21 @@ final class PoolSupervisor(
       tenantDbs.values.find(td => td.tenantId == t.id && td.name == nm)
     }
 
+  /** Find the (tenant, tenantDb) pair whose DuckDB-side catalog name (the composed Postgres
+    * `dbName` = `${tenant}_${tenantDb}`, lowercased) matches `catalog`. Used by the CLS rewriter's
+    * column-catalog fetcher to route a DuckDB catalog reference back to its tenant-db.
+    *
+    * The composed name is what `Names.normalizeTenantDbName` produces and is persisted into
+    * `TenantDb.name` (always lowercase via `Names.normalizeOrError`); matching against `td.name`
+    * with `equalsIgnoreCase` keeps this in sync with the SAME formula `spawn-quack-node.sh` /
+    * `effectiveMetastoreFor` use to spawn the node, with no risk of drift.
+    *
+    * Returns `None` if no matching tenant-db is registered.
+    */
+  def findTenantDbByCatalogName(catalog: String): Option[TenantDb] =
+    if catalog == null || catalog.isEmpty then None
+    else tenantDbs.values.find(_.name.equalsIgnoreCase(catalog))
+
   /** Resolve `(tenant, poolName) -> PoolKey` so the FlightSQL edge can route a connection that
     * addresses only `tenant` + `pool`. Pool names are unique within a tenant (enforced both by
     * `createPool` and the `qodstate_pool_tenant_name_unique` constraint), so at most one match
