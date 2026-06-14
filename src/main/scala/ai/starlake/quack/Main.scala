@@ -457,13 +457,13 @@ object Main extends IOApp with LazyLogging:
           .load()
           .getString("quack-on-demand.cls.unresolvedTable")
           .toLowerCase match
-          case "deny"        => ai.starlake.quack.edge.cls.UnresolvedMode.Deny
-          case "passthrough" => ai.starlake.quack.edge.cls.UnresolvedMode.Passthrough
-          case other         =>
+          case "deny" => ai.starlake.quack.edge.cls.UnresolvedMode.Deny
+          case "pass" => ai.starlake.quack.edge.cls.UnresolvedMode.Pass
+          case other  =>
             logger.warn(
-              s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to passthrough"
+              s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to pass"
             )
-            ai.starlake.quack.edge.cls.UnresolvedMode.Passthrough
+            ai.starlake.quack.edge.cls.UnresolvedMode.Pass
 
       // Resolve a DuckDB-side catalog name to its DuckLakeCatalogReader by looking up the
       // tenant-db owning that catalog and reusing the cache populated by `catalogHandlers`.

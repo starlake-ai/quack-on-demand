@@ -53,7 +53,7 @@ object ColumnPolicyRewriter:
 final class ColumnPolicyRewriter(
     catalog:        ColumnCatalog,
     inner:          SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
-    unresolvedMode: UnresolvedMode         = UnresolvedMode.Passthrough
+    unresolvedMode: UnresolvedMode         = UnresolvedMode.Pass
 ):
   import ColumnPolicyRewriter._
 

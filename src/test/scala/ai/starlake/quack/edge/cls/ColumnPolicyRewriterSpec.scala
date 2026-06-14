@@ -157,7 +157,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "passthrough SELECT * when the catalog has no entry for the table" in {
-    // With UnresolvedMode.Passthrough (the rewriter's default) plus an empty catalog, the inner
+    // With UnresolvedMode.Pass (the rewriter's default) plus an empty catalog, the inner
     // jsqltranspiler can't resolve `tpch1.customer` and falls into the LENIENT/parse-failed arm.
     // The rewriter surfaces this as PassthroughParseFailed (distinct from Passthrough since
     // Task 9 split the metric tag); both are routed the same way - original SQL forwarded.

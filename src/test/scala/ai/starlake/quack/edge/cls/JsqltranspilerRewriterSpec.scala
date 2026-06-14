@@ -210,7 +210,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       policies       = List(maskEmail),
       defaultCatalog = Some("acme_tpch"),
       defaultSchema  = Some("tpch1"),
-      unresolvedMode = UnresolvedMode.Passthrough
+      unresolvedMode = UnresolvedMode.Pass
     )
     out match
       case RewriteOutcome.Passthrough => succeed
