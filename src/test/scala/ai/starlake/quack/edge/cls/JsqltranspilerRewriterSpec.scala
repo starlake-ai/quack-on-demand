@@ -1,0 +1,35 @@
+package ai.starlake.quack.edge.cls
+
+import ai.starlake.quack.ondemand.state.RoleColumnPolicy
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+
+class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
+
+  private val rw = new JsqltranspilerRewriter
+
+  private val maskEmail = RoleColumnPolicy(
+    id            = "cp-1",
+    roleId        = "r-1",
+    catalogName   = "*",
+    schemaName    = "tpch1",
+    tableName     = "customer",
+    columnName    = "c_email",
+    action        = "mask",
+    transformSql  = Some("'***'")
+  )
+
+  private val schema = Map("customer" -> List("c_id", "c_email", "c_phone"))
+
+  "rewrite" should "mask a directly-projected covered column" in {
+    val out = rw.rewrite(
+      sql            = "SELECT c_email FROM customer",
+      schema         = schema,
+      policies       = List(maskEmail),
+      defaultCatalog = Some("acme_tpch"),
+      defaultSchema  = Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
+      case other                          => fail(s"expected Rewritten, got $other")
+  }
