@@ -423,6 +423,35 @@ final case class UserRoleMembershipRequest(userId: String, roleId: String)
 final case class UserGroupMembershipRequest(userId: String, groupId: String)
 final case class GroupRoleMembershipRequest(groupId: String, roleId: String)
 
+// ----- RBAC: column policies ---------------------------------------------
+
+final case class ColumnPolicyDto(
+    id:           String,
+    roleId:       String,
+    catalogName:  String,
+    schemaName:   String,
+    tableName:    String,
+    columnName:   String,
+    action:       String,
+    transformSql: Option[String]
+)
+final case class CreateColumnPolicyRequest(
+    roleId:       String,
+    catalogName:  String,
+    schemaName:   String,
+    tableName:    String,
+    columnName:   String,
+    action:       String,
+    transformSql: Option[String] = None
+)
+final case class UpdateColumnPolicyRequest(
+    id:           String,
+    action:       String,
+    transformSql: Option[String] = None
+)
+final case class DeleteColumnPolicyRequest(id: String)
+final case class ColumnPolicyListResponse(policies: List[ColumnPolicyDto])
+
 // ----- RBAC: pool permissions --------------------------------------------
 
 final case class PoolPermissionGrantRequest(
@@ -880,6 +909,55 @@ object Dtos:
   given Codec[UserRoleMembershipRequest]  = deriveCodec
   given Codec[UserGroupMembershipRequest] = deriveCodec
   given Codec[GroupRoleMembershipRequest] = deriveCodec
+
+  // RBAC: column policies
+  given Codec[ColumnPolicyDto]           = deriveCodec
+  given Codec[CreateColumnPolicyRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        roleId       <- c.get[String]("roleId")
+        catalogName  <- c.getOrElse[String]("catalogName")("*")
+        schemaName   <- c.getOrElse[String]("schemaName")("*")
+        tableName    <- c.getOrElse[String]("tableName")("*")
+        columnName   <- c.get[String]("columnName")
+        action       <- c.get[String]("action")
+        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
+      yield CreateColumnPolicyRequest(roleId, catalogName, schemaName, tableName, columnName, action, transformSql)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "roleId"       -> r.roleId.asJson,
+          "catalogName"  -> r.catalogName.asJson,
+          "schemaName"   -> r.schemaName.asJson,
+          "tableName"    -> r.tableName.asJson,
+          "columnName"   -> r.columnName.asJson,
+          "action"       -> r.action.asJson,
+          "transformSql" -> r.transformSql.asJson
+        )
+      )
+    }
+  )
+  given Codec[UpdateColumnPolicyRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        id           <- c.get[String]("id")
+        action       <- c.get[String]("action")
+        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
+      yield UpdateColumnPolicyRequest(id, action, transformSql)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "id"           -> r.id.asJson,
+          "action"       -> r.action.asJson,
+          "transformSql" -> r.transformSql.asJson
+        )
+      )
+    }
+  )
+  given Codec[DeleteColumnPolicyRequest] = deriveCodec
+  given Codec[ColumnPolicyListResponse]  = deriveCodec
 
   // RBAC: pool permissions
   given Codec[PoolPermissionGrantRequest]  = deriveCodec
