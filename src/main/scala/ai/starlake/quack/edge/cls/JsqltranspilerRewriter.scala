@@ -87,8 +87,15 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy]
   ): (Boolean, Select) =
     val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val visitor = new PolicyVisitor(policies, changed)
+
     sel match
       case ps: PlainSelect =>
+        // FROM-tables of this select (key -> table). Single-table case lets the visitor resolve
+        // an unqualified column reference to the implicit table. Used inside composite expressions
+        // (function args, BETWEEN bounds, CASE arms, etc.) where the resolver doesn't expand the
+        // qualifier.
+        visitor.fromTables = collectFromTables(ps)
         val items = ps.getSelectItems
         if items != null then
           val it  = items.listIterator()
@@ -96,17 +103,105 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           while it.hasNext do
             val si           = it.next()
             val (table, col) = if origins.indices.contains(idx) then origins(idx) else ("", "")
-            matchingPolicy(table, col, policies) match
-              case Some(p) if p.action == RoleColumnPolicy.ActionDeny =>
-                throw DenyException(s"column $table.$col is denied")
-              case Some(p) =>
-                val replacement = CCJSqlParserUtil.parseExpression(p.transformSql.get)
-                si.asInstanceOf[SelectItem[Expression]].setExpression(replacement)
-                changed.set(true)
-              case None => ()
+            // Top-level column origin override: the resolver knows the physical lineage of the
+            // projection slot even if the expression at that slot is itself a Column whose name
+            // is an alias of another column.
+            visitor.topLevelOverride = Some((table, col))
+            val expr     = si.getExpression
+            val replaced = visitor.visit(expr)
+            if (replaced ne expr) then
+              si.asInstanceOf[SelectItem[Expression]].setExpression(replaced)
+              changed.set(true)
+            visitor.topLevelOverride = None
             idx += 1
       case _ => ()
     (changed.get, sel)
+
+  /** Build a list of (alias -> rawTableName) for the FROM + JOINs of a PlainSelect. */
+  private def collectFromTables(ps: PlainSelect): List[(String, String)] =
+    val buf = scala.collection.mutable.ListBuffer.empty[(String, String)]
+    def add(t: net.sf.jsqlparser.schema.Table): Unit =
+      val raw = t.getName
+      val key = Option(t.getAlias).map(_.getName).getOrElse(raw)
+      buf += (key -> raw)
+    Option(ps.getFromItem).foreach {
+      case t: net.sf.jsqlparser.schema.Table => add(t)
+      case _                                 => ()
+    }
+    Option(ps.getJoins).foreach { joins =>
+      val it = joins.iterator()
+      while it.hasNext do
+        Option(it.next().getRightItem).foreach {
+          case t: net.sf.jsqlparser.schema.Table => add(t)
+          case _                                 => ()
+        }
+    }
+    buf.toList
+
+  private final class PolicyVisitor(
+      policies: List[RoleColumnPolicy],
+      changed: java.util.concurrent.atomic.AtomicBoolean
+  ):
+    var topLevelOverride: Option[(String, String)] = None
+    var fromTables: List[(String, String)]         = Nil
+
+    /** Resolve the physical table for a Column reference. */
+    private def resolveTable(col: net.sf.jsqlparser.schema.Column): String =
+      Option(col.getTable).map(_.getName) match
+        case Some(key) =>
+          // Alias or table-name qualifier - look up the base table behind the alias.
+          fromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+        case None =>
+          // Unqualified - fall back to the single FROM item if there is exactly one.
+          if fromTables.size == 1 then fromTables.head._2 else ""
+
+    /** Walk `expr` and return its replacement (same instance if nothing changed). */
+    def visit(expr: Expression): Expression =
+      expr match
+        case col: net.sf.jsqlparser.schema.Column =>
+          val (tableName, columnName) = topLevelOverride.getOrElse {
+            (resolveTable(col), col.getColumnName)
+          }
+          matchingPolicy(tableName, columnName, policies) match
+            case Some(p) if p.action == RoleColumnPolicy.ActionDeny =>
+              throw DenyException(s"column $tableName.$columnName is denied")
+            case Some(p) =>
+              changed.set(true)
+              CCJSqlParserUtil.parseExpression(p.transformSql.get)
+            case None => col
+
+        case fn: net.sf.jsqlparser.expression.Function =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          Option(fn.getParameters).foreach { params =>
+            val list = params.asInstanceOf[
+              net.sf.jsqlparser.expression.operators.relational.ExpressionList[Expression]
+            ]
+            val it = list.listIterator()
+            while it.hasNext do
+              val cur = it.next()
+              val nxt = visit(cur)
+              if nxt ne cur then it.set(nxt)
+          }
+          topLevelOverride = saved
+          fn
+
+        case b: net.sf.jsqlparser.expression.BinaryExpression =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          b.setLeftExpression(visit(b.getLeftExpression))
+          b.setRightExpression(visit(b.getRightExpression))
+          topLevelOverride = saved
+          b
+
+        case p: net.sf.jsqlparser.expression.Parenthesis =>
+          val saved = topLevelOverride
+          topLevelOverride = None
+          p.setExpression(visit(p.getExpression))
+          topLevelOverride = saved
+          p
+
+        case other => other
 
   private def matchingPolicy(
       table: String,
