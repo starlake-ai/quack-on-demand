@@ -8,23 +8,36 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
   /** Send `sql` to `node`. Records load, EWMA, and health side-effects on the tracker. Returns the
     * raw response - the caller is responsible for closing any streaming reader inside
     * [[QuackResponse.Ok]].
+    *
+    * `recordLoad=false` suppresses ALL NodeLoadTracker side effects (inFlight, totalServed, ewmaMs,
+    * latency-ring percentiles, healthy flag). Used by the FlightSQL Prepare-time LIMIT-0 probe so
+    * the internal schema-probe round-trip is invisible to the per-node load/latency stats surfaced
+    * on the UI dashboard (Total Served, QPS, p50/p95/p99). Mirrors [[probe]]'s policy: a controlled
+    * internal call shouldn't bookkeep against capacity or trip the health flag.
     */
-  def send(node: RunningNode, sql: String, session: Option[String]): IO[QuackResponse] =
+  def send(
+      node: RunningNode,
+      sql: String,
+      session: Option[String],
+      recordLoad: Boolean = true
+  ): IO[QuackResponse] =
     // Quack's URI scheme; DuckDB's `quack_query` parses it.
     val endpoint = s"quack:${node.host}:${node.port}"
-    IO.delay(tracker.onStart(node.nodeId)) *>
+    val onStart  = if recordLoad then IO.delay(tracker.onStart(node.nodeId)) else IO.unit
+    onStart *>
       client.query(endpoint, node.token, sql, session).flatMap { resp =>
         IO.delay {
-          val latency = resp match
-            case QuackResponse.Ok(_, l, _)  => l
-            case QuackResponse.Failed(_, l) => l
-          tracker.onFinish(node.nodeId, latency)
-          resp match
-            case QuackResponse.Ok(_, _, _) =>
-              tracker.setHealthy(node.nodeId, true)
-            case QuackResponse.Failed(QuackError.Transient(_), _) =>
-              tracker.setHealthy(node.nodeId, false)
-            case _ => ()
+          if recordLoad then
+            val latency = resp match
+              case QuackResponse.Ok(_, l, _)  => l
+              case QuackResponse.Failed(_, l) => l
+            tracker.onFinish(node.nodeId, latency)
+            resp match
+              case QuackResponse.Ok(_, _, _) =>
+                tracker.setHealthy(node.nodeId, true)
+              case QuackResponse.Failed(QuackError.Transient(_), _) =>
+                tracker.setHealthy(node.nodeId, false)
+              case _ => ()
           resp
         }
       }

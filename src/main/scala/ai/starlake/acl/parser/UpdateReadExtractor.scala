@@ -5,9 +5,9 @@ import net.sf.jsqlparser.statement.update.Update
 
 import scala.jdk.CollectionConverters.*
 
-/** Walks an UPDATE statement's WHERE clause, FROM/JOIN list for read-side table
-  * references. Reuses `TableExtractorVisitor` so the same CTE-skipping and
-  * sub-query handling applies. */
+/** Walks an UPDATE statement's WHERE clause, FROM/JOIN list for read-side table references. Reuses
+  * `TableExtractorVisitor` so the same CTE-skipping and sub-query handling applies.
+  */
 object UpdateReadExtractor:
   def extract(upd: Update): List[Table] =
     val v = new TableExtractorVisitor()

@@ -25,20 +25,19 @@ import com.typesafe.scalalogging.LazyLogging
   * Catalog/schema defaults: when a referenced table is unqualified, the SQL parser fills them in
   * from the pool's metastore via [[ValidationContext.defaultDatabase]] / `defaultSchema`.
   */
-/** `tenantCatalogs(tenantId)` returns the catalog names (= tenant-db names)
-  * the given tenant owns. Used to scope wildcard catalog grants (`*.*.* ALL`)
-  * so a tenant admin cannot wildcard-match a sibling tenant's catalog. An
-  * empty set or an unknown tenant id collapses to "no catalogs admissible
-  * via wildcard for this session"; explicit (non-wildcard) catalog grants
-  * are honored regardless of the session's tenant. Default is a no-op
-  * lookup that returns `Set.empty`, which makes wildcard catalog matches
-  * fail-closed: callers that don't wire a real lookup get the safer
-  * behavior. */
+/** `tenantCatalogs(tenantId)` returns the catalog names (= tenant-db names) the given tenant owns.
+  * Used to scope wildcard catalog grants (`*.*.* ALL`) so a tenant admin cannot wildcard-match a
+  * sibling tenant's catalog. An empty set or an unknown tenant id collapses to "no catalogs
+  * admissible via wildcard for this session"; explicit (non-wildcard) catalog grants are honored
+  * regardless of the session's tenant. Default is a no-op lookup that returns `Set.empty`, which
+  * makes wildcard catalog matches fail-closed: callers that don't wire a real lookup get the safer
+  * behavior.
+  */
 final class PostgresAclValidator(
-    defaultDatabase: String                 = "",
-    defaultSchema:   String                 = "main",
-    dialect:         String                 = "duckdb",
-    tenantCatalogs:  String => Set[String]  = _ => Set.empty
+    defaultDatabase: String = "",
+    defaultSchema: String = "main",
+    dialect: String = "duckdb",
+    tenantCatalogs: String => Set[String] = _ => Set.empty
 ) extends StatementValidator,
       LazyLogging:
 
@@ -90,9 +89,12 @@ final class PostgresAclValidator(
     // Collect all (table, verb) tuples from every Extracted statement.
     // ControlFlow statements (COMMIT, ROLLBACK, SET, ...) carry no accesses
     // and contribute nothing.
-    val accesses: Set[TableAccess] = extraction.statements.collect {
-      case StatementResult.Extracted(_, _, a, _) => a
-    }.flatten.toSet
+    val accesses: Set[TableAccess] = extraction.statements
+      .collect { case StatementResult.Extracted(_, _, a, _) =>
+        a
+      }
+      .flatten
+      .toSet
 
     // Empty access set means the statement was pure ControlFlow (or every
     // arm yielded zero refs). Admit unconditionally -- there is nothing to
@@ -134,11 +136,10 @@ final class PostgresAclValidator(
       logger.warn(s"ACL DENIED: $msg")
       Denied(msg)
 
-  /** Whether a role-permission verb covers a parser-emitted access verb.
-    * Grant verbs are the canonical (RO / RW / DDL / ALL) set; the parser
-    * emits the collapsed `Verb.Read | Verb.Write | Verb.Ddl` per access.
-    * `RW` is the only multi-cover grant (Read + Write); DDL stays
-    * separate because CREATE/DROP/ALTER are deliberately higher-privilege.
+  /** Whether a role-permission verb covers a parser-emitted access verb. Grant verbs are the
+    * canonical (RO / RW / DDL / ALL) set; the parser emits the collapsed
+    * `Verb.Read | Verb.Write | Verb.Ddl` per access. `RW` is the only multi-cover grant (Read +
+    * Write); DDL stays separate because CREATE/DROP/ALTER are deliberately higher-privilege.
     */
   private def verbCovers(grantVerb: String, access: Verb): Boolean =
     val gu = grantVerb.toUpperCase
@@ -152,24 +153,22 @@ final class PostgresAclValidator(
   private def wildcardMatch(grant: String, ref: String): Boolean =
     grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
 
-  /** Catalog-specific wildcard match: the literal-equal arm behaves like
-    * `wildcardMatch`, but the `*` arm additionally requires the referenced
-    * catalog to be in the session's allowed-catalog set. This closes the
-    * cross-tenant wildcard leak (a tenant admin with `*.*.* ALL` could
-    * otherwise SELECT from a sibling tenant's catalog -- see project
-    * memory `project-catalog-wildcard-cross-tenant`).
+  /** Catalog-specific wildcard match: the literal-equal arm behaves like `wildcardMatch`, but the
+    * `*` arm additionally requires the referenced catalog to be in the session's allowed-catalog
+    * set. This closes the cross-tenant wildcard leak (a tenant admin with `*.*.* ALL` could
+    * otherwise SELECT from a sibling tenant's catalog -- see project memory
+    * `project-catalog-wildcard-cross-tenant`).
     *
-    * An empty `sessionCatalogs` means no catalog matches via wildcard for
-    * this session. Operators who want a tenant admin to retain cross-tenant
-    * read access can still grant an explicit catalog (`otherdb.*.* ALL`),
-    * which bypasses the wildcard arm via the literal-equal check below. */
+    * An empty `sessionCatalogs` means no catalog matches via wildcard for this session. Operators
+    * who want a tenant admin to retain cross-tenant read access can still grant an explicit catalog
+    * (`otherdb.*.* ALL`), which bypasses the wildcard arm via the literal-equal check below.
+    */
   private def catalogMatch(
-      grant:           String,
-      ref:             String,
+      grant: String,
+      ref: String,
       sessionCatalogs: Set[String]
   ): Boolean =
-    if grant == RolePermission.Wildcard then
-      sessionCatalogs.exists(_.equalsIgnoreCase(ref))
+    if grant == RolePermission.Wildcard then sessionCatalogs.exists(_.equalsIgnoreCase(ref))
     else grant.equalsIgnoreCase(ref)
 
   private def hasWildcardAll(eff: EffectiveSet): Boolean =

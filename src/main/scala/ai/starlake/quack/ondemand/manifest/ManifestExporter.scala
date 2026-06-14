@@ -31,20 +31,24 @@ object ManifestExporter:
 
     // Pull the whole graph in one round-trip; the per-tenant loop below
     // walks the in-memory index maps instead of going back to the store.
-    val snap         = store.snapshot()
-    val dbsByTenant  = snap.tenantDbs.groupBy(_.tenantId)
-    val poolsByDb    = snap.pools.groupBy(_.tenantDbId)
-    val rolesByT     = snap.roles.groupBy(_.tenantId)
-    val groupsByT    = snap.groups.groupBy(_.tenantId)
-    val rolePermsByRole    = snap.rolePermissions.groupBy(_.roleId)
-    val colPoliciesByRole  = snap.columnPolicies.groupBy(_.roleId)
-    val rolesByGroup       = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
-    val rolesByUser     = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
-    val groupsByUser    = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
-    val poolPermsByUser =
-      snap.poolPermissions.collect { case p if p.userId.isDefined => p.userId.get -> p }
-        .groupBy(_._1).view.mapValues(_.map(_._2)).toMap
-    val usersByTenant   = snap.users.groupBy(_.tenant)
+    val snap              = store.snapshot()
+    val dbsByTenant       = snap.tenantDbs.groupBy(_.tenantId)
+    val poolsByDb         = snap.pools.groupBy(_.tenantDbId)
+    val rolesByT          = snap.roles.groupBy(_.tenantId)
+    val groupsByT         = snap.groups.groupBy(_.tenantId)
+    val rolePermsByRole   = snap.rolePermissions.groupBy(_.roleId)
+    val colPoliciesByRole = snap.columnPolicies.groupBy(_.roleId)
+    val rolesByGroup      = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
+    val rolesByUser       = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
+    val groupsByUser      = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
+    val poolPermsByUser   =
+      snap.poolPermissions
+        .collect { case p if p.userId.isDefined => p.userId.get -> p }
+        .groupBy(_._1)
+        .view
+        .mapValues(_.map(_._2))
+        .toMap
+    val usersByTenant = snap.users.groupBy(_.tenant)
 
     val tenants = snap.tenants.sortBy(_.displayName).map { t =>
       // Build id -> name maps for dbs, pools, roles, groups in this tenant.
@@ -143,11 +147,11 @@ object ManifestExporter:
             .sortBy(p => (p.catalogName, p.schemaName, p.tableName, p.columnName))
             .map { p =>
               ManifestRoleColumnPolicy(
-                catalog      = p.catalogName,
-                schema       = p.schemaName,
-                table        = p.tableName,
-                column       = p.columnName,
-                action       = p.action,
+                catalog = p.catalogName,
+                schema = p.schemaName,
+                table = p.tableName,
+                column = p.columnName,
+                action = p.action,
                 transformSql = p.transformSql
               )
             }
@@ -166,28 +170,29 @@ object ManifestExporter:
       // Users may be keyed by tenant id or tenant displayName depending on
       // how they were seeded; union both keys and dedup by user id.
       val tenantUsers = (
-        usersByTenant.getOrElse(Some(t.id),   Nil) ++
-        usersByTenant.getOrElse(Some(t.name), Nil)
+        usersByTenant.getOrElse(Some(t.id), Nil) ++
+          usersByTenant.getOrElse(Some(t.name), Nil)
       ).distinctBy(_.id)
-        .sortBy(_.username).map { u =>
-        val userRoleNames  =
-          rolesByUser.getOrElse(u.id, Nil).flatMap(roleIdToName.get).sorted
-        val userGroupNames =
-          groupsByUser.getOrElse(u.id, Nil).flatMap(groupIdToName.get).sorted
-        val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { pp =>
-          ManifestPoolGrant(pool = pp.poolId.flatMap(poolIdToName.get))
+        .sortBy(_.username)
+        .map { u =>
+          val userRoleNames =
+            rolesByUser.getOrElse(u.id, Nil).flatMap(roleIdToName.get).sorted
+          val userGroupNames =
+            groupsByUser.getOrElse(u.id, Nil).flatMap(groupIdToName.get).sorted
+          val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { pp =>
+            ManifestPoolGrant(pool = pp.poolId.flatMap(poolIdToName.get))
+          }
+          ManifestUser(
+            tenant = u.tenant,
+            username = u.username,
+            password = None,
+            role = u.role,
+            enabled = true,
+            roles = userRoleNames,
+            groups = userGroupNames,
+            poolGrants = userPoolGrants
+          )
         }
-        ManifestUser(
-          tenant = u.tenant,
-          username = u.username,
-          password = None,
-          role = u.role,
-          enabled = true,
-          roles = userRoleNames,
-          groups = userGroupNames,
-          poolGrants = userPoolGrants
-        )
-      }
 
       (
         ManifestTenant(

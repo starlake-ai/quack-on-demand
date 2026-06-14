@@ -66,8 +66,7 @@ final class ManagerServer(
         "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
           "UI login flow) before exposing the manager beyond localhost."
       )
-    else
-      logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
+    else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
 
     Kleisli { req =>
       val path = req.uri.path.toString
@@ -79,9 +78,9 @@ final class ManagerServer(
         // it doesn't leak cross-origin); the header is the CLI / static-key
         // path. A request can present either; the static key only ever
         // matches via the header.
-        val headerToken = req.headers.get(CIString("X-API-Key")).map(_.head.value)
-        val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
-        val provided    = headerToken.orElse(cookieToken)
+        val headerToken  = req.headers.get(CIString("X-API-Key")).map(_.head.value)
+        val cookieToken  = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
+        val provided     = headerToken.orElse(cookieToken)
         val staticMatch  = staticConfigured.exists(expected => headerToken.contains(expected))
         val sessionAdmin = provided.exists(sessions.isAdmin)
         val openMode     = staticConfigured.isEmpty
@@ -279,7 +278,7 @@ final class ManagerServer(
       Endpoints.quarantineNode.serverLogic { case (req, key) =>
         nodes.quarantineNode(req, key)(sessions.scopeOf)
       },
-Endpoints.createTenant.serverLogic { case (req, key) =>
+      Endpoints.createTenant.serverLogic { case (req, key) =>
         tenants.createTenant(req, key)(sessions.scopeOf)
       },
       Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.scopeOf)),

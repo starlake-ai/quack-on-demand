@@ -1163,13 +1163,13 @@ final class PostgresControlPlaneStore(
 
   private def readColumnPolicy(rs: ResultSet): RoleColumnPolicy =
     RoleColumnPolicy(
-      id          = rs.getString("id"),
-      roleId      = rs.getString("role_id"),
+      id = rs.getString("id"),
+      roleId = rs.getString("role_id"),
       catalogName = rs.getString("catalog_name"),
-      schemaName  = rs.getString("schema_name"),
-      tableName   = rs.getString("table_name"),
-      columnName  = rs.getString("column_name"),
-      action      = rs.getString("action"),
+      schemaName = rs.getString("schema_name"),
+      tableName = rs.getString("table_name"),
+      columnName = rs.getString("column_name"),
+      action = rs.getString("action"),
       transformSql = Option(rs.getString("transform_sql"))
     )
 

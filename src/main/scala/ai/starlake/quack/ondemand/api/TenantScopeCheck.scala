@@ -35,8 +35,8 @@ object TenantScopeCheck:
     * Resolution outcomes:
     *   - `Some(tenantId)` and the session can manage it => admit (returns `None`).
     *   - `Some(tenantId)` out of scope => 403 `tenant_forbidden`.
-    *   - `None` (resource not found) => admit; the handler returns its usual 404. We deliberately do
-    *     NOT 403 on missing-id, to avoid leaking cross-tenant existence information.
+    *   - `None` (resource not found) => admit; the handler returns its usual 404. We deliberately
+    *     do NOT 403 on missing-id, to avoid leaking cross-tenant existence information.
     *
     * Superuser and static-key sessions always admit (same as [[reject]]).
     */

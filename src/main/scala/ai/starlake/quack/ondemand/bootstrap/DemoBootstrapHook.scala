@@ -9,13 +9,12 @@ import org.slf4j.LoggerFactory
 
 import scala.util.Try
 
-/** Reads the bundled (or operator-provided) demo manifest pointed at by
-  * `QOD_BOOTSTRAP_YAML` and imports it via [[ManifestImporter]]. Non-fatal
-  * at every failure boundary -- a broken YAML loses you the demo, not the
-  * manager.
+/** Reads the bundled (or operator-provided) demo manifest pointed at by `QOD_BOOTSTRAP_YAML` and
+  * imports it via [[ManifestImporter]]. Non-fatal at every failure boundary -- a broken YAML loses
+  * you the demo, not the manager.
   *
-  * Dependencies are injected so the hook is unit-testable without
-  * touching the filesystem or the real process environment.
+  * Dependencies are injected so the hook is unit-testable without touching the filesystem or the
+  * real process environment.
   */
 object DemoBootstrapHook:
 
@@ -26,13 +25,15 @@ object DemoBootstrapHook:
 
   /** Runs the hook. Always succeeds: failure paths log and return Unit.
     *
-    * @param env       env-var reader (e.g. `sys.env.get`)
-    * @param readFile  file reader returning the manifest YAML body
-    * @param store     control-plane store to apply the manifest to
-    * @param fedStore  optional federated-source store; when provided, any
-    *                  federatedSources in the manifest are persisted too.
-    *                  Pass None to silently drop federation entries (the
-    *                  unit-test path uses this).
+    * @param env
+    *   env-var reader (e.g. `sys.env.get`)
+    * @param readFile
+    *   file reader returning the manifest YAML body
+    * @param store
+    *   control-plane store to apply the manifest to
+    * @param fedStore
+    *   optional federated-source store; when provided, any federatedSources in the manifest are
+    *   persisted too. Pass None to silently drop federation entries (the unit-test path uses this).
     */
   def run(
       env: String => Option[String],

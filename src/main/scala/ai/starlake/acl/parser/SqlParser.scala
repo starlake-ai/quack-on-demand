@@ -30,8 +30,10 @@ object SqlParser:
   /** Extract table references from a SQL string that may contain multiple statements.
     *
     * Each statement is processed independently:
-    *   - SELECT statements: tables are extracted and qualified, reported as Extracted with Read accesses
-    *   - DML statements (INSERT/UPDATE/DELETE/MERGE): reported as Extracted with Write/Read accesses
+    *   - SELECT statements: tables are extracted and qualified, reported as Extracted with Read
+    *     accesses
+    *   - DML statements (INSERT/UPDATE/DELETE/MERGE): reported as Extracted with Write/Read
+    *     accesses
     *   - DDL statements (CREATE/DROP/ALTER): reported as Extracted with Ddl/Read accesses
     *   - TRUNCATE: reported as Extracted with Write access (mass-delete semantic)
     *   - Control-flow statements (COMMIT, SET, USE, etc.): reported as ControlFlow
@@ -95,8 +97,8 @@ object SqlParser:
         StatementResult.ParseError(0, snippet, message)
 
   private def processStatement(
-      stmt:   Statement,
-      index:  Int,
+      stmt: Statement,
+      index: Int,
       config: Config
   ): StatementResult =
     val snippet = truncateSnippet(stmt.toString)
@@ -104,72 +106,72 @@ object SqlParser:
       case select: Select =>
         val rawTables                 = TableExtractor.extract(select)
         val (qualifiedTables, errors) = TableQualifier.qualify(rawTables, config)
-        val accesses = qualifiedTables.map(t => TableAccess(t, Verb.Read)).toSet
+        val accesses                  = qualifiedTables.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, errors)
 
       // parser-3: INSERT
       case ins: Insert =>
-        val target               = ins.getTable
-        val srcRaw               = Option(ins.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1)           = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target     = ins.getTable
+        val srcRaw     = Option(ins.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
+        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
       // parser-4: UPDATE
       case upd: Update =>
-        val target               = upd.getTable
-        val readTables           = UpdateReadExtractor.extract(upd)
-        val (qSrc, e1)           = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target     = upd.getTable
+        val readTables = UpdateReadExtractor.extract(upd)
+        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
       // parser-5: DELETE
       case del: Delete =>
-        val target               = del.getTable
-        val readTables           = DeleteReadExtractor.extract(del)
-        val (qSrc, e1)           = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target     = del.getTable
+        val readTables = DeleteReadExtractor.extract(del)
+        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
       // parser-6: MERGE
       case mrg: Merge =>
-        val target               = mrg.getTable
+        val target                  = mrg.getTable
         val readTables: List[Table] = Option(mrg.getFromItem) match
-          case Some(t: Table)      => List(t)
-          case Some(fi: FromItem)  =>
+          case Some(t: Table)     => List(t)
+          case Some(fi: FromItem) =>
             val v = new TableExtractorVisitor()
             v.visitFromItem(fi)
             v.tables.toList
-          case None                => Nil
-        val (qSrc, e1)           = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+          case None => Nil
+        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
       // parser-7: CREATE TABLE
       case ct: CreateTable =>
-        val target               = ct.getTable
-        val srcRaw               = Option(ct.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1)           = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
+        val target     = ct.getTable
+        val srcRaw     = Option(ct.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
+        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
       // parser-7: CREATE VIEW
       case cv: CreateView =>
-        val target               = cv.getView
-        val srcRaw               = Option(cv.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1)           = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)           = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
+        val target     = cv.getView
+        val srcRaw     = Option(cv.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
+        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+        val accesses   = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
 
@@ -183,17 +185,17 @@ object SqlParser:
 
       // parser-8: ALTER TABLE
       case al: Alter =>
-        val target               = al.getTable
-        val (qTgt, errs)         = TableQualifier.qualify(List(target), config)
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet
+        val target       = al.getTable
+        val (qTgt, errs) = TableQualifier.qualify(List(target), config)
+        val accesses     = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet
         StatementResult.Extracted(index, snippet, accesses, errs)
 
       // parser-8: TRUNCATE
       case tr: Truncate =>
-        val target               = tr.getTable
-        val (qTgt, errs)         = TableQualifier.qualify(List(target), config)
+        val target       = tr.getTable
+        val (qTgt, errs) = TableQualifier.qualify(List(target), config)
         // Truncate is a mass-delete; treat as Write so a WRITE grant covers it.
-        val accesses             = qTgt.map(t => TableAccess(t, Verb.Write)).toSet
+        val accesses = qTgt.map(t => TableAccess(t, Verb.Write)).toSet
         StatementResult.Extracted(index, snippet, accesses, errs)
 
       case _: UnsupportedStatement =>

@@ -43,7 +43,7 @@ final class ManifestHandlers(
   ): IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
     superuserCheck(apiKey)(scopeOf) match
       case Some(err) => Left(err)
-      case None =>
+      case None      =>
         val m = ManifestExporter.build(store, Instant.now, managerVersion, hostname, federatedStore)
         Right(Yaml.pretty(m.asJson))
   }
@@ -54,14 +54,16 @@ final class ManifestHandlers(
     IO.blocking {
       superuserCheck(apiKey)(scopeOf) match
         case Some(err) => Left(err)
-        case None =>
+        case None      =>
           parser.parse(body).flatMap(_.as[ConfigManifest]) match
             case Left(e) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
             case Right(m) =>
               ManifestImporter.apply(m, store, federatedStore) match
                 case Left(errs) =>
-                  Left(StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; ")))
+                  Left(
+                    StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; "))
+                  )
                 case Right(_) =>
                   // Reload the supervisor's in-memory caches (tenants, tenant-dbs,
                   // pools, RBAC effective sets) from the freshly-written store
