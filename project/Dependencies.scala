@@ -45,6 +45,9 @@ object Dependencies {
   val nimbusJoseJwt         = "com.nimbusds" % "nimbus-jose-jwt" % Versions.nimbusJoseJwt
 
   val jsqlParser            = "com.manticore-projects.jsqlformatter" % "jsqlparser" % Versions.jsqlParser
+  // jsqltranspiler  provides JSQLColumResolver for column-level
+  // security rewriting. Shares the JSqlParser 5.3.218 ABI with jsqlParser above.
+  val jsqltranspiler        = "ai.starlake.jsqltranspiler" % "jsqltranspiler" % Versions.jsqltranspiler
   val catsCore              = "org.typelevel" %% "cats-core" % Versions.cats
   val kubernetesClient      = "io.fabric8" % "kubernetes-client" % Versions.fabric8
   val kubernetesServerMock  = "io.fabric8" % "kubernetes-server-mock" % Versions.fabric8 % Test
