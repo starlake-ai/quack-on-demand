@@ -147,3 +147,20 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
       case other                          => fail(s"expected Rewritten, got $other")
   }
+
+  it should "expand multi-table SELECT * and mask per-table" in {
+    val multi = Map(
+      "customer" -> List("c_id", "c_email"),
+      "orders"   -> List("o_id", "o_customer")
+    )
+    val out = rw.rewrite(
+      "SELECT * FROM customer c JOIN orders o ON c.c_id = o.o_customer",
+      multi, List(maskEmail),
+      Some("acme_tpch"), Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) =>
+        sql should include ("'***'")
+        sql.toLowerCase should include ("o_id")
+      case other => fail(s"expected Rewritten, got $other")
+  }
