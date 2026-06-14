@@ -139,6 +139,101 @@ The DDL target is extracted as a `Ddl` access; a `CREATE TABLE ... AS SELECT` al
 
 If a statement fails to parse, it is denied unless the principal holds a `*.*.* ALL` grant (a conservative fallback so an unrecognized statement cannot slip through).
 
+## Column-level policies
+
+The table-level ACL described above is "all-or-nothing" per table: once a role has `RO` on `customer`, every column on `customer` is readable. Many regulated workloads (GDPR, HIPAA, PCI) need finer control: a role may read `customer` but `c_ssn` is forbidden, or `c_email` is returned as `'***'` instead of the raw value. The column-policy system enforces these patterns by rewriting the user's SELECT before it reaches a Quack node.
+
+### Data model
+
+Policies live in `qodstate_role_column_policy` (one row per `(role, catalog, schema, table, column)`) and attach to roles only; users inherit them through the same role-membership graph as table permissions.
+
+| Column | Meaning |
+|---|---|
+| `role_id`        | The role that carries the policy. |
+| `catalog_name` / `schema_name` / `table_name` | The protected table. `*` wildcards work the same way as for table permissions, including tenant scoping on `catalog_name`. |
+| `column_name`    | The protected column. **Always literal — `*` is rejected.** A wildcard column policy would mean "deny everything", which is already expressible via absence of a table-level grant. |
+| `action`         | `deny` (refuse any query that references the column) or `mask` (return a transformed value). |
+| `transform_sql`  | The transform expression. `NULL` for `deny`; a strict-containment-validated scalar SQL expression for `mask`. |
+
+`UNIQUE (role_id, catalog_name, schema_name, table_name, column_name)` so updates replace in place. `ON DELETE CASCADE from qodstate_role` so dropping a role drops its policies.
+
+### Where the rewriter sits in the pipeline
+
+```
+client SQL
+   │
+   ▼  table-level ACL (per the gates above)              ─── unchanged
+   │     returns Allowed at the (role, table) level
+   │
+   ▼  ColumnPolicyRewriter                                ─── new
+   │     - parses the SQL via JSqlParser
+   │     - walks every PlainSelect reachable (projections,
+   │       WHERE / HAVING, subqueries, CTE bodies, UNION arms)
+   │     - expands `SELECT *` against the DuckLake column catalog
+   │     - for each column reference, looks up a matching policy
+   │         · `deny` → refuses the query (403)
+   │         · `mask` → replaces the reference with `transform_sql`
+   │
+   ▼  adapter sends the rewritten SQL to the Quack node
+```
+
+The rewriter only runs for SELECT-shaped statements; DML and DDL pass through unchanged (the table-level ACL has already gated whether the user can write to the target). Statements that fail to parse are passed through unmodified — DuckDB returns the syntax error to the client, just as it does today.
+
+Superusers bypass the rewriter, matching the bypass behaviour of the table-level ACL.
+
+### Action: deny
+
+A `deny` policy refuses any query that references the protected column anywhere — projection, WHERE clause, HAVING, GROUP BY, ORDER BY, JOIN condition, subquery, CTE body — and short-circuits with a 403 carrying the column qualifier. `SELECT *` deny is fail-closed: if star expansion uncovers a denied column, the query is refused rather than silently dropping the column from the projection.
+
+### Action: mask + transform_sql
+
+A `mask` policy replaces every reference to the column with the operator-authored `transform_sql` expression. The replacement happens in place: composite expressions like `length(c_email)` become `length('***')`; predicates like `WHERE c_email LIKE '%@acme.com'` become `WHERE '***' LIKE '%@acme.com'` (which trivially matches no rows, the right behaviour for a masked column under predicate inference). Projection aliases are preserved (`SELECT c_email AS e FROM customer` stays aliased as `e`).
+
+`transform_sql` is **strict-containment-validated** at policy create time. The validator runs once when the operator writes the policy and rejects expressions that would let the policy leak its own column:
+
+1. The expression parses as a single scalar SQL expression.
+2. Every column reference in the expression names only the protected column (case-insensitive). `concat(c_email, c_phone)` is rejected when the policy is on `c_email`.
+3. No subqueries, `EXISTS`, or any other form of nested SELECT.
+4. No side-effect or escape functions: the denylist includes `read_csv`, `read_parquet`, `read_json`, `attach`, `detach`, `install`, `load`, `system`, `current_setting`, `set_setting`, `pg_read_server_files`, `pg_read_binary_file`, and anything matching `pragma_*` (prefix).
+5. Canonical form ≤ 1024 chars.
+
+A failed validation returns `400 invalid_policy` with the violated rule named in the message. Typical valid expressions:
+
+| `transform_sql` | Meaning |
+|---|---|
+| `'***'`                                           | constant string |
+| `NULL`                                             | scrub to NULL |
+| `md5(c_email)`                                     | hash |
+| `concat('user_', md5(c_email))`                    | prefix + hash |
+| `regexp_replace(c_phone, '\d', 'X')`               | character substitution |
+| `concat('****', substr(c_phone, length(c_phone) - 3, 4))` | last-4 reveal |
+
+### SELECT * expansion
+
+When the user issues `SELECT *` (or `SELECT t.*`), the rewriter reads the column list from the DuckLake catalog and expands the star to a literal projection BEFORE applying policies. Operators see the same number of columns the table actually has, with masked columns rewritten in place. When the catalog cannot enumerate the table (federated source temporarily unreachable, etc.), the rewriter passes the original `*` through — table-level ACL still decided whether the user could read the table in the first place. A `column_policy_catalog_lookups_total{result=error}` metric surfaces this case for operators.
+
+### Effective policies and caching
+
+Column policies join the `RolePermission` and pool-permission rows in the per-user `EffectiveSet`. The same 60-second `PoolSupervisor` cache covers them, and the same mutator-invalidation contract applies: `createColumnPolicy`, `updateColumnPolicy`, and `deleteColumnPolicy` each call `invalidateEffectiveCache()`, so a freshly-authored policy takes effect on the next handshake regardless of the TTL.
+
+Per-statement cost is in-memory only: a small AST walk + per-column lookup against the cached `EffectiveSet.columnPolicies` list. No Postgres traffic on the hot path.
+
+### Observability
+
+Three Micrometer metrics expose the rewriter's behaviour:
+
+| Metric | Tags | Use |
+|---|---|---|
+| `column_policy_rewrites_total`       | `tenant`, `pool`, `outcome` ∈ `{rewritten, denied, passthrough}` | Fraction of reads paying the rewrite cost; spot policy regressions. |
+| `column_policy_catalog_lookups_total` | `tenant`, `pool`, `result` ∈ `{hit, miss, error}` | `ColumnCatalog` cache effectiveness; alert on `error > 0` to catch federation breakage. |
+| `column_policy_rewrite_duration_seconds` | `tenant`, `pool` | Histogram of rewrite step wall time; alert on percentile regressions. |
+
+`Denied` outcomes also surface in the statement-history view (with `status=denied` and the offending column qualifier in the error message) and in the audit log line `column policy denied: user=… column=… role=… statement=…`.
+
+### Authoring
+
+Column policies are administered the same way as table permissions: via REST endpoints under `/api/role/column-policy/{create,update,delete,list}`, via the admin UI's "Column policies" tab on the role detail page, and via YAML manifest (`columnPolicies` list under each role). The bundled demo manifest (`bootstrap-demo.yaml`) ships an example mask policy on `acme/analyst/customer.c_phone` so a fresh `LOAD_TPCH=1` boot demonstrates the feature end-to-end without manual setup.
+
 ## The two gates
 
 Every FlightSQL request passes through two sequential gates.
