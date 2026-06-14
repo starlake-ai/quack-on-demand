@@ -40,6 +40,11 @@ import type {
   RolePermissionGrantRequest,
   RolePermissionRevokeRequest,
   RolePermissionListResponse,
+  ColumnPolicyDto,
+  CreateColumnPolicyRequest,
+  UpdateColumnPolicyRequest,
+  DeleteColumnPolicyRequest,
+  ColumnPolicyListResponse,
   GroupResponse,
   GroupCreateRequest,
   GroupDeleteRequest,
@@ -245,6 +250,16 @@ export const api = {
     post<RolePermissionResponse>('/role/permission/grant', req),
   revokeRolePermission: (req: RolePermissionRevokeRequest) =>
     post<void>('/role/permission/revoke', req),
+
+  // ----- RBAC: column-level policies -----
+  createColumnPolicy: (req: CreateColumnPolicyRequest) =>
+    post<ColumnPolicyDto>('/role/column-policy/create', req),
+  updateColumnPolicy: (req: UpdateColumnPolicyRequest) =>
+    post<void>('/role/column-policy/update', req),
+  deleteColumnPolicy: (req: DeleteColumnPolicyRequest) =>
+    post<void>('/role/column-policy/delete', req),
+  listColumnPolicies: (roleId: string) =>
+    get<ColumnPolicyListResponse>(`/role/column-policy/list?roleId=${encodeURIComponent(roleId)}`),
 
   // ----- RBAC: groups -----
   listGroups:  (tenant: string) =>
