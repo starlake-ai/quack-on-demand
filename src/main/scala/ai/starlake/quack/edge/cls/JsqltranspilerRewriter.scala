@@ -89,6 +89,21 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
     val visitor = new PolicyVisitor(policies, changed)
 
+    // Recurse into CTE bodies first. Top-level lineage doesn't apply inside the CTE body, so pass
+    // empty origins; the visitor will fall back to each Column's own (table, column) qualifier
+    // resolved via the inner PlainSelect's FROM clause.
+    Option(sel.getWithItemsList).foreach { wis =>
+      val it = wis.iterator()
+      while it.hasNext do
+        val wi = it.next()
+        Option(wi.getParenthesedStatement).foreach {
+          case ps: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
+            val (innerChanged, _) = applyPolicies(ps.getSelect, IndexedSeq.empty, policies)
+            if innerChanged then changed.set(true)
+          case _ => ()
+        }
+    }
+
     sel match
       case ps: PlainSelect =>
         // FROM-tables of this select (key -> table). Single-table case lets the visitor resolve
@@ -101,12 +116,14 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           val it  = items.listIterator()
           var idx = 0
           while it.hasNext do
-            val si           = it.next()
-            val (table, col) = if origins.indices.contains(idx) then origins(idx) else ("", "")
+            val si = it.next()
             // Top-level column origin override: the resolver knows the physical lineage of the
             // projection slot even if the expression at that slot is itself a Column whose name
-            // is an alias of another column.
-            visitor.topLevelOverride = Some((table, col))
+            // is an alias of another column. Only meaningful when origins are available (top-level
+            // call); inside recursion (e.g. CTE body) origins is empty and the visitor falls back
+            // to each Column's own (table, column) qualifier.
+            visitor.topLevelOverride =
+              if origins.indices.contains(idx) then Some(origins(idx)) else None
             val expr     = si.getExpression
             val replaced = visitor.visit(expr)
             if (replaced ne expr) then
