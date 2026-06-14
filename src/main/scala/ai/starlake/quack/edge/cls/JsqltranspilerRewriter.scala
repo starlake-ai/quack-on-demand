@@ -27,7 +27,15 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       (tableKey +: cols).toArray
     }
 
-    val resolver = new JSQLColumResolver(schemaDef)
+    // Use the 3-arg constructor so SQL schema qualifiers (e.g. `tpch1.customer`) match the
+    // schemaless rows in `schemaDef`. The 1-arg form leaves currentSchema="" and silently
+    // mismatches every schema-qualified table ref. defaultCatalog/defaultSchema come from the
+    // caller's SchemaContext (the session-defaults pinned at handshake time).
+    val resolver = new JSQLColumResolver(
+      defaultCatalog.getOrElse(""),
+      defaultSchema.getOrElse(""),
+      schemaDef
+    )
     resolver.setErrorMode(unresolvedMode match
       case UnresolvedMode.Deny        => JdbcMetaData.ErrorMode.STRICT
       case UnresolvedMode.Passthrough => JdbcMetaData.ErrorMode.LENIENT)
