@@ -190,3 +190,31 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
       case other                          => fail(s"expected Rewritten, got $other")
   }
+
+  it should "deny SELECT against an unknown table in STRICT mode" in {
+    val out = rw.rewrite(
+      sql            = "SELECT c_email FROM unknown_table",
+      schema         = Map.empty, // resolver has no entry for unknown_table
+      policies       = List(maskEmail),
+      defaultCatalog = Some("acme_tpch"),
+      defaultSchema  = Some("tpch1"),
+      unresolvedMode = UnresolvedMode.Deny
+    )
+    out match
+      case RewriteOutcome.Denied(_) => succeed
+      case other                    => fail(s"expected Denied, got $other")
+  }
+
+  it should "pass through SELECT against an unknown table in LENIENT mode" in {
+    val out = rw.rewrite(
+      sql            = "SELECT c_email FROM unknown_table",
+      schema         = Map.empty,
+      policies       = List(maskEmail),
+      defaultCatalog = Some("acme_tpch"),
+      defaultSchema  = Some("tpch1"),
+      unresolvedMode = UnresolvedMode.Passthrough
+    )
+    out match
+      case RewriteOutcome.Passthrough => succeed
+      case other                      => fail(s"expected Passthrough, got $other")
+  }
