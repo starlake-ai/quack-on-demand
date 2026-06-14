@@ -451,11 +451,15 @@ object Main extends IOApp with LazyLogging:
       )
       val classifier = new StatementClassifier(classifierCfg)
 
+      val clsConfig = com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.cls")
+      val clsEnabled: Boolean = clsConfig.getBoolean("enabled")
+      if !clsEnabled then
+        logger.info(
+          "column-level security is DISABLED (quack-on-demand.cls.enabled=false). " +
+            "Every statement bypasses the rewriter."
+        )
       val unresolvedTableMode: ai.starlake.quack.edge.cls.UnresolvedMode =
-        com.typesafe.config.ConfigFactory
-          .load()
-          .getString("quack-on-demand.cls.unresolvedTable")
-          .toLowerCase match
+        clsConfig.getString("unresolvedTable").toLowerCase match
           case "deny" => ai.starlake.quack.edge.cls.UnresolvedMode.Deny
           case "pass" => ai.starlake.quack.edge.cls.UnresolvedMode.Pass
           case other  =>
@@ -490,7 +494,8 @@ object Main extends IOApp with LazyLogging:
         )
       val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
         catalog = columnCatalog,
-        unresolvedMode = unresolvedTableMode
+        unresolvedMode = unresolvedTableMode,
+        enabled = clsEnabled
       )
 
       val fsRouter = new FlightSqlRouter(

@@ -197,6 +197,21 @@ FROM x` is masked according to the base table's policy. For FROM-item subqueries
 outer-scope policy keyed on `(subAlias, exposedName)` so the outer projection is masked too,
 since jsqltranspiler's lineage stops at the FROM boundary.
 
+### Kill switch (feature flag — EXPERIMENTAL)
+
+Column-level security is **experimental** and ships **disabled by default**. Operators opt in
+by setting `quack-on-demand.cls.enabled = true` (or env `QOD_CLS_ENABLED=true`). When disabled,
+every statement bypasses the rewriter completely: no FROM-table catalog lookup, no
+jsqltranspiler call, no per-statement overhead. The behaviour matches a build with column
+policies absent. Treat the toggle as a kill switch you can flip off in an incident: change
+the env var and restart the manager.
+
+While the feature is experimental, expect rough edges around federated sources,
+`LateralSubSelect` / `TableFunction` FROM items, and the 5-second catalog cache TTL race
+documented below. Standard SELECT, JOIN, CTE, UNION, subquery, CASE, CAST, IN, BETWEEN,
+EXTRACT, window, and LIKE constructs are covered by tests and considered ready for staging
+trials.
+
 ### Unresolved-table behaviour
 
 When the rewriter encounters a table the DuckLake catalog cannot enumerate (federated alias
