@@ -89,7 +89,7 @@ object DuckLakeInitializer extends LazyLogging:
     // `exec` loaders run after the manager comes up), so we must not
     // assume the database already exists. CREATE DATABASE cannot run
     // inside the target DB, so connect to the admin DB first.
-    val adminDb = sys.env.getOrElse("PG_ADMIN_DB", "postgres")
+    val adminDb  = sys.env.getOrElse("PG_ADMIN_DB", "postgres")
     val adminUrl =
       s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(adminDb, "UTF-8")}"
     val adminConn = DriverManager.getConnection(adminUrl, pgUser, pgPassword)
@@ -101,11 +101,13 @@ object DuckLakeInitializer extends LazyLogging:
       val checkStmt = adminConn.prepareStatement(
         "SELECT 1 FROM pg_database WHERE datname = ?"
       )
-      val exists = try
-        checkStmt.setString(1, dbName)
-        val rs = checkStmt.executeQuery()
-        try rs.next() finally rs.close()
-      finally checkStmt.close()
+      val exists =
+        try
+          checkStmt.setString(1, dbName)
+          val rs = checkStmt.executeQuery()
+          try rs.next()
+          finally rs.close()
+        finally checkStmt.close()
       if !exists then
         val createStmt = adminConn.createStatement()
         // CREATE DATABASE cannot use parameter binding for the identifier;
@@ -263,9 +265,9 @@ object DuckLakeInitializer extends LazyLogging:
   /** Identifier quote: wrap in `"`, double any embedded `"`. */
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
 
-  /** libpq keyword-value value: always wrap in `'...'`, escape `'` as `\'` and `\` as `\\`.
-    * Order matters -- the backslash escape must run before the apostrophe escape, otherwise the
-    * backslash we add to `\'` gets doubled.
+  /** libpq keyword-value value: always wrap in `'...'`, escape `'` as `\'` and `\` as `\\`. Order
+    * matters -- the backslash escape must run before the apostrophe escape, otherwise the backslash
+    * we add to `\'` gets doubled.
     */
   private[ondemand] def libpqValue(v: String): String =
     "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"

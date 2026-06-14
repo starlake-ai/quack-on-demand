@@ -51,11 +51,11 @@ private[parser] class TableExtractorVisitor:
 
   private def visitSelect(select: Select): Unit =
     select match
-      case ps: PlainSelect         => visitPlainSelect(ps)
-      case sol: SetOperationList   => visitSetOperationList(sol)
-      case _: Values               => () // VALUES clause, no tables
-      case ls: LateralSubSelect    => visitParenthesedSelect(ls)
-      case psel: ParenthesedSelect => visitParenthesedSelect(psel)
+      case ps: PlainSelect                                 => visitPlainSelect(ps)
+      case sol: SetOperationList                           => visitSetOperationList(sol)
+      case _: Values                                       => () // VALUES clause, no tables
+      case ls: LateralSubSelect                            => visitParenthesedSelect(ls)
+      case psel: ParenthesedSelect                         => visitParenthesedSelect(psel)
       case fq: net.sf.jsqlparser.statement.piped.FromQuery =>
         // DuckDB / BigQuery FROM-first shorthand: `FROM t [pipe ops...]`.
         // FromQuery extends Select but does not match the PlainSelect /
@@ -72,7 +72,7 @@ private[parser] class TableExtractorVisitor:
             val onExpressions = j.getOnExpressions
             if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
           }
-      case _                       => () // Other select types, no-op
+      case _ => () // Other select types, no-op
 
   private def visitPlainSelect(ps: PlainSelect): Unit =
     // FROM clause

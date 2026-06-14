@@ -5,9 +5,10 @@ import net.sf.jsqlparser.statement.delete.Delete
 
 import scala.jdk.CollectionConverters.*
 
-/** Walks a DELETE statement's WHERE clause, USING list, and JOIN list for
-  * read-side table references. Reuses `TableExtractorVisitor` so the same
-  * CTE-skipping and sub-query handling applies. */
+/** Walks a DELETE statement's WHERE clause, USING list, and JOIN list for read-side table
+  * references. Reuses `TableExtractorVisitor` so the same CTE-skipping and sub-query handling
+  * applies.
+  */
 object DeleteReadExtractor:
   def extract(del: Delete): List[Table] =
     val v = new TableExtractorVisitor()

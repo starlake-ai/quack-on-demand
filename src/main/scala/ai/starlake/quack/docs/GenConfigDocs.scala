@@ -6,9 +6,9 @@ import com.typesafe.config.{Config, ConfigFactory}
 import java.nio.file.{Files, Paths}
 import scala.util.Try
 
-/** Generates the Configuration reference page from `ConfigRegistry` (the same source the
-  * admin UI Config page uses) joined with the live default values from `application.conf`.
-  * Pure: no server, no DB. Args: [outPath].
+/** Generates the Configuration reference page from `ConfigRegistry` (the same source the admin UI
+  * Config page uses) joined with the live default values from `application.conf`. Pure: no server,
+  * no DB. Args: [outPath].
   */
 object GenConfigDocs:
 
@@ -16,12 +16,12 @@ object GenConfigDocs:
   def entries: List[ConfigEntry] =
     ConfigRegistry.collect(
       ConfigRegistry.rootsFor(
-        managerCls    = classOf[ai.starlake.quack.ManagerConfig],
-        flightCls     = classOf[ai.starlake.quack.FlightConfig],
-        authCls       = classOf[ai.starlake.quack.edge.config.AuthenticationConfig],
-        aclCls        = classOf[ai.starlake.quack.edge.config.AclConfig],
+        managerCls = classOf[ai.starlake.quack.ManagerConfig],
+        flightCls = classOf[ai.starlake.quack.FlightConfig],
+        authCls = classOf[ai.starlake.quack.edge.config.AuthenticationConfig],
+        aclCls = classOf[ai.starlake.quack.edge.config.AclConfig],
         validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
-        metricsCls    = classOf[ai.starlake.quack.observability.metrics.MetricsConfig]
+        metricsCls = classOf[ai.starlake.quack.observability.metrics.MetricsConfig]
       )
     )
 
@@ -38,9 +38,9 @@ object GenConfigDocs:
   private def escape(s: String): String =
     s.replace("|", "\\|").replace("\n", " ")
 
-  /** Like [[escape]] but also neutralizes MDX-significant characters for prose cells that
-    * are NOT wrapped in a code span. Docusaurus parses Markdown as MDX, so a bare `{tenant}`
-    * or `<x>` in a description would be read as a JSX expression/element and break the build.
+  /** Like [[escape]] but also neutralizes MDX-significant characters for prose cells that are NOT
+    * wrapped in a code span. Docusaurus parses Markdown as MDX, so a bare `{tenant}` or `<x>` in a
+    * description would be read as a JSX expression/element and break the build.
     */
   private def escapeText(s: String): String =
     escape(s).replace("{", "&#123;").replace("}", "&#125;").replace("<", "&lt;")

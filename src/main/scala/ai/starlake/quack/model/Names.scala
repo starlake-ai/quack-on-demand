@@ -19,17 +19,19 @@ object Names:
     * lowercase hex chars. Ids minted today are 32 hex chars (UUID with dashes stripped, ~128 bits
     * of entropy); the open-ended length lets shorter ids that already exist in the database keep
     * matching. This is the pattern used to disambiguate the FlightSQL `tenant` connection-string
-    * param -- a caller may pass either the display name (`tpch`) or the surrogate id
-    * (`t-02d0e86e` / `t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e`); the two shapes never overlap because
-    * display names cannot start with `t-` (hyphen is not in the identifier alphabet). */
+    * param -- a caller may pass either the display name (`tpch`) or the surrogate id (`t-02d0e86e`
+    * / `t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e`); the two shapes never overlap because display names
+    * cannot start with `t-` (hyphen is not in the identifier alphabet).
+    */
   private val TenantIdPattern = "^t-[0-9a-f]{8,}$".r
 
   def isValid(raw: String): Boolean =
     raw != null && raw.length >= 1 && raw.length <= MaxLength && Pattern.matches(raw)
 
-  /** Whether `raw` matches the tenant-id surrogate shape. Display names cannot
-    * match because they exclude hyphens; tenant ids cannot match `isValid` for
-    * the same reason. The two spaces are disjoint. */
+  /** Whether `raw` matches the tenant-id surrogate shape. Display names cannot match because they
+    * exclude hyphens; tenant ids cannot match `isValid` for the same reason. The two spaces are
+    * disjoint.
+    */
   def looksLikeTenantId(raw: String): Boolean =
     raw != null && TenantIdPattern.matches(raw)
 

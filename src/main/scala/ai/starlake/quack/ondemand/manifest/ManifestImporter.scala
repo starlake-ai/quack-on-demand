@@ -24,7 +24,6 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission
 }
 
-
 object ManifestImporter:
 
   type ValidationResult = Either[List[String], Unit]
@@ -148,23 +147,35 @@ object ManifestImporter:
       //    don't re-query the store on every iteration. The maps are
       //    mutated in lock-step with every upsert so the rest of apply()
       //    sees the live state.
-      val snap = store.snapshot()
+      val snap              = store.snapshot()
       val tenantDbsByTenant =
-        snap.tenantDbs.groupBy(_.tenantId).map { case (k, xs) =>
-          k -> scala.collection.mutable.Map.from(xs.map(td => td.name -> td))
-        }.to(scala.collection.mutable.Map)
+        snap.tenantDbs
+          .groupBy(_.tenantId)
+          .map { case (k, xs) =>
+            k -> scala.collection.mutable.Map.from(xs.map(td => td.name -> td))
+          }
+          .to(scala.collection.mutable.Map)
       val poolsByDb =
-        snap.pools.groupBy(_.tenantDbId).map { case (k, xs) =>
-          k -> scala.collection.mutable.Map.from(xs.map(p => p.name -> p))
-        }.to(scala.collection.mutable.Map)
+        snap.pools
+          .groupBy(_.tenantDbId)
+          .map { case (k, xs) =>
+            k -> scala.collection.mutable.Map.from(xs.map(p => p.name -> p))
+          }
+          .to(scala.collection.mutable.Map)
       val rolesByTenant =
-        snap.roles.groupBy(_.tenantId).map { case (k, xs) =>
-          k -> scala.collection.mutable.Map.from(xs.map(r => r.name -> r))
-        }.to(scala.collection.mutable.Map)
+        snap.roles
+          .groupBy(_.tenantId)
+          .map { case (k, xs) =>
+            k -> scala.collection.mutable.Map.from(xs.map(r => r.name -> r))
+          }
+          .to(scala.collection.mutable.Map)
       val groupsByTenant =
-        snap.groups.groupBy(_.tenantId).map { case (k, xs) =>
-          k -> scala.collection.mutable.Map.from(xs.map(g => g.name -> g))
-        }.to(scala.collection.mutable.Map)
+        snap.groups
+          .groupBy(_.tenantId)
+          .map { case (k, xs) =>
+            k -> scala.collection.mutable.Map.from(xs.map(g => g.name -> g))
+          }
+          .to(scala.collection.mutable.Map)
 
       def dbsOf(tid: String): collection.Map[String, TenantDb] =
         tenantDbsByTenant.getOrElse(tid, scala.collection.mutable.Map.empty)
@@ -216,7 +227,8 @@ object ManifestImporter:
         // ---- TenantDbs: delete-then-upsert.
         val keepDbNames = mt.tenantDbs.map(_.name).toSet
         val localDbs    = tenantDbsByTenant.getOrElseUpdate(
-          tenantId, scala.collection.mutable.Map.empty
+          tenantId,
+          scala.collection.mutable.Map.empty
         )
         localDbs.values.toList.foreach { d =>
           if !keepDbNames.contains(d.name) then
@@ -269,7 +281,7 @@ object ManifestImporter:
             val localPools = poolsByDb.getOrElseUpdate(dbId, scala.collection.mutable.Map.empty)
             val existing   = localPools.get(mp.name)
             val poolId     = existing.map(_.id).getOrElse(Names.newSurrogateId("p"))
-            val dist     = RoleDistribution(
+            val dist       = RoleDistribution(
               writeonly = mp.roleDistribution.writeonly,
               readonly = mp.roleDistribution.readonly,
               dual = mp.roleDistribution.dual
@@ -315,7 +327,8 @@ object ManifestImporter:
             errs += s"role '${mr.name}': tenant '${mr.tenant}' not found after tenant pass"
           case Some(tenantId) =>
             val localRoles = rolesByTenant.getOrElseUpdate(
-              tenantId, scala.collection.mutable.Map.empty
+              tenantId,
+              scala.collection.mutable.Map.empty
             )
             val existing = localRoles.get(mr.name)
             val roleId   = existing.map(_.id).getOrElse(Names.newSurrogateId("r"))
@@ -346,13 +359,13 @@ object ManifestImporter:
             mr.columnPolicies.foreach { mcp =>
               store.insertColumnPolicy(
                 RoleColumnPolicy(
-                  id           = Names.newSurrogateId("cp"),
-                  roleId       = roleId,
-                  catalogName  = mcp.catalog,
-                  schemaName   = mcp.schema,
-                  tableName    = mcp.table,
-                  columnName   = mcp.column,
-                  action       = mcp.action,
+                  id = Names.newSurrogateId("cp"),
+                  roleId = roleId,
+                  catalogName = mcp.catalog,
+                  schemaName = mcp.schema,
+                  tableName = mcp.table,
+                  columnName = mcp.column,
+                  action = mcp.action,
                   transformSql = mcp.transformSql
                 )
               )
@@ -366,7 +379,8 @@ object ManifestImporter:
             errs += s"group '${mg.name}': tenant '${mg.tenant}' not found after tenant pass"
           case Some(tenantId) =>
             val localGroups = groupsByTenant.getOrElseUpdate(
-              tenantId, scala.collection.mutable.Map.empty
+              tenantId,
+              scala.collection.mutable.Map.empty
             )
             val existing = localGroups.get(mg.name)
             val groupId  = existing.map(_.id).getOrElse(Names.newSurrogateId("g"))

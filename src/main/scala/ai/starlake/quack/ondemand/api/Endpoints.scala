@@ -118,8 +118,9 @@ object Endpoints:
     * profile carries a non-None `tenant`) with 403 `superuser_required` so a non-superuser admin
     * can't list cross-tenant config even with a stolen URL.
     */
-  val serverConfig
-      : PublicEndpoint[Option[String], (sttp.model.StatusCode, ErrorResponse), ConfigListResponse, Any] =
+  val serverConfig: PublicEndpoint[Option[
+    String
+  ], (sttp.model.StatusCode, ErrorResponse), ConfigListResponse, Any] =
     base.get
       .in("config" / "server")
       .in(sttp.tapir.header[Option[String]]("X-API-Key"))

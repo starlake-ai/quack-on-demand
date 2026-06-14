@@ -89,10 +89,10 @@ final class PoolSupervisor(
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
 
-  /** Caffeine-backed cache of resolved EffectiveSets. Caffeine handles the TTL
-    * (`expireAfterWrite`) and bounds memory (`maximumSize`) so distinct (userId, jwtRolesHash,
-    * jwtGroupsHash) combinations accumulated over the manager's lifetime can't leak. The previous
-    * hand-rolled `ConcurrentHashMap + expiresAt` form did neither.
+  /** Caffeine-backed cache of resolved EffectiveSets. Caffeine handles the TTL (`expireAfterWrite`)
+    * and bounds memory (`maximumSize`) so distinct (userId, jwtRolesHash, jwtGroupsHash)
+    * combinations accumulated over the manager's lifetime can't leak. The previous hand-rolled
+    * `ConcurrentHashMap + expiresAt` form did neither.
     */
   private val effectiveCache: com.github.benmanes.caffeine.cache.Cache[
     EffectiveCacheKey,

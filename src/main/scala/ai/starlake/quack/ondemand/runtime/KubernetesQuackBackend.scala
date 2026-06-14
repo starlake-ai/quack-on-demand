@@ -18,9 +18,9 @@ import scala.jdk.CollectionConverters._
   *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
   *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
   *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
-  *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads
-  *     it back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing
-  *     after a restart.
+  *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads it
+  *     back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing after a
+  *     restart.
   */
 final class KubernetesQuackBackend(
     client: KubernetesClient,
@@ -205,8 +205,7 @@ final class KubernetesQuackBackend(
     // whose env.valueFrom references a missing Secret. ensureTokenSecret
     // also makes the bearer string recoverable after manager restart.
     ensureTokenSecret(spec.nodeId, token)
-    if spec.extraSetupSql.nonEmpty then
-      ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+    if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
 
     val pod     = buildPod(spec, token)
     val created = client.pods.inNamespace(namespace).resource(pod).create()
@@ -238,9 +237,11 @@ final class KubernetesQuackBackend(
       client.pods
         .inNamespace(namespace)
         .withName(name)
-        .waitUntilCondition(pod => pod != null && readPodReady(pod),
-                            startupTimeoutSec.toLong,
-                            java.util.concurrent.TimeUnit.SECONDS)
+        .waitUntilCondition(
+          pod => pod != null && readPodReady(pod),
+          startupTimeoutSec.toLong,
+          java.util.concurrent.TimeUnit.SECONDS
+        )
     catch
       case _: io.fabric8.kubernetes.client.KubernetesClientTimeoutException =>
         sys.error(s"pod $name not ready in ${startupTimeoutSec}s")
@@ -285,8 +286,8 @@ final class KubernetesQuackBackend(
     ()
   }
 
-  /** Reconstruct a [[PoolKey]] from a pod's labels. Returns `None` if the pod is gone or its
-    * label set is incomplete (older labelling scheme or hand-edited pod).
+  /** Reconstruct a [[PoolKey]] from a pod's labels. Returns `None` if the pod is gone or its label
+    * set is incomplete (older labelling scheme or hand-edited pod).
     */
   private def readPoolKey(nodeId: String): Option[PoolKey] =
     Option(client.pods.inNamespace(namespace).withName(nodeId).get()).flatMap { p =>
@@ -300,8 +301,8 @@ final class KubernetesQuackBackend(
       yield PoolKey(tenant, tenantDb, pool)
     }
 
-  /** K8s Secret name for a pool's federation SQL. Hyphenizes the `tenantDb` underscore the same
-    * way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does so the result is RFC-1123
+  /** K8s Secret name for a pool's federation SQL. Hyphenizes the `tenantDb` underscore the same way
+    * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does so the result is RFC-1123
     * compatible. All segments are already Postgres-identifier-safe so no further escaping needed.
     */
   private def secretNameFor(key: PoolKey): String =
@@ -313,8 +314,8 @@ final class KubernetesQuackBackend(
     */
   private def tokenSecretNameFor(nodeId: String): String = s"qod-token-$nodeId"
 
-  /** Create-or-replace the per-pod token Secret. Same pattern as [[ensureFederationSecret]] --
-    * must run before pod create so kubelet sees the Secret when validating the pod's
+  /** Create-or-replace the per-pod token Secret. Same pattern as [[ensureFederationSecret]] -- must
+    * run before pod create so kubelet sees the Secret when validating the pod's
     * `env.valueFrom.secretKeyRef`. Idempotent across spawn retries.
     */
   private def ensureTokenSecret(nodeId: String, token: String): Unit =
@@ -333,10 +334,10 @@ final class KubernetesQuackBackend(
     ()
 
   /** Create-or-replace the per-pool federation Secret. Content is `stringData` (UTF-8, kubelet
-    * base64-encodes); kubelet rejects pods that reference a missing Secret so this MUST run
-    * before pod create. Idempotent -- fabric8's `resource(...).createOr(replace)` mirrors a
-    * kubectl-apply, so concurrent ensure-calls for the same pool either both succeed (latest
-    * wins) or one races on resourceVersion (auto-retried by fabric8).
+    * base64-encodes); kubelet rejects pods that reference a missing Secret so this MUST run before
+    * pod create. Idempotent -- fabric8's `resource(...).createOr(replace)` mirrors a kubectl-apply,
+    * so concurrent ensure-calls for the same pool either both succeed (latest wins) or one races on
+    * resourceVersion (auto-retried by fabric8).
     */
   private def ensureFederationSecret(key: PoolKey, sql: String): Unit =
     val name = secretNameFor(key)
@@ -375,7 +376,7 @@ final class KubernetesQuackBackend(
       val labels = Option(p.getMetadata.getLabels)
         .map(_.asScala)
         .getOrElse(scala.collection.mutable.Map.empty)
-      val nodeId  = p.getMetadata.getName
+      val nodeId = p.getMetadata.getName
       // Recover the bearer token from the per-pod Secret so a manager
       // restart doesn't wedge every Flight call to this pod on 401. Pods
       // without a matching Secret keep the empty token they had before;
@@ -434,8 +435,8 @@ end KubernetesQuackBackend
 
 object KubernetesQuackBackend:
 
-  /** Key inside the per-pool federation Secret holding the resolved SQL. Same string as the env
-    * var name [[buildPod]] sets on the pod, so an operator who shells into the pod and runs
+  /** Key inside the per-pool federation Secret holding the resolved SQL. Same string as the env var
+    * name [[buildPod]] sets on the pod, so an operator who shells into the pod and runs
     * `env | grep extraSetupSql` sees a familiar value -- the kubelet-injected env mirrors the
     * Secret's keyed payload.
     */

@@ -76,8 +76,8 @@ class AuthenticationService(
         .collectFirst { case r @ Right(_) => r }
         .getOrElse(Left(s"Authentication failed: ${errors.result().mkString("; ")}"))
 
-  /** System-scope bearer validation against the global chain. Used for management-plane logins
-    * (no tenant context) and FlightSQL handshakes with `?superuser=true`.
+  /** System-scope bearer validation against the global chain. Used for management-plane logins (no
+    * tenant context) and FlightSQL handshakes with `?superuser=true`.
     */
   def authenticateBearer(token: String): Either[String, AuthenticatedProfile] =
     authenticateBearer(AuthScope.System, token)
@@ -110,17 +110,17 @@ class AuthenticationService(
 
   /** Resolve the bearer chain for a given scope. For `AuthScope.Tenant(t)` we ask the registry for
     * a per-tenant OIDC authenticator built from the tenant's `authProvider` + `authConfig`. If the
-    * global chain already has a slot for that provider it gets swapped; if not (operator runs
-    * fully per-tenant OIDC) the per-tenant authenticator is prepended so it actually gets tried.
+    * global chain already has a slot for that provider it gets swapped; if not (operator runs fully
+    * per-tenant OIDC) the per-tenant authenticator is prepended so it actually gets tried.
     */
   private def bearerChainFor(scope: AuthScope): List[BearerAuthProvider] =
     scope match
-      case AuthScope.System => bearerProviders
+      case AuthScope.System           => bearerProviders
       case AuthScope.Tenant(tenantId) =>
         tenantOidcRegistry.flatMap(_.forTenant(tenantId)) match
           case None            => bearerProviders
           case Some(perTenant) =>
-            val target = perTenant.providerName
+            val target  = perTenant.providerName
             val swapped = bearerProviders.map {
               case o: OidcBearerAuthenticator if o.providerName == target => perTenant
               case other                                                  => other

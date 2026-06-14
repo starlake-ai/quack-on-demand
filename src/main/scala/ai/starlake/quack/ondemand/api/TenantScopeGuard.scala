@@ -3,8 +3,8 @@ package ai.starlake.quack.ondemand.api
 /** Extracts a tenant id from a management-plane request URL/query so the apiKeyGuard can reject
   * `tenant_forbidden` for non-superuser sessions.
   *
-  * Only the URL-path / query forms are recognized here. Body-tenant endpoints (e.g.
-  * POST /api/pool/create with `{ tenant: "..." }`) are NOT covered by this helper. Those handlers
+  * Only the URL-path / query forms are recognized here. Body-tenant endpoints (e.g. POST
+  * /api/pool/create with `{ tenant: "..." }`) are NOT covered by this helper. Those handlers
   * enforce the scope themselves via [[TenantScopeCheck.reject]].
   */
 object TenantScopeGuard:

@@ -162,7 +162,7 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.get(key) match
           case None =>
@@ -173,17 +173,20 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
   def listPools(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolListResponse] = IO.delay {
-    val all = sup.list().flatMap(p => respond(p.key))
+    val all      = sup.list().flatMap(p => respond(p.key))
     val filtered = apiKey.flatMap(scopeOf) match
-      case None              => all // no session => static-key trusted admin
+      case None                   => all // no session => static-key trusted admin
       case Some(s) if s.superuser => all
-      case Some(s) =>
+      case Some(s)                =>
         // PoolResponse.tenant holds the display name. Resolve each manageable
         // tenant id to a display name and filter by that set. Deleted tenants
         // simply drop out.
-        val allowedDisplay = sup.listTenants().collect {
-          case t if s.manageableTenants.contains(t.id) => t.displayName
-        }.toSet
+        val allowedDisplay = sup
+          .listTenants()
+          .collect {
+            case t if s.manageableTenants.contains(t.id) => t.displayName
+          }
+          .toSet
         all.filter(p => allowedDisplay.contains(p.tenant))
     Right(PoolListResponse(filtered))
   }
@@ -200,7 +203,7 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None =>
+      case None      =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.setPoolDisabled(key, req.disabled).map {
           case Right(_) =>

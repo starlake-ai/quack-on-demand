@@ -3,11 +3,10 @@ package ai.starlake.quack.docs
 import ai.starlake.quack.ondemand.api.{Endpoints, RbacEndpoints}
 import sttp.tapir.AnyEndpoint
 
-/** Collects every public Tapir endpoint val from the endpoint-definition objects via
-  * reflection, so a newly added endpoint is picked up by the OpenAPI generator with no
-  * extra wiring. Only public zero-arg members whose runtime return type is a
-  * `sttp.tapir.Endpoint` are included; the private `base` and `fedBase` builders are
-  * excluded because `getMethods` returns public members only.
+/** Collects every public Tapir endpoint val from the endpoint-definition objects via reflection, so
+  * a newly added endpoint is picked up by the OpenAPI generator with no extra wiring. Only public
+  * zero-arg members whose runtime return type is a `sttp.tapir.Endpoint` are included; the private
+  * `base` and `fedBase` builders are excluded because `getMethods` returns public members only.
   */
 object DocEndpoints:
 

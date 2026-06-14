@@ -35,13 +35,13 @@ final class FlightProducerImpl(
     * client gets correct multi-Execute semantics.
     *
     * `preferredNode` is the Quack node that served Prepare (when there was one). The Execute path
-    * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across
-    * the two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node
-    * call (DML / DDL / transaction control via [[PrepareStrategy.SkipExecute]]).
+    * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across the
+    * two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node call
+    * (DML / DDL / transaction control via [[PrepareStrategy.SkipExecute]]).
     *
     * `prepareDurationMs` is the wall-clock time the LIMIT-0 probe spent on the node. Forwarded to
-    * the router on the Execute call so the resulting [[StatementRecord]] carries it -- the UI
-    * uses it to render "57 ms / prep 28 ms" on the single visible row. `None` for SkipExecute.
+    * the router on the Execute call so the resulting [[StatementRecord]] carries it -- the UI uses
+    * it to render "57 ms / prep 28 ms" on the single visible row. `None` for SkipExecute.
     */
   private final case class PreparedExec(
       sql: String,
@@ -55,7 +55,8 @@ final class FlightProducerImpl(
 
   /** Cached empty Arrow schema for the [[PrepareStrategy.SkipExecute]] arm. FlightSQL clients
     * interpret a zero-field `dataset_schema` as "this statement is an update, not a query" and
-    * dispatch through `executeUpdate` rather than `executeQuery`. */
+    * dispatch through `executeUpdate` rather than `executeQuery`.
+    */
   private val emptySchemaBytes: ByteString =
     serializeSchema(new Schema(java.util.Collections.emptyList[Field]()))
 
@@ -96,9 +97,9 @@ final class FlightProducerImpl(
         // for a wrappable SELECT we send a LIMIT-0 subquery so the planner returns the result
         // schema without running the body; for everything else we fall back to the original SQL.
         val probeSqlOpt: Option[String] = strategy match
-          case PrepareStrategy.SkipExecute        => None
-          case PrepareStrategy.ProbeWrap(probe)   => Some(probe)
-          case PrepareStrategy.FullExecute        => Some(sql)
+          case PrepareStrategy.SkipExecute      => None
+          case PrepareStrategy.ProbeWrap(probe) => Some(probe)
+          case PrepareStrategy.FullExecute      => Some(sql)
 
         probeSqlOpt match
           case None =>
@@ -107,8 +108,12 @@ final class FlightProducerImpl(
             preparedStatements.put(
               handle,
               PreparedExec(
-                sql, connId, user, poolKey, eff,
-                preferredNode     = None,
+                sql,
+                connId,
+                user,
+                poolKey,
+                eff,
+                preferredNode = None,
                 prepareDurationMs = None
               )
             )
@@ -137,8 +142,12 @@ final class FlightProducerImpl(
                 preparedStatements.put(
                   handle,
                   PreparedExec(
-                    sql, connId, user, poolKey, eff,
-                    preferredNode     = Some(result.nodeId),
+                    sql,
+                    connId,
+                    user,
+                    poolKey,
+                    eff,
+                    preferredNode = Some(result.nodeId),
                     prepareDurationMs = Some(result.durationMs)
                   )
                 )
