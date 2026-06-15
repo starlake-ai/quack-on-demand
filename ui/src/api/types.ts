@@ -322,6 +322,32 @@ export interface UpdateColumnPolicyRequest {
 export interface DeleteColumnPolicyRequest { id: string; }
 export interface ColumnPolicyListResponse { policies: ColumnPolicyDto[]; }
 
+// ----- RBAC: row-level policies -----
+export interface RowPolicyDto {
+  id:           string;
+  roleId:       string;
+  catalogName:  string;
+  schemaName:   string;
+  tableName:    string;
+  predicateSql: string;
+}
+
+export interface CreateRowPolicyRequest {
+  roleId:       string;
+  catalogName:  string;
+  schemaName:   string;
+  tableName:    string;
+  predicateSql: string;
+}
+
+export interface UpdateRowPolicyRequest {
+  id:           string;
+  predicateSql: string;
+}
+
+export interface DeleteRowPolicyRequest { id: string; }
+export interface RowPolicyListResponse { policies: RowPolicyDto[]; }
+
 // ----- RBAC: groups -----
 export interface GroupResponse {
   id:          string;

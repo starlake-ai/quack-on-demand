@@ -1173,6 +1173,81 @@ final class PostgresControlPlaneStore(
       transformSql = Option(rs.getString("transform_sql"))
     )
 
+  // ---------------- Row policies (Liquibase 0013) ----------------
+
+  def insertRowPolicy(p: RoleRowPolicy): RoleRowPolicy = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_role_row_policy
+        |  (id, role_id, catalog_name, schema_name, table_name, predicate_sql)
+        |VALUES (?, ?, ?, ?, ?, ?)""".stripMargin
+    )
+    try
+      ps.setString(1, p.id)
+      ps.setString(2, p.roleId)
+      ps.setString(3, p.catalogName)
+      ps.setString(4, p.schemaName)
+      ps.setString(5, p.tableName)
+      ps.setString(6, p.predicateSql)
+      ps.executeUpdate()
+      p
+    finally ps.close()
+  }
+
+  def updateRowPolicy(id: String, predicateSql: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      "UPDATE qodstate_role_row_policy SET predicate_sql = ? WHERE id = ?"
+    )
+    try
+      ps.setString(1, predicateSql)
+      ps.setString(2, id)
+      ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
+  def deleteRowPolicy(id: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_role_row_policy WHERE id = ?")
+    try
+      ps.setString(1, id)
+      ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
+  def getRowPolicy(id: String): Option[RoleRowPolicy] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, role_id, catalog_name, schema_name, table_name, predicate_sql
+        |FROM qodstate_role_row_policy WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readRowPolicy(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listRowPolicies(roleId: String): List[RoleRowPolicy] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, role_id, catalog_name, schema_name, table_name, predicate_sql
+        |FROM qodstate_role_row_policy WHERE role_id = ? ORDER BY id""".stripMargin
+    )
+    try
+      ps.setString(1, roleId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readRowPolicy)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  private def readRowPolicy(rs: ResultSet): RoleRowPolicy =
+    RoleRowPolicy(
+      id = rs.getString("id"),
+      roleId = rs.getString("role_id"),
+      catalogName = rs.getString("catalog_name"),
+      schemaName = rs.getString("schema_name"),
+      tableName = rs.getString("table_name"),
+      predicateSql = rs.getString("predicate_sql")
+    )
+
   // ---------------- Snapshot ----------------
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
@@ -1250,6 +1325,11 @@ final class PostgresControlPlaneStore(
         c,
         "SELECT id, role_id, catalog_name, schema_name, table_name, column_name, action, transform_sql FROM qodstate_role_column_policy ORDER BY id",
         readColumnPolicy
+      ),
+      rowPolicies = selectAll(
+        c,
+        "SELECT id, role_id, catalog_name, schema_name, table_name, predicate_sql FROM qodstate_role_row_policy ORDER BY id",
+        readRowPolicy
       )
     )
   }

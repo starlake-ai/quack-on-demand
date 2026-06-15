@@ -262,6 +262,26 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
   def listAllColumnPolicies(): List[RoleColumnPolicy] =
     columnPolicies.values.toList.sortBy(_.id)
 
+  // ---------------- Row policies ----------------
+  private val rowPolicies = TrieMap.empty[String, RoleRowPolicy]
+
+  def insertRowPolicy(p: RoleRowPolicy): RoleRowPolicy = {
+    rowPolicies.put(p.id, p); p
+  }
+
+  def updateRowPolicy(id: String, predicateSql: String): Boolean =
+    rowPolicies.get(id) match {
+      case Some(p) => rowPolicies.put(id, p.copy(predicateSql = predicateSql)); true
+      case None    => false
+    }
+
+  def deleteRowPolicy(id: String): Boolean = rowPolicies.remove(id).isDefined
+
+  def getRowPolicy(id: String): Option[RoleRowPolicy] = rowPolicies.get(id)
+
+  def listRowPolicies(roleId: String): List[RoleRowPolicy] =
+    rowPolicies.values.filter(_.roleId == roleId).toList.sortBy(_.id)
+
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants         = listTenants(),
     tenantDbs       = tenantDbs.values.toList.sortBy(_.name),
@@ -274,5 +294,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     userGroups      = userGroups.toList.sorted.map((u, g) => UserGroupEdge(u, g)),
     userRoles       = userRoles .toList.sorted.map((u, r) => UserRoleEdge (u, r)),
     groupRoles      = groupRoles.toList.sorted.map((g, r) => GroupRoleEdge(g, r)),
-    poolPermissions = poolPermissions.values.toList.sortBy(_.id)
+    poolPermissions = poolPermissions.values.toList.sortBy(_.id),
+    columnPolicies  = columnPolicies.values.toList.sortBy(_.id),
+    rowPolicies     = rowPolicies.values.toList.sortBy(_.id)
   )
