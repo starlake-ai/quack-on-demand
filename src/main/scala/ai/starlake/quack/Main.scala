@@ -578,6 +578,7 @@ object Main extends IOApp with LazyLogging:
       val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
       val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
       val columnPolicyHandlers = new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup)
+      val rowPolicyHandlers    = new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
@@ -644,7 +645,8 @@ object Main extends IOApp with LazyLogging:
         serverConfigHandlers,
         manifestHandlers,
         federatedSourceHandlers,
-        columnPolicyHandlers
+        columnPolicyHandlers,
+        rowPolicyHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

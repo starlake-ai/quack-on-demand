@@ -269,6 +269,12 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     rowPolicies.put(p.id, p); p
   }
 
+  def updateRowPolicy(id: String, predicateSql: String): Boolean =
+    rowPolicies.get(id) match {
+      case Some(p) => rowPolicies.put(id, p.copy(predicateSql = predicateSql)); true
+      case None    => false
+    }
+
   def deleteRowPolicy(id: String): Boolean = rowPolicies.remove(id).isDefined
 
   def getRowPolicy(id: String): Option[RoleRowPolicy] = rowPolicies.get(id)

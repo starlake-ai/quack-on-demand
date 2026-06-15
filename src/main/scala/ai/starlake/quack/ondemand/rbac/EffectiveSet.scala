@@ -22,5 +22,6 @@ final case class EffectiveSet(
     groups: List[RbacGroup],
     permissions: List[RolePermission],
     poolPerms: List[PoolPermission],
-    columnPolicies: List[RoleColumnPolicy] = Nil
+    columnPolicies: List[RoleColumnPolicy] = Nil,
+    rowPolicies: List[RoleRowPolicy] = Nil
 )

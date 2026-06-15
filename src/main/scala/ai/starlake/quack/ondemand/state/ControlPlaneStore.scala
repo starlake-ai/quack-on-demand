@@ -189,6 +189,7 @@ trait ControlPlaneStore:
 
   // ----- Row policies -----
   def insertRowPolicy(p: RoleRowPolicy): RoleRowPolicy
+  def updateRowPolicy(id: String, predicateSql: String): Boolean
   def deleteRowPolicy(id: String): Boolean
   def getRowPolicy(id: String): Option[RoleRowPolicy]
   def listRowPolicies(roleId: String): List[RoleRowPolicy]

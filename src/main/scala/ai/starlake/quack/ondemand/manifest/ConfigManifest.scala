@@ -95,12 +95,20 @@ final case class ManifestRoleColumnPolicy(
     transformSql: Option[String] = None
 )
 
+final case class ManifestRoleRowPolicy(
+    catalog: String = "*",
+    schema: String,
+    table: String,
+    predicateSql: String
+)
+
 final case class ManifestRole(
     tenant: String,
     name: String,
     description: Option[String] = None,
     permissions: List[ManifestTablePermission] = Nil,
-    columnPolicies: List[ManifestRoleColumnPolicy] = Nil
+    columnPolicies: List[ManifestRoleColumnPolicy] = Nil,
+    rowPolicies: List[ManifestRoleRowPolicy] = Nil
 )
 
 final case class ManifestGroup(
@@ -156,6 +164,18 @@ object ConfigManifest:
       yield ManifestRoleColumnPolicy(catalog, schema, table, column, action, transformSql)
     },
     deriveEncoder[ManifestRoleColumnPolicy]
+  )
+
+  given Codec[ManifestRoleRowPolicy] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        catalog      <- c.getOrElse[String]("catalog")("*")
+        schema       <- c.get[String]("schema")
+        table        <- c.get[String]("table")
+        predicateSql <- c.get[String]("predicateSql")
+      yield ManifestRoleRowPolicy(catalog, schema, table, predicateSql)
+    },
+    deriveEncoder[ManifestRoleRowPolicy]
   )
 
   // Placement codecs: every field but `key` (tolerations) and
@@ -293,7 +313,8 @@ object ConfigManifest:
         description    <- c.getOrElse[Option[String]]("description")(None)
         permissions    <- c.getOrElse[List[ManifestTablePermission]]("permissions")(Nil)
         columnPolicies <- c.getOrElse[List[ManifestRoleColumnPolicy]]("columnPolicies")(Nil)
-      yield ManifestRole(tenant, name, description, permissions, columnPolicies)
+        rowPolicies    <- c.getOrElse[List[ManifestRoleRowPolicy]]("rowPolicies")(Nil)
+      yield ManifestRole(tenant, name, description, permissions, columnPolicies, rowPolicies)
     },
     deriveEncoder[ManifestRole]
   )
