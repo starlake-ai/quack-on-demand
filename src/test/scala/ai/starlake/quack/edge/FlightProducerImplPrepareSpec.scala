@@ -194,3 +194,84 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     added.size shouldBe 1
     added.head.prepareDurationMs shouldBe None
     added.head.sql shouldBe "INSERT INTO t VALUES (1)"
+
+  // ---- acceptPutStatement: literal (non-prepared) DML via executeUpdate ----
+
+  private final class RecordingPutListener
+      extends StreamListener[org.apache.arrow.flight.PutResult]:
+    val metadata    = new AtomicReference[Array[Byte]](null)
+    val onErrorRef  = new AtomicReference[Throwable](null)
+    @volatile var completed: Boolean = false
+    def onNext(r: org.apache.arrow.flight.PutResult): Unit =
+      // Copy the metadata bytes out synchronously -- the producer releases the
+      // backing ArrowBuf as soon as run() returns.
+      val buf = r.getApplicationMetadata
+      if buf != null then
+        val bytes = new Array[Byte](buf.readableBytes().toInt)
+        buf.getBytes(buf.readerIndex(), bytes)
+        metadata.set(bytes)
+    def onError(t: Throwable): Unit = onErrorRef.set(t)
+    def onCompleted(): Unit         = completed = true
+
+  private def runUpdate(producer: FlightProducerImpl, peer: String, sql: String): RecordingPutListener =
+    val cmd = FlightSql.CommandStatementUpdate.newBuilder().setQuery(sql).build()
+    val ack = new RecordingPutListener
+    // We never read the FlightStream for a plain statement update (no bound
+    // params), so null is safe here.
+    producer.acceptPutStatement(cmd, fakeCallContext(peer), null, ack).run()
+    ack
+
+  "FlightProducerImpl.acceptPutStatement" should
+    "execute a literal INSERT through the router and ack a DoPutUpdateResult" in:
+      val (producer, sent, _, peer) = setupProducer()
+      val ack = runUpdate(producer, peer, "INSERT INTO t VALUES (1)")
+      ack.onErrorRef.get() shouldBe null
+      ack.completed shouldBe true
+      // The statement actually reached a node.
+      sent.exists(_._2.contains("INSERT INTO t VALUES (1)")) shouldBe true
+      // The update count round-trips as a DoPutUpdateResult. The stubbed node
+      // returns `SELECT 1 AS x` (one row), so the extracted count is 1.
+      val meta = ack.metadata.get()
+      meta should not be null
+      FlightSql.DoPutUpdateResult.parseFrom(meta).getRecordCount shouldBe 1L
+
+  it should "ack onError (not onCompleted) when no pool is bound to the peer" in:
+    val (producer, _, _, _) = setupProducer()
+    val ack = runUpdate(producer, "unbound-peer", "INSERT INTO t VALUES (1)")
+    ack.completed shouldBe false
+    ack.onErrorRef.get() should not be null
+
+  // ---- acceptPutPreparedStatementUpdate: the path Arrow JDBC / DBeaver use ----
+  // (they prepare every statement, so a literal INSERT arrives as a prepared
+  // update, not a CommandStatementUpdate).
+
+  private def runPreparedUpdate(producer: FlightProducerImpl, peer: String, sql: String): RecordingPutListener =
+    val prep   = runPrepare(producer, peer, sql)
+    val handle = decodePrepareResult(prep.onNextValue.get()).getPreparedStatementHandle
+    val cmd = FlightSql.CommandPreparedStatementUpdate
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val ack = new RecordingPutListener
+    producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(peer), null, ack).run()
+    ack
+
+  "FlightProducerImpl.acceptPutPreparedStatementUpdate" should
+    "execute a prepared literal INSERT and ack a DoPutUpdateResult" in:
+      val (producer, sent, _, peer) = setupProducer()
+      val ack = runPreparedUpdate(producer, peer, "INSERT INTO t VALUES (1)")
+      ack.onErrorRef.get() shouldBe null
+      ack.completed shouldBe true
+      sent.exists(_._2.contains("INSERT INTO t VALUES (1)")) shouldBe true
+      FlightSql.DoPutUpdateResult.parseFrom(ack.metadata.get()).getRecordCount shouldBe 1L
+
+  it should "ack onError for an unknown prepared-statement handle" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd = FlightSql.CommandPreparedStatementUpdate
+      .newBuilder()
+      .setPreparedStatementHandle(ByteString.copyFromUtf8("bogus-handle"))
+      .build()
+    val ack = new RecordingPutListener
+    producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(peer), null, ack).run()
+    ack.completed shouldBe false
+    ack.onErrorRef.get() should not be null
