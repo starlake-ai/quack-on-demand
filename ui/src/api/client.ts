@@ -45,6 +45,11 @@ import type {
   UpdateColumnPolicyRequest,
   DeleteColumnPolicyRequest,
   ColumnPolicyListResponse,
+  RowPolicyDto,
+  CreateRowPolicyRequest,
+  UpdateRowPolicyRequest,
+  DeleteRowPolicyRequest,
+  RowPolicyListResponse,
   GroupResponse,
   GroupCreateRequest,
   GroupDeleteRequest,
@@ -260,6 +265,15 @@ export const api = {
     post<void>('/role/column-policy/delete', req),
   listColumnPolicies: (roleId: string) =>
     get<ColumnPolicyListResponse>(`/role/column-policy/list?roleId=${encodeURIComponent(roleId)}`),
+
+  createRowPolicy: (req: CreateRowPolicyRequest) =>
+    post<RowPolicyDto>('/role/row-policy/create', req),
+  updateRowPolicy: (req: UpdateRowPolicyRequest) =>
+    post<void>('/role/row-policy/update', req),
+  deleteRowPolicy: (req: DeleteRowPolicyRequest) =>
+    post<void>('/role/row-policy/delete', req),
+  listRowPolicies: (roleId: string) =>
+    get<RowPolicyListResponse>(`/role/row-policy/list?roleId=${encodeURIComponent(roleId)}`),
 
   // ----- RBAC: groups -----
   listGroups:  (tenant: string) =>
