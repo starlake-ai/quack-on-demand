@@ -21,7 +21,8 @@ import ai.starlake.quack.ondemand.state.{
   RbacGroup,
   RbacRole,
   RoleColumnPolicy,
-  RolePermission
+  RolePermission,
+  RoleRowPolicy
 }
 
 object ManifestImporter:
@@ -367,6 +368,20 @@ object ManifestImporter:
                   columnName = mcp.column,
                   action = mcp.action,
                   transformSql = mcp.transformSql
+                )
+              )
+            }
+            // Replace row policies: delete every existing then re-insert.
+            store.listRowPolicies(roleId).foreach(p => store.deleteRowPolicy(p.id))
+            mr.rowPolicies.foreach { mrp =>
+              store.insertRowPolicy(
+                RoleRowPolicy(
+                  id = Names.newSurrogateId("rp"),
+                  roleId = roleId,
+                  catalogName = mrp.catalog,
+                  schemaName = mrp.schema,
+                  tableName = mrp.table,
+                  predicateSql = mrp.predicateSql
                 )
               )
             }

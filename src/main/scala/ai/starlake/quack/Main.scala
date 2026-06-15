@@ -498,6 +498,15 @@ object Main extends IOApp with LazyLogging:
         enabled = clsEnabled
       )
 
+      val rlsEnabled: Boolean =
+        com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
+      if !rlsEnabled then
+        logger.info(
+          "row-level security is DISABLED (quack-on-demand.rls.enabled=false). " +
+            "Every statement bypasses the row-policy rewriter."
+        )
+      val rowPolicyRewriter = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = rlsEnabled)
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -507,7 +516,8 @@ object Main extends IOApp with LazyLogging:
         stmtHistory,
         stmtInstruments,
         classifier,
-        columnPolicyRewriter
+        columnPolicyRewriter,
+        rowPolicyRewriter
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
@@ -578,6 +588,7 @@ object Main extends IOApp with LazyLogging:
       val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
       val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
       val columnPolicyHandlers = new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup)
+      val rowPolicyHandlers    = new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
@@ -644,7 +655,8 @@ object Main extends IOApp with LazyLogging:
         serverConfigHandlers,
         manifestHandlers,
         federatedSourceHandlers,
-        columnPolicyHandlers
+        columnPolicyHandlers,
+        rowPolicyHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

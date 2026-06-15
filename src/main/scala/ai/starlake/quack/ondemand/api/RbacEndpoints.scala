@@ -202,6 +202,54 @@ object RbacEndpoints:
       .in(apiKey)
       .out(jsonBody[ColumnPolicyListResponse])
 
+  // ----- RBAC: row policies -----
+
+  val createRowPolicy: PublicEndpoint[
+    (CreateRowPolicyRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    RowPolicyDto,
+    Any
+  ] =
+    base.post
+      .in("role" / "row-policy" / "create")
+      .in(jsonBody[CreateRowPolicyRequest])
+      .in(apiKey)
+      .out(jsonBody[RowPolicyDto])
+
+  val updateRowPolicy: PublicEndpoint[
+    (UpdateRowPolicyRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("role" / "row-policy" / "update")
+      .in(jsonBody[UpdateRowPolicyRequest])
+      .in(apiKey)
+
+  val deleteRowPolicy: PublicEndpoint[
+    (DeleteRowPolicyRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("role" / "row-policy" / "delete")
+      .in(jsonBody[DeleteRowPolicyRequest])
+      .in(apiKey)
+
+  val listRowPolicies: PublicEndpoint[
+    (String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    RowPolicyListResponse,
+    Any
+  ] =
+    base.get
+      .in("role" / "row-policy" / "list")
+      .in(query[String]("roleId"))
+      .in(apiKey)
+      .out(jsonBody[RowPolicyListResponse])
+
   // ----- RBAC: groups -----
   val createGroup: PublicEndpoint[
     (GroupCreateRequest, Option[String]),

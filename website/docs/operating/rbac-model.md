@@ -300,6 +300,119 @@ The `column_policy_rewrites_total{outcome=...}` counter emits five outcomes:
 
 Column policies are administered the same way as table permissions: via REST endpoints under `/api/role/column-policy/{create,update,delete,list}`, via the admin UI's "Column policies" tab on the role detail page, and via YAML manifest (`columnPolicies` list under each role). The bundled demo manifest (`bootstrap-demo.yaml`) ships an example mask policy on `acme/analyst/customer.c_phone` so a fresh `LOAD_TPCH=1` boot demonstrates the feature end-to-end without manual setup.
 
+## Row-level policies
+
+Column policies restrict *which columns* a role sees; row policies restrict *which rows*. Where column-level security blanks out `c_ssn`, row-level security drops the customer records a role is not allowed to see in the first place — a salesperson sees only their own region's orders, a tenant analyst sees only rows tagged with their tenant id, an auditor sees everything. Like column policies, row policies are enforced by rewriting the user's SELECT before it reaches a Quack node; unlike column policies, the rewrite pushes a boolean filter down onto each protected table rather than transforming the projection.
+
+### Data model
+
+Policies live in `qodstate_role_row_policy` (one row per `(role, catalog, schema, table)`) and attach to roles only; users inherit them through the same role-membership graph as table permissions.
+
+| Column | Meaning |
+|---|---|
+| `role_id`        | The role that carries the policy. |
+| `catalog_name` / `schema_name` / `table_name` | The protected table. `*` wildcards work the same way as for table permissions, including tenant scoping on `catalog_name`. A `table_name = '*'` policy filters every table the query touches — useful for a tenant-id predicate that should apply everywhere. |
+| `predicate_sql`  | A boolean SQL expression that admits a row when it evaluates true. May embed identity-substitution tokens (see below). Validated at create time. |
+
+`UNIQUE (role_id, catalog_name, schema_name, table_name)` so updates replace in place; a role carries at most one predicate per exact table tuple (a wildcard policy and a specific-table policy are different tuples and both apply). `ON DELETE CASCADE from qodstate_role` so dropping a role drops its policies.
+
+### Where the rewriter sits in the pipeline
+
+The row rewriter runs *after* the column rewriter, so the two compose with row filtering innermost:
+
+```
+client SQL
+   │
+   ▼  table-level ACL                                    ─── unchanged
+   │
+   ▼  ColumnPolicyRewriter (masking / deny)              ─── outer
+   │
+   ▼  RowPolicyRewriter                                  ─── inner
+   │     - parses the (already column-rewritten) SQL
+   │     - walks every table reference reachable
+   │       (FROM, JOINs, subqueries, CTE bodies, UNION arms)
+   │     - for each table with a matching policy, replaces it with
+   │         (SELECT * FROM <table> WHERE <predicate>) <alias>
+   │
+   ▼  adapter sends the rewritten SQL to the Quack node
+```
+
+Pushing the predicate onto the **base relation** (rather than wrapping the whole query in an outer `WHERE`) is what keeps the filter correct under joins (each table filters independently), aggregation (rows are dropped *before* `GROUP BY`), `LIMIT`/`DISTINCT`/set operations (filtering happens before they apply), and projections that do not select the predicate's columns. It also means the filter runs on the *true* (unmasked) values, so a row policy keyed on a column that a column policy masks still filters correctly. This matches the semantics of Postgres RLS and Snowflake row-access policies, where the predicate is a property of the table scan.
+
+The rewriter only runs for SELECT-shaped statements; DML and DDL pass through unchanged. Statements that fail to parse are forwarded unmodified (tagged `parse_failed`). Superusers (tenant `NULL`) bypass the rewriter entirely.
+
+### Row-level security guarantees
+
+Every table occurrence reachable from the statement is considered: the top-level `FROM` item, each `JOIN` right-hand item, parenthesised subqueries, and CTE (`WITH`) bodies are recursed into. A table matches a policy when its `(catalog, schema, table)` — resolved against the session's default catalog/schema for bare names — equals the policy tuple component-wise, with `*` matching anything. When a table matches more than one of the principal's policies (e.g. a wildcard tenant-id policy plus a specific-table policy, or policies from two different roles), the predicates are combined (see "Combining policies").
+
+### Kill switch (feature flag — EXPERIMENTAL)
+
+Row-level security is **experimental** and ships **disabled by default**. Operators opt in by setting `quack-on-demand.rls.enabled = true` (or env `QOD_RLS_ENABLED=true`). When disabled, every statement bypasses the rewriter completely — no parse, no table walk, no per-statement overhead. Treat the toggle as a kill switch you can flip off in an incident: change the env var and restart the manager. It is independent of `QOD_CLS_ENABLED`; either feature can run without the other.
+
+### Predicate validation
+
+`predicate_sql` is validated once at policy create/update time and rejected (`400 invalid_policy`, with the violated rule named) when it:
+
+1. Fails to parse as a single boolean SQL expression (after identity tokens are neutralised).
+2. Contains a subquery or `EXISTS` — nesting a SELECT inside the predicate is refused.
+3. Calls a side-effect or escape function: the denylist matches column-level security's — `read_csv`, `read_parquet`, `read_json`, `query`, `sql`, `attach`, `detach`, `install`, `load`, `system`, `current_setting`, `set_setting`, `pg_read_server_files`, `pg_read_binary_file`, and anything matching `pragma_*`.
+4. Exceeds 1024 characters.
+
+Detection runs on the parsed, canonicalised expression with string literals stripped, so a denylisted function nested inside any wrapper (`read_csv(...) IS NOT NULL`) is still caught, while a harmless literal like `note = 'select one'` is not mistaken for a subquery. Unlike a column mask transform, the predicate may reference *any* column of the protected table — it filters rows, so there is no single-column containment rule.
+
+### Identity substitution tokens
+
+Predicates may embed identity tokens that are filled from the principal's `EffectiveSet` at query time (never at authoring time — the stored predicate keeps the tokens). Each token expands to a complete SQL literal, so a single value is quoted and escaped and a list is rendered for `IN (…)`:
+
+| Token | Expands to | Example expansion |
+|---|---|---|
+| `${user}`     | the username, quoted        | `'alice'` |
+| `${tenant}` / `${tenantId}` | the principal's tenant id, quoted | `'acme'` |
+| `${roles}`    | the effective role names as a quoted list | `'analyst', 'auditor'` |
+| `${groups}`   | the effective group names as a quoted list | `'sales', 'eng'` |
+
+Single-quotes in a value are doubled (`o'brien` → `'o''brien'`), so substitution is injection-safe. A **list token that resolves to the empty set becomes `NULL`**, so `dept IN (${groups})` becomes `dept IN (NULL)` — a predicate that matches no rows. This is the safe-restrictive default: a principal in no groups sees nothing through a group-keyed policy rather than erroring on `IN ()`.
+
+Typical predicates:
+
+| `predicate_sql` | Effect |
+|---|---|
+| `region = ${tenantId}`              | rows tagged with the caller's tenant |
+| `owner = ${user}`                   | row-ownership |
+| `dept IN (${groups})`               | rows for any of the caller's groups |
+| `is_public OR owner = ${user}`      | public rows plus the caller's own |
+
+### Combining policies
+
+A principal sees a row if **any** matching policy admits it: predicates are combined with `OR` (permissive union). When role A filters `customer` by `region = 'eu'` and role B filters it by `tier = 'gold'`, a user holding both sees `WHERE (region = 'eu') OR (tier = 'gold')`. This makes additional roles strictly *widen* visibility, matching the additive nature of the rest of the RBAC model. A table with no matching policy for the principal is left unfiltered (table-level ACL already decided whether the principal may read it at all).
+
+### Interaction with column-level security
+
+When both features are on, the row filter is injected inside the column rewrite, so rows are filtered on their true values and only the surviving rows are then masked for display. A row policy may safely key on a column that a column policy masks: the filter sees the real value (inside `(SELECT * FROM t WHERE …)`), the masking applies in the outer projection.
+
+### Effective policies and caching
+
+Row policies join column policies and the `RolePermission` / pool-permission rows in the per-user `EffectiveSet.rowPolicies`. The same 60-second `PoolSupervisor` cache covers them, and the same mutator-invalidation contract applies: `createRowPolicy`, `updateRowPolicy`, and `deleteRowPolicy` each call `invalidateEffectiveCache()`, so a freshly-authored policy takes effect on the next handshake regardless of the TTL. Per-statement cost is in-memory only: an AST table-walk plus per-table lookup against the cached list — no Postgres traffic on the hot path.
+
+### Observability
+
+Two Micrometer metrics expose the rewriter's behaviour:
+
+| Metric | Tags | Use |
+|---|---|---|
+| `row_policy_rewrites_total`          | `tenant`, `pool`, `outcome` ∈ `{rewritten, parse_failed, passthrough}` | Fraction of reads paying the rewrite cost; spot policy regressions. |
+| `row_policy_rewrite_duration_seconds` | `tenant`, `pool` | Histogram of rewrite step wall time; alert on percentile regressions. |
+
+The `outcome` tag emits:
+
+- `rewritten`: at least one table was wrapped in a filtered subselect.
+- `parse_failed`: the SQL could not be parsed; the original statement is forwarded unchanged. Distinct from `passthrough` so operators can tell "rewriter inactive because nothing to filter" from "rewriter gave up".
+- `passthrough`: the rewriter inspected the SQL and decided no rewrite was needed (no covered table referenced; non-SELECT; superuser; user has no row policies; feature disabled).
+
+### Authoring
+
+Row policies are administered the same way as column policies: via REST endpoints under `/api/role/row-policy/{create,update,delete,list}`, via the admin UI's "Row policies" tab on the role detail page, and via YAML manifest (`rowPolicies` list under each role, each entry a `{catalog, schema, table, predicateSql}` object).
+
 ## The two gates
 
 Every FlightSQL request passes through two sequential gates.

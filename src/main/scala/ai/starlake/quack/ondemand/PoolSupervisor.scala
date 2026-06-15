@@ -1133,6 +1133,53 @@ final class PoolSupervisor(
   def listColumnPoliciesByRole(roleId: String): IO[List[state.RoleColumnPolicy]] =
     IO.blocking(store.listColumnPolicies(roleId))
 
+  // ---------- RBAC: row policies ----------
+
+  def tenantForRowPolicy(id: String): Option[String] =
+    store.getRowPolicy(id).flatMap(p => rbacResolver.role(p.roleId).map(_.tenantId))
+
+  def createRowPolicy(
+      roleId: String,
+      catalogName: String,
+      schemaName: String,
+      tableName: String,
+      predicateSql: String
+  ): IO[Either[String, state.RoleRowPolicy]] = IO.blocking {
+    ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
+      case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
+        Left(s"invalid predicateSql: $reason")
+      case ai.starlake.quack.edge.rls.RowPredicateValidator.Valid(canon) =>
+        val p = state.RoleRowPolicy(
+          id = newId("rp"),
+          roleId = roleId,
+          catalogName = catalogName,
+          schemaName = schemaName,
+          tableName = tableName,
+          predicateSql = canon
+        )
+        val persisted = store.insertRowPolicy(p)
+        invalidateEffectiveCache()
+        Right(persisted)
+  }
+
+  def updateRowPolicy(id: String, predicateSql: String): IO[Either[String, Unit]] = IO.blocking {
+    ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
+      case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
+        Left(s"invalid predicateSql: $reason")
+      case ai.starlake.quack.edge.rls.RowPredicateValidator.Valid(canon) =>
+        val ok = store.updateRowPolicy(id, canon)
+        if ok then { invalidateEffectiveCache(); Right(()) }
+        else Left(s"row policy $id not found")
+  }
+
+  def deleteRowPolicy(id: String): IO[Either[String, Unit]] = IO.blocking {
+    if store.deleteRowPolicy(id) then { invalidateEffectiveCache(); Right(()) }
+    else Left(s"row policy $id not found")
+  }
+
+  def listRowPoliciesByRole(roleId: String): IO[List[state.RoleRowPolicy]] =
+    IO.blocking(store.listRowPolicies(roleId))
+
   // ---------- RBAC: groups ----------
 
   def createGroup(
@@ -1418,13 +1465,15 @@ final class PoolSupervisor(
       val directPools    = store.listPoolPermissionsForUser(u.id)
       val viaGroupPools  = groupIds.toList.flatMap(rbacResolver.poolPermissionsForGroup)
       val columnPolicies = allRoleIds.toList.flatMap(store.listColumnPolicies)
+      val rowPolicies    = allRoleIds.toList.flatMap(store.listRowPolicies)
       ai.starlake.quack.ondemand.rbac.EffectiveSet(
         u,
         effRoles,
         effGroups,
         effPerms,
         directPools ++ viaGroupPools,
-        columnPolicies
+        columnPolicies,
+        rowPolicies
       )
     }
 

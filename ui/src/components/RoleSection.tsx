@@ -3,6 +3,7 @@ import { api, ApiError } from '../api/client';
 import type { RolePermissionResponse, RoleResponse } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
 import RoleColumnPoliciesSection from './RoleColumnPoliciesSection';
+import RoleRowPoliciesSection from './RoleRowPoliciesSection';
 import Tabs from './Tabs';
 
 const VERBS = ['RO', 'RW', 'DDL', 'ALL'];
@@ -256,6 +257,11 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
                     id: 'column-policies',
                     label: 'Column policies',
                     body: <RoleColumnPoliciesSection roleId={selected.id} />,
+                  },
+                  {
+                    id: 'row-policies',
+                    label: 'Row policies',
+                    body: <RoleRowPoliciesSection roleId={selected.id} />,
                   },
                 ]}
               />
