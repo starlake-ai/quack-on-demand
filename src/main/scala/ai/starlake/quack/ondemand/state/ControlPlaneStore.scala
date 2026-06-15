@@ -187,6 +187,12 @@ trait ControlPlaneStore:
   def listColumnPolicies(roleId: String): List[RoleColumnPolicy]
   def listAllColumnPolicies(): List[RoleColumnPolicy]
 
+  // ----- Row policies -----
+  def insertRowPolicy(p: RoleRowPolicy): RoleRowPolicy
+  def deleteRowPolicy(id: String): Boolean
+  def getRowPolicy(id: String): Option[RoleRowPolicy]
+  def listRowPolicies(roleId: String): List[RoleRowPolicy]
+
   /** Load the full topology in one round-trip. Used by the supervisor at boot to seed its in-memory
     * caches. The RBAC graph is included so [[ai.starlake.quack.ondemand.rbac.RbacResolver]] can
     * answer effective_pools / effective_roles without per-request joins.

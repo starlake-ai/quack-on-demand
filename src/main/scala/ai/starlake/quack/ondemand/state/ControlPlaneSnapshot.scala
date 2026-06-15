@@ -25,5 +25,6 @@ final case class ControlPlaneSnapshot(
     userRoles: List[UserRoleEdge] = Nil,
     groupRoles: List[GroupRoleEdge] = Nil,
     poolPermissions: List[PoolPermission] = Nil,
-    columnPolicies: List[RoleColumnPolicy] = Nil
+    columnPolicies: List[RoleColumnPolicy] = Nil,
+    rowPolicies: List[RoleRowPolicy] = Nil
 )
