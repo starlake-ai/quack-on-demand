@@ -81,7 +81,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       result: Either[String, AuthenticatedProfile],
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore,
-      cookieSecureOverride: Option[Boolean] = None
+      cookieSecureOverride: Option[Boolean] = None,
+      resolveTenant: String => Option[String] = _ => None
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -98,7 +99,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tokens               = tokens,
       identitySource       = ManagementIdentitySource.Db,
       grantsForIdentity    = (_, _) => Nil, // unused in Db mode
-      cookieSecureOverride = cookieSecureOverride
+      cookieSecureOverride = cookieSecureOverride,
+      resolveTenant        = resolveTenant
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -148,6 +150,54 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls.head._1     shouldBe AuthScope.System
     resp.superuser    shouldBe true
     resp.manageableTenants shouldBe empty
+  }
+
+  it should "resolve a tenant DISPLAY NAME to its surrogate id before forwarding the scope" in {
+    val profile = AuthenticatedProfile(
+      username   = "alice",
+      role       = "admin",
+      groups     = Set.empty,
+      claims     = Map.empty,
+      authMethod = "db",
+      tenant     = Some("t-abc123")
+    )
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    // Operator typed the human-readable name "acme"; the resolver maps it to id.
+    val h = makeHandlers(
+      Right(profile),
+      calls,
+      resolveTenant = {
+        case "acme"     => Some("t-abc123")
+        case "t-abc123" => Some("t-abc123")
+        case _          => None
+      }
+    )
+
+    h.login(LoginRequest("alice", "secret", tenant = Some("acme"))).unsafeRunSync()
+
+    calls.head._1 shouldBe AuthScope.Tenant("t-abc123")
+  }
+
+  it should "accept the tenant id directly (resolver is identity on a known id)" in {
+    val profile = AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("t-abc123"))
+    val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h = makeHandlers(Right(profile), calls, resolveTenant = Map("t-abc123" -> "t-abc123").get)
+
+    h.login(LoginRequest("alice", "secret", tenant = Some("t-abc123"))).unsafeRunSync()
+
+    calls.head._1 shouldBe AuthScope.Tenant("t-abc123")
+  }
+
+  it should "fall back to the raw tenant string when the resolver does not recognize it" in {
+    val profile = AuthenticatedProfile("bob", "admin", Set.empty, Map.empty, "db", Some("t-x"))
+    val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h       = makeHandlers(Right(profile), calls, resolveTenant = _ => None)
+
+    h.login(LoginRequest("bob", "secret", tenant = Some("unknown-tenant"))).unsafeRunSync()
+
+    // Unresolved -> pass through verbatim so the authenticator returns a clean
+    // "user not found" rather than the handler 500-ing.
+    calls.head._1 shouldBe AuthScope.Tenant("unknown-tenant")
   }
 
   it should "coerce blank tenant string to System scope before forwarding" in {
