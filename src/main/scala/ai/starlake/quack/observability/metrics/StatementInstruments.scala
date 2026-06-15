@@ -94,6 +94,40 @@ final class StatementInstruments(registry: MeterRegistry):
   def recordColumnPolicyRewriteDuration(tenant: String, pool: String, ms: Long): Unit =
     resolveRewriteTimer(tenant, pool).record(Duration.ofMillis(ms))
 
+  private val rowRewriteTimerCache =
+    new java.util.concurrent.ConcurrentHashMap[(String, String), Timer]()
+
+  private def resolveRowRewriteTimer(tenant: String, pool: String): Timer =
+    rowRewriteTimerCache.computeIfAbsent(
+      (tenant, pool),
+      _ =>
+        Timer
+          .builder("row_policy_rewrite_duration_seconds")
+          .tag("tenant", tenant)
+          .tag("pool", pool)
+          .register(registry)
+    )
+
+  /** Increment the row-policy rewrite counter. `outcome` is one of: `rewritten`, `passthrough`,
+    * `parse_failed`.
+    */
+  def recordRowPolicyRewrite(tenant: String, pool: String, outcome: String): Unit =
+    registry
+      .counter(
+        "row_policy_rewrites_total",
+        "tenant",
+        tenant,
+        "pool",
+        pool,
+        "outcome",
+        outcome
+      )
+      .increment()
+
+  /** Observe the wall-clock duration of a row-policy rewrite pass. */
+  def recordRowPolicyRewriteDuration(tenant: String, pool: String, ms: Long): Unit =
+    resolveRowRewriteTimer(tenant, pool).record(Duration.ofMillis(ms))
+
 object StatementInstruments:
 
   /** Singleton no-op used when callers don't need real metric recording. Backed by an empty

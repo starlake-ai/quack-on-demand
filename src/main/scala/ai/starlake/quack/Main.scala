@@ -498,6 +498,15 @@ object Main extends IOApp with LazyLogging:
         enabled = clsEnabled
       )
 
+      val rlsEnabled: Boolean =
+        com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
+      if !rlsEnabled then
+        logger.info(
+          "row-level security is DISABLED (quack-on-demand.rls.enabled=false). " +
+            "Every statement bypasses the row-policy rewriter."
+        )
+      val rowPolicyRewriter = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = rlsEnabled)
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -507,7 +516,8 @@ object Main extends IOApp with LazyLogging:
         stmtHistory,
         stmtInstruments,
         classifier,
-        columnPolicyRewriter
+        columnPolicyRewriter,
+        rowPolicyRewriter
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

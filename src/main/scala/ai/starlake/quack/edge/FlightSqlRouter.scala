@@ -39,7 +39,9 @@ final class FlightSqlRouter(
     val columnPolicyRewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
         new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
-      )
+      ),
+    val rowPolicyRewriter: ai.starlake.quack.edge.rls.RowPolicyRewriter =
+      new ai.starlake.quack.edge.rls.RowPolicyRewriter()
 ):
 
   private def record(
@@ -192,6 +194,31 @@ final class FlightSqlRouter(
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             return IO.pure(Left(s"access denied: $reason"))
 
+    // Row-level security: filter rows AFTER column masking is decided, but injected at the BASE
+    // table so the predicate runs on the true (unmasked) values. Operates on the CLS output so the
+    // two rewriters compose (RLS innermost, CLS outermost).
+    val finalSql: String = effectiveSet match
+      case None      => rewrittenSql
+      case Some(eff) =>
+        val r0         = System.nanoTime()
+        val schemaCtxR = ai.starlake.quack.edge.rls.SchemaContext(
+          defaultDatabase = ctx.defaultDatabase,
+          defaultSchema = ctx.defaultSchema
+        )
+        val outcome   = rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR)
+        val elapsedMs = (System.nanoTime() - r0) / 1_000_000L
+        stmtInstruments.recordRowPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+        outcome match
+          case ai.starlake.quack.edge.rls.RowPolicyRewriter.Passthrough =>
+            stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
+            rewrittenSql
+          case ai.starlake.quack.edge.rls.RowPolicyRewriter.PassthroughParseFailed =>
+            stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
+            rewrittenSql
+          case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(s) =>
+            stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
+            s
+
     supervisor.snapshot(poolKey) match
       case None =>
         if s.txOpen then sessions.invalidatePin(connectionId)
@@ -206,7 +233,7 @@ final class FlightSqlRouter(
         // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
         // initial schema) when the pool's metastore advertises a dbName.
-        val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), rewrittenSql)
+        val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
             maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
