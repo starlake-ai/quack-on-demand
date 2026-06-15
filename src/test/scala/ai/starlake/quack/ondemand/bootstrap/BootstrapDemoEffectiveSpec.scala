@@ -22,9 +22,10 @@ import scala.util.Using
   * is the contract the YAML must keep producing; if a yaml edit breaks
   * a row, this spec fires before the docs go stale.
   *
-  * Note: ManifestImporter stores RbacUser.tenant as the raw YAML tenant
-  * name ("acme", "globex"), NOT the surrogate id. The tenantCatalogs
-  * function therefore matches on the name string.
+  * Note: ManifestImporter stores RbacUser.tenant as the tenant surrogate
+  * id (resolved from the YAML tenant name), which is what the validator
+  * keys catalogs by. The tenantCatalogs function therefore matches on the
+  * id resolved from the imported store.
   */
 class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
 
@@ -53,20 +54,28 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
     supervisor.restore()
     (s, supervisor)
 
-  // ManifestImporter stores RbacUser.tenant using the raw YAML tenant name
-  // ("acme" / "globex"), so tenantCatalogs must key on those strings.
+  // The store keys users (and the validator keys catalogs) by tenant
+  // surrogate id, so resolve the demo tenants' ids and build tenantCatalogs
+  // around them.
+  private val tenantIdByName: Map[String, String] =
+    store.listTenants().map(t => t.displayName -> t.id).toMap
+  private val acmeId   = tenantIdByName("acme")
+  private val globexId = tenantIdByName("globex")
+
   private val validator = new PostgresAclValidator(
     defaultDatabase = "acme_tpch",
     defaultSchema   = "tpch1",
     tenantCatalogs  = {
-      case "acme"   => Set("acme_tpch")
-      case "globex" => Set("globex_tpcds")
-      case _        => Set.empty
+      case `acmeId`   => Set("acme_tpch")
+      case `globexId` => Set("globex_tpcds")
+      case _          => Set.empty
     }
   )
 
   private def effective(username: String, tenant: Option[String]): EffectiveSet =
-    val user = store.findUser(tenant, username).getOrElse(
+    // Callers pass the tenant display name; users are keyed by surrogate id.
+    val tenantId = tenant.map(n => tenantIdByName.getOrElse(n, n))
+    val user = store.findUser(tenantId, username).getOrElse(
       fail(s"user $username (tenant=$tenant) missing from store")
     )
     sup.effectiveSetForUser(user.id).getOrElse(

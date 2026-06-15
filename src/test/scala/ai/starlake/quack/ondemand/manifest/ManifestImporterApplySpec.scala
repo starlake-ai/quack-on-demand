@@ -53,6 +53,26 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.getPasswordHash(None, "admin").get shouldBe pre
   }
 
+  it should "store a tenant-scoped user under the tenant surrogate id, not the display name" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(
+      tenants = List(ManifestTenant(name = "acme")),
+      users   = List(
+        ManifestUser(tenant = Some("acme"), username = "alice", password = Some("pw"), role = "user")
+      )
+    )
+    ManifestImporter.apply(m, s) shouldBe Right(())
+
+    val tenantId = s.listTenants().find(_.displayName == "acme").map(_.id).get
+    // qodstate_user.tenant must hold the surrogate id -- that is what
+    // createUser persists and what listUsers / findUserForLogin query against.
+    // Storing the display name here makes `?tenant=acme` listings and
+    // tenant-scoped login silently return nothing.
+    s.findUser(Some(tenantId), "alice")          should not be empty
+    s.findUser(Some("acme"), "alice")            shouldBe None
+    s.listUsers(Some(tenantId)).map(_.username)  shouldBe List("alice")
+  }
+
   it should "reject a new user without a password field and no prior credential" in {
     val s = new InMemoryControlPlaneStore()
     val m = base.copy(users = List(ManifestUser(tenant   = None, username = "newbie",

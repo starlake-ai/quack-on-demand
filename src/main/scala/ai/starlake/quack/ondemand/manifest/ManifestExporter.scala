@@ -183,7 +183,10 @@ object ManifestExporter:
             ManifestPoolGrant(pool = pp.poolId.flatMap(poolIdToName.get))
           }
           ManifestUser(
-            tenant = u.tenant,
+            // Emit the tenant DISPLAY NAME -- manifests are human-facing and
+            // keyed by name (matching role/group emission above), not the
+            // stored surrogate id. Superusers (tenant = None) stay None.
+            tenant = u.tenant.map(_ => t.displayName),
             username = u.username,
             password = None,
             role = u.role,
