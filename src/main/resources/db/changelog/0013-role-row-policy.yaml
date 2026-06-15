@@ -1,0 +1,35 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0013-qodstate-role-row-policy
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_role_row_policy
+            columns:
+              - column: { name: id,            type: TEXT,        constraints: { primaryKey: true, nullable: false } }
+              - column: { name: role_id,       type: TEXT,        constraints: { nullable: false } }
+              - column: { name: catalog_name,  type: TEXT,        constraints: { nullable: false } }
+              - column: { name: schema_name,   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: table_name,    type: TEXT,        constraints: { nullable: false } }
+              - column: { name: predicate_sql, type: TEXT,        constraints: { nullable: false } }
+              - column:
+                  name: created_at
+                  type: TIMESTAMP WITH TIME ZONE
+                  defaultValueComputed: now()
+                  constraints: { nullable: false }
+        - addForeignKeyConstraint:
+            baseTableName: qodstate_role_row_policy
+            baseColumnNames: role_id
+            referencedTableName: qodstate_role
+            referencedColumnNames: id
+            constraintName: qodstate_role_row_policy_role_fk
+            onDelete: CASCADE
+        - addUniqueConstraint:
+            tableName: qodstate_role_row_policy
+            columnNames: role_id, catalog_name, schema_name, table_name
+            constraintName: qodstate_role_row_policy_uniq
+        - createIndex:
+            tableName: qodstate_role_row_policy
+            indexName: qodstate_role_row_policy_role_idx
+            columns:
+              - column: { name: role_id }
