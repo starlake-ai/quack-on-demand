@@ -454,6 +454,30 @@ final case class UpdateColumnPolicyRequest(
 final case class DeleteColumnPolicyRequest(id: String)
 final case class ColumnPolicyListResponse(policies: List[ColumnPolicyDto])
 
+// ----- RBAC: row policies ------------------------------------------------
+
+final case class RowPolicyDto(
+    id: String,
+    roleId: String,
+    catalogName: String,
+    schemaName: String,
+    tableName: String,
+    predicateSql: String
+)
+final case class CreateRowPolicyRequest(
+    roleId: String,
+    catalogName: String,
+    schemaName: String,
+    tableName: String,
+    predicateSql: String
+)
+final case class UpdateRowPolicyRequest(
+    id: String,
+    predicateSql: String
+)
+final case class DeleteRowPolicyRequest(id: String)
+final case class RowPolicyListResponse(policies: List[RowPolicyDto])
+
 // ----- RBAC: pool permissions --------------------------------------------
 
 final case class PoolPermissionGrantRequest(
@@ -968,6 +992,34 @@ object Dtos:
   )
   given Codec[DeleteColumnPolicyRequest] = deriveCodec
   given Codec[ColumnPolicyListResponse]  = deriveCodec
+
+  // RBAC: row policies
+  given Codec[RowPolicyDto]           = deriveCodec
+  given Codec[CreateRowPolicyRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        roleId       <- c.get[String]("roleId")
+        catalogName  <- c.getOrElse[String]("catalogName")("*")
+        schemaName   <- c.getOrElse[String]("schemaName")("*")
+        tableName    <- c.getOrElse[String]("tableName")("*")
+        predicateSql <- c.get[String]("predicateSql")
+      yield CreateRowPolicyRequest(roleId, catalogName, schemaName, tableName, predicateSql)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "roleId"       -> r.roleId.asJson,
+          "catalogName"  -> r.catalogName.asJson,
+          "schemaName"   -> r.schemaName.asJson,
+          "tableName"    -> r.tableName.asJson,
+          "predicateSql" -> r.predicateSql.asJson
+        )
+      )
+    }
+  )
+  given Codec[UpdateRowPolicyRequest] = deriveCodec
+  given Codec[DeleteRowPolicyRequest] = deriveCodec
+  given Codec[RowPolicyListResponse]  = deriveCodec
 
   // RBAC: pool permissions
   given Codec[PoolPermissionGrantRequest]  = deriveCodec

@@ -37,7 +37,8 @@ final class ManagerServer(
     serverConfig: ConfigHandlers,
     manifest: ManifestHandlers,
     federatedSources: Option[FederatedSourceHandlers] = None,
-    columnPolicies: RoleColumnPolicyHandlers
+    columnPolicies: RoleColumnPolicyHandlers,
+    rowPolicies: RoleRowPolicyHandlers
 ) extends LazyLogging:
 
   /** Path is unauthenticated - the UI needs these before login. */
@@ -227,6 +228,18 @@ final class ManagerServer(
       },
       RbacEndpoints.listColumnPolicies.serverLogic { case (roleId, key) =>
         columnPolicies.list(roleId, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.createRowPolicy.serverLogic { case (req, key) =>
+        rowPolicies.create(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.updateRowPolicy.serverLogic { case (req, key) =>
+        rowPolicies.update(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, key) =>
+        rowPolicies.delete(req, key)(sessions.scopeOf)
+      },
+      RbacEndpoints.listRowPolicies.serverLogic { case (roleId, key) =>
+        rowPolicies.list(roleId, key)(sessions.scopeOf)
       }
     )
 

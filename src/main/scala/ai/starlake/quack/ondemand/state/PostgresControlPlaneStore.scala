@@ -1193,6 +1193,17 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def updateRowPolicy(id: String, predicateSql: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      "UPDATE qodstate_role_row_policy SET predicate_sql = ? WHERE id = ?"
+    )
+    try
+      ps.setString(1, predicateSql)
+      ps.setString(2, id)
+      ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
   def deleteRowPolicy(id: String): Boolean = withConn { c =>
     val ps = c.prepareStatement("DELETE FROM qodstate_role_row_policy WHERE id = ?")
     try

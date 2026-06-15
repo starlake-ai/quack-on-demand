@@ -250,6 +250,7 @@ object ManagerServerHarness:
     val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
     val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
     val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
+    val rowPolicyHandlers    = new RoleRowPolicyHandlers(sup)
 
     val sessions   = new SessionTokenStore
     val authSvc    = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
@@ -304,7 +305,8 @@ object ManagerServerHarness:
       serverConfigHandlers,
       manifestHandlers,
       federatedSources = None,
-      columnPolicies   = columnPolicyHandlers
+      columnPolicies   = columnPolicyHandlers,
+      rowPolicies      = rowPolicyHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port
