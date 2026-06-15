@@ -668,6 +668,153 @@ final class FlightProducerImpl(
       listener
     )
 
+  /** FlightSQL "execute an update statement" entrypoint. A client's `executeUpdate` on a literal
+    * INSERT / UPDATE / DELETE / DDL arrives here as a `CommandStatementUpdate` -- the read path
+    * `getStreamStatement` only ever sees a SELECT (DoGet). We resolve the per-peer pool context
+    * exactly as [[runStatement]] does, run the SQL through the router (ACL gate + routing + node
+    * call), and return the affected-row count to the client as a `DoPutUpdateResult`.
+    *
+    * A plain statement update carries no bound parameters, so we never read `flightStream` --
+    * mirroring the Arrow reference producer. Parameterized DML (`INSERT ... VALUES (?)`) is a
+    * separate, larger feature: it additionally needs a `parameter_schema` advertised at Prepare and
+    * an `acceptPutPreparedStatementUpdate` override.
+    */
+  override def acceptPutStatement(
+      command: FlightSql.CommandStatementUpdate,
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable =
+    val sql  = command.getQuery
+    val peer = Option(context.peerIdentity()).getOrElse("anonymous")
+    new Runnable:
+      def run(): Unit =
+        drainPutStream(flightStream)
+        (
+          ConnectionContext.poolFor(peer),
+          ConnectionContext.connectionIdFor(peer),
+          ConnectionContext.userFor(peer)
+        ) match
+          case (Some(poolKey), Some(connId), Some(user)) =>
+            logger.debug(s"acceptPutStatement pool=$poolKey sql='$sql'")
+            val eff = ConnectionContext.effectiveSetFor(peer)
+            ackUpdateResult(
+              scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()),
+              ackStream,
+              "acceptPutStatement"
+            )
+          case _ =>
+            ackStream.onError(
+              CallStatus.UNAUTHENTICATED
+                .withDescription("no pool bound to session; authenticate first")
+                .toRuntimeException()
+            )
+
+  /** FlightSQL "execute a prepared update" entrypoint. Arrow JDBC / ADBC / DBeaver prepare *every*
+    * statement, so a literal INSERT / UPDATE / DELETE / DDL the user runs arrives here (not via
+    * [[acceptPutStatement]]): first `createPreparedStatement` stores the handle, then `executeUpdate`
+    * lands as a `CommandPreparedStatementUpdate`. We replay the SQL captured at Prepare time -- same
+    * (connId, user, poolKey, EffectiveSet) as [[getStreamPreparedStatement]] -- and ack the count.
+    *
+    * Bound parameters (`?`) would arrive as rows on `flightStream`; we don't read them, so this
+    * covers literal (non-parameterized) prepared updates only. Parameterized DML still needs the
+    * `parameter_schema` work at Prepare.
+    */
+  override def acceptPutPreparedStatementUpdate(
+      command: FlightSql.CommandPreparedStatementUpdate,
+      context: FlightProducer.CallContext,
+      flightStream: FlightStream,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Runnable =
+    val handle = command.getPreparedStatementHandle.toStringUtf8
+    new Runnable:
+      def run(): Unit =
+        drainPutStream(flightStream)
+        preparedStatements.get(handle) match
+          case None =>
+            ackStream.onError(
+              CallStatus.INVALID_ARGUMENT
+                .withDescription(s"no such prepared statement: $handle")
+                .toRuntimeException()
+            )
+          case Some(p) =>
+            logger.debug(s"acceptPutPreparedStatementUpdate pool=${p.poolKey} sql='${p.sql}'")
+            ackUpdateResult(
+              scala.util.Try(
+                router
+                  .execute(
+                    p.connId,
+                    p.user,
+                    p.poolKey,
+                    p.sql,
+                    p.effectiveSet,
+                    p.preferredNode,
+                    prepareDurationMs = p.prepareDurationMs
+                  )
+                  .unsafeRunSync()
+              ),
+              ackStream,
+              "acceptPutPreparedStatementUpdate"
+            )
+
+  /** Consume and discard the DoPut request stream. A FlightSQL update client streams its bound
+    * parameter batches (often a single empty batch for a literal statement) on the DoPut channel;
+    * if the server writes its `PutResult` and half-closes WITHOUT reading them, the client's
+    * in-flight write breaks and surfaces as `UNAVAILABLE: io exception`. We don't support bound
+    * parameters, so drain the batches and throw them away. `null` only in unit tests, which drive
+    * `run()` directly without a wire stream. */
+  private def drainPutStream(flightStream: FlightStream): Unit =
+    if flightStream != null then while flightStream.next() do ()
+
+  /** Shared tail of the two update entrypoints: turn a router execution outcome into a
+    * `DoPutUpdateResult` ack (or an error on the ack stream). Closes the result either way. */
+  private def ackUpdateResult(
+      attempt: scala.util.Try[Either[String, QueryResult]],
+      ackStream: FlightProducer.StreamListener[PutResult],
+      label: String
+  ): Unit =
+    attempt match
+      case scala.util.Success(Right(result)) =>
+        val count =
+          try updateCountOf(result.rows)
+          finally result.close()
+        emitUpdateCount(count, ackStream)
+      case scala.util.Success(Left(msg)) =>
+        ackStream.onError(CallStatus.INVALID_ARGUMENT.withDescription(msg).toRuntimeException())
+      case scala.util.Failure(t) =>
+        logger.error(s"$label threw: ${t.getMessage}", t)
+        ackStream.onError(CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException())
+
+  /** Best-effort affected-row count from a DML result. DuckDB returns a single-row, single-column
+    * "Count" (BigInt) for INSERT / UPDATE / DELETE; we read that cell. Anything else (DDL, or a node
+    * that returns no count) yields -1, which FlightSQL clients accept as an unknown update count. */
+  private def updateCountOf(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
+    try
+      if reader.loadNextBatch() then
+        val root = reader.getVectorSchemaRoot
+        if root.getRowCount >= 1 && !root.getFieldVectors.isEmpty then
+          root.getFieldVectors.get(0).getObject(0) match
+            case n: java.lang.Number => n.longValue()
+            case _                   => -1L
+        else -1L
+      else -1L
+    catch case _: Throwable => -1L
+
+  /** Serialize a `DoPutUpdateResult{record_count}` into an ArrowBuf and hand it to the ack stream.
+    * The buffer is released only after `onNext` + `onCompleted` have consumed it (mirrors the Arrow
+    * reference producer's try-with-resources ordering). */
+  private def emitUpdateCount(
+      count: Long,
+      ackStream: FlightProducer.StreamListener[PutResult]
+  ): Unit =
+    val result = FlightSql.DoPutUpdateResult.newBuilder().setRecordCount(count).build()
+    val buf    = allocator.buffer(result.getSerializedSize.toLong)
+    try
+      buf.writeBytes(result.toByteArray)
+      ackStream.onNext(PutResult.metadata(buf))
+      ackStream.onCompleted()
+    finally buf.close()
+
   override def getFlightInfoStatement(
       command: FlightSql.CommandStatementQuery,
       context: FlightProducer.CallContext,
