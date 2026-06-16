@@ -7,7 +7,7 @@ Each Quack node is a DuckDB engine over a DuckLake catalog, so the dialect a cli
 
 ## Dialect
 
-Statements are executed by DuckDB on the chosen node, so DuckDB syntax, functions, and types apply, including its `FROM`-first shorthand (`FROM t SELECT ...`). The gateway does not rewrite your SQL beyond the default-schema prefix described below.
+Statements are executed by DuckDB on the chosen node, so DuckDB syntax, functions, and types apply, including its `FROM`-first shorthand (`FROM t SELECT ...`). Beyond the default-schema prefix described below, the gateway leaves your SQL untouched — unless [column- or row-level security](/operating/rbac-model) is enabled, in which case a matching `SELECT` is rewritten to mask columns or filter rows before it reaches the node.
 
 ## Unqualified names and the default schema
 

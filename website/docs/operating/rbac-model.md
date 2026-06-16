@@ -411,7 +411,7 @@ The `outcome` tag emits:
 
 ### Authoring
 
-Row policies are administered the same way as column policies: via REST endpoints under `/api/role/row-policy/{create,update,delete,list}`, via the admin UI's "Row policies" tab on the role detail page, and via YAML manifest (`rowPolicies` list under each role, each entry a `{catalog, schema, table, predicateSql}` object).
+Row policies are administered the same way as column policies: via REST endpoints under `/api/role/row-policy/{create,update,delete,list}`, via the admin UI's "Row policies" tab on the role detail page, and via YAML manifest (`rowPolicies` list under each role, each entry a `{catalog, schema, table, predicateSql}` object). The bundled demo manifest (`bootstrap-demo.yaml`) ships an example policy on `acme/analyst/customer` filtering to `c_mktsegment = 'BUILDING'`, so a fresh `LOAD_TPCH=1` boot with `QOD_RLS_ENABLED=true` demonstrates the feature end-to-end: the analyst sees only the ~30k BUILDING customers, a superuser sees all 150k. `scripts/adbc.sh` is a quick way to diff the two.
 
 ## The two gates
 
