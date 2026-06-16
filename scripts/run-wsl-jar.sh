@@ -1,0 +1,1 @@
+QOD_NATIVE_CLIENT=false BUILD=1 LOAD_TPCH=1 NUKE=1 QOD_PG_PASSWORD=postgres QOD_RLS_ENABLED=true QOD_CLS_ENABLED=true ./scripts/run-jar.sh

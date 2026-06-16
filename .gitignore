@@ -120,3 +120,4 @@ website/build/
 website/.docusaurus/
 website/static/openapi.yaml
 website/docs/reference/configuration.md
+docs/superpowers/
