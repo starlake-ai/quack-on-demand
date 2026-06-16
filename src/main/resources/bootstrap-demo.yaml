@@ -72,6 +72,11 @@ roles:
       - { catalog: acme_tpch, schema: tpch1, table: region,   verb: RO }
     columnPolicies:
       - { catalog: "*", schema: tpch1, table: customer, column: c_phone, action: mask, transformSql: "'***'" }
+    rowPolicies:
+      # Row-level security demo: the analyst only sees BUILDING-segment customers.
+      # A fresh `LOAD_TPCH=1` boot with QOD_RLS_ENABLED=true drops customer rows of
+      # every other market segment before they reach the node.
+      - { catalog: "*", schema: tpch1, table: customer, predicateSql: "c_mktsegment = 'BUILDING'" }
 
   - tenant: acme
     name: etl
