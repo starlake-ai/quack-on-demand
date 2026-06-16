@@ -21,6 +21,7 @@ Use this skill when the user wants to:
 - `scripts/run-jar.sh` - boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
 - `scripts/stop-jar.sh` - SIGTERM → wait → SIGKILL
 - `scripts/loadtest/loadtest.py` - Python FlightSQL load tester (ADBC driver)
+- `scripts/adbc.sh` - run one SQL query against the FlightSQL edge and print it as a table (ADBC driver, self-provisioning venv)
 - `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
 - `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
 - `src/main/resources/application.conf` - config (every key has a `QOD_*` env-var override)
@@ -267,6 +268,31 @@ Per-node fields surfaced via `/api/pool/list`:
 - `avgDurationMs` - EWMA latency
 - `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
 - `healthy` / `draining` - tracker flags
+
+## Ad-hoc queries
+
+`scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees — handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.
+
+```bash
+# Query as a tenant user (Basic auth + tenant/pool routing headers).
+# --insecure trusts the edge's self-signed dev cert.
+scripts/adbc.sh --url grpc+tls://localhost:31338 \
+  --user alice --password demo-alice \
+  --tenant acme --pool bi --insecure \
+  --query "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
+
+# Same query as the bootstrap superuser (system realm) -- bypasses RLS/CLS,
+# so diffing the two outputs shows exactly what a policy filtered or masked.
+scripts/adbc.sh --url grpc+tls://localhost:31338 \
+  --user root --password demo-root \
+  --tenant acme --pool bi --superuser --insecure \
+  --query "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
+
+# SQL on stdin instead of --query; edge with TLS off uses grpc://
+echo "SELECT 1" | scripts/adbc.sh --url grpc://localhost:31338 --tenant acme --pool bi
+```
+
+Flags: `--url` (required), `--user` / `--password` (or `LT_USER` / `LT_PASSWORD`), `--query` (or `LT_QUERY`, or stdin), `--tenant` / `--pool` (or `LT_TENANT` / `LT_POOL`), `--superuser`, `--insecure`. Unqualified table names resolve against the pool's default schema, but the FlightSQL prepare-time probe needs a real table — schema-qualify (`tpch1.customer`) if you hit "Table … does not exist" at prepare.
 
 ## Load testing
 
