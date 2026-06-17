@@ -302,6 +302,37 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   // ConnectionContext check, surfacing as UNAUTHENTICATED.
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Case 7: `x-qod-authorization` aliases `Authorization`.
+  //
+  // The Arrow Flight SQL ODBC build that Power BI ships wraps forwards
+  // arbitrary passthrough headers (`tenant`, `pool`) but discards the
+  // standard `Authorization` header. The fallback lets the connector .mez
+  // route the credential through any passthrough name; the server accepts
+  // either header identically.
+  // -------------------------------------------------------------------------
+
+  it should "accept Basic creds presented via x-qod-authorization (alias of Authorization)" in {
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val client = h.newClient()
+    try
+      val hdrs = new FlightCallHeaders()
+      hdrs.insert("tenant", SecurityFixtures.TenantName)
+      hdrs.insert("pool", SecurityFixtures.PoolName)
+      hdrs.insert(
+        "x-qod-authorization",
+        s"Basic ${basicCredentials(SecurityFixtures.AliceUsername, SecurityFixtures.AlicePassword)}"
+      )
+      val opt = new HeaderCallOption(hdrs)
+      assertAuthPassed {
+        client.getInfo(FlightDescriptor.command("SELECT 1".getBytes("UTF-8")), opt)
+      }
+    finally
+      client.close()
+      h.shutdown()
+  }
+
   it should "reject a data-bearing call from an unauthenticated peer" in {
     import com.google.protobuf.{Any => ProtoAny}
     import org.apache.arrow.flight.sql.impl.FlightSql
