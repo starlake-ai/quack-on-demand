@@ -312,6 +312,42 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   // either header identically.
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Case 8: accept unpadded base64 in the `Basic` credential value.
+  //
+  // The Dremio Arrow Flight SQL ODBC connection-string parser uses
+  // `rfind('=')` on the entire remaining string, which corrupts splits when
+  // the value contains `=` (Base64 padding). Verified against
+  // dremio/flightsql-odbc connection_string_parser.cc:52. Workaround:
+  // connector emits Basic credentials base64-encoded WITHOUT padding, server
+  // pads + decodes. Same wire format (`Basic <base64>`); only the encoder
+  // alphabet variant changes.
+  // -------------------------------------------------------------------------
+
+  private def basicCredentialsUnpadded(user: String, password: String): String =
+    Base64.getEncoder.withoutPadding.encodeToString(s"$user:$password".getBytes("UTF-8"))
+
+  it should "accept Basic creds with UNPADDED base64 (Dremio parser workaround)" in {
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val client = h.newClient()
+    try
+      val hdrs = new FlightCallHeaders()
+      hdrs.insert("tenant", SecurityFixtures.TenantName)
+      hdrs.insert("pool", SecurityFixtures.PoolName)
+      hdrs.insert(
+        "x-qod-authorization",
+        s"Basic ${basicCredentialsUnpadded(SecurityFixtures.AliceUsername, SecurityFixtures.AlicePassword)}"
+      )
+      val opt = new HeaderCallOption(hdrs)
+      assertAuthPassed {
+        client.getInfo(FlightDescriptor.command("SELECT 1".getBytes("UTF-8")), opt)
+      }
+    finally
+      client.close()
+      h.shutdown()
+  }
+
   it should "accept Basic creds presented via x-qod-authorization (alias of Authorization)" in {
     val fix    = SecurityFixtures.freshStore()
     val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
