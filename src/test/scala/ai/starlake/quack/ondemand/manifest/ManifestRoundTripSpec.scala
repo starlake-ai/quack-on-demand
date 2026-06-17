@@ -160,9 +160,12 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Second import: use the original parsed manifest which has NO password fields
     ManifestImporter.apply(parsed, dst) shouldBe Right(())
 
-    // Passwords must be unchanged after the password-less second import
+    // Passwords must be unchanged after the password-less second import.
+    // The importer normalizes the user's tenant to the surrogate id it minted
+    // for "tpch" on import, so look the credential up by that id, not the name.
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.getPasswordHash(None, "admin").get shouldBe adminHash
-    dst.getPasswordHash(Some("tpch"), "alice").get shouldBe aliceHash
+    dst.getPasswordHash(Some(aliceTenantId), "alice").get shouldBe aliceHash
   }
 
   // ------------------------------------------------------------------
