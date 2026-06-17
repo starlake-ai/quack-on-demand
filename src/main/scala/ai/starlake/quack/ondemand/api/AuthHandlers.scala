@@ -29,7 +29,14 @@ final class AuthHandlers(
     identitySource: ManagementIdentitySource,
     grantsForIdentity: GrantsLookup,
     cookieSecureOverride: Option[Boolean] = None,
-    cookiePath: String = "/api"
+    cookiePath: String = "/api",
+    /** Resolves a login form's tenant -- entered as either the surrogate id (`t-…`) or the
+      * human-readable display name -- to the surrogate id stored in `qodstate_user.tenant`, which
+      * is what the authenticator's tenant-scoped query matches on. Returns `None` for an unknown
+      * value so the caller can pass it through verbatim and let auth fail cleanly. Defaults to a
+      * no-op (id-only) for callers that don't wire a registry (e.g. unit tests).
+      */
+    resolveTenant: String => Option[String] = _ => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -102,7 +109,10 @@ final class AuthHandlers(
       )
     else
       val scope: AuthScope = req.tenant.map(_.trim).filter(_.nonEmpty) match
-        case Some(t) => AuthScope.Tenant(t)
+        // Accept either the tenant id or its display name; normalize to the id
+        // the authenticator's tenant query matches. Unknown -> pass through so
+        // auth fails as "user not found" rather than 500-ing.
+        case Some(t) => AuthScope.Tenant(resolveTenant(t).getOrElse(t))
         case None    => AuthScope.System
       authService.authenticateBasic(scope, req.username, req.password) match
         case Left(err) =>

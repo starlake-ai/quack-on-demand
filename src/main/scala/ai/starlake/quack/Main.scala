@@ -347,7 +347,9 @@ object Main extends IOApp with LazyLogging:
       identitySource = identitySource,
       grantsForIdentity = grantsForIdentity,
       cookieSecureOverride = cookieSecureOverride,
-      cookiePath = mgrCfg.auth.management.sessionCookiePath
+      cookiePath = mgrCfg.auth.management.sessionCookiePath,
+      // Let operators log in with either the tenant id or its display name.
+      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

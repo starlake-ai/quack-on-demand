@@ -192,7 +192,16 @@ object ManifestImporter:
       //    forward.
       val snapshot: Map[(Option[String], String), String] =
         m.users.flatMap { u =>
-          store.getPasswordHash(u.tenant, u.username).map(h => (u.tenant, u.username) -> h)
+          // The prior hash is stored under the tenant SURROGATE ID, so resolve
+          // the display name before the lookup -- but key the snapshot by the
+          // manifest's display name to match the apply-time read below. A
+          // tenant not yet known to the store has no prior credential.
+          val storedTenant: Option[Option[String]] = u.tenant match
+            case None       => Some(None)
+            case Some(name) => tenantIdFor(store, name).map(Some(_))
+          storedTenant
+            .flatMap(t => store.getPasswordHash(t, u.username))
+            .map(h => (u.tenant, u.username) -> h)
         }.toMap
 
       // 2. Tenants + their nested collections (tenant-dbs, pools).
@@ -425,13 +434,15 @@ object ManifestImporter:
           case None =>
             errs += s"users[]: '${mu.username}' has no password and no prior credential in the manager"
           case Some(hash) =>
-            val userId = store.upsertUserWithHash(mu.tenant, mu.username, hash, mu.role)
-
-            // Tenant-scoped lookups for the user's role / group / pool
-            // grants. Superusers (tenant = None) skip the role/group
-            // replace below because the manifest cannot reference any --
-            // validation already enforced that.
+            // Resolve the manifest's tenant DISPLAY NAME to its surrogate id
+            // and persist THAT. `qodstate_user.tenant` holds the tenant id --
+            // matching createUser, the role/group upserts below, and what
+            // listUsers / findUserForLogin query against. Storing the display
+            // name here made `?tenant=acme` listings and tenant-scoped login
+            // silently come back empty. Superusers (tenant = None) stay None;
+            // the import-time validation guarantees a non-None tenant resolves.
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
+            val userId = store.upsertUserWithHash(tenantId, mu.username, hash, mu.role)
 
             // --- User roles
             val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
