@@ -66,6 +66,7 @@ const sidebars: SidebarsConfig = {
         'connecting/clients',
         'connecting/authenticating',
         'connecting/sql',
+        'connecting/powerbi',
       ],
     },
     {
