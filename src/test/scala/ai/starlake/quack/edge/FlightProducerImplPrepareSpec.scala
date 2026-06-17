@@ -254,6 +254,75 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     )
     schemaResult.getSchema.getFields.size() shouldBe 0
 
+  // The Arrow Flight SQL ODBC driver reads the result schema from
+  // FlightInfo.schema, NOT the dedicated GetSchema RPC. Returning null
+  // (the previous behavior) makes the driver fall back to reading the
+  // Schema from the DoGet IPC stream, which it doesn't do for column
+  // description -> Power BI throws "Tried reading schema message, was
+  // null or length 0". Returning the cached Prepare-time schema fixes it
+  // and stays compatible with ADBC (the stream emits the same schema).
+
+  it should "populate FlightInfo.schema on getFlightInfoPreparedStatement after a SELECT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val prepListener = runPrepare(producer, peer, "SELECT a FROM t")
+    val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
+    val handle       = prepResult.getPreparedStatementHandle
+    val cmd          = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val info = producer.getFlightInfoPreparedStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
+    )
+    info.getSchema should not be null
+    info.getSchema.getFields.size() should be >= 1
+
+  it should "populate FlightInfo.schema as empty on getFlightInfoPreparedStatement after an INSERT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val prepListener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
+    val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
+    val handle       = prepResult.getPreparedStatementHandle
+    val cmd          = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val info = producer.getFlightInfoPreparedStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
+    )
+    info.getSchema should not be null
+    info.getSchema.getFields.size() shouldBe 0
+
+  // Same FlightInfo.schema fix for the un-prepared (one-shot) statement path.
+  // ProbeWrap runs the LIMIT-0 probe to capture the result schema before the
+  // client's DoGet. For DML/DDL (SkipExecute) we keep the schema null on
+  // FlightInfo: ADBC would 400 on a mismatch between an "empty" advertised
+  // schema and the single-row Count the stream actually emits.
+
+  it should "populate FlightInfo.schema on getFlightInfoStatement for a SELECT" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("SELECT a FROM t")
+      .build()
+    val info = producer.getFlightInfoStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    info.getSchema should not be null
+    info.getSchema.getFields.size() should be >= 1
+
+  it should "leave FlightInfo.schema null on getFlightInfoStatement for an INSERT" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("INSERT INTO t VALUES (1)")
+      .build()
+    val info = producer.getFlightInfoStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    // FlightInfo coerces null on the wire to an empty Schema on the read side,
+    // so the assertion is on field count: still zero, no probe performed.
+    info.getSchema.getFields.size() shouldBe 0
+
   it should "throw UNAUTHENTICATED for getSchemaStatement when peer has no connection context" in:
     val (producer, _, _, _) = setupProducer()
     val cmd                 = FlightSql.CommandStatementQuery

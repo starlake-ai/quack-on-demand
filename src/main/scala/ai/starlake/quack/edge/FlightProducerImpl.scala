@@ -5,6 +5,7 @@ import com.google.protobuf.{Any => ProtoAny, ByteString}
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.flight.*
 import org.apache.arrow.flight.sql.NoOpFlightSqlProducer
+import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
 import org.apache.arrow.flight.sql.impl.FlightSql
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.VectorSchemaRoot
@@ -241,13 +242,23 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val handle = command.getPreparedStatementHandle.toStringUtf8
-    if !preparedStatements.contains(handle) then
-      throw CallStatus.INVALID_ARGUMENT
-        .withDescription(s"no such prepared statement: $handle")
-        .toRuntimeException()
-    val ticket   = new Ticket(ProtoAny.pack(command).toByteArray)
-    val endpoint = new FlightEndpoint(ticket)
-    new FlightInfo(null, descriptor, Collections.singletonList(endpoint), -1L, -1L)
+    preparedStatements.get(handle) match
+      case None =>
+        throw CallStatus.INVALID_ARGUMENT
+          .withDescription(s"no such prepared statement: $handle")
+          .toRuntimeException()
+      case Some(p) =>
+        val ticket   = new Ticket(ProtoAny.pack(command).toByteArray)
+        val endpoint = new FlightEndpoint(ticket)
+        // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver
+        // reads the result schema from FlightInfo.schema rather than the
+        // dedicated GetSchema RPC, so a null schema here makes the SQLGetData
+        // / SQLDescribeCol path fall through to "schema message was null or
+        // length 0" inside Power BI. We pass the cached Prepare-time schema
+        // (matches the DoGet stream byte-for-byte) which keeps ADBC happy:
+        // ADBC's mismatch guard is "FlightInfo.schema differs from the
+        // stream schema", not "FlightInfo.schema is non-null".
+        new FlightInfo(p.datasetSchema, descriptor, Collections.singletonList(endpoint), -1L, -1L)
 
   override def getStreamPreparedStatement(
       command: FlightSql.CommandPreparedStatementQuery,
@@ -318,7 +329,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_CATALOGS_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -345,7 +356,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_SCHEMAS_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -380,8 +391,13 @@ final class FlightProducerImpl(
       descriptor: FlightDescriptor
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    // include_schema=true emits a fifth `table_schema` column (the per-table
+    // Arrow schema, IPC-serialized) on top of GET_TABLES_SCHEMA_NO_SCHEMA.
+    val schema =
+      if command.getIncludeSchema then Schemas.GET_TABLES_SCHEMA
+      else Schemas.GET_TABLES_SCHEMA_NO_SCHEMA
     new FlightInfo(
-      null,
+      schema,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -584,7 +600,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_TABLE_TYPES_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -629,7 +645,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_PRIMARY_KEYS_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -641,10 +657,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(
-      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_PRIMARY_KEYS_SCHEMA,
-      listener
-    )
+    emitEmpty(Schemas.GET_PRIMARY_KEYS_SCHEMA, listener)
 
   override def getFlightInfoImportedKeys(
       command: FlightSql.CommandGetImportedKeys,
@@ -653,7 +666,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_IMPORTED_KEYS_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -665,10 +678,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(
-      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_IMPORTED_KEYS_SCHEMA,
-      listener
-    )
+    emitEmpty(Schemas.GET_IMPORTED_KEYS_SCHEMA, listener)
 
   override def getFlightInfoExportedKeys(
       command: FlightSql.CommandGetExportedKeys,
@@ -677,7 +687,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_EXPORTED_KEYS_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -689,10 +699,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(
-      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_EXPORTED_KEYS_SCHEMA,
-      listener
-    )
+    emitEmpty(Schemas.GET_EXPORTED_KEYS_SCHEMA, listener)
 
   override def getFlightInfoCrossReference(
       command: FlightSql.CommandGetCrossReference,
@@ -701,7 +708,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_CROSS_REFERENCE_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -713,10 +720,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    emitEmpty(
-      org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_CROSS_REFERENCE_SCHEMA,
-      listener
-    )
+    emitEmpty(Schemas.GET_CROSS_REFERENCE_SCHEMA, listener)
 
   /** FlightSQL "execute an update statement" entrypoint. A client's `executeUpdate` on a literal
     * INSERT / UPDATE / DELETE / DDL arrives here as a `CommandStatementUpdate` -- the read path
@@ -889,7 +893,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_TYPE_INFO_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -908,7 +912,7 @@ final class FlightProducerImpl(
       rows: List[TypeInfoRow],
       listener: FlightProducer.ServerStreamListener
   ): Unit =
-    val schema = org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_TYPE_INFO_SCHEMA
+    val schema = Schemas.GET_TYPE_INFO_SCHEMA
     val root   = VectorSchemaRoot.create(schema, allocator)
     try
       root.allocateNew()
@@ -1244,7 +1248,7 @@ final class FlightProducerImpl(
   ): FlightInfo =
     val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
     new FlightInfo(
-      null,
+      Schemas.GET_SQL_INFO_SCHEMA,
       descriptor,
       Collections.singletonList(new FlightEndpoint(ticket)),
       -1L,
@@ -1275,34 +1279,39 @@ final class FlightProducerImpl(
     val ticket = new Ticket(ProtoAny.pack(tsq).toByteArray)
     // No locations → client follows up on the same connection.
     val endpoint = new FlightEndpoint(ticket)
-    // null schema = "I don't know yet, trust the schema in the DoGet stream".
-    // If we returned an empty Schema here, ADBC compares it with the actual
-    // stream schema and 400s on mismatch.
+    // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver reads
+    // the result schema from FlightInfo.schema (via FlightSqlResultSet::Init)
+    // rather than the dedicated GetSchema RPC. We probe with the same
+    // LIMIT-0 wrap createPreparedStatement uses and embed the result here.
+    // For DML/DDL (SkipExecute) we keep the schema null - the stream emits
+    // a single-row Count, and advertising an empty schema here would 400
+    // ADBC's stream-schema-mismatch guard. The driver team confirmed a
+    // CORRECT schema that matches the DoGet stream passes ADBC's check;
+    // only an empty/wrong schema breaks it.
+    val peer        = Option(context.peerIdentity()).getOrElse("anonymous")
+    val schemaOrNull = probeStatementSchema(peer, command.getQuery).orNull
     new FlightInfo(
-      null,
+      schemaOrNull,
       descriptor,
       Collections.singletonList(endpoint),
       -1L,
       -1L
     )
 
-  /** R5 / Power BI ODBC: probe the result-set Schema for a literal SELECT (or empty schema for
-    * DML/DDL) so ODBC clients can answer SQLDescribeCol / SQLNumResultCols BEFORE fetching rows.
-    * Re-uses the same Prepare-time strategy as `createPreparedStatement` (LIMIT-0 wrap for SELECT,
-    * skip for DML/DDL, full for SHOW/DESCRIBE/EXPLAIN). The probe is run with `recordExecution =
-    * false` so it doesn't pollute the operator history or per-node load metrics.
+  /** Probe the result-set Schema for a literal statement using the same PrepareStrategy split as
+    * [[createPreparedStatement]]. Returns `Some(schema)` for queries (LIMIT-0 wrap on SELECT,
+    * full execute on SHOW/DESCRIBE/EXPLAIN) and `None` for DML/DDL (no result schema to advertise
+    * up front - the stream emits a single-row Count instead). Run with `recordExecution = false`
+    * so the probe stays invisible in operator history and per-node load metrics.
     *
-    * Note: we don't keep the null `FlightInfo.schema` (in [[getFlightInfoStatement]]) - returning
-    * an empty Schema there 400s ADBC on stream-schema mismatch. ODBC reads the schema via this
-    * dedicated GetSchema RPC instead.
+    * Throws a Flight RuntimeException on auth / router failure. Used by [[getSchemaStatement]]
+    * (dedicated RPC) and [[getFlightInfoStatement]] (the FlightInfo.schema path the Apache Arrow
+    * Flight SQL ODBC driver actually reads, per its `FlightSqlResultSet::Init()`).
     */
-  override def getSchemaStatement(
-      command: FlightSql.CommandStatementQuery,
-      context: FlightProducer.CallContext,
-      descriptor: FlightDescriptor
-  ): SchemaResult =
-    val sql  = command.getQuery
-    val peer = Option(context.peerIdentity()).getOrElse("anonymous")
+  private def probeStatementSchema(
+      peer: String,
+      sql: String
+  ): Option[Schema] =
     (
       ConnectionContext.poolFor(peer),
       ConnectionContext.connectionIdFor(peer),
@@ -1316,28 +1325,39 @@ final class FlightProducerImpl(
           case PrepareStrategy.SkipExecute      => None
           case PrepareStrategy.ProbeWrap(probe) => Some(probe)
           case PrepareStrategy.FullExecute      => Some(sql)
-        probeSqlOpt match
-          case None => new SchemaResult(emptySchema)
-          case Some(probeSql) =>
-            scala.util.Try(
-              router
-                .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
-                .unsafeRunSync()
-            ) match
-              case scala.util.Success(Right(result)) =>
-                try new SchemaResult(result.rows.getVectorSchemaRoot.getSchema)
-                finally result.close()
-              case scala.util.Success(Left(f)) =>
-                throw toFlightException(f)
-              case scala.util.Failure(t) =>
-                logger.error(s"getSchemaStatement threw: ${t.getMessage}", t)
-                throw CallStatus.INTERNAL
-                  .withDescription(t.getMessage)
-                  .toRuntimeException()
+        probeSqlOpt.map { probeSql =>
+          scala.util.Try(
+            router
+              .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
+              .unsafeRunSync()
+          ) match
+            case scala.util.Success(Right(result)) =>
+              try result.rows.getVectorSchemaRoot.getSchema
+              finally result.close()
+            case scala.util.Success(Left(f)) =>
+              throw toFlightException(f)
+            case scala.util.Failure(t) =>
+              logger.error(s"probeStatementSchema threw: ${t.getMessage}", t)
+              throw CallStatus.INTERNAL
+                .withDescription(t.getMessage)
+                .toRuntimeException()
+        }
       case _ =>
         throw CallStatus.UNAUTHENTICATED
           .withDescription(s"no connection context for peer $peer")
           .toRuntimeException()
+
+  /** R5 / Power BI ODBC: serve the dedicated GetSchema RPC for `CommandStatementQuery`. Driver
+    * teams that read the schema from this RPC (rather than from `FlightInfo.schema`) get the
+    * same probed schema. Empty schema for DML/DDL - the documented contract for the RPC.
+    */
+  override def getSchemaStatement(
+      command: FlightSql.CommandStatementQuery,
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): SchemaResult =
+    val peer = Option(context.peerIdentity()).getOrElse("anonymous")
+    new SchemaResult(probeStatementSchema(peer, command.getQuery).getOrElse(emptySchema))
 
   override def getStreamStatement(
       ticket: FlightSql.TicketStatementQuery,

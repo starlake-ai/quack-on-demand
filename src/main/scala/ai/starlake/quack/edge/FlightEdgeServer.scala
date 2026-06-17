@@ -177,7 +177,28 @@ final class FlightEdgeServer(
           case Some(knownPeerId) =>
             authResult(knownPeerId)
           case None =>
-            handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr, superuserHdr)
+            // Anonymous peer admit-path: when there is NO Authorization
+            // header at all, mint an anonymous peerId without binding any
+            // ConnectionContext. Some FlightSQL clients (the Apache Arrow
+            // Flight SQL ODBC driver, used by Power BI / Excel) issue
+            // their connect-time GetSqlInfo + GetXdbcTypeInfo BEFORE they
+            // replay the session bearer from the handshake. The server's
+            // identification metadata is not tenant data, so admitting an
+            // anonymous peer here lets the SQLGetInfo cache load.
+            //
+            // Producer methods that need tenant context look up
+            // `ConnectionContext.poolFor(peer)` and reject the anonymous
+            // peer downstream with UNAUTHENTICATED (see
+            // FlightProducerImpl.runStatement etc.). Only the static
+            // GetSqlInfo / GetXdbcTypeInfo paths are reachable anonymously.
+            //
+            // A malformed Authorization header (e.g. `Bearer <stale id>`,
+            // or `Basic <unparseable>`) is NOT silently anonymized: it
+            // falls through to handshake so the client gets a precise
+            // credential error instead of a downstream "no pool bound"
+            // surprise.
+            if authHeader.isEmpty then authResult(s"anonymous-${UUID.randomUUID()}")
+            else handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr, superuserHdr)
 
       /** Mint a new session peerId. Runs the configured auth chain when one exists; otherwise
         * trusts the client. On success we resolve tenant/pool via TenantSelector and bind the

@@ -263,3 +263,67 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       client.close()
       h.shutdown()
   }
+
+  // -------------------------------------------------------------------------
+  // Case 5: GetSqlInfo is reachable without auth.
+  //
+  // The Apache Arrow Flight SQL ODBC driver (Power BI, Excel) loads its
+  // SQLGetInfo cache at connect time by calling GetSqlInfo BEFORE replaying
+  // the session bearer from the handshake. Quack must serve GetSqlInfo as
+  // server-identification metadata (no tenant data is exposed) so the
+  // driver's connect-time probe succeeds. Data-bearing calls (runStatement,
+  // catalogs / schemas / tables) still require auth.
+  // -------------------------------------------------------------------------
+
+  it should "serve GetSqlInfo without any Authorization header" in {
+    import com.google.protobuf.{Any => ProtoAny}
+    import org.apache.arrow.flight.sql.impl.FlightSql
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val client = h.newClient()
+    try
+      // No Authorization, no tenant, no pool. Just the SqlInfo command.
+      val sqlInfoCmd = FlightSql.CommandGetSqlInfo
+        .newBuilder()
+        .addInfo(FlightSql.SqlInfo.FLIGHT_SQL_SERVER_NAME_VALUE)
+        .build()
+      val packed = ProtoAny.pack(sqlInfoCmd).toByteArray
+      assertAuthPassed {
+        client.getInfo(FlightDescriptor.command(packed))
+      }
+    finally
+      client.close()
+      h.shutdown()
+  }
+
+  // -------------------------------------------------------------------------
+  // Case 6: data-bearing calls still require auth even though SqlInfo
+  // doesn't. Anonymous peers reach the producer but bounce off the
+  // ConnectionContext check, surfacing as UNAUTHENTICATED.
+  // -------------------------------------------------------------------------
+
+  it should "reject a data-bearing call from an unauthenticated peer" in {
+    import com.google.protobuf.{Any => ProtoAny}
+    import org.apache.arrow.flight.sql.impl.FlightSql
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val client = h.newClient()
+    try
+      val stmtCmd = FlightSql.CommandStatementQuery
+        .newBuilder()
+        .setQuery("SELECT 1")
+        .build()
+      val packed = ProtoAny.pack(stmtCmd).toByteArray
+      // getFlightInfoStatement now probes the schema before returning the
+      // FlightInfo (needed so ODBC's `flight_info->GetSchema()` works).
+      // The probe goes through router.execute, which consults
+      // ConnectionContext - so an anonymous peer is rejected here at
+      // getInfo() rather than later at getStream().
+      val ex = intercept[FlightRuntimeException] {
+        client.getInfo(FlightDescriptor.command(packed))
+      }
+      ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
+    finally
+      client.close()
+      h.shutdown()
+  }
