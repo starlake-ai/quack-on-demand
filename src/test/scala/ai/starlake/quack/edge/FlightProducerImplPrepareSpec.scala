@@ -177,6 +177,97 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     result.getParameterSchema.size() should be > 0
     parseSchema(result.getParameterSchema.toByteArray).getFields.size() shouldBe 0
 
+  // ---- GetSchema (R5 / Power BI ODBC) ----
+  //
+  // The Apache Arrow Flight SQL ODBC driver calls GetSchema BEFORE fetching
+  // rows so it can answer SQLDescribeCol / SQLNumResultCols. Without our
+  // override both forms (`CommandStatementQuery`, `CommandPreparedStatementQuery`)
+  // fall through to the NoOp throw, and the driver surfaces
+  // "Tried reading schema message, was null or length 0" inside Power BI.
+
+  it should "return the cached schema for getSchemaPreparedStatement after a SELECT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val prepListener = runPrepare(producer, peer, "SELECT a FROM t")
+    val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
+    val handle       = prepResult.getPreparedStatementHandle
+    val cmd          = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val schemaResult = producer.getSchemaPreparedStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
+    )
+    schemaResult should not be null
+    schemaResult.getSchema should not be null
+    // Probe SQL is a stubbed TestArrow response (single-column "i" Int32),
+    // so the schema isn't empty; the precise shape is fixture-dependent.
+    // What matters here is "non-null, parseable schema" which is what the
+    // ODBC driver needs.
+    schemaResult.getSchema.getFields.size() should be >= 1
+
+  it should "return an empty schema for getSchemaPreparedStatement after an INSERT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val prepListener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
+    val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
+    val handle       = prepResult.getPreparedStatementHandle
+    val cmd          = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val schemaResult = producer.getSchemaPreparedStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
+    )
+    schemaResult.getSchema.getFields.size() shouldBe 0
+
+  it should "throw INVALID_ARGUMENT for getSchemaPreparedStatement with unknown handle" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("nope"))
+      .build()
+    val ex = intercept[org.apache.arrow.flight.FlightRuntimeException] {
+      producer.getSchemaPreparedStatement(
+        cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+      )
+    }
+    ex.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.INVALID_ARGUMENT
+
+  it should "probe and return the result schema for getSchemaStatement on a SELECT" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("SELECT a FROM t")
+      .build()
+    val schemaResult           = producer.getSchemaStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    schemaResult.getSchema.getFields.size() should be >= 1
+
+  it should "return an empty schema for getSchemaStatement on an INSERT" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("INSERT INTO t VALUES (1)")
+      .build()
+    val schemaResult           = producer.getSchemaStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    schemaResult.getSchema.getFields.size() shouldBe 0
+
+  it should "throw UNAUTHENTICATED for getSchemaStatement when peer has no connection context" in:
+    val (producer, _, _, _) = setupProducer()
+    val cmd                 = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("SELECT a FROM t")
+      .build()
+    val anonPeer            = s"anonymous-${java.util.UUID.randomUUID()}"
+    val ex = intercept[org.apache.arrow.flight.FlightRuntimeException] {
+      producer.getSchemaStatement(
+        cmd, fakeCallContext(anonPeer), FlightDescriptor.command(Array.emptyByteArray)
+      )
+    }
+    ex.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAUTHENTICATED
+
   // ---- Prepare + Execute merge into a single history row ----
 
   /** Walk through the FlightSQL Prepare action + the subsequent Execute, and return whatever

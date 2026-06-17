@@ -50,15 +50,22 @@ final class FlightProducerImpl(
       poolKey: ai.starlake.quack.model.PoolKey,
       effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
       preferredNode: Option[String],
-      prepareDurationMs: Option[Long]
+      prepareDurationMs: Option[Long],
+      // R5 / Power BI ODBC: the SCHEMA used to answer
+      // `getSchemaPreparedStatement`. Captured from the Prepare-time probe
+      // so the Execute path doesn't pay a second probe.
+      datasetSchema: Schema
   )
 
-  /** Cached empty Arrow schema for the [[PrepareStrategy.SkipExecute]] arm. FlightSQL clients
-    * interpret a zero-field `dataset_schema` as "this statement is an update, not a query" and
-    * dispatch through `executeUpdate` rather than `executeQuery`.
+  /** Cached empty Arrow schema. Returned for DML/DDL Prepare results (zero-field schema = "this is
+    * an update, dispatch through executeUpdate"), and as the wire-time `parameter_schema` value
+    * since Quack has no parameter binding.
     */
+  private val emptySchema: Schema =
+    new Schema(java.util.Collections.emptyList[Field]())
+
   private val emptySchemaBytes: ByteString =
-    serializeSchema(new Schema(java.util.Collections.emptyList[Field]()))
+    serializeSchema(emptySchema)
 
   private val preparedStatements =
     scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
@@ -128,7 +135,8 @@ final class FlightProducerImpl(
                 poolKey,
                 eff,
                 preferredNode = None,
-                prepareDurationMs = None
+                prepareDurationMs = None,
+                datasetSchema = emptySchema
               )
             )
             val resp = FlightSql.ActionCreatePreparedStatementResult
@@ -154,9 +162,14 @@ final class FlightProducerImpl(
                 .unsafeRunSync()
             ) match
               case scala.util.Success(Right(result)) =>
-                val handle      = java.util.UUID.randomUUID().toString
-                val schemaBytes =
-                  try serializeSchema(result.rows.getVectorSchemaRoot.getSchema)
+                val handle = java.util.UUID.randomUUID().toString
+                // Capture both the Schema object (for getSchemaPreparedStatement)
+                // and the IPC-serialized bytes (for the Prepare response) in a
+                // single read of the probe result; close the reader either way.
+                val (schema, schemaBytes) =
+                  try
+                    val s = result.rows.getVectorSchemaRoot.getSchema
+                    (s, serializeSchema(s))
                   finally result.close()
                 preparedStatements.put(
                   handle,
@@ -167,7 +180,8 @@ final class FlightProducerImpl(
                     poolKey,
                     eff,
                     preferredNode = Some(result.nodeId),
-                    prepareDurationMs = Some(result.durationMs)
+                    prepareDurationMs = Some(result.durationMs),
+                    datasetSchema = schema
                   )
                 )
                 val resp = FlightSql.ActionCreatePreparedStatementResult
@@ -202,6 +216,24 @@ final class FlightProducerImpl(
     val handle = request.getPreparedStatementHandle.toStringUtf8
     preparedStatements.remove(handle)
     listener.onCompleted()
+
+  /** R5 / Power BI ODBC: return the cached Prepare-time dataset schema. The Arrow Flight SQL ODBC
+    * driver calls GetSchema before fetching rows so it can answer SQLDescribeCol /
+    * SQLNumResultCols. Without this override the NoOp default throws UNIMPLEMENTED and Power BI
+    * surfaces "Tried reading schema message, was null or length 0".
+    */
+  override def getSchemaPreparedStatement(
+      command: FlightSql.CommandPreparedStatementQuery,
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): SchemaResult =
+    val handle = command.getPreparedStatementHandle.toStringUtf8
+    preparedStatements.get(handle) match
+      case Some(p) => new SchemaResult(p.datasetSchema)
+      case None    =>
+        throw CallStatus.INVALID_ARGUMENT
+          .withDescription(s"no such prepared statement: $handle")
+          .toRuntimeException()
 
   override def getFlightInfoPreparedStatement(
       command: FlightSql.CommandPreparedStatementQuery,
@@ -1253,6 +1285,59 @@ final class FlightProducerImpl(
       -1L,
       -1L
     )
+
+  /** R5 / Power BI ODBC: probe the result-set Schema for a literal SELECT (or empty schema for
+    * DML/DDL) so ODBC clients can answer SQLDescribeCol / SQLNumResultCols BEFORE fetching rows.
+    * Re-uses the same Prepare-time strategy as `createPreparedStatement` (LIMIT-0 wrap for SELECT,
+    * skip for DML/DDL, full for SHOW/DESCRIBE/EXPLAIN). The probe is run with `recordExecution =
+    * false` so it doesn't pollute the operator history or per-node load metrics.
+    *
+    * Note: we don't keep the null `FlightInfo.schema` (in [[getFlightInfoStatement]]) - returning
+    * an empty Schema there 400s ADBC on stream-schema mismatch. ODBC reads the schema via this
+    * dedicated GetSchema RPC instead.
+    */
+  override def getSchemaStatement(
+      command: FlightSql.CommandStatementQuery,
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): SchemaResult =
+    val sql  = command.getQuery
+    val peer = Option(context.peerIdentity()).getOrElse("anonymous")
+    (
+      ConnectionContext.poolFor(peer),
+      ConnectionContext.connectionIdFor(peer),
+      ConnectionContext.userFor(peer)
+    ) match
+      case (Some(poolKey), Some(connId), Some(user)) =>
+        val eff      = ConnectionContext.effectiveSetFor(peer)
+        val kind     = router.classifier.classify(sql)
+        val strategy = PrepareStrategy.choose(sql, kind)
+        val probeSqlOpt: Option[String] = strategy match
+          case PrepareStrategy.SkipExecute      => None
+          case PrepareStrategy.ProbeWrap(probe) => Some(probe)
+          case PrepareStrategy.FullExecute      => Some(sql)
+        probeSqlOpt match
+          case None => new SchemaResult(emptySchema)
+          case Some(probeSql) =>
+            scala.util.Try(
+              router
+                .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
+                .unsafeRunSync()
+            ) match
+              case scala.util.Success(Right(result)) =>
+                try new SchemaResult(result.rows.getVectorSchemaRoot.getSchema)
+                finally result.close()
+              case scala.util.Success(Left(f)) =>
+                throw toFlightException(f)
+              case scala.util.Failure(t) =>
+                logger.error(s"getSchemaStatement threw: ${t.getMessage}", t)
+                throw CallStatus.INTERNAL
+                  .withDescription(t.getMessage)
+                  .toRuntimeException()
+      case _ =>
+        throw CallStatus.UNAUTHENTICATED
+          .withDescription(s"no connection context for peer $peer")
+          .toRuntimeException()
 
   override def getStreamStatement(
       ticket: FlightSql.TicketStatementQuery,
