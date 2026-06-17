@@ -83,6 +83,133 @@ final class FlightProducerImpl(
       )
     ByteString.copyFrom(baos.toByteArray)
 
+  // -------------------------------------------------------------------------
+  //  Self-authenticating Flight DoGet tickets (R5 follow-up).
+  //
+  //  Symptom: the Apache Arrow Flight SQL ODBC driver replays the session
+  //  bearer on Handshake and GetFlightInfo but NOT on the follow-up DoGet.
+  //  Quack's getStream* methods used to look up (poolKey, connId, user, eff)
+  //  via ConnectionContext.poolFor(context.peerIdentity()) - which fails with
+  //  UNAUTHENTICATED for the anonymous DoGet peer.
+  //
+  //  Fix: at every getFlightInfo* (called WITH the bearer), mint a transient
+  //  ConnectionContext entry keyed by a fresh UUID that duplicates the
+  //  authenticated peer's context, and prefix the issued ticket bytes with a
+  //  small envelope carrying that UUID. The overridden `getStream` below
+  //  unwraps the envelope and dispatches the unwrapped ticket through a
+  //  CallContext whose `peerIdentity()` returns the UUID, so the existing
+  //  per-method context lookups Just Work without needing to re-thread the
+  //  session bearer through DoGet.
+  //
+  //  Net: the ticket is the capability that authorizes the DoGet, independent
+  //  of whether the client replays the bearer.
+  // -------------------------------------------------------------------------
+
+  /** Magic prefix on self-auth ticket envelopes. Tickets that don't start with this byte sequence
+    * are forwarded to `super.getStream` unchanged (legacy / unauthenticated path).
+    */
+  private val TicketMagic: Array[Byte] = "QOD1".getBytes(StandardCharsets.UTF_8)
+
+  /** TTL for a ticket-scoped ConnectionContext entry. Tight bound because DoGet should follow
+    * GetFlightInfo immediately; the entry exists only to bridge the bearer gap on that one RPC.
+    */
+  private val TicketSessionTtlSec: Long = 300
+
+  /** Bind a fresh `tk-<uuid>` ConnectionContext entry duplicating the source peer's context.
+    * Returns the new key; `None` when the source peer has no ConnectionContext (e.g. the
+    * anonymous admit-path peer minted at headerAuth - the call has no session to clone).
+    */
+  private def mintTicketPeer(sourcePeer: String): Option[String] =
+    ConnectionContext.entry(sourcePeer).map { e =>
+      val key = s"tk-${java.util.UUID.randomUUID()}"
+      ConnectionContext.bind(
+        peer = key,
+        key = e.poolKey,
+        connectionId = e.connectionId,
+        user = e.user,
+        effectiveSet = e.effectiveSet,
+        ttlSec = TicketSessionTtlSec
+      )
+      key
+    }
+
+  /** Wrap an Any-packed FlightSql command (or TicketStatementQuery) into a self-auth ticket. When
+    * the source peer has no bound session (anonymous path) we pass through the raw bytes - the
+    * downstream getStream* will reject with the existing UNAUTHENTICATED error.
+    */
+  private def selfAuthTicket(sourcePeer: String, originalAnyBytes: Array[Byte]): Ticket =
+    mintTicketPeer(sourcePeer) match
+      case None      => new Ticket(originalAnyBytes)
+      case Some(key) =>
+        val keyBytes = key.getBytes(StandardCharsets.UTF_8)
+        val out      =
+          new Array[Byte](TicketMagic.length + 1 + keyBytes.length + originalAnyBytes.length)
+        System.arraycopy(TicketMagic, 0, out, 0, TicketMagic.length)
+        out(TicketMagic.length) = keyBytes.length.toByte
+        System.arraycopy(keyBytes, 0, out, TicketMagic.length + 1, keyBytes.length)
+        System.arraycopy(
+          originalAnyBytes,
+          0,
+          out,
+          TicketMagic.length + 1 + keyBytes.length,
+          originalAnyBytes.length
+        )
+        new Ticket(out)
+
+  /** Unwrap a self-auth ticket envelope. Returns the embedded `tk-<uuid>` and the original Any
+    * bytes when the magic prefix is present; otherwise returns `(None, raw)` and the caller
+    * forwards the raw bytes downstream as a legacy ticket.
+    */
+  private def unwrapTicket(raw: Array[Byte]): (Option[String], Array[Byte]) =
+    if raw.length < TicketMagic.length + 1 then (None, raw)
+    else if !ticketHasMagic(raw) then (None, raw)
+    else
+      val keyLen = raw(TicketMagic.length) & 0xff
+      if raw.length < TicketMagic.length + 1 + keyLen then (None, raw)
+      else
+        val keyEnd   = TicketMagic.length + 1 + keyLen
+        val keyBytes = java.util.Arrays.copyOfRange(raw, TicketMagic.length + 1, keyEnd)
+        val original = java.util.Arrays.copyOfRange(raw, keyEnd, raw.length)
+        (Some(new String(keyBytes, StandardCharsets.UTF_8)), original)
+
+  private def ticketHasMagic(raw: Array[Byte]): Boolean =
+    var i  = 0
+    var ok = true
+    while ok && i < TicketMagic.length do
+      if raw(i) != TicketMagic(i) then ok = false
+      i += 1
+    ok
+
+  /** Wrap a CallContext to return a specific `peerIdentity()`, delegating everything else. Used
+    * after a self-auth ticket envelope unwrap so the dispatched getStream* methods see the
+    * session-bound peer instead of the anonymous DoGet peer.
+    */
+  private def withPeer(
+      orig: FlightProducer.CallContext,
+      peer: String
+  ): FlightProducer.CallContext =
+    new FlightProducer.CallContext:
+      override def peerIdentity(): String = peer
+      override def isCancelled(): Boolean = orig.isCancelled()
+      override def getMiddleware[T <: FlightServerMiddleware](
+          key: FlightServerMiddleware.Key[T]
+      ): T = orig.getMiddleware(key)
+      override def getMiddleware()
+          : java.util.Map[FlightServerMiddleware.Key[?], FlightServerMiddleware] =
+        orig.getMiddleware()
+
+  override def getStream(
+      context: FlightProducer.CallContext,
+      ticket: Ticket,
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    val (sessionKey, originalBytes) = unwrapTicket(ticket.getBytes)
+    sessionKey match
+      case Some(key) =>
+        super.getStream(withPeer(context, key), new Ticket(originalBytes), listener)
+      case None =>
+        super.getStream(context, ticket, listener)
+
   /** Map a typed [[RouterFailure]] to the Arrow Flight `CallStatus` the wire surfaces to clients.
     * Keeps the status code authoritative so connectors (Power BI, DBeaver, ADBC) can branch on
     * UNAUTHORIZED / NOT_FOUND / INVALID_ARGUMENT / UNAVAILABLE / INTERNAL without parsing the
@@ -248,7 +375,10 @@ final class FlightProducerImpl(
           .withDescription(s"no such prepared statement: $handle")
           .toRuntimeException()
       case Some(p) =>
-        val ticket   = new Ticket(ProtoAny.pack(command).toByteArray)
+        val ticket   = selfAuthTicket(
+          Option(context.peerIdentity()).getOrElse("anonymous"),
+          ProtoAny.pack(command).toByteArray
+        )
         val endpoint = new FlightEndpoint(ticket)
         // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver
         // reads the result schema from FlightInfo.schema rather than the
@@ -327,7 +457,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_CATALOGS_SCHEMA,
       descriptor,
@@ -354,7 +487,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_SCHEMAS_SCHEMA,
       descriptor,
@@ -390,7 +526,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     // include_schema=true emits a fifth `table_schema` column (the per-table
     // Arrow schema, IPC-serialized) on top of GET_TABLES_SCHEMA_NO_SCHEMA.
     val schema =
@@ -598,7 +737,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_TABLE_TYPES_SCHEMA,
       descriptor,
@@ -643,7 +785,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_PRIMARY_KEYS_SCHEMA,
       descriptor,
@@ -664,7 +809,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_IMPORTED_KEYS_SCHEMA,
       descriptor,
@@ -685,7 +833,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_EXPORTED_KEYS_SCHEMA,
       descriptor,
@@ -706,7 +857,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(command).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_CROSS_REFERENCE_SCHEMA,
       descriptor,
@@ -891,7 +1045,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(request).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_TYPE_INFO_SCHEMA,
       descriptor,
@@ -1246,7 +1403,10 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
+    val ticket = selfAuthTicket(
+      Option(context.peerIdentity()).getOrElse("anonymous"),
+      ProtoAny.pack(request).toByteArray
+    )
     new FlightInfo(
       Schemas.GET_SQL_INFO_SCHEMA,
       descriptor,
@@ -1272,11 +1432,12 @@ final class FlightProducerImpl(
     // NoOpFlightSqlProducer.getStream parses ticket.getBytes() as Any and
     // dispatches to getStreamStatement only when the unwrapped message is
     // TicketStatementQuery. Raw SQL bytes will silently fail dispatch.
-    val tsq = FlightSql.TicketStatementQuery
+    val peer = Option(context.peerIdentity()).getOrElse("anonymous")
+    val tsq  = FlightSql.TicketStatementQuery
       .newBuilder()
       .setStatementHandle(ByteString.copyFromUtf8(command.getQuery))
       .build()
-    val ticket = new Ticket(ProtoAny.pack(tsq).toByteArray)
+    val ticket = selfAuthTicket(peer, ProtoAny.pack(tsq).toByteArray)
     // No locations → client follows up on the same connection.
     val endpoint = new FlightEndpoint(ticket)
     // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver reads
@@ -1288,7 +1449,6 @@ final class FlightProducerImpl(
     // ADBC's stream-schema-mismatch guard. The driver team confirmed a
     // CORRECT schema that matches the DoGet stream passes ADBC's check;
     // only an empty/wrong schema breaks it.
-    val peer        = Option(context.peerIdentity()).getOrElse("anonymous")
     val schemaOrNull = probeStatementSchema(peer, command.getQuery).orNull
     new FlightInfo(
       schemaOrNull,
