@@ -204,6 +204,20 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val (sessionKey, originalBytes) = unwrapTicket(ticket.getBytes)
+    // Diagnostic: peer + envelope outcome so operators can tell at a glance
+    // whether DoGet authorized via a self-auth ticket or fell through to the
+    // anonymous-peer / no-context error path.
+    if logger.underlying.isDebugEnabled then
+      val peer        = Option(context.peerIdentity()).getOrElse("(null)")
+      val outcome     = sessionKey match
+        case Some(k) => s"envelope->$k"
+        case None    => "no-envelope"
+      val ticketBytes = ticket.getBytes
+      val ticketLen   = ticketBytes.length
+      logger.debug(
+        s"getStream: peer=$peer ticketLen=$ticketLen ticketPrefix=" +
+          ticketBytes.take(8).map(b => f"$b%02x").mkString + s" $outcome"
+      )
     sessionKey match
       case Some(key) =>
         super.getStream(withPeer(context, key), new Ticket(originalBytes), listener)
