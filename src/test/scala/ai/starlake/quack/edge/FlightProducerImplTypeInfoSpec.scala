@@ -76,9 +76,10 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
   private final class CapturingListener extends ServerStreamListener:
     @volatile var schema: org.apache.arrow.vector.types.pojo.Schema = null
     @volatile var rowCount: Int                                    = -1
-    val typeNames = scala.collection.mutable.ListBuffer.empty[String]
-    val dataTypes = scala.collection.mutable.ListBuffer.empty[Int]
-    val infoNames = scala.collection.mutable.ListBuffer.empty[Long]
+    val typeNames   = scala.collection.mutable.ListBuffer.empty[String]
+    val dataTypes   = scala.collection.mutable.ListBuffer.empty[Int]
+    val infoNames   = scala.collection.mutable.ListBuffer.empty[Long]
+    val int32Values = scala.collection.mutable.ListBuffer.empty[Int]
     @volatile var done: Boolean             = false
     @volatile var errored: Throwable        = null
     private var root: VectorSchemaRoot      = null
@@ -115,6 +116,23 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
         var i  = 0
         while i < rowCount do
           if !iv.isNull(i) then infoNames += (iv.get(i).toLong & 0xffffffffL)
+          i += 1
+      }
+      // SqlInfo response shape: value is a DenseUnion with 6 children indexed
+      // 0..5 -> string_value, bool_value, bigint_value, int32_bitmask,
+      // string_list, int32_to_int32_list_map. For the FLIGHT_SQL_SERVER_*
+      // codes that hold a SqlSupportedTransaction enum, the union picks the
+      // int32_bitmask child (typeId 3). Read it back so tests can pin the
+      // exact reported value.
+      Option(root.getVector("value")).foreach { v =>
+        val union   = v.asInstanceOf[org.apache.arrow.vector.complex.DenseUnionVector]
+        var i       = 0
+        while i < rowCount do
+          val tid = union.getTypeId(i)
+          if tid == 3 then
+            val int32Vec = union.getIntVector(tid)
+            val offset   = union.getOffset(i)
+            int32Values += int32Vec.get(offset)
           i += 1
       }
     override def putMetadata(buf: org.apache.arrow.memory.ArrowBuf): Unit = ()
@@ -281,6 +299,24 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
     listener.done shouldBe true
     listener.infoNames.toSet should contain allOf (
       FLIGHT_SQL_SERVER_NAME.toLong, FLIGHT_SQL_SERVER_VERSION.toLong
+    )
+
+  // R7 fix-up after R15 redeploy: advertising
+  // SQL_SUPPORTED_TRANSACTION_TRANSACTION made clients call BeginTransaction
+  // (the FlightSql server-managed transaction action), which we don't
+  // implement and which throws UNIMPLEMENTED. Honest answer: NONE.
+  it should "report SQL_SUPPORTED_TRANSACTION_NONE for FlightSqlServerTransaction" in:
+    val producer = setupProducer()
+    val cmd = FlightSql.CommandGetSqlInfo
+      .newBuilder()
+      .addInfo(SqlInfo.FLIGHT_SQL_SERVER_TRANSACTION_VALUE)
+      .build()
+    val listener = new CapturingListener
+    producer.getStreamSqlInfo(cmd, fakeContext, listener)
+    listener.errored shouldBe null
+    listener.done shouldBe true
+    listener.int32Values.headOption shouldBe Some(
+      FlightSql.SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_NONE.getNumber
     )
 
   // R7 follow-up: the ODBC driver's SQLGetInfo cache fails with

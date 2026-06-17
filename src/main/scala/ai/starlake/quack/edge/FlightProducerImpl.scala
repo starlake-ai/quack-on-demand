@@ -986,8 +986,15 @@ final class FlightProducerImpl(
       .withFlightSqlServerReadOnly(false)
       .withFlightSqlServerSql(true)
       .withFlightSqlServerSubstrait(false)
+      // R7 fix-up: report NONE for the FlightSql server-managed transaction
+      // action surface. Quack handles inline BEGIN/COMMIT/ROLLBACK statements
+      // through the regular query path (see `SqlTransactionsSupported = true`
+      // below), but it does NOT implement the FlightSql BeginTransaction /
+      // EndTransaction / BeginSavepoint actions - those still inherit
+      // UNIMPLEMENTED from NoOpFlightSqlProducer. Advertising TRANSACTION made
+      // ADBC autocommit-off clients call BeginTransaction and hard-fail.
       .withFlightSqlServerTransaction(
-        SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_TRANSACTION
+        SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_NONE
       )
       .withFlightSqlServerCancel(false)
       // ---- DDL surface ----
