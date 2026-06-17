@@ -145,6 +145,64 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
     override def setUseZeroCopy(zeroCopy: Boolean): Unit                  = ()
     override def setOnCancelHandler(handler: Runnable): Unit              = ()
 
+  // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver reads
+  // the result schema from FlightInfo.schema for metadata result sets too,
+  // not just for queries. Each getFlightInfo* handler must embed the
+  // canonical Flight SQL schema instead of null.
+  "FlightProducerImpl metadata handlers" should
+    "populate FlightInfo.schema on every getFlightInfo* metadata override" in:
+    import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
+    val producer = setupProducer()
+    val desc     = org.apache.arrow.flight.FlightDescriptor.command(Array.emptyByteArray)
+    val pairs: List[(String, () => org.apache.arrow.flight.FlightInfo, org.apache.arrow.vector.types.pojo.Schema)] = List(
+      ("Catalogs",  () => producer.getFlightInfoCatalogs(
+        FlightSql.CommandGetCatalogs.newBuilder().build(), fakeContext, desc),
+        Schemas.GET_CATALOGS_SCHEMA),
+      ("Schemas",   () => producer.getFlightInfoSchemas(
+        FlightSql.CommandGetDbSchemas.newBuilder().build(), fakeContext, desc),
+        Schemas.GET_SCHEMAS_SCHEMA),
+      ("Tables",    () => producer.getFlightInfoTables(
+        FlightSql.CommandGetTables.newBuilder().setIncludeSchema(false).build(),
+        fakeContext, desc),
+        Schemas.GET_TABLES_SCHEMA_NO_SCHEMA),
+      ("Tables+schema", () => producer.getFlightInfoTables(
+        FlightSql.CommandGetTables.newBuilder().setIncludeSchema(true).build(),
+        fakeContext, desc),
+        Schemas.GET_TABLES_SCHEMA),
+      ("TableTypes", () => producer.getFlightInfoTableTypes(
+        FlightSql.CommandGetTableTypes.newBuilder().build(), fakeContext, desc),
+        Schemas.GET_TABLE_TYPES_SCHEMA),
+      ("PrimaryKeys", () => producer.getFlightInfoPrimaryKeys(
+        FlightSql.CommandGetPrimaryKeys.newBuilder().setTable("t").build(),
+        fakeContext, desc),
+        Schemas.GET_PRIMARY_KEYS_SCHEMA),
+      ("ImportedKeys", () => producer.getFlightInfoImportedKeys(
+        FlightSql.CommandGetImportedKeys.newBuilder().setTable("t").build(),
+        fakeContext, desc),
+        Schemas.GET_IMPORTED_KEYS_SCHEMA),
+      ("ExportedKeys", () => producer.getFlightInfoExportedKeys(
+        FlightSql.CommandGetExportedKeys.newBuilder().setTable("t").build(),
+        fakeContext, desc),
+        Schemas.GET_EXPORTED_KEYS_SCHEMA),
+      ("CrossReference", () => producer.getFlightInfoCrossReference(
+        FlightSql.CommandGetCrossReference.newBuilder().setPkTable("p").setFkTable("f").build(),
+        fakeContext, desc),
+        Schemas.GET_CROSS_REFERENCE_SCHEMA),
+      ("TypeInfo",  () => producer.getFlightInfoTypeInfo(
+        FlightSql.CommandGetXdbcTypeInfo.newBuilder().build(), fakeContext, desc),
+        Schemas.GET_TYPE_INFO_SCHEMA),
+      ("SqlInfo",   () => producer.getFlightInfoSqlInfo(
+        FlightSql.CommandGetSqlInfo.newBuilder().build(), fakeContext, desc),
+        Schemas.GET_SQL_INFO_SCHEMA),
+    )
+    pairs.foreach { case (label, fn, expected) =>
+      withClue(s"$label: ") {
+        val info = fn()
+        info.getSchema should not be null
+        info.getSchema shouldBe expected
+      }
+    }
+
   "FlightProducerImpl.getStreamTypeInfo" should
     "emit a row per DuckDB type matching TypeInfoCatalog" in:
     val producer = setupProducer()
