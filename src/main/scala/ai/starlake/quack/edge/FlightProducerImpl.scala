@@ -393,7 +393,11 @@ final class FlightProducerImpl(
     val schemaPattern =
       if command.hasDbSchemaFilterPattern then Some(command.getDbSchemaFilterPattern) else None
     val filters = (
-      catalog.map(c => s"catalog_name = '${quote(c)}'") ::
+      // LIKE not = : the Apache Arrow Flight SQL ODBC driver forwards PBI's
+      // SQLTables wildcard '%' as a literal catalog value, so `=` rejects every
+      // row. Treating the filter as a LIKE pattern restores wildcard semantics
+      // without breaking exact-match callers (literal names match themselves).
+      catalog.map(c => s"catalog_name LIKE '${quote(c)}'") ::
         schemaPattern.map(p => s"schema_name LIKE '${quote(p)}'") ::
         Some("schema_name NOT IN ('information_schema', 'pg_catalog')") :: Nil
     ).flatten.mkString(" AND ")
@@ -436,7 +440,7 @@ final class FlightProducerImpl(
     val tablePattern =
       if command.hasTableNameFilterPattern then Some(command.getTableNameFilterPattern) else None
     val filters = (
-      catalog.map(c => s"table_catalog = '${quote(c)}'") ::
+      catalog.map(c => s"table_catalog LIKE '${quote(c)}'") ::
         schemaPattern.map(p => s"table_schema LIKE '${quote(p)}'") ::
         tablePattern.map(p => s"table_name LIKE '${quote(p)}'") ::
         Some("table_schema NOT IN ('information_schema', 'pg_catalog')") :: Nil
