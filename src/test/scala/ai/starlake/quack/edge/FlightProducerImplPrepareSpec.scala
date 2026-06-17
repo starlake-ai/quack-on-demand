@@ -147,6 +147,36 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     )
     schema.getFields.size() shouldBe 0
 
+  /** Deserialize a serialized IPC Arrow schema from raw bytes. */
+  private def parseSchema(bytes: Array[Byte]): org.apache.arrow.vector.types.pojo.Schema =
+    org.apache.arrow.vector.ipc.message.MessageSerializer.deserializeSchema(
+      new org.apache.arrow.vector.ipc.ReadChannel(
+        java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(bytes))
+      )
+    )
+
+  // The Apache Arrow Flight SQL ODBC driver (Power BI, Excel) reads
+  // `parameter_schema` from the Prepare result to learn the parameter
+  // count. An absent field throws "Tried reading schema message, was null
+  // or length 0" inside the driver. Quack has no parameter binding (R9 is
+  // out of scope), so we advertise an empty schema = zero parameters.
+
+  it should "set parameter_schema to an empty schema on a SELECT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val listener = runPrepare(producer, peer, "SELECT a FROM t")
+    val result   = decodePrepareResult(listener.onNextValue.get())
+    // bytes field: non-empty payload = field set on the wire
+    result.getParameterSchema.size() should be > 0
+    parseSchema(result.getParameterSchema.toByteArray).getFields.size() shouldBe 0
+
+  it should "set parameter_schema to an empty schema on an INSERT prepare" in:
+    val (producer, _, _, peer) = setupProducer()
+    val listener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
+    val result   = decodePrepareResult(listener.onNextValue.get())
+    // bytes field: non-empty payload = field set on the wire
+    result.getParameterSchema.size() should be > 0
+    parseSchema(result.getParameterSchema.toByteArray).getFields.size() shouldBe 0
+
   // ---- Prepare + Execute merge into a single history row ----
 
   /** Walk through the FlightSQL Prepare action + the subsequent Execute, and return whatever
