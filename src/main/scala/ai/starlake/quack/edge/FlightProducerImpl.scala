@@ -135,6 +135,11 @@ final class FlightProducerImpl(
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
               .setDatasetSchema(emptySchemaBytes)
+              // Apache Arrow Flight SQL ODBC reads parameter_schema to learn
+              // the parameter count. An absent field throws "Tried reading
+              // schema message, was null or length 0". Quack has no parameter
+              // binding so we advertise zero parameters via the empty schema.
+              .setParameterSchema(emptySchemaBytes)
               .build()
             listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
             listener.onCompleted()
@@ -169,6 +174,9 @@ final class FlightProducerImpl(
                   .newBuilder()
                   .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
                   .setDatasetSchema(schemaBytes)
+                  // Empty parameter_schema = zero bound parameters. See the
+                  // SkipExecute arm above for the why.
+                  .setParameterSchema(emptySchemaBytes)
                   .build()
                 listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
                 listener.onCompleted()
