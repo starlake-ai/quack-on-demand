@@ -106,7 +106,7 @@ final class FlightSqlRouter(
       preferredNode: Option[String] = None,
       recordExecution: Boolean = true,
       prepareDurationMs: Option[Long] = None
-  ): IO[Either[String, QueryResult]] =
+  ): IO[Either[RouterFailure, QueryResult]] =
     val s    = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
     val kind = classifier.classify(sql)
     // ACL / SQL validation gate. Runs before routing so denied
@@ -151,7 +151,7 @@ final class FlightSqlRouter(
     validator.validate(ctx) match
       case Denied(reason) =>
         maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-        return IO.pure(Left(s"access denied: $reason"))
+        return IO.pure(Left(RouterFailure.AccessDenied(s"access denied: $reason")))
       case Allowed => () // fall through
 
     // Column-level security: enforce per-column policies before routing.
@@ -184,7 +184,7 @@ final class FlightSqlRouter(
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "denied")
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-            return IO.pure(Left(s"access denied: $reason"))
+            return IO.pure(Left(RouterFailure.AccessDenied(s"access denied: $reason")))
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
             // Deny path where the cause was an unresolved table/schema/catalog coordinate
             // rather than a policy match. Same wire error as Denied but tagged separately.
@@ -192,7 +192,7 @@ final class FlightSqlRouter(
               .recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "unresolved_deny")
             val reason = "unresolved table"
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-            return IO.pure(Left(s"access denied: $reason"))
+            return IO.pure(Left(RouterFailure.AccessDenied(s"access denied: $reason")))
 
     // Row-level security: filter rows AFTER column masking is decided, but injected at the BASE
     // table so the predicate runs on the true (unmasked) values. Operates on the CLS output so the
@@ -223,7 +223,7 @@ final class FlightSqlRouter(
       case None =>
         if s.txOpen then sessions.invalidatePin(connectionId)
         maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
-        IO.pure(Left(s"pool not found: $poolKey"))
+        IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
       case Some(snap) =>
         // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
         // current snapshot; otherwise None lets Router.pick run its load-aware choice.
@@ -237,17 +237,17 @@ final class FlightSqlRouter(
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
             maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
-            IO.pure(Left(reason))
+            IO.pure(Left(RouterFailure.Unavailable(reason)))
 
           case RoutingDecision.PinnedNodeGone(_) =>
             sessions.invalidatePin(connectionId)
             maybeRecord(nodeId = "-", durationMs = 0, status = "pin-lost", error = None)
-            IO.pure(Left("pinned node disappeared; transaction lost"))
+            IO.pure(Left(RouterFailure.Unavailable("pinned node disappeared; transaction lost")))
 
           case RoutingDecision.Use(nodeId) =>
             snap.nodes.find(_.nodeId == nodeId) match
               case None =>
-                IO.pure(Left(s"node $nodeId not in snapshot"))
+                IO.pure(Left(RouterFailure.Internal(s"node $nodeId not in snapshot")))
               case Some(node) =>
                 adapter
                   .send(node, wrappedSql, session = None, recordLoad = recordExecution)
@@ -261,7 +261,11 @@ final class FlightSqlRouter(
                       maybeRecord(nodeId, latency, "transient", Some(m))
                       if s.txOpen then
                         sessions.invalidatePin(connectionId)
-                        IO.pure(Left(s"transient failure inside transaction: $m"))
+                        IO.pure(
+                          Left(
+                            RouterFailure.Unavailable(s"transient failure inside transaction: $m")
+                          )
+                        )
                       else
                         retryOnce(
                           connectionId,
@@ -274,7 +278,7 @@ final class FlightSqlRouter(
 
                     case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
                       maybeRecord(nodeId, latency, "permanent", Some(m))
-                      IO.pure(Left(s"permanent failure: $m"))
+                      IO.pure(Left(classifyPermanent(m)))
                   }
 
   /** Prepend `USE <dbName>.<schemaName>;` so the remote DuckDB session lands in the pool's
@@ -316,9 +320,9 @@ final class FlightSqlRouter(
       sql: String,
       exclude: String,
       recordLoad: Boolean = true
-  ): IO[Either[String, QueryResult]] =
+  ): IO[Either[RouterFailure, QueryResult]] =
     supervisor.snapshot(poolKey) match
-      case None          => IO.pure(Left(s"pool not found: $poolKey"))
+      case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
       case Some(snapAll) =>
         val snap = snapAll.copy(nodes = snapAll.nodes.filterNot(_.nodeId == exclude))
         Router.pick(snap, kind, pinned = None) match
@@ -336,11 +340,25 @@ final class FlightSqlRouter(
                     sessions.onStatement(connectionId, kind, nodeId)
                     Right(QueryResult(reader, close, nodeId, latency))
                   case QuackResponse.Failed(QuackError.Transient(m), _) =>
-                    Left(s"retry failed (transient): $m")
+                    Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                   case QuackResponse.Failed(QuackError.Permanent(m), _) =>
-                    Left(s"retry failed (permanent): $m")
+                    Left(classifyPermanent(s"retry failed: $m"))
                 }
               case None =>
-                IO.pure(Left("no fallback node available"))
+                IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
           case _ =>
-            IO.pure(Left("no fallback node available"))
+            IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
+
+  /** Map a permanent DuckDB error envelope to a typed failure. DuckDB stamps user-input errors with
+    * prefixes like `Parser Error`, `Binder Error`, `Catalog Error` - we route the ones about
+    * missing objects to [[RouterFailure.NotFound]] and the rest to [[RouterFailure.BadRequest]].
+    * The `permanent failure:` prefix is preserved in the reason for operators reading metrics /
+    * history.
+    */
+  private def classifyPermanent(message: String): RouterFailure =
+    val lower    = message.toLowerCase
+    val notFound = lower.contains("does not exist") || lower.contains("not found") ||
+      (lower.contains("catalog error") && lower.contains("does not"))
+    val full = s"permanent failure: $message"
+    if notFound then RouterFailure.NotFound(full)
+    else RouterFailure.BadRequest(full)

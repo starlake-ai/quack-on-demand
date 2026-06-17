@@ -3,7 +3,7 @@ object Versions {
   val sttpApispec    = "0.11.3" // openapi-circe-yaml serializer; must match what tapir 1.11.10 pulls transitively
   val http4s         = "0.23.24"
   val circe          = "0.14.10"
-  val arrow          = "14.0.1"
+  val arrow          = "18.3.0"
   val grpc           = "1.76.3"
   val scalaLogging   = "3.9.5"
   val logbackClassic = "1.5.12"
