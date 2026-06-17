@@ -47,12 +47,12 @@ object RowPolicyRewriter:
   case object Passthrough                 extends Outcome
 
   /** SQL could not be parsed. Routed identically to [[Passthrough]] (original SQL forwarded) but
-    * tagged separately on `row_policy_rewrites_total` so dashboards can split "rewriter blind"
-    * from "no policy applied".
+    * tagged separately on `row_policy_rewrites_total` so dashboards can split "rewriter blind" from
+    * "no policy applied".
     */
   case object PassthroughParseFailed extends Outcome
 
-  private val Wildcard = RoleRowPolicy.Wildcard
+  private val Wildcard   = RoleRowPolicy.Wildcard
   private val TokenRegex = "\\$\\{[a-zA-Z]+\\}".r
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
@@ -161,8 +161,8 @@ class RowPolicyRewriter(enabled: Boolean = false):
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean
   ): net.sf.jsqlparser.statement.select.FromItem =
-    val name   = t.getName
-    val schema = Option(t.getSchemaName).getOrElse(ctx.defaultSchema.getOrElse(""))
+    val name    = t.getName
+    val schema  = Option(t.getSchemaName).getOrElse(ctx.defaultSchema.getOrElse(""))
     val catalog = Option(t.getDatabase)
       .flatMap(d => Option(d.getDatabaseName))
       .getOrElse(ctx.defaultDatabase.getOrElse(""))

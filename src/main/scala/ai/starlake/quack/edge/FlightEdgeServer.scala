@@ -317,11 +317,11 @@ final class FlightEdgeServer(
                   jwtGroups
                 ) match
                   case Left(err) =>
-                    // Arrow Flight's CallStatus has UNAUTHENTICATED but no
-                    // dedicated PERMISSION_DENIED until later versions; reuse
-                    // UNAUTHENTICATED with a "permission denied: " prefix so
-                    // FlightSQL clients can still surface the reason text.
-                    throw CallStatus.UNAUTHENTICATED
+                    // R12: the principal authenticated but isn't authorized for
+                    // this (tenant, pool). Surface UNAUTHORIZED (Arrow Flight's
+                    // PERMISSION_DENIED) so clients can tell "wrong password"
+                    // from "no access to this pool" without parsing strings.
+                    throw CallStatus.UNAUTHORIZED
                       .withDescription(s"permission denied: $err")
                       .toRuntimeException()
                   case Right(auth) =>

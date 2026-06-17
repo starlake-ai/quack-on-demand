@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Allowed, StatementValidator, ValidationContext, ValidationResult}
+import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext, ValidationResult}
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -110,10 +110,47 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val out = router.execute("c-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
     out shouldBe a [Left[_, _]]
 
+  // R12: distinct Flight SQL status codes. Each failure shape carries its
+  // own RouterFailure variant so the Flight producer can map to UNAUTHORIZED
+  // / NOT_FOUND / INVALID_ARGUMENT / UNAVAILABLE / INTERNAL rather than
+  // folding every error to INTERNAL.
+  it should "tag a quarantined-pool failure as RouterFailure.Unavailable" in:
+    val (router, _, _) = setup()
+    val nodeId = router.supervisor.list().head.nodes.head.nodeId
+    router.tracker.setHealthy(nodeId, false)
+    val out = router.execute("c-2-kind", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a [RouterFailure.Unavailable]
+
   it should "return Left when pool does not exist" in:
     val (router, _, _) = setup()
     val out = router.execute("c-3", "alice", PoolKey("ghost", "ghost_default", "missing"), "SELECT 1").unsafeRunSync()
     out shouldBe a [Left[_, _]]
+
+  it should "tag an unknown pool as RouterFailure.NotFound" in:
+    val (router, _, _) = setup()
+    val out = router.execute("c-3-kind", "alice",
+      PoolKey("ghost", "ghost_default", "missing"), "SELECT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a [RouterFailure.NotFound]
+
+  it should "tag a StatementValidator deny as RouterFailure.AccessDenied" in:
+    val denying = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult = Denied("you can't read this")
+    // Reuse setup() to get a wired supervisor/adapter, then rebuild the
+    // router with the denying validator. We pull the existing router's
+    // collaborators rather than re-stand-up the whole stack.
+    val (base, _, _) = setup()
+    val router = new FlightSqlRouter(
+      base.supervisor, base.sessions, base.tracker, base.adapter,
+      validator = denying, stmtInstruments = si
+    )
+    val out = router.execute("c-deny", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a [RouterFailure.AccessDenied]
+
+  it should "tag a permanent backend error as RouterFailure.BadRequest" in:
+    val perm = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L)
+    val (router, _, _) = setup(stub = perm)
+    val out = router.execute("c-bad", "alice", poolKey, "SELECTT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a [RouterFailure.BadRequest]
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
@@ -465,4 +502,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       effectiveSet = Some(effWithPolicies(policies))
     ).unsafeRunSync()
     out shouldBe a[Left[?, ?]]
-    out.left.get should include("access denied")
+    val failure = out.left.get
+    failure shouldBe a[RouterFailure.AccessDenied]
+    failure.reason should include("access denied")

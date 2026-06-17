@@ -75,6 +75,20 @@ final class FlightProducerImpl(
       )
     ByteString.copyFrom(baos.toByteArray)
 
+  /** Map a typed [[RouterFailure]] to the Arrow Flight `CallStatus` the wire surfaces to clients.
+    * Keeps the status code authoritative so connectors (Power BI, DBeaver, ADBC) can branch on
+    * UNAUTHORIZED / NOT_FOUND / INVALID_ARGUMENT / UNAVAILABLE / INTERNAL without parsing the
+    * description string. R12.
+    */
+  private def toFlightException(f: RouterFailure): Throwable =
+    val status = f match
+      case RouterFailure.AccessDenied(_) => CallStatus.UNAUTHORIZED
+      case RouterFailure.NotFound(_)     => CallStatus.NOT_FOUND
+      case RouterFailure.BadRequest(_)   => CallStatus.INVALID_ARGUMENT
+      case RouterFailure.Unavailable(_)  => CallStatus.UNAVAILABLE
+      case RouterFailure.Internal(_)     => CallStatus.INTERNAL
+    status.withDescription(f.reason).toRuntimeException()
+
   override def createPreparedStatement(
       request: FlightSql.ActionCreatePreparedStatementRequest,
       context: FlightProducer.CallContext,
@@ -158,10 +172,8 @@ final class FlightProducerImpl(
                   .build()
                 listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
                 listener.onCompleted()
-              case scala.util.Success(Left(msg)) =>
-                listener.onError(
-                  CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
-                )
+              case scala.util.Success(Left(f)) =>
+                listener.onError(toFlightException(f))
               case scala.util.Failure(t) =>
                 logger.error(s"createPreparedStatement threw: ${t.getMessage}", t)
                 listener.onError(
@@ -241,10 +253,8 @@ final class FlightProducerImpl(
                     .toRuntimeException()
                 )
             finally result.close()
-          case scala.util.Success(Left(msg)) =>
-            listener.error(
-              CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
-            )
+          case scala.util.Success(Left(f)) =>
+            listener.error(toFlightException(f))
           case scala.util.Failure(t) =>
             logger.error(s"getStreamPreparedStatement re-execute threw: ${t.getMessage}", t)
             listener.error(
@@ -397,8 +407,8 @@ final class FlightProducerImpl(
                 .withDescription(s"router threw: ${t.getMessage}")
                 .toRuntimeException()
             )
-          case scala.util.Success(Left(msg)) =>
-            listener.error(CallStatus.INTERNAL.withDescription(msg).toRuntimeException())
+          case scala.util.Success(Left(f)) =>
+            listener.error(toFlightException(f))
           case scala.util.Success(Right(listResult)) =>
             val rows        = collectRowsAndClose(listResult)
             val withSchemas = rows.map { case (cat, sch, name, typ) =>
@@ -712,9 +722,10 @@ final class FlightProducerImpl(
 
   /** FlightSQL "execute a prepared update" entrypoint. Arrow JDBC / ADBC / DBeaver prepare *every*
     * statement, so a literal INSERT / UPDATE / DELETE / DDL the user runs arrives here (not via
-    * [[acceptPutStatement]]): first `createPreparedStatement` stores the handle, then `executeUpdate`
-    * lands as a `CommandPreparedStatementUpdate`. We replay the SQL captured at Prepare time -- same
-    * (connId, user, poolKey, EffectiveSet) as [[getStreamPreparedStatement]] -- and ack the count.
+    * [[acceptPutStatement]]): first `createPreparedStatement` stores the handle, then
+    * `executeUpdate` lands as a `CommandPreparedStatementUpdate`. We replay the SQL captured at
+    * Prepare time -- same (connId, user, poolKey, EffectiveSet) as [[getStreamPreparedStatement]]
+    * -- and ack the count.
     *
     * Bound parameters (`?`) would arrive as rows on `flightStream`; we don't read them, so this
     * covers literal (non-parameterized) prepared updates only. Parameterized DML still needs the
@@ -762,14 +773,19 @@ final class FlightProducerImpl(
     * if the server writes its `PutResult` and half-closes WITHOUT reading them, the client's
     * in-flight write breaks and surfaces as `UNAVAILABLE: io exception`. We don't support bound
     * parameters, so drain the batches and throw them away. `null` only in unit tests, which drive
-    * `run()` directly without a wire stream. */
+    * `run()` directly without a wire stream.
+    */
   private def drainPutStream(flightStream: FlightStream): Unit =
     if flightStream != null then while flightStream.next() do ()
 
   /** Shared tail of the two update entrypoints: turn a router execution outcome into a
-    * `DoPutUpdateResult` ack (or an error on the ack stream). Closes the result either way. */
+    * `DoPutUpdateResult` ack (or an error on the ack stream). Closes the result either way. R12:
+    * router failures are mapped to their kind-appropriate Flight status (AccessDenied ->
+    * UNAUTHORIZED, NotFound -> NOT_FOUND, etc.) via [[toFlightException]], not folded to
+    * INVALID_ARGUMENT.
+    */
   private def ackUpdateResult(
-      attempt: scala.util.Try[Either[String, QueryResult]],
+      attempt: scala.util.Try[Either[RouterFailure, QueryResult]],
       ackStream: FlightProducer.StreamListener[PutResult],
       label: String
   ): Unit =
@@ -779,15 +795,17 @@ final class FlightProducerImpl(
           try updateCountOf(result.rows)
           finally result.close()
         emitUpdateCount(count, ackStream)
-      case scala.util.Success(Left(msg)) =>
-        ackStream.onError(CallStatus.INVALID_ARGUMENT.withDescription(msg).toRuntimeException())
+      case scala.util.Success(Left(f)) =>
+        ackStream.onError(toFlightException(f))
       case scala.util.Failure(t) =>
         logger.error(s"$label threw: ${t.getMessage}", t)
         ackStream.onError(CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException())
 
   /** Best-effort affected-row count from a DML result. DuckDB returns a single-row, single-column
-    * "Count" (BigInt) for INSERT / UPDATE / DELETE; we read that cell. Anything else (DDL, or a node
-    * that returns no count) yields -1, which FlightSQL clients accept as an unknown update count. */
+    * "Count" (BigInt) for INSERT / UPDATE / DELETE; we read that cell. Anything else (DDL, or a
+    * node that returns no count) yields -1, which FlightSQL clients accept as an unknown update
+    * count.
+    */
   private def updateCountOf(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
     try
       if reader.loadNextBatch() then
@@ -802,7 +820,8 @@ final class FlightProducerImpl(
 
   /** Serialize a `DoPutUpdateResult{record_count}` into an ArrowBuf and hand it to the ack stream.
     * The buffer is released only after `onNext` + `onCompleted` have consumed it (mirrors the Arrow
-    * reference producer's try-with-resources ordering). */
+    * reference producer's try-with-resources ordering).
+    */
   private def emitUpdateCount(
       count: Long,
       ackStream: FlightProducer.StreamListener[PutResult]
@@ -814,6 +833,383 @@ final class FlightProducerImpl(
       ackStream.onNext(PutResult.metadata(buf))
       ackStream.onCompleted()
     finally buf.close()
+
+  // -----------------------------------------------------------------
+  //  Type info + SQL info - R7. Power BI and other ODBC clients read
+  //  these to learn the server's type system and SQL capabilities. The
+  //  NoOp base throws UNIMPLEMENTED; we emit the canonical Flight SQL
+  //  schemas populated from [[TypeInfoCatalog]] (types) and a
+  //  [[SqlInfoBuilder]] (server identification + dialect knobs).
+  // -----------------------------------------------------------------
+
+  override def getFlightInfoTypeInfo(
+      request: FlightSql.CommandGetXdbcTypeInfo,
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
+
+  override def getStreamTypeInfo(
+      request: FlightSql.CommandGetXdbcTypeInfo,
+      context: FlightProducer.CallContext,
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    val filter = if request.hasDataType then Some(request.getDataType) else None
+    emitTypeInfo(TypeInfoCatalog.filterByDataType(filter), listener)
+
+  private def emitTypeInfo(
+      rows: List[TypeInfoRow],
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    val schema = org.apache.arrow.flight.sql.FlightSqlProducer.Schemas.GET_TYPE_INFO_SCHEMA
+    val root   = VectorSchemaRoot.create(schema, allocator)
+    try
+      root.allocateNew()
+      val typeNameVec =
+        root.getVector("type_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val dataTypeVec =
+        root.getVector("data_type").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val columnSizeVec =
+        root.getVector("column_size").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val literalPrefixVec =
+        root.getVector("literal_prefix").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val literalSuffixVec =
+        root.getVector("literal_suffix").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val createParamsVec =
+        root.getVector("create_params").asInstanceOf[org.apache.arrow.vector.complex.ListVector]
+      val nullableVec =
+        root.getVector("nullable").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val caseSensitiveVec =
+        root.getVector("case_sensitive").asInstanceOf[org.apache.arrow.vector.BitVector]
+      val searchableVec =
+        root.getVector("searchable").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val unsignedAttributeVec =
+        root.getVector("unsigned_attribute").asInstanceOf[org.apache.arrow.vector.BitVector]
+      val fixedPrecScaleVec =
+        root.getVector("fixed_prec_scale").asInstanceOf[org.apache.arrow.vector.BitVector]
+      val autoIncrementVec =
+        root.getVector("auto_increment").asInstanceOf[org.apache.arrow.vector.BitVector]
+      val localTypeNameVec =
+        root.getVector("local_type_name").asInstanceOf[org.apache.arrow.vector.VarCharVector]
+      val minimumScaleVec =
+        root.getVector("minimum_scale").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val maximumScaleVec =
+        root.getVector("maximum_scale").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val sqlDataTypeVec =
+        root.getVector("sql_data_type").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val datetimeSubcodeVec =
+        root.getVector("datetime_subcode").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val numPrecRadixVec =
+        root.getVector("num_prec_radix").asInstanceOf[org.apache.arrow.vector.IntVector]
+      val intervalPrecisionVec =
+        root.getVector("interval_precision").asInstanceOf[org.apache.arrow.vector.IntVector]
+
+      rows.zipWithIndex.foreach { case (r, i) =>
+        typeNameVec.setSafe(i, r.typeName.getBytes(StandardCharsets.UTF_8))
+        dataTypeVec.setSafe(i, r.dataType)
+        setOptionInt(columnSizeVec, i, r.columnSize)
+        setOptionStr(literalPrefixVec, i, r.literalPrefix)
+        setOptionStr(literalSuffixVec, i, r.literalSuffix)
+        // R7: emit create_params as a null list. ODBC consumers (Power BI,
+        // DBeaver) use it only when issuing DDL like CREATE TABLE; they don't
+        // need it to render result sets. Skipping the dense ListVector writer
+        // dance keeps this method readable.
+        createParamsVec.setNull(i)
+        nullableVec.setSafe(i, r.nullable)
+        caseSensitiveVec.setSafe(i, if r.caseSensitive then 1 else 0)
+        searchableVec.setSafe(i, r.searchable)
+        setOptionBit(unsignedAttributeVec, i, r.unsignedAttribute)
+        fixedPrecScaleVec.setSafe(i, if r.fixedPrecScale then 1 else 0)
+        setOptionBit(autoIncrementVec, i, r.autoIncrement)
+        setOptionStr(localTypeNameVec, i, r.localTypeName)
+        setOptionInt(minimumScaleVec, i, r.minimumScale)
+        setOptionInt(maximumScaleVec, i, r.maximumScale)
+        sqlDataTypeVec.setSafe(i, r.sqlDataType)
+        setOptionInt(datetimeSubcodeVec, i, r.datetimeSubcode)
+        setOptionInt(numPrecRadixVec, i, r.numPrecRadix)
+        setOptionInt(intervalPrecisionVec, i, r.intervalPrecision)
+      }
+      root.setRowCount(rows.size)
+      listener.start(root)
+      listener.putNext()
+      listener.completed()
+    finally root.close()
+
+  private def setOptionInt(
+      vec: org.apache.arrow.vector.IntVector,
+      i: Int,
+      v: Option[Int]
+  ): Unit = v match
+    case Some(x) => vec.setSafe(i, x)
+    case None    => vec.setNull(i)
+
+  private def setOptionStr(
+      vec: org.apache.arrow.vector.VarCharVector,
+      i: Int,
+      v: Option[String]
+  ): Unit = v match
+    case Some(x) => vec.setSafe(i, x.getBytes(StandardCharsets.UTF_8))
+    case None    => vec.setNull(i)
+
+  private def setOptionBit(
+      vec: org.apache.arrow.vector.BitVector,
+      i: Int,
+      v: Option[Boolean]
+  ): Unit = v match
+    case Some(x) => vec.setSafe(i, if x then 1 else 0)
+    case None    => vec.setNull(i)
+
+  /** SqlInfoBuilder pre-loaded with the full standard SqlInfo set. R7. The Arrow Flight SQL ODBC
+    * driver builds its SQLGetInfo cache from this response; any code we omit surfaces to the client
+    * as `Unknown GetInfo type: N`. Values reflect DuckDB's actual behavior where it differs from
+    * generic defaults (case-insensitive unquoted / case-sensitive quoted identifiers, full ANSI-92
+    * grammar, serializable isolation, no stored procedures).
+    *
+    * Maximum-length codes use `0` per ODBC convention for "no fixed limit". Function-name lists use
+    * JDBC escape names (the standard JDBC `getNumericFunctions` / `getStringFunctions` /
+    * `getSystemFunctions` / `getTimeDateFunctions` surface) so ODBC translation tables resolve.
+    */
+  private val sqlInfoBuilder: org.apache.arrow.flight.sql.SqlInfoBuilder =
+    import org.apache.arrow.flight.sql.impl.FlightSql.*
+    new org.apache.arrow.flight.sql.SqlInfoBuilder()
+      // ---- Server identification + top-level capabilities ----
+      .withFlightSqlServerName("Quack on Demand")
+      .withFlightSqlServerVersion("1.0")
+      .withFlightSqlServerArrowVersion("18.3.0")
+      .withFlightSqlServerReadOnly(false)
+      .withFlightSqlServerSql(true)
+      .withFlightSqlServerSubstrait(false)
+      .withFlightSqlServerTransaction(
+        SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_TRANSACTION
+      )
+      .withFlightSqlServerCancel(false)
+      // ---- DDL surface ----
+      .withSqlDdlCatalog(true)
+      .withSqlDdlSchema(true)
+      .withSqlDdlTable(true)
+      // ---- Identifier handling ----
+      .withSqlIdentifierCase(
+        SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_LOWERCASE
+      )
+      .withSqlIdentifierQuoteChar("\"")
+      // DuckDB preserves quoted identifiers as-is (no folding). The proto enum
+      // has no "mixed case" / "preserve" value, so `UNKNOWN` is the closest fit.
+      .withSqlQuotedIdentifierCase(
+        SqlSupportedCaseSensitivity.SQL_CASE_SENSITIVITY_UNKNOWN
+      )
+      .withSqlAllTablesAreSelectable(true)
+      .withSqlNullOrdering(SqlNullOrdering.SQL_NULLS_SORTED_AT_END)
+      .withSqlKeywords(Array.empty[String])
+      // ---- Function lists (JDBC escape names) ----
+      .withSqlNumericFunctions(
+        Array(
+          "ABS",
+          "ACOS",
+          "ASIN",
+          "ATAN",
+          "ATAN2",
+          "CEILING",
+          "COS",
+          "COT",
+          "DEGREES",
+          "EXP",
+          "FLOOR",
+          "LOG",
+          "LOG10",
+          "MOD",
+          "PI",
+          "POWER",
+          "RADIANS",
+          "RAND",
+          "ROUND",
+          "SIGN",
+          "SIN",
+          "SQRT",
+          "TAN",
+          "TRUNCATE"
+        )
+      )
+      .withSqlStringFunctions(
+        Array(
+          "ASCII",
+          "CHAR",
+          "CHAR_LENGTH",
+          "CHARACTER_LENGTH",
+          "CONCAT",
+          "LCASE",
+          "LEFT",
+          "LENGTH",
+          "LOCATE",
+          "LOWER",
+          "LTRIM",
+          "OCTET_LENGTH",
+          "POSITION",
+          "REPEAT",
+          "REPLACE",
+          "RIGHT",
+          "RTRIM",
+          "SPACE",
+          "SUBSTRING",
+          "TRIM",
+          "UCASE",
+          "UPPER"
+        )
+      )
+      .withSqlSystemFunctions(Array("DATABASE", "IFNULL", "USER"))
+      .withSqlDatetimeFunctions(
+        Array(
+          "CURRENT_DATE",
+          "CURRENT_TIME",
+          "CURRENT_TIMESTAMP",
+          "DAYNAME",
+          "DAYOFMONTH",
+          "DAYOFWEEK",
+          "DAYOFYEAR",
+          "EXTRACT",
+          "HOUR",
+          "MINUTE",
+          "MONTH",
+          "MONTHNAME",
+          "NOW",
+          "QUARTER",
+          "SECOND",
+          "WEEK",
+          "YEAR"
+        )
+      )
+      .withSqlSearchStringEscape("\\")
+      .withSqlExtraNameCharacters("$_")
+      // No CAST source/target matrix advertised. Clients fall back to TRY_CAST /
+      // their own type-promotion rules instead of relying on the matrix.
+      .withSqlSupportsConvert(java.util.Collections.emptyMap[Integer, java.util.List[Integer]])
+      // ---- Grammar / dialect ----
+      .withSqlSupportsColumnAliasing(true)
+      .withSqlNullPlusNullIsNull(true)
+      .withSqlSupportsTableCorrelationNames(true)
+      .withSqlSupportsDifferentTableCorrelationNames(true)
+      .withSqlSupportsExpressionsInOrderBy(true)
+      .withSqlSupportsOrderByUnrelated(true)
+      .withSqlSupportedGroupBy(
+        SqlSupportedGroupBy.SQL_GROUP_BY_UNRELATED,
+        SqlSupportedGroupBy.SQL_GROUP_BY_BEYOND_SELECT
+      )
+      .withSqlSupportsLikeEscapeClause(true)
+      .withSqlSupportsNonNullableColumns(true)
+      .withSqlSupportedGrammar(
+        SupportedSqlGrammar.SQL_CORE_GRAMMAR,
+        SupportedSqlGrammar.SQL_MINIMUM_GRAMMAR,
+        SupportedSqlGrammar.SQL_EXTENDED_GRAMMAR
+      )
+      .withSqlAnsi92SupportedLevel(
+        SupportedAnsi92SqlGrammarLevel.ANSI92_ENTRY_SQL,
+        SupportedAnsi92SqlGrammarLevel.ANSI92_INTERMEDIATE_SQL,
+        SupportedAnsi92SqlGrammarLevel.ANSI92_FULL_SQL
+      )
+      .withSqlSupportsIntegrityEnhancementFacility(false)
+      .withSqlOuterJoinSupportLevel(
+        SqlOuterJoinsSupportLevel.SQL_FULL_OUTER_JOINS,
+        SqlOuterJoinsSupportLevel.SQL_LIMITED_OUTER_JOINS
+      )
+      // ---- Vocabulary ----
+      .withSqlSchemaTerm("schema")
+      .withSqlProcedureTerm("procedure")
+      .withSqlCatalogTerm("database")
+      .withSqlCatalogAtStart(true)
+      .withSqlSchemasSupportedActions(
+        SqlSupportedElementActions.SQL_ELEMENT_IN_PROCEDURE_CALLS,
+        SqlSupportedElementActions.SQL_ELEMENT_IN_INDEX_DEFINITIONS,
+        SqlSupportedElementActions.SQL_ELEMENT_IN_PRIVILEGE_DEFINITIONS
+      )
+      .withSqlCatalogsSupportedActions(
+        SqlSupportedElementActions.SQL_ELEMENT_IN_PROCEDURE_CALLS,
+        SqlSupportedElementActions.SQL_ELEMENT_IN_INDEX_DEFINITIONS,
+        SqlSupportedElementActions.SQL_ELEMENT_IN_PRIVILEGE_DEFINITIONS
+      )
+      .withSqlSupportedPositionedCommands(
+        SqlSupportedPositionedCommands.SQL_POSITIONED_DELETE,
+        SqlSupportedPositionedCommands.SQL_POSITIONED_UPDATE
+      )
+      .withSqlSelectForUpdateSupported(false)
+      .withSqlStoredProceduresSupported(false)
+      .withSqlSubQueriesSupported(
+        SqlSupportedSubqueries.SQL_SUBQUERIES_IN_COMPARISONS,
+        SqlSupportedSubqueries.SQL_SUBQUERIES_IN_EXISTS,
+        SqlSupportedSubqueries.SQL_SUBQUERIES_IN_INS,
+        SqlSupportedSubqueries.SQL_SUBQUERIES_IN_QUANTIFIEDS
+      )
+      .withSqlCorrelatedSubqueriesSupported(true)
+      .withSqlSupportedUnions(
+        SqlSupportedUnions.SQL_UNION,
+        SqlSupportedUnions.SQL_UNION_ALL
+      )
+      // ---- Maximum-length limits (0 = unbounded per ODBC convention) ----
+      .withSqlMaxBinaryLiteralLength(0L)
+      .withSqlMaxCharLiteralLength(0L)
+      .withSqlMaxColumnNameLength(0L)
+      .withSqlMaxColumnsInGroupBy(0L)
+      .withSqlMaxColumnsInIndex(0L)
+      .withSqlMaxColumnsInOrderBy(0L)
+      .withSqlMaxColumnsInSelect(0L)
+      .withSqlMaxColumnsInTable(0L)
+      .withSqlMaxConnections(0L)
+      .withSqlMaxCursorNameLength(0L)
+      .withSqlMaxIndexLength(0L)
+      .withSqlDbSchemaNameLength(0L)
+      .withSqlMaxProcedureNameLength(0L)
+      .withSqlMaxCatalogNameLength(0L)
+      .withSqlMaxRowSize(0L)
+      .withSqlMaxRowSizeIncludesBlobs(true)
+      .withSqlMaxStatementLength(0L)
+      .withSqlMaxStatements(0L)
+      .withSqlMaxTableNameLength(0L)
+      .withSqlMaxTablesInSelect(0L)
+      .withSqlMaxUsernameLength(0L)
+      // ---- Transactions ----
+      .withSqlDefaultTransactionIsolation(
+        SqlTransactionIsolationLevel.SQL_TRANSACTION_SERIALIZABLE.getNumber.toLong
+      )
+      .withSqlTransactionsSupported(true)
+      .withSqlSupportedTransactionsIsolationLevels(
+        SqlTransactionIsolationLevel.SQL_TRANSACTION_SERIALIZABLE
+      )
+      .withSqlDataDefinitionCausesTransactionCommit(false)
+      .withSqlDataDefinitionsInTransactionsIgnored(false)
+      .withSqlSupportedResultSetTypes(
+        SqlSupportedResultSetType.SQL_RESULT_SET_TYPE_FORWARD_ONLY
+      )
+      .withSqlBatchUpdatesSupported(true)
+      .withSqlSavepointsSupported(false)
+      .withSqlNamedParametersSupported(false)
+      .withSqlLocatorsUpdateCopy(false)
+      .withSqlStoredFunctionsUsingCallSyntaxSupported(false)
+
+  override def getFlightInfoSqlInfo(
+      request: FlightSql.CommandGetSqlInfo,
+      context: FlightProducer.CallContext,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
+    new FlightInfo(
+      null,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
+
+  override def getStreamSqlInfo(
+      command: FlightSql.CommandGetSqlInfo,
+      context: FlightProducer.CallContext,
+      listener: FlightProducer.ServerStreamListener
+  ): Unit =
+    sqlInfoBuilder.send(command.getInfoList, listener)
 
   override def getFlightInfoStatement(
       command: FlightSql.CommandStatementQuery,
@@ -891,11 +1287,9 @@ final class FlightProducerImpl(
                     .toRuntimeException()
                 )
             finally result.close()
-          case scala.util.Success(Left(msg)) =>
-            logger.warn(s"router.execute Left: $msg")
-            listener.error(
-              CallStatus.INTERNAL.withDescription(msg).toRuntimeException()
-            )
+          case scala.util.Success(Left(f)) =>
+            logger.warn(s"router.execute Left: $f")
+            listener.error(toFlightException(f))
 
       case _ =>
         listener.error(
