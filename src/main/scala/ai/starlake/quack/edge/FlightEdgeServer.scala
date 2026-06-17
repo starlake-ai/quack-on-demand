@@ -153,6 +153,23 @@ final class FlightEdgeServer(
             case _           => None
         }
         val basicUsername = basicPair.map(_._1)
+        // Diagnostic: per-RPC header summary at DEBUG. Enables operators to
+        // see exactly what credentials each Flight call carries when a driver
+        // (Power BI ODBC, etc.) misbehaves. Doesn't log token bytes - just
+        // shapes / tenant / pool - so it's safe to leave on in prod.
+        if logger.underlying.isDebugEnabled then
+          val shape = (bearer.isDefined, basicPair.isDefined) match
+            case (true, _)      => s"bearer(prefix=${bearer.get.take(4)}…)"
+            case (false, true)  => s"basic(user=${basicUsername.getOrElse("?")})"
+            case (false, false) =>
+              if authHeader.isDefined then s"authHeader(unparsed='${authHeader.get.take(8)}…')"
+              else "none"
+          logger.debug(
+            s"headerAuth: creds=$shape " +
+              s"tenant=${Option(headers.get("tenant")).getOrElse("-")} " +
+              s"pool=${Option(headers.get("pool")).getOrElse("-")} " +
+              s"superuser=${Option(headers.get("superuser")).getOrElse("-")}"
+          )
         // Flight call headers carrying the target tenant + pool. These
         // names match how Arrow Flight JDBC drivers serialize arbitrary
         // connection-string parameters into gRPC metadata -- e.g.
