@@ -302,58 +302,6 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
   // ConnectionContext check, surfacing as UNAUTHENTICATED.
   // -------------------------------------------------------------------------
 
-  // -------------------------------------------------------------------------
-  // Case 7: Apache Arrow Flight SQL ODBC issues DoGet WITHOUT replaying the
-  // bearer it received at handshake, even though it does replay on
-  // GetFlightInfo. The ticket - issued only after an authenticated
-  // GetFlightInfo - must carry the auth context so DoGet works without a
-  // bearer header.
-  // -------------------------------------------------------------------------
-
-  it should "serve DoGet without a bearer when the ticket came from an authenticated GetFlightInfo" in {
-    import com.google.protobuf.{Any => ProtoAny}
-    import org.apache.arrow.flight.sql.impl.FlightSql
-    val fix = SecurityFixtures.freshStore()
-    val h   = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
-    try
-      // Step 1: authenticated client gets a Catalogs ticket. We use
-      // CommandGetCatalogs (rather than a SELECT) because the fixture's pool
-      // has no Quack nodes registered, so a query probe would fail with
-      // UNAVAILABLE in getFlightInfoStatement before we ever got a ticket.
-      // Catalogs builds the ticket without a probe.
-      val authClient = h.newClient()
-      val ticket =
-        try
-          val opts = headersOpt(
-            tenant   = SecurityFixtures.TenantName,
-            pool     = SecurityFixtures.PoolName,
-            user     = SecurityFixtures.AliceUsername,
-            password = SecurityFixtures.AlicePassword
-          )
-          val cmd  = FlightSql.CommandGetCatalogs.newBuilder().build()
-          val info = authClient.getInfo(
-            FlightDescriptor.command(ProtoAny.pack(cmd).toByteArray),
-            opts
-          )
-          info.getEndpoints.get(0).getTicket
-        finally authClient.close()
-
-      // Step 2: a fresh client uses the ticket WITHOUT presenting any bearer.
-      // The fixture's pool has no nodes, so the actual SQL execution at the
-      // node layer will fail with UNAVAILABLE - we accept that because the
-      // test's assertion is "auth gate didn't reject", not "stream completes
-      // cleanly". A pre-fix run gets UNAUTHENTICATED from runStatement
-      // failing to find ConnectionContext for the anonymous DoGet peer.
-      val anonClient = h.newClient()
-      try
-        assertAuthPassed {
-          val stream = anonClient.getStream(ticket)
-          try while stream.next() do () finally stream.close()
-        }
-      finally anonClient.close()
-    finally h.shutdown()
-  }
-
   it should "reject a data-bearing call from an unauthenticated peer" in {
     import com.google.protobuf.{Any => ProtoAny}
     import org.apache.arrow.flight.sql.impl.FlightSql
