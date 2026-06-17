@@ -141,7 +141,16 @@ final class FlightEdgeServer(
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:
       override def authenticate(headers: CallHeaders): CallHeaderAuthenticator.AuthResult =
+        // Read `Authorization` first; fall back to `x-qod-authorization` for
+        // clients whose driver / proxy strips the standard header but passes
+        // arbitrary `x-*` headers through. Confirmed needed by the Apache
+        // Arrow Flight SQL ODBC build that the current Power BI connector
+        // wraps: it forwards `tenant` / `pool` (which are arbitrary
+        // passthrough keys) but discards `Authorization`. The two header
+        // names are accepted identically; the value format is unchanged
+        // (`Basic <base64>` or `Bearer <token>`).
         val authHeader = Option(headers.get("Authorization"))
+          .orElse(Option(headers.get("x-qod-authorization")))
         val bearer     = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
         val basic      = authHeader
           .filter(_.startsWith("Basic "))
@@ -164,11 +173,16 @@ final class FlightEdgeServer(
             case (false, false) =>
               if authHeader.isDefined then s"authHeader(unparsed='${authHeader.get.take(8)}…')"
               else "none"
+          val allKeys = scala.jdk.CollectionConverters.SetHasAsScala(headers.keys()).asScala
+            .toList
+            .sorted
+            .mkString(",")
           logger.debug(
             s"headerAuth: creds=$shape " +
               s"tenant=${Option(headers.get("tenant")).getOrElse("-")} " +
               s"pool=${Option(headers.get("pool")).getOrElse("-")} " +
-              s"superuser=${Option(headers.get("superuser")).getOrElse("-")}"
+              s"superuser=${Option(headers.get("superuser")).getOrElse("-")} " +
+              s"keys=[$allKeys]"
           )
         // Flight call headers carrying the target tenant + pool. These
         // names match how Arrow Flight JDBC drivers serialize arbitrary
