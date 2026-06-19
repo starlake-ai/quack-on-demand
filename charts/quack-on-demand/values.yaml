@@ -237,6 +237,16 @@ flightsql:
 # the AuthenticationService chain alongside the built-in Basic / DB auth.
 # Both authenticate the same FlightSQL session; the manager picks the first
 # one that accepts the credentials presented.
+#
+# NOTE: this block governs the FlightSQL DATA PLANE. To drive admin-UI SSO
+# (the /ui/ login), that is a separate, provider-agnostic switch:
+#   - set auth.management.identitySource=oidc (env QOD_MGMT_IDENTITY_SOURCE)
+#   - set auth.management.oidc.{issuerUrl,clientId,clientSecret} (env
+#     QOD_MGMT_OIDC_ISSUER_URL / _CLIENT_ID / _CLIENT_SECRET); endpoints are
+#     resolved via OIDC Discovery so any compliant IdP works
+#   - set QOD_PUBLIC_BASE_URL and register
+#     ${QOD_PUBLIC_BASE_URL}/api/auth/oidc/callback as a redirect URI
+# See website/docs/operating/auth-providers.md ("Admin UI single sign-on").
 auth:
   keycloak:
     enabled: false
