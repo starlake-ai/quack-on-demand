@@ -31,7 +31,7 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
       id = "test-id",
       displayName = "Test Tenant",
       disabled = false,
-      authProvider = "oidc",
+      authProvider = "db",
       authConfig = authConfig
     )
 
@@ -160,4 +160,29 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
     url should startWith("https://idp.example.com/logout?")
     url should include("post_logout_redirect_uri=https%3A%2F%2Fqod.example.com%2Fui%2F")
     url should include("id_token_hint=id-tok")
+  }
+
+  it should "sanitize malicious returnTo values to /ui/ and pass a safe path unchanged" in {
+    val seed    = "s5"
+    val nonce   = codec.genNonce(seed)
+    val service = svc(nonce = nonce, tokenJson = """{"id_token":"x"}""")
+
+    // (input returnTo, expected returnTo after round-trip)
+    val cases = List(
+      "https://evil.com" -> "/ui/",
+      "//evil.com"       -> "/ui/",
+      ""                 -> "/ui/",
+      "/admin"           -> "/admin"
+    )
+
+    cases.foreach { case (returnTo, expected) =>
+      val started = service.startAuth(OidcScope.System, returnTo, seed = seed).toOption.get
+      val result  = service.completeAuth(
+        code = "code-x",
+        state = started.stateCookieValue,
+        stateCookieValue = started.stateCookieValue,
+        now = 1_000_500L
+      )
+      result.map(_.returnTo) shouldBe Right(expected)
+    }
   }
