@@ -22,9 +22,9 @@ final case class OidcEndpoints(
 
 /** Stable error codes surfaced to the UI as `/ui/?error=<code>` or as a 400 body. */
 enum OidcSsoError(val code: String):
-  case TenantNotConfigured extends OidcSsoError("tenant_oidc_not_configured")
-  case ProviderUnsupported extends OidcSsoError("provider_unsupported")
-  case InvalidState        extends OidcSsoError("invalid_state")
-  case IdpError            extends OidcSsoError("idp_error")
-  case NotProvisioned      extends OidcSsoError("not_provisioned")
-  case AdminRequired       extends OidcSsoError("admin_required")
+  case ScopeNotConfigured extends OidcSsoError("oidc_not_configured")
+  case DiscoveryFailed    extends OidcSsoError("discovery_failed")
+  case InvalidState       extends OidcSsoError("invalid_state")
+  case IdpError           extends OidcSsoError("idp_error")
+  case NotProvisioned     extends OidcSsoError("not_provisioned")
+  case AdminRequired      extends OidcSsoError("admin_required")
