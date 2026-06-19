@@ -12,8 +12,14 @@ interface AuthState {
   // disabled). In that case the UI runs without a login screen and the
   // "user" is a synthetic anonymous principal.
   authEnabled: boolean;
+  // "db" = password form login; "oidc" = IdP redirect flow.
+  identitySource: 'db' | 'oidc';
+  // Human-readable IdP label, e.g. "Keycloak" or "Google". Empty string when db mode.
+  ssoProviderName: string;
   login: (username: string, password: string, tenant?: string) => Promise<void>;
   logout: () => Promise<void>;
+  // Redirect the browser to the OIDC start endpoint (oidc mode only).
+  ssoLogin: (tenant?: string) => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -29,6 +35,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [manageableTenants, setManageableTenants]   = useState<string[]>([]);
   const [loading, setLoading]   = useState(true);
   const [authEnabled, setAuthEnabled] = useState(true);
+  const [identitySource, setIdentitySource] = useState<'db' | 'oidc'>('db');
+  const [ssoProviderName, setSsoProviderName] = useState<string>('');
 
   // On mount:
   //   1. Ask the server whether auth is enabled (open endpoint, no token).
@@ -38,6 +46,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     api.clientConfig()
       .then(cfg => {
+        setIdentitySource(cfg.identitySource ?? 'db');
+        setSsoProviderName(cfg.ssoProviderName ?? '');
         if (!cfg.authEnabled) {
           setAuthEnabled(false);
           setUsername(ANONYMOUS_USERNAME);
@@ -90,12 +100,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  function ssoLogin(tenant?: string) {
+    // Pick up ?tenant= from the current URL when no explicit tenant is given.
+    const t = tenant ?? new URLSearchParams(window.location.search).get('tenant') ?? undefined;
+    window.location.href = '/api/auth/oidc/start' + (t ? `?tenant=${encodeURIComponent(t)}` : '');
+  }
+
+  function ssoLogout() {
+    window.location.href = '/api/auth/oidc/logout';
+  }
+
   async function logout() {
     // No-op when auth is disabled - there's no session to revoke.
     if (!authEnabled) return;
-    // Server-side: clear the qod_session cookie + denylist the jti for the
-    // remaining lifetime. JS can't clear an HttpOnly cookie, so this hop
-    // is required.
+    // OIDC mode: redirect to the IdP logout endpoint; the server clears the
+    // session cookie there.
+    if (identitySource === 'oidc') { ssoLogout(); return; }
+    // Password mode: server-side clear the qod_session cookie + denylist the
+    // jti for the remaining lifetime. JS can't clear an HttpOnly cookie,
+    // so this hop is required.
     try { await api.logout(); } catch { /* best effort */ }
     setUsername(null);
     setRole(null);
@@ -105,7 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, login, logout }}>
+    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, identitySource, ssoProviderName, login, logout, ssoLogin }}>
       {children}
     </AuthContext.Provider>
   );
