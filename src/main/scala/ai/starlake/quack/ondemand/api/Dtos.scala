@@ -132,7 +132,13 @@ final case class ClientConfigResponse(
     // True iff the runtime backend is Kubernetes (i.e. supports
     // nodeSelector / tolerations placement). The UI hides the per-pool
     // cohort/placement controls when false.
-    placementSupported: Boolean = false
+    placementSupported: Boolean = false,
+    // "db" or "oidc". When "oidc" the UI renders no password form and instead
+    // redirects to /api/auth/oidc/start.
+    identitySource: String = "db",
+    // Best-effort label for the SSO provider (the issuer host, e.g.
+    // "accounts.google.com"); empty in db mode. Cosmetic only (UI copy).
+    ssoProviderName: String = ""
 )
 
 /** One row of the admin UI Config page: a single scalar from `application.conf` with its env-var

@@ -41,6 +41,11 @@ final class ManagerServer(
     rowPolicies: RoleRowPolicyHandlers
 ) extends LazyLogging:
 
+  /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
+  private def issuerHost(issuerUrl: String): String =
+    try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
+    catch case _: Exception => ""
+
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/config/client" ||
@@ -331,7 +336,14 @@ final class ManagerServer(
               flightSqlPort = edgeCfg.port,
               flightSqlTls = edgeCfg.tlsEnabled,
               authEnabled = authEnabled,
-              placementSupported = pools.supportsPlacement
+              placementSupported = pools.supportsPlacement,
+              identitySource =
+                if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then "oidc"
+                else "db",
+              ssoProviderName =
+                if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then
+                  issuerHost(cfg.auth.management.oidc.issuerUrl)
+                else ""
             )
           )
         )
