@@ -163,4 +163,56 @@ At least one OIDC provider (Keycloak, Google, or Azure AD) must be enabled along
 
 ---
 
+## Admin UI single sign-on (OIDC)
+
+The providers above govern the **FlightSQL data plane** (how a SQL client authenticates). This section is separate: it controls how operators log in to the **admin UI** at `/ui/`.
+
+By default (`auth.management.identitySource=db`) the admin UI shows a username / password / tenant form. Set `identitySource=oidc` to make the admin UI a **pure SSO client**: the password form is removed and the browser is redirected to your identity provider.
+
+It is **provider-agnostic**: it uses OIDC Discovery, so it works with any compliant IdP (Keycloak, Google, Azure AD, Okta, Auth0, Cognito, ...). You configure an **issuer URL** and a client id/secret; the manager resolves the authorize / token / end-session / JWKS endpoints from `${issuerUrl}/.well-known/openid-configuration`.
+
+`qodstate_user` remains authoritative for role and tenant scope: the IdP verifies identity, and the matching `qodstate_user` grant decides what the operator may manage. IdP role/tenant claims are discarded.
+
+```bash
+QOD_MGMT_IDENTITY_SOURCE=oidc                       # turn on admin-UI SSO (default: db)
+
+# System / superuser scope (the bare /ui/ login uses this issuer):
+QOD_MGMT_OIDC_ISSUER_URL=https://idp.example.com/realms/qod
+QOD_MGMT_OIDC_CLIENT_ID=qod-admin
+QOD_MGMT_OIDC_CLIENT_SECRET=...                     # confidential client secret
+QOD_MGMT_OIDC_SCOPES="openid email profile"         # default "openid email profile"
+
+# Externally visible manager URL, used to build the redirect_uri. MUST match the
+# redirect URI registered on the IdP client. When unset, derived from the request.
+QOD_PUBLIC_BASE_URL=https://qod.example.com
+```
+
+Register this **redirect URI** on each IdP client:
+
+```
+${QOD_PUBLIC_BASE_URL}/api/auth/oidc/callback
+```
+
+### Login URLs and scope
+
+- `/ui/` (no tenant) is the **system / superuser** login and authenticates against the manager-wide issuer above. Only a superuser (`qodstate_user.tenant IS NULL`, role admin) may complete it; a non-superuser is rejected and must sign in through their tenant.
+- `/ui/?tenant=<id>` authenticates against **that tenant's** OIDC client and requires an admin grant for that tenant.
+
+### Per-tenant OIDC
+
+A tenant authenticates against its own issuer, configured in `qodstate_tenant.authConfig` with these generic keys (set them via the tenant auth API / admin UI):
+
+| Key | Meaning |
+|---|---|
+| `issuerUrl` | the tenant's OIDC issuer (discovery base) |
+| `clientId` | the tenant's OIDC client id |
+| `clientSecretRef` | a secret reference (e.g. `env:ACME_CLIENT_SECRET`) resolved at runtime |
+| `scopes` | optional; defaults to `openid email profile` |
+
+### Logout
+
+Logout is **RP-initiated**: it clears the `qod_session` cookie and redirects to the IdP end-session endpoint so the IdP session is terminated as well.
+
+---
+
 For the full reference of all authentication tunables, including `QOD_AUTH_ROLE_CLAIM` and `QOD_SESSION_TTL_SEC`, see [/reference/configuration](/reference/configuration).
