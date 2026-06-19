@@ -1,6 +1,12 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{
+  AuthScope,
+  AuthenticatedProfile,
+  AuthenticationService,
+  OidcScope,
+  OidcSsoService
+}
 import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
 import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
@@ -11,13 +17,14 @@ import sttp.model.headers.{Cookie, CookieValueWithMeta}
   *
   *   - `System`: the caller did not specify a tenant. Any admin (superuser or tenant-admin) is
   *     accepted; the resulting session reflects exactly the grants the principal holds.
+  *   - `SystemStrict`: superuser ONLY. Used by the OIDC bare `/ui/` (system IdP) login. A
+  *     non-superuser tenant-admin must sign in through their tenant scope instead.
   *   - `Tenant(id)`: the caller presented a tenant. The principal must be superuser OR an admin of
   *     that specific tenant.
-  *
-  * The OIDC callback (task 6) will add a third case when needed.
   */
 enum RequiredScope:
   case System
+  case SystemStrict
   case Tenant(id: String)
 
 /** REST endpoints driving the UI's login lifecycle.
@@ -49,7 +56,11 @@ final class AuthHandlers(
       * value so the caller can pass it through verbatim and let auth fail cleanly. Defaults to a
       * no-op (id-only) for callers that don't wire a registry (e.g. unit tests).
       */
-    resolveTenant: String => Option[String] = _ => None
+    resolveTenant: String => Option[String] = _ => None,
+    /** Optional OIDC SSO service. `None` when SSO is not configured; present when
+      * `auth.management.oidc` is wired and `oidcStart`/`oidcCallback`/`oidcLogout` are active.
+      */
+    oidc: Option[OidcSsoService] = None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -98,6 +109,109 @@ final class AuthHandlers(
       expires = None,
       otherDirectives = Map.empty
     )
+
+  private def stateCookie(value: String, forwardedProto: Option[String]): CookieValueWithMeta =
+    CookieValueWithMeta.unsafeApply(
+      value = value,
+      maxAge = Some(600L),
+      path = Some(cookiePath),
+      domain = None,
+      secure = deriveSecure(forwardedProto),
+      httpOnly = true,
+      sameSite = sameSiteLax,
+      expires = None,
+      otherDirectives = Map.empty
+    )
+
+  private def clearStateCookie(forwardedProto: Option[String]): CookieValueWithMeta =
+    CookieValueWithMeta.unsafeApply(
+      value = "",
+      maxAge = Some(0L),
+      path = Some(cookiePath),
+      domain = None,
+      secure = deriveSecure(forwardedProto),
+      httpOnly = true,
+      sameSite = sameSiteLax,
+      expires = None,
+      otherDirectives = Map.empty
+    )
+
+  def oidcStart(
+      tenant: Option[String],
+      returnTo: Option[String]
+  ): Out[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
+    oidc match
+      case None =>
+        Left((StatusCode.NotFound, ErrorResponse("auth_mode_disabled", "SSO is not enabled")))
+      case Some(svc) =>
+        val scope = tenant.map(_.trim).filter(_.nonEmpty) match
+          case Some(t) => OidcScope.Tenant(resolveTenant(t).getOrElse(t))
+          case None    => OidcScope.System
+        val seed = java.util.UUID.randomUUID().toString
+        svc.startAuth(scope, returnTo.getOrElse("/ui/"), seed) match
+          case Left(err) =>
+            Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
+          case Right(req) =>
+            Right(
+              (StatusCode.Found, req.redirectLocation, stateCookie(req.stateCookieValue, None))
+            )
+  }
+
+  def oidcCallback(
+      code: Option[String],
+      state: Option[String],
+      stateCookie: Option[String],
+      forwardedProto: Option[String]
+  ): IO[(StatusCode, String, CookieValueWithMeta, CookieValueWithMeta)] = IO.blocking {
+    oidc match
+      case None =>
+        (
+          StatusCode.Found,
+          "/ui/?error=auth_mode_disabled",
+          clearCookie(forwardedProto),
+          clearStateCookie(forwardedProto)
+        )
+      case Some(svc) =>
+        svc.completeAuth(
+          code.getOrElse(""),
+          state.getOrElse(""),
+          stateCookie.getOrElse(""),
+          System.currentTimeMillis()
+        ) match
+          case Left(err) =>
+            (
+              StatusCode.Found,
+              s"/ui/?error=${err.code}",
+              clearCookie(forwardedProto),
+              clearStateCookie(forwardedProto)
+            )
+          case Right(result) =>
+            val required = result.scope match
+              case OidcScope.System    => RequiredScope.SystemStrict
+              case OidcScope.Tenant(t) => RequiredScope.Tenant(t)
+            mintSessionFor(result.profile, required, forwardedProto) match
+              case Left((_, err)) =>
+                (
+                  StatusCode.Found,
+                  s"/ui/?error=${err.error}",
+                  clearCookie(forwardedProto),
+                  clearStateCookie(forwardedProto)
+                )
+              case Right((cookie, _)) =>
+                (StatusCode.Found, result.returnTo, cookie, clearStateCookie(forwardedProto))
+  }
+
+  def oidcLogout(
+      sessionCookie: Option[String],
+      forwardedProto: Option[String]
+  ): IO[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
+    sessionCookie.foreach(tokens.revoke)
+    // id_token_hint is not persisted in this iteration; RP-initiated logout still
+    // clears the local cookie and (when configured) hits the IdP end-session endpoint.
+    // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
+    val location = oidc.flatMap(_.endSessionUrl(OidcScope.System, None)).getOrElse("/ui/")
+    (StatusCode.Found, location, clearCookie(forwardedProto))
+  }
 
   def login(
       req: LoginRequest,
@@ -171,11 +285,13 @@ final class AuthHandlers(
     // `System` scope (no tenant in the login form) accepts any admin role --
     // superuser or tenant-admin. This preserves the original `login` behavior
     // where the absence of a tenant did not restrict which admins could proceed.
+    // `SystemStrict` (OIDC bare /ui/ login) further restricts to superuser only.
     // `Tenant(t)` scope further requires the caller to be admin of that specific
     // tenant (or a superuser).
     val scopeOk = required match
-      case RequiredScope.System    => superuser || manageableTenants.nonEmpty
-      case RequiredScope.Tenant(t) => superuser || manageableTenants.contains(t)
+      case RequiredScope.System       => superuser || manageableTenants.nonEmpty
+      case RequiredScope.SystemStrict => superuser
+      case RequiredScope.Tenant(t)    => superuser || manageableTenants.contains(t)
 
     if grants.isEmpty then
       Left(
@@ -203,7 +319,8 @@ final class AuthHandlers(
           StatusCode.Forbidden,
           ErrorResponse(
             "admin_required",
-            s"user '${profile.username}' is not an admin of the requested scope"
+            s"user '${profile.username}' is not authorized for the requested scope " +
+              "(system login requires a superuser; sign in via your tenant instead)"
           )
         )
       )
