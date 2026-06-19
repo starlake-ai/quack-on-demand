@@ -115,7 +115,14 @@ final case class ManagementAuthConfig(
           "URL prefix, not the backend's. E.g. proxy at https://platform/quack/api/* -> " +
           "QOD_SESSION_COOKIE_PATH=/quack/api."
     )
-    sessionCookiePath: String
+    sessionCookiePath: String,
+    @field @ConfigField(
+      envVar = "QOD_PUBLIC_BASE_URL",
+      description = "Externally visible manager base URL (e.g. https://qod.example.com). " +
+        "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
+        "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
+    )
+    publicBaseUrl: String = ""
 )
 
 final case class ManagerAuthConfig(
