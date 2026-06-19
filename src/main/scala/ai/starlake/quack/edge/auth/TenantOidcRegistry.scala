@@ -170,5 +170,61 @@ final class TenantOidcRegistry(
       )
       OidcProviderFactory.createAws(cfg, roleClaim)
 
+  /** Resolve authorize/token/end-session endpoints for an admin-UI SSO login. System scope uses the
+    * manager-wide Keycloak config; tenant scope reads `qodstate_tenant.authConfig`. Only Keycloak
+    * is supported for UI SSO in this MVP; other providers return `ProviderUnsupported`.
+    */
+  def endpointsFor(
+      scope: OidcScope,
+      globalKeycloak: KeycloakAuthConfig
+  ): Either[OidcSsoError, OidcEndpoints] =
+    scope match
+      case OidcScope.System =>
+        if globalKeycloak.enabled then
+          Right(
+            keycloakEndpoints(
+              globalKeycloak.baseUrl,
+              globalKeycloak.realm,
+              globalKeycloak.clientId,
+              globalKeycloak.clientSecret
+            )
+          )
+        else Left(OidcSsoError.ProviderUnsupported)
+      case OidcScope.Tenant(tenantId) =>
+        loadTenant(tenantId) match
+          case None    => Left(OidcSsoError.TenantNotConfigured)
+          case Some(t) =>
+            t.authProvider match
+              case "keycloak" =>
+                val cfg      = t.authConfig
+                val resolved = for
+                  baseUrl <- need(cfg, "baseUrl")
+                  realm   <- need(cfg, "realm")
+                  cid     <- need(cfg, "clientId")
+                  ref     <- need(cfg, "clientSecretRef")
+                  secret  <- resolveSecret(tenantId, "keycloak", ref)
+                yield keycloakEndpoints(baseUrl, realm, cid, secret)
+                resolved.toRight(OidcSsoError.TenantNotConfigured)
+              case _ => Left(OidcSsoError.ProviderUnsupported)
+
+  private def keycloakEndpoints(
+      baseUrl: String,
+      realm: String,
+      clientId: String,
+      clientSecret: String
+  ): OidcEndpoints =
+    val oidc = s"$baseUrl/realms/$realm/protocol/openid-connect"
+    OidcEndpoints(
+      provider = "keycloak",
+      authorizeUrl = s"$oidc/auth",
+      tokenUrl = s"$oidc/token",
+      endSessionUrl = s"$oidc/logout",
+      jwksUrl = s"$oidc/certs",
+      issuer = s"$baseUrl/realms/$realm",
+      clientId = clientId,
+      clientSecret = clientSecret,
+      scopes = "openid email profile"
+    )
+
   /** Visible for tests. */
   private[auth] def cacheSize: Int = cache.size
