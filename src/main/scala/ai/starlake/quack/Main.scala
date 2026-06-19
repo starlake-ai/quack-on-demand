@@ -2,7 +2,16 @@ package ai.starlake.quack
 
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.auth.{
+  AuthenticationService,
+  OidcBearerAuthenticator,
+  OidcDiscovery,
+  OidcEndpointResolver,
+  OidcEndpoints,
+  OidcSsoService,
+  OidcStateCodec
+}
+import ai.starlake.quack.secrets.SecretRefResolver
 import ai.starlake.quack.edge.config.{
   AclConfig,
   AuthenticationConfig,
@@ -343,6 +352,78 @@ object Main extends IOApp with LazyLogging:
               "Treating as 'auto' (derive from X-Forwarded-Proto)."
           )
           None
+    // Build the admin-UI OIDC SSO service only in oidc mode. Discovery + token exchange use a shared
+    // java.net.http client; id_token validation reuses OidcBearerAuthenticator against the discovered
+    // jwks_uri. redirect_uri is built from the public base URL (must match the IdP client's
+    // registered redirect URI).
+    val oidcSso: Option[OidcSsoService] =
+      if identitySource == ManagementIdentitySource.Oidc then
+        val httpClient = java.net.http.HttpClient
+          .newBuilder()
+          .connectTimeout(java.time.Duration.ofSeconds(10))
+          .build()
+        val discovery = new OidcDiscovery(httpGet =
+          url =>
+            try
+              val req = java.net.http.HttpRequest
+                .newBuilder()
+                .uri(java.net.URI.create(url))
+                .GET()
+                .timeout(java.time.Duration.ofSeconds(15))
+                .build()
+              val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+              if resp.statusCode() == 200 then Right(resp.body())
+              else Left(s"discovery HTTP ${resp.statusCode()}")
+            catch case e: Exception => Left(e.getMessage)
+        )
+        val resolver = new OidcEndpointResolver(
+          loadTenant = id => sup.getTenantById(id),
+          secrets = SecretRefResolver.default,
+          discovery = discovery
+        )
+        val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
+        if mgrCfg.auth.management.publicBaseUrl.trim.isEmpty then
+          logger.warn(
+            "identitySource=oidc but QOD_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults to " +
+              s"http://localhost:${mgrCfg.port}, which must match the IdP client's registered redirect " +
+              "URI. Set QOD_PUBLIC_BASE_URL for any non-localhost deploy."
+          )
+        val publicBaseUrlOf = () =>
+          val base = mgrCfg.auth.management.publicBaseUrl
+          if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
+        val httpExchange = (url: String, form: String) =>
+          try
+            val req = java.net.http.HttpRequest
+              .newBuilder()
+              .uri(java.net.URI.create(url))
+              .header("Content-Type", "application/x-www-form-urlencoded")
+              .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
+              .timeout(java.time.Duration.ofSeconds(15))
+              .build()
+            val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+            if resp.statusCode() == 200 then Right(resp.body())
+            else Left(s"token endpoint HTTP ${resp.statusCode()}")
+          catch case e: Exception => Left(e.getMessage)
+        val buildValidator = (ep: OidcEndpoints) =>
+          new OidcBearerAuthenticator(
+            ep.provider,
+            ep.jwksUrl,
+            ep.issuer,
+            ep.clientId,
+            authCfg.roleClaim
+          )
+        Some(
+          new OidcSsoService(
+            resolver = resolver,
+            mgmt = mgrCfg.auth.management.oidc,
+            codec = codec,
+            roleClaim = authCfg.roleClaim,
+            publicBaseUrlOf = publicBaseUrlOf,
+            httpExchange = httpExchange,
+            buildValidator = buildValidator
+          )
+        )
+      else None
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
@@ -351,7 +432,8 @@ object Main extends IOApp with LazyLogging:
       cookieSecureOverride = cookieSecureOverride,
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
-      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
+      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
+      oidc = oidcSso
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

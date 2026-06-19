@@ -138,7 +138,8 @@ final class AuthHandlers(
 
   def oidcStart(
       tenant: Option[String],
-      returnTo: Option[String]
+      returnTo: Option[String],
+      forwardedProto: Option[String] = None
   ): Out[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
     oidc match
       case None =>
@@ -153,7 +154,11 @@ final class AuthHandlers(
             Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
           case Right(req) =>
             Right(
-              (StatusCode.Found, req.redirectLocation, stateCookie(req.stateCookieValue, None))
+              (
+                StatusCode.Found,
+                req.redirectLocation,
+                stateCookie(req.stateCookieValue, forwardedProto)
+              )
             )
   }
 
