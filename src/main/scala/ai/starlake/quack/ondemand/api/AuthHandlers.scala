@@ -1,11 +1,24 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.{AuthScope, AuthenticationService}
+import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
 import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
 import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
 import sttp.model.StatusCode
 import sttp.model.headers.{Cookie, CookieValueWithMeta}
+
+/** What the chosen login entry point requires of the authenticated principal.
+  *
+  *   - `System`: the caller did not specify a tenant. Any admin (superuser or tenant-admin) is
+  *     accepted; the resulting session reflects exactly the grants the principal holds.
+  *   - `Tenant(id)`: the caller presented a tenant. The principal must be superuser OR an admin of
+  *     that specific tenant.
+  *
+  * The OIDC callback (task 6) will add a third case when needed.
+  */
+enum RequiredScope:
+  case System
+  case Tenant(id: String)
 
 /** REST endpoints driving the UI's login lifecycle.
   *
@@ -118,54 +131,93 @@ final class AuthHandlers(
         case Left(err) =>
           Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))
         case Right(profile) =>
-          val grants = identitySource match
-            case ManagementIdentitySource.Db =>
-              // The DB authenticator already encoded the (tenant, role) the operator
-              // provisioned in `qodstate_user`. Collapse it into a one-element grant
-              // set so the rest of the pipeline is uniform.
-              List(UserGrant(profile.tenant, profile.role))
-            case ManagementIdentitySource.Oidc =>
-              // Discard JWT role + tenant. The qodstate_user row is authoritative for
-              // management-plane authorization.
-              grantsForIdentity(profile.username, profile.claims.get("email"))
-
-          val superuser = grants.exists(g => g.tenant.isEmpty && g.role.equalsIgnoreCase("admin"))
-          val manageableTenants: Set[String] = grants.collect {
-            case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
-          }.toSet
-
-          if grants.isEmpty then
-            Left(
-              (
-                StatusCode.Forbidden,
-                ErrorResponse(
-                  "not_provisioned",
-                  s"user '${profile.username}' authenticated but has no qodstate_user grant"
-                )
-              )
-            )
-          else if !superuser && manageableTenants.isEmpty then
-            Left(
-              (
-                StatusCode.Forbidden,
-                ErrorResponse(
-                  "admin_required",
-                  s"user '${profile.username}' has no admin grant; manager UI is admin-only"
-                )
-              )
-            )
-          else
-            val sessionScope = SessionScope(superuser, manageableTenants)
-            val token        = tokens.mintWithScope(profile, sessionScope)
-            val resp         = LoginResponse(
-              token = token,
-              username = profile.username,
-              tenant = None,
-              superuser = superuser,
-              manageableTenants = manageableTenants.toList.sorted
-            )
-            Right((sessionCookie(token, forwardedProto), resp))
+          val required = scope match
+            case AuthScope.System    => RequiredScope.System
+            case AuthScope.Tenant(t) => RequiredScope.Tenant(t)
+          mintSessionFor(profile, required, forwardedProto)
   }
+
+  /** Shared authorization + session minting for both the password login and the OIDC callback.
+    *
+    * `required` expresses what the chosen login URL demands:
+    *   - `System`: no tenant was specified; any admin (superuser or tenant-admin) is accepted.
+    *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser or admin of
+    *     that tenant.
+    *
+    * The grant computation and the not_provisioned / admin_required gates are identical to the
+    * original inline `login` logic, so the two entry points cannot drift.
+    */
+  private def mintSessionFor(
+      profile: AuthenticatedProfile,
+      required: RequiredScope,
+      forwardedProto: Option[String]
+  ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
+    val grants = identitySource match
+      case ManagementIdentitySource.Db =>
+        // The DB authenticator already encoded the (tenant, role) the operator
+        // provisioned in `qodstate_user`. Collapse it into a one-element grant
+        // set so the rest of the pipeline is uniform.
+        List(UserGrant(profile.tenant, profile.role))
+      case ManagementIdentitySource.Oidc =>
+        // Discard JWT role + tenant. The qodstate_user row is authoritative for
+        // management-plane authorization.
+        grantsForIdentity(profile.username, profile.claims.get("email"))
+
+    val superuser = grants.exists(g => g.tenant.isEmpty && g.role.equalsIgnoreCase("admin"))
+    val manageableTenants: Set[String] = grants.collect {
+      case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
+    }.toSet
+
+    // `System` scope (no tenant in the login form) accepts any admin role --
+    // superuser or tenant-admin. This preserves the original `login` behavior
+    // where the absence of a tenant did not restrict which admins could proceed.
+    // `Tenant(t)` scope further requires the caller to be admin of that specific
+    // tenant (or a superuser).
+    val scopeOk = required match
+      case RequiredScope.System    => superuser || manageableTenants.nonEmpty
+      case RequiredScope.Tenant(t) => superuser || manageableTenants.contains(t)
+
+    if grants.isEmpty then
+      Left(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse(
+            "not_provisioned",
+            s"user '${profile.username}' authenticated but has no qodstate_user grant"
+          )
+        )
+      )
+    else if !superuser && manageableTenants.isEmpty then
+      Left(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse(
+            "admin_required",
+            s"user '${profile.username}' has no admin grant; manager UI is admin-only"
+          )
+        )
+      )
+    else if !scopeOk then
+      Left(
+        (
+          StatusCode.Forbidden,
+          ErrorResponse(
+            "admin_required",
+            s"user '${profile.username}' is not an admin of the requested scope"
+          )
+        )
+      )
+    else
+      val sessionScope = SessionScope(superuser, manageableTenants)
+      val token        = tokens.mintWithScope(profile, sessionScope)
+      val resp         = LoginResponse(
+        token = token,
+        username = profile.username,
+        tenant = None,
+        superuser = superuser,
+        manageableTenants = manageableTenants.toList.sorted
+      )
+      Right((sessionCookie(token, forwardedProto), resp))
 
   /** Logout. Accepts the token via X-API-Key header OR qod_session cookie -- the UI uses the cookie
     * (JS can't read HttpOnly cookies); CLI uses the header. The response always emits a
