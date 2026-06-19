@@ -67,6 +67,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[K8sConfig]                 = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]               = ProductHint[AdminConfig](camelMapping)
   given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
+  given ProductHint[ManagementOidcConfig]      = ProductHint[ManagementOidcConfig](camelMapping)
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
@@ -84,6 +85,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
   given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
+  given ConfigReader[ManagementOidcConfig]   = deriveReader[ManagementOidcConfig]
   given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]

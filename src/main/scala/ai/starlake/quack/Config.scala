@@ -75,6 +75,35 @@ final case class FederationConfig(
     secretStore: String
 )
 
+/** Generic OIDC client for admin-UI SSO (system/superuser scope). Endpoints are resolved from
+  * `${issuerUrl}/.well-known/openid-configuration` via OIDC Discovery, so any compliant IdP works.
+  */
+final case class ManagementOidcConfig(
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_ISSUER_URL",
+      description = "OIDC issuer URL for admin-UI SSO (system scope), e.g. " +
+        "https://accounts.google.com or http://keycloak:8080/auth/realms/qod. Discovery reads " +
+        "${issuerUrl}/.well-known/openid-configuration. Empty disables system-scope SSO."
+    )
+    issuerUrl: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_CLIENT_ID",
+      description = "OIDC client id for admin-UI SSO (system scope)."
+    )
+    clientId: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_CLIENT_SECRET",
+      description = "OIDC client secret for admin-UI SSO (system scope).",
+      sensitive = true
+    )
+    clientSecret: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_SCOPES",
+      description = "OIDC scopes requested for admin-UI SSO. Default 'openid email profile'."
+    )
+    scopes: String = "openid email profile"
+)
+
 final case class ManagementAuthConfig(
     @field @ConfigField(
       envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_SOURCE",
@@ -122,7 +151,8 @@ final case class ManagementAuthConfig(
         "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
         "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
     )
-    publicBaseUrl: String = ""
+    publicBaseUrl: String = "",
+    oidc: ManagementOidcConfig = ManagementOidcConfig()
 )
 
 final case class ManagerAuthConfig(
