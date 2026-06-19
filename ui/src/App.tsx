@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
@@ -121,6 +122,13 @@ function Shell() {
   );
 }
 
+function SsoRedirect({ ssoLogin }: { ssoLogin: () => void }) {
+  // Side effect in an effect (not the render body) so it does not double-fire
+  // under React StrictMode.
+  useEffect(() => { ssoLogin(); }, []);
+  return <div className="loading">Redirecting to sign-in…</div>;
+}
+
 function AuthGate() {
   const { username, loading, identitySource, ssoLogin } = useAuth();
   if (loading) return <div className="loading">Loading session…</div>;
@@ -130,8 +138,7 @@ function AuthGate() {
   if (identitySource === 'oidc') {
     const err = new URLSearchParams(window.location.search).get('error');
     if (err) return <SsoError code={err} onRetry={ssoLogin} />;
-    ssoLogin();
-    return <div className="loading">Redirecting to sign-in…</div>;
+    return <SsoRedirect ssoLogin={ssoLogin} />;
   }
   // db mode: unchanged password form.
   return <Login />;

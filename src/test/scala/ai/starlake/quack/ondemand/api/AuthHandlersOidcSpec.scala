@@ -24,7 +24,7 @@ import ai.starlake.quack.edge.config.{
   OAuthConfig
 }
 import ai.starlake.quack.model.Tenant
-import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource}
+import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
 import ai.starlake.quack.ondemand.state.UserGrant
 import ai.starlake.quack.secrets.SecretRefResolver
 import cats.effect.unsafe.implicits.global
@@ -182,12 +182,13 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
 
   private def makeHandlers(
       grants: List[UserGrant],
-      svc: Option[OidcSsoService] = None
+      svc: Option[OidcSsoService] = None,
+      tokens: SessionTokenStore = new SessionTokenStore
   ): AuthHandlers =
     val directory: GrantsLookup = (_, _) => grants
     new AuthHandlers(
       authService = dummyAuthService,
-      tokens = new SessionTokenStore,
+      tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = directory,
       oidc = svc
@@ -206,7 +207,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     val svc      = buildSvc(seed)
     val started  = svc.startAuth(scope, returnTo, seed).toOption.get
     val handlers = makeHandlers(grants, Some(svc))
-    (handlers, svc, started.stateCookieValue, started.stateCookieValue)
+    (handlers, svc, started.stateParam, started.stateCookieValue)
 
   // ================================================================
   // 1. oidcStart (system scope, no tenant) -> 302 + state cookie
@@ -395,4 +396,29 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     location should startWith("https://idp.example.com/logout?")
     cookie.value shouldBe ""
     cookie.maxAge shouldBe Some(0L)
+  }
+
+  // ================================================================
+  // 12. oidcLogout with a live session token -> revokes the jti
+  // ================================================================
+
+  it should "revoke the session jti when a session cookie is presented" in {
+    val svc      = buildSvc("s12")
+    val tokens   = new SessionTokenStore
+    val handlers = makeHandlers(List(UserGrant(None, "admin")), Some(svc), tokens)
+    val profile  = AuthenticatedProfile(
+      username = "alice",
+      role = "admin",
+      groups = Set("admin"),
+      claims = Map("email" -> "alice@acme.io"),
+      authMethod = "oidc"
+    )
+    val token  = tokens.mintWithScope(profile, SessionScope(superuser = true, Set.empty))
+    val before = tokens.revokedJtiCount
+    val (status, _, cookie) =
+      handlers.oidcLogout(Some(token), None).unsafeRunSync()
+    status shouldBe StatusCode.Found
+    cookie.value shouldBe ""
+    cookie.maxAge shouldBe Some(0L)
+    tokens.revokedJtiCount shouldBe (before + 1)
   }

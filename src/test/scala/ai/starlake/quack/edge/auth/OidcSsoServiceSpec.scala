@@ -114,7 +114,7 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
       service.startAuth(OidcScope.Tenant("acme"), "/ui/?tenant=acme", seed = "s2").toOption.get
     val res = service.completeAuth(
       code = "code-1",
-      state = started.stateCookieValue,
+      state = started.stateParam,
       stateCookieValue = started.stateCookieValue,
       now = 1_000_500L
     )
@@ -128,8 +128,8 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
     val started = service.startAuth(OidcScope.System, "/ui/", "s3").toOption.get
     service.completeAuth(
       "c",
-      started.stateCookieValue,
-      "different-cookie",
+      started.stateParam,
+      "wrong::verifier",
       now = 1_000_500L
     ) shouldBe Left(OidcSsoError.InvalidState)
   }
@@ -149,7 +149,7 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
     val started = service.startAuth(OidcScope.System, "/ui/", "s4").toOption.get
     service.completeAuth(
       "c",
-      started.stateCookieValue,
+      started.stateParam,
       started.stateCookieValue,
       now = 1_000_500L
     ) shouldBe Left(OidcSsoError.IdpError)
@@ -171,6 +171,8 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
     val cases = List(
       "https://evil.com" -> "/ui/",
       "//evil.com"       -> "/ui/",
+      "/\\evil.com"      -> "/ui/",
+      "/%2F%2Fevil.com"  -> "/ui/",
       ""                 -> "/ui/",
       "/admin"           -> "/admin"
     )
@@ -179,10 +181,42 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
       val started = service.startAuth(OidcScope.System, returnTo, seed = seed).toOption.get
       val result  = service.completeAuth(
         code = "code-x",
-        state = started.stateCookieValue,
+        state = started.stateParam,
         stateCookieValue = started.stateCookieValue,
         now = 1_000_500L
       )
       result.map(_.returnTo) shouldBe Right(expected)
     }
+  }
+
+  it should "round-trip the PKCE verifier into the token-exchange form" in {
+    val seed         = "pkce-seed"
+    val nonce        = codec.genNonce(seed)
+    var capturedForm = ""
+    val service      = new OidcSsoService(
+      resolver = resolver,
+      mgmt = mgmt,
+      codec = codec,
+      roleClaim = "role",
+      publicBaseUrlOf = () => "https://qod.example.com",
+      httpExchange = (_, form) => { capturedForm = form; Right("""{"id_token":"jwt"}""") },
+      buildValidator = stubValidator(nonce),
+      nowMillis = () => 1_000_000L
+    )
+    val started = service.startAuth(OidcScope.System, "/ui/", seed = seed).toOption.get
+    // The verifier must NOT travel in the IdP-facing state param.
+    started.stateParam should not include "::"
+    started.stateCookieValue should include("::")
+    val res = service.completeAuth(
+      code = "code-pkce",
+      state = started.stateParam,
+      stateCookieValue = started.stateCookieValue,
+      now = 1_000_500L
+    )
+    res.map(_.profile.username) shouldBe Right("alice")
+    val expectedVerifier =
+      java.net.URLEncoder
+        .encode(codec.genPkce(seed).verifier, java.nio.charset.StandardCharsets.UTF_8)
+    capturedForm should include("code_verifier=")
+    capturedForm should include(s"code_verifier=$expectedVerifier")
   }

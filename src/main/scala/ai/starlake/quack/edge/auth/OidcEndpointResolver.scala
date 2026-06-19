@@ -13,7 +13,7 @@ class OidcEndpointResolver(
     loadTenant: String => Option[Tenant],
     secrets: SecretRefResolver,
     discovery: OidcDiscovery
-):
+) extends com.typesafe.scalalogging.LazyLogging:
 
   private final case class ScopeOidc(
       issuerUrl: String,
@@ -55,14 +55,18 @@ class OidcEndpointResolver(
         loadTenant(tenantId) match
           case None    => Left(OidcSsoError.ScopeNotConfigured)
           case Some(t) =>
-            val cfg      = t.authConfig
-            val resolved = for
-              issuer <- need(cfg, "issuerUrl")
-              cid    <- need(cfg, "clientId")
-              ref    <- need(cfg, "clientSecretRef")
-              secret <- secrets.resolve(ref).toOption
-            yield ScopeOidc(issuer, cid, secret, scopesOr(cfg.getOrElse("scopes", "")))
-            resolved.toRight(OidcSsoError.ScopeNotConfigured)
+            val cfg = t.authConfig
+            (need(cfg, "issuerUrl"), need(cfg, "clientId"), need(cfg, "clientSecretRef")) match
+              case (Some(issuer), Some(cid), Some(ref)) =>
+                secrets.resolve(ref) match
+                  case Right(secret) =>
+                    Right(ScopeOidc(issuer, cid, secret, scopesOr(cfg.getOrElse("scopes", ""))))
+                  case Left(err) =>
+                    logger.warn(
+                      s"OIDC SSO: tenant '$tenantId' clientSecretRef did not resolve ($err)"
+                    )
+                    Left(OidcSsoError.ScopeNotConfigured)
+              case _ => Left(OidcSsoError.ScopeNotConfigured)
 
   private def need(cfg: Map[String, String], key: String): Option[String] =
     cfg.get(key).map(_.trim).filter(_.nonEmpty)
