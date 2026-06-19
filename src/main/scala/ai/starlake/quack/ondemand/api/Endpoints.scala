@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.edge.auth.OidcSsoService
 import Dtos.given
 import sttp.tapir._
 import sttp.tapir.generic.auto._
@@ -297,6 +298,60 @@ object Endpoints:
       .in(header[Option[String]]("X-API-Key"))
       .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[WhoamiResponse])
+
+  // OIDC SSO redirect endpoints. start returns Either (Left = JSON error, Right = 302 redirect),
+  // so it uses `base` (which carries the JSON errorOut). callback/logout always 302 (no error
+  // channel) so they use bare `endpoint`; failures are encoded in the Location query string.
+  val oidcStart: PublicEndpoint[
+    (Option[String], Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    (sttp.model.StatusCode, String, sttp.model.headers.CookieValueWithMeta),
+    Any
+  ] =
+    base.get
+      .in("auth" / "oidc" / "start")
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("returnTo"))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[String]("Location"))
+      .out(setCookie(OidcSsoService.STATE_COOKIE))
+
+  val oidcCallback: PublicEndpoint[
+    (Option[String], Option[String], Option[String], Option[String]),
+    Unit,
+    (
+        sttp.model.StatusCode,
+        String,
+        sttp.model.headers.CookieValueWithMeta,
+        sttp.model.headers.CookieValueWithMeta
+    ),
+    Any
+  ] =
+    endpoint.get
+      .in("api" / "auth" / "oidc" / "callback")
+      .in(query[Option[String]]("code"))
+      .in(query[Option[String]]("state"))
+      .in(cookie[Option[String]](OidcSsoService.STATE_COOKIE))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[String]("Location"))
+      .out(setCookie(SessionTokenStore.CookieName))
+      .out(setCookie(OidcSsoService.STATE_COOKIE))
+
+  val oidcLogout: PublicEndpoint[
+    (Option[String], Option[String]),
+    Unit,
+    (sttp.model.StatusCode, String, sttp.model.headers.CookieValueWithMeta),
+    Any
+  ] =
+    endpoint.get
+      .in("api" / "auth" / "oidc" / "logout")
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[String]("Location"))
+      .out(setCookie(SessionTokenStore.CookieName))
 
   // Recent statement history (newest first), bounded by `limit` (default 50).
   // Tenant-scoped: the handler clamps the response to rows whose tenant is in

@@ -43,7 +43,9 @@ final class ManagerServer(
 
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
-    path == "/api/auth/login" || path == "/api/config/client"
+    path == "/api/auth/login" || path == "/api/config/client" ||
+      path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
+      path == "/api/auth/oidc/logout"
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
@@ -141,6 +143,15 @@ final class ManagerServer(
       Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
       Endpoints.statementHistory.serverLogic { case (limit, key) =>
         statementHistory.recent(limit, key)(sessions.scopeOf)
+      },
+      Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
+        auth.oidcStart(tenant, returnTo, proto)
+      },
+      Endpoints.oidcCallback.serverLogicSuccess { case (code, state, stateCookie, proto) =>
+        auth.oidcCallback(code, state, stateCookie, proto)
+      },
+      Endpoints.oidcLogout.serverLogicSuccess { case (sessionCookie, proto) =>
+        auth.oidcLogout(sessionCookie, proto)
       }
     )
 
