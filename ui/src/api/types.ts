@@ -123,6 +123,10 @@ export interface ClientConfigResponse {
   // True iff the runtime backend supports node placement (Kubernetes).
   // The UI hides cohort/placement controls when false.
   placementSupported?: boolean;
+  // "db" (default) = password form; "oidc" = redirect to the IdP via /api/auth/oidc/start.
+  identitySource?: 'db' | 'oidc';
+  // Human-readable IdP label shown in the SSO redirect card (e.g. "Keycloak", "Google").
+  ssoProviderName?: string;
 }
 
 /** One row of the Config page. `value` is masked ("(set)" / "(unset)")
