@@ -167,14 +167,19 @@ At least one OIDC provider (Keycloak, Google, or Azure AD) must be enabled along
 
 The providers above govern the **FlightSQL data plane** (how a SQL client authenticates). This section is separate: it controls how operators log in to the **admin UI** at `/ui/`.
 
-By default (`auth.management.identitySource=db`) the admin UI shows a username / password / tenant form. Set `identitySource=oidc` to make the admin UI a **pure SSO client**: the password form is removed and the browser is redirected to your identity provider.
+The admin-UI login mode is resolved **per scope**, not globally:
+
+- `/ui/?tenant=<id>` reads **that tenant's** `authProvider`: `db` shows the password form, an OIDC provider (`keycloak` / `google` / `azure` / `aws`) redirects to that tenant's IdP. A tenant is therefore pure-password or pure-SSO; there is no password fallback inside an OIDC tenant.
+- The bare `/ui/` (system / superuser scope) uses the manager-wide `auth.management.identitySource`: `db` (default) shows the password form, `oidc` makes it a **pure SSO client** against the manager-wide issuer below.
+
+The SPA resolves the mode for the tenant in the URL via the unauthenticated `GET /api/auth/mode?tenant=<id>` (omit `tenant` for the system scope) before deciding what to render.
 
 It is **provider-agnostic**: it uses OIDC Discovery, so it works with any compliant IdP (Keycloak, Google, Azure AD, Okta, Auth0, Cognito, ...). You configure an **issuer URL** and a client id/secret; the manager resolves the authorize / token / end-session / JWKS endpoints from `${issuerUrl}/.well-known/openid-configuration`.
 
 `qodstate_user` remains authoritative for role and tenant scope: the IdP verifies identity, and the matching `qodstate_user` grant decides what the operator may manage. IdP role/tenant claims are discarded.
 
 ```bash
-QOD_MGMT_IDENTITY_SOURCE=oidc                       # turn on admin-UI SSO (default: db)
+QOD_MGMT_IDENTITY_SOURCE=oidc                       # system-scope (bare /ui/) SSO (default: db)
 
 # System / superuser scope (the bare /ui/ login uses this issuer):
 QOD_MGMT_OIDC_ISSUER_URL=https://idp.example.com/realms/qod
@@ -195,8 +200,8 @@ ${QOD_MGMT_PUBLIC_BASE_URL}/api/auth/oidc/callback
 
 ### Login URLs and scope
 
-- `/ui/` (no tenant) is the **system / superuser** login and authenticates against the manager-wide issuer above. Only a superuser (`qodstate_user.tenant IS NULL`, role admin) may complete it; a non-superuser is rejected and must sign in through their tenant.
-- `/ui/?tenant=<id>` authenticates against **that tenant's** OIDC client and requires an admin grant for that tenant.
+- `/ui/` (no tenant) is the **system / superuser** login. Its mode follows `QOD_MGMT_IDENTITY_SOURCE`; in `oidc` it authenticates against the manager-wide issuer above. Only a superuser (`qodstate_user.tenant IS NULL`, role admin) may complete it; a non-superuser is rejected and must sign in through their tenant.
+- `/ui/?tenant=<id>` follows **that tenant's** `authProvider`: a `db` tenant gets the password form, an OIDC tenant authenticates against that tenant's OIDC client. Either way it requires an admin grant for that tenant.
 
 ### Per-tenant OIDC
 
