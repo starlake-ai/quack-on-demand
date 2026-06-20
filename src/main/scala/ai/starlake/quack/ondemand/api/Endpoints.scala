@@ -299,6 +299,21 @@ object Endpoints:
       .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[WhoamiResponse])
 
+  // Unauthenticated: the SPA calls this before login (tenant from the URL) to decide whether to
+  // render the password form ("db") or redirect to /api/auth/oidc/start ("oidc"). A db tenant or a
+  // fully-configured OIDC tenant returns 200; an unknown / misconfigured tenant returns 400 with a
+  // stable error code.
+  val authMode: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    AuthModeResponse,
+    Any
+  ] =
+    base.get
+      .in("auth" / "mode")
+      .in(query[Option[String]]("tenant"))
+      .out(jsonBody[AuthModeResponse])
+
   // OIDC SSO redirect endpoints. start returns Either (Left = JSON error, Right = 302 redirect),
   // so it uses `base` (which carries the JSON errorOut). callback/logout always 302 (no error
   // channel) so they use bare `endpoint`; failures are encoded in the Location query string.

@@ -49,6 +49,7 @@ final class ManagerServer(
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/config/client" ||
+      path == "/api/auth/mode" ||
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout"
 
@@ -146,6 +147,7 @@ final class ManagerServer(
         auth.logout(apiKey, cookie, proto)
       },
       Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
+      Endpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
       Endpoints.statementHistory.serverLogic { case (limit, key) =>
         statementHistory.recent(limit, key)(sessions.scopeOf)
       },

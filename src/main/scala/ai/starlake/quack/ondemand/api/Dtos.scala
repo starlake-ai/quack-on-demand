@@ -324,6 +324,17 @@ final case class WhoamiResponse(
     manageableTenants: List[String] = Nil
 )
 
+/** Resolved admin-UI login mode for a scope, returned by the unauthenticated `GET /api/auth/mode`.
+  * The SPA reads this per the tenant in the URL to decide whether to render the password form
+  * (`db`) or redirect to `/api/auth/oidc/start` (`oidc`).
+  */
+final case class AuthModeResponse(
+    // "db" -> render the password form; "oidc" -> redirect to /api/auth/oidc/start.
+    mode: String,
+    // Cosmetic provider label (issuer host for a tenant, manager-wide provider for system).
+    ssoProviderName: String = ""
+)
+
 // ----- Recent statement history -----
 final case class StatementHistoryEntry(
     ts: String, // ISO-8601 UTC
@@ -881,6 +892,23 @@ object Dtos:
       )
     }
   )
+  given Codec[AuthModeResponse] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        mode            <- c.get[String]("mode")
+        ssoProviderName <- c.getOrElse[String]("ssoProviderName")("")
+      yield AuthModeResponse(mode, ssoProviderName)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "mode"            -> r.mode.asJson,
+          "ssoProviderName" -> r.ssoProviderName.asJson
+        )
+      )
+    }
+  )
+
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
 

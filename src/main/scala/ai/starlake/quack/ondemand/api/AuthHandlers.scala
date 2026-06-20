@@ -411,3 +411,18 @@ final class AuthHandlers(
           (StatusCode.Unauthorized, ErrorResponse("revoked", "session token has been revoked"))
         )
   }
+
+  /** Resolve the admin-UI login mode for a scope. Unauthenticated: the SPA calls this before login
+    * with the tenant from the URL (absent for the system scope) to decide whether to render the
+    * password form (`db`) or redirect to SSO (`oidc`). An unknown or misconfigured tenant returns
+    * `400` with a stable error code so the UI can surface it instead of silently falling back.
+    */
+  def authMode(tenant: Option[String]): Out[AuthModeResponse] = IO.blocking {
+    authModeResolver.modeFor(tenant.map(_.trim).filter(_.nonEmpty)) match
+      case Left(err) =>
+        Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
+      case Right(ManagementAuthMode.Db) =>
+        Right(AuthModeResponse("db", ""))
+      case Right(ManagementAuthMode.Oidc) =>
+        Right(AuthModeResponse("oidc", ""))
+  }
