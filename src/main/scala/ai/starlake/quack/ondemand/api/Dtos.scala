@@ -177,7 +177,12 @@ final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, n
 final case class ErrorResponse(error: String, message: String)
 
 final case class TenantRequest(
-    name: String,
+    // Slug key (required): a lowercase identifier that IS the tenant's one
+    // key, used in URLs, sessions, scope checks, and FKs. e.g. "acme".
+    id: String,
+    // Free-form human label (caps / spaces allowed). Defaults to `id` when
+    // empty. e.g. "Acme Corporation".
+    displayName: String = "",
     // Auth provider for every user in this tenant. One of
     // {db, keycloak, google, azure, aws}; defaults to `db` so existing
     // wire callers and the bootstrap path keep working.
@@ -188,8 +193,12 @@ final case class TenantRequest(
     authConfig: Map[String, String] = Map.empty
 )
 final case class TenantResponse(
+    // The slug key. Also exposed as `id` (identical) for callers that key on
+    // either field; both hold the slug.
     name: String,
     id: String,
+    // Free-form human label. May differ from `id` (e.g. "Acme Corporation").
+    displayName: String,
     // Pool natural keys under this tenant, formatted as `tenantDb/pool`
     // (the tenant prefix is implicit). Storage configuration lives on
     // `qodstate_tenant_db` rows, not here.
@@ -747,15 +756,17 @@ object Dtos:
   given Codec[TenantRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        name         <- c.get[String]("name")
+        id           <- c.get[String]("id")
+        displayName  <- c.getOrElse[String]("displayName")("")
         authProvider <- c.getOrElse[String]("authProvider")("db")
         authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
-      yield TenantRequest(name, authProvider, authConfig)
+      yield TenantRequest(id, displayName, authProvider, authConfig)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(
         JsonObject(
-          "name"         -> r.name.asJson,
+          "id"           -> r.id.asJson,
+          "displayName"  -> r.displayName.asJson,
           "authProvider" -> r.authProvider.asJson,
           "authConfig"   -> r.authConfig.asJson
         )

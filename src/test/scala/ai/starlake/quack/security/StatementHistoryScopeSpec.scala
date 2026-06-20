@@ -36,7 +36,6 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
     store.upsertTenant(
       Tenant(
         id           = GlobexTenantId,
-        name         = GlobexName,
         displayName  = GlobexName,
         authProvider = "db"
       )

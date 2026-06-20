@@ -148,7 +148,7 @@ export function PlacementUnsupportedWarning() {
     }}>
       This manager is not running on Kubernetes. Placement instructions will be
       saved with the pool (so they survive a YAML export to a K8s cluster) but
-      ignored at runtime — every node will be spawned by the local backend
+      ignored at runtime - every node will be spawned by the local backend
       regardless of nodeSelector.
     </p>
   );

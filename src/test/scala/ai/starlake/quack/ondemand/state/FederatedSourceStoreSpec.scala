@@ -39,7 +39,7 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
 
   // Helper to seed a tenant + tenant-db so the federation FK can resolve.
   private def seedTd(cp: PostgresControlPlaneStore): String =
-    cp.upsertTenant(Tenant(id = "t-1", name = "t1", displayName = "t1", disabled = false))
+    cp.upsertTenant(Tenant(id = "t-1", displayName = "t1", disabled = false))
     cp.upsertTenantDb(TenantDb(
       id        = "td-1",
       tenantId  = "t-1",

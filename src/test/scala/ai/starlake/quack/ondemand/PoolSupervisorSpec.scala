@@ -188,7 +188,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val res = sup.createTenant(Tenant("foo")).unsafeRunSync()
     res.isRight shouldBe true
     val t = res.toOption.get
-    t.name        shouldBe "foo"
+    t.id        shouldBe "foo"
     t.displayName shouldBe "foo"
     t.id            should not be empty
     sup.getTenant("foo").map(_.displayName) shouldBe Some("foo")

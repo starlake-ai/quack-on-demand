@@ -137,7 +137,6 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
 
     s.upsertTenant(Tenant(
       id          = HexTenantId,
-      name        = hexTenantDisplayName,
       displayName = hexTenantDisplayName,
       authProvider = "db"
     ))

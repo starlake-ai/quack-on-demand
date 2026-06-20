@@ -54,7 +54,7 @@ export interface PoolResponse {
   metastore: Record<string, string>;
   disabled: boolean;
   // Persisted placement plan. Empty array (the default) means no
-  // placement constraint — all nodes scheduled wherever the runtime puts
+  // placement constraint - all nodes scheduled wherever the runtime puts
   // them. Only meaningful on the Kubernetes backend.
   cohorts?: PoolCohort[];
 }
@@ -156,14 +156,20 @@ export interface ManifestImportSummary {
 export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
 
 export interface TenantRequest {
-  name: string;
+  // Slug key (required), e.g. "acme". The one tenant key in URLs/sessions/FKs.
+  id: string;
+  // Free-form human label, e.g. "Acme Corporation".
+  displayName: string;
   authProvider?: AuthProvider;
   authConfig?: Record<string, string>;
 }
 
 export interface TenantResponse {
   id: string;
+  // Equal to id (kept for callers that key on `name`); both hold the slug.
   name: string;
+  // Free-form human label; may differ from id.
+  displayName: string;
   pools: string[];
   disabled: boolean;
   authProvider: AuthProvider;

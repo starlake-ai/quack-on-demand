@@ -112,7 +112,7 @@ export default function RoleColumnPoliciesSection({ roleId }: { roleId: string }
                 <td>
                   {p.transformSql
                     ? <code style={{ fontFamily: 'var(--mono)', fontSize: '0.85em', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{p.transformSql}</code>
-                    : <em style={{ color: 'var(--text-mute)' }}>—</em>
+                    : <em style={{ color: 'var(--text-mute)' }}>-</em>
                   }
                 </td>
                 <td className="actions">

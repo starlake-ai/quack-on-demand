@@ -52,7 +52,7 @@ function SsoError({ code, onRetry }: { code: string; onRetry: () => void }) {
         </div>
         <div className="login-err">{copy.title}</div>
         <p style={{ margin: '0.5rem 0 1rem' }}>{copy.detail}</p>
-        <button onClick={onRetry}>Try again</button>
+        <button onClick={() => onRetry()}>Try again</button>
       </div>
     </div>
   );

@@ -106,13 +106,13 @@ final case class ManagementOidcConfig(
 
 final case class ManagementAuthConfig(
     @field @ConfigField(
-      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_SOURCE",
+      envVar = "QOD_MGMT_IDENTITY_SOURCE",
       description =
         "Management-plane identity source: 'db' (qodstate_user as identity+authz) or 'oidc' (IdP for identity, qodstate_user for role+tenants)."
     )
     identitySource: String,
     @field @ConfigField(
-      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_CLAIM",
+      envVar = "QOD_MGMT_IDENTITY_CLAIM",
       description =
         "JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback)."
     )
@@ -146,7 +146,7 @@ final case class ManagementAuthConfig(
     )
     sessionCookiePath: String,
     @field @ConfigField(
-      envVar = "QOD_PUBLIC_BASE_URL",
+      envVar = "QOD_MGMT_PUBLIC_BASE_URL",
       description = "Externally visible manager base URL (e.g. https://qod.example.com). " +
         "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
         "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
