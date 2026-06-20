@@ -30,6 +30,11 @@ datasets
 docs/TPCH_SF1*
 .env
 
+# DuckDB temp-spill + local caches from native loader runs (can reach GBs)
+.tmp
+.duckdb
+.bloop
+
 # Editor + OS noise
 *.log
 *.swp
