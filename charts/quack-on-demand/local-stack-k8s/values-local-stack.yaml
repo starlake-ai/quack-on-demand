@@ -59,4 +59,4 @@ auth:
       issuerUrl:    http://keycloak:8080/auth/realms/qod
       clientId:     qod-admin
       clientSecret: qod-admin-secret
-      scopes:       "openid email profil
+      scopes:       "openid email profile"
