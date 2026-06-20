@@ -67,6 +67,12 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
   }
 
   useEffect(() => {
+    // Empty the previous tenant's data before loading the new scope, so stale
+    // rows + detail don't linger during the fetch. Only on tenant change --
+    // mutation-triggered reloadRoles() calls keep the open detail pane.
+    setRoles([]);
+    setSelected(null);
+    setVerbCounts({});
     reloadRoles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);

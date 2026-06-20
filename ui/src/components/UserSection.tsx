@@ -135,6 +135,11 @@ export default function UserSection({
 
   useEffect(() => {
     setNewTenant(tenant ?? SUPERUSER);
+    // Empty the previous scope's rows + collapse any open detail before loading
+    // the new scope, so stale rows don't linger during the fetch. Only here --
+    // mutation-triggered reload() calls keep the list/expansion in place.
+    setRows([]);
+    setExpandedId(null);
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, superusersOnly]);
