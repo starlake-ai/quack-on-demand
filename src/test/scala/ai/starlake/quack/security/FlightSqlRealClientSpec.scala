@@ -411,3 +411,36 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       client.close()
       h.shutdown()
   }
+
+  // -------------------------------------------------------------------------
+  // Case: `x-qod-superuser` is an alias of the `superuser` flag, so an ODBC
+  // stack (Power BI / Excel via the Flight SQL ODBC driver) that namespaces
+  // custom connection properties still selects the system realm. `root` is a
+  // system user (tenant IS NULL); targeting a tenant pool it authenticates ONLY
+  // under the system realm. Without the alias being read, the flag is false ->
+  // tenant realm -> root is not found -> UNAUTHENTICATED.
+  // -------------------------------------------------------------------------
+
+  it should "select the system realm via the x-qod-superuser header alias" in {
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = true, tls = false)
+    val client = h.newClient()
+    try
+      val hdrs = new FlightCallHeaders()
+      hdrs.insert("tenant", SecurityFixtures.TenantName)
+      hdrs.insert("pool", SecurityFixtures.PoolName)
+      hdrs.insert("x-qod-superuser", "true")
+      hdrs.insert(
+        "authorization",
+        s"Basic ${basicCredentials(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)}"
+      )
+      assertAuthPassed {
+        client.getInfo(
+          FlightDescriptor.command("SELECT 1".getBytes("UTF-8")),
+          new HeaderCallOption(hdrs)
+        )
+      }
+    finally
+      client.close()
+      h.shutdown()
+  }
