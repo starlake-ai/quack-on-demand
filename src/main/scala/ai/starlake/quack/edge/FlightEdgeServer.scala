@@ -151,8 +151,8 @@ final class FlightEdgeServer(
         // (`Basic <base64>` or `Bearer <token>`).
         val authHeader = Option(headers.get("Authorization"))
           .orElse(Option(headers.get("x-qod-authorization")))
-        val bearer     = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
-        val basic      = authHeader
+        val bearer = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+        val basic  = authHeader
           .filter(_.startsWith("Basic "))
           .map(_.stripPrefix("Basic "))
           .map(b64 => new String(java.util.Base64.getDecoder.decode(b64)))
@@ -173,7 +173,9 @@ final class FlightEdgeServer(
             case (false, false) =>
               if authHeader.isDefined then s"authHeader(unparsed='${authHeader.get.take(8)}…')"
               else "none"
-          val allKeys = scala.jdk.CollectionConverters.SetHasAsScala(headers.keys()).asScala
+          val allKeys = scala.jdk.CollectionConverters
+            .SetHasAsScala(headers.keys())
+            .asScala
             .toList
             .sorted
             .mkString(",")
@@ -181,7 +183,7 @@ final class FlightEdgeServer(
             s"headerAuth: creds=$shape " +
               s"tenant=${Option(headers.get("tenant")).getOrElse("-")} " +
               s"pool=${Option(headers.get("pool")).getOrElse("-")} " +
-              s"superuser=${Option(headers.get("superuser")).getOrElse("-")} " +
+              s"superuser=${Option(headers.get("superuser")).orElse(Option(headers.get("x-qod-superuser"))).getOrElse("-")} " +
               s"keys=[$allKeys]"
           )
         // Flight call headers carrying the target tenant + pool. These
@@ -193,12 +195,20 @@ final class FlightEdgeServer(
         // (pool names are unique per tenant).
         val poolHdr   = Option(headers.get("pool"))
         val tenantHdr = Option(headers.get("tenant"))
-        // `superuser=true` URL param picks the system realm regardless of
-        // the `tenant` header. The tenant/pool headers still drive query
-        // routing -- a system superuser can target a tenant's pool while
-        // authenticating against the global realm. Anything other than the
-        // literal string "true" (case-insensitive) is treated as false.
+        // `superuser=true` picks the system realm regardless of the `tenant`
+        // header. The tenant/pool headers still drive query routing -- a system
+        // superuser can target a tenant's pool while authenticating against the
+        // global realm. Anything other than the literal string "true"
+        // (case-insensitive) is treated as false.
+        //
+        // Read `superuser` first; fall back to `x-qod-superuser` (mirrors the
+        // Authorization / x-qod-authorization pair above). Arrow Flight JDBC
+        // forwards the bare `?superuser=true` URL param as header `superuser`;
+        // some ODBC stacks (Power BI / Excel via the Flight SQL ODBC driver)
+        // namespace custom connection properties, so the `x-qod-` form is
+        // accepted too.
         val superuserHdr = Option(headers.get("superuser"))
+          .orElse(Option(headers.get("x-qod-superuser")))
           .exists(_.equalsIgnoreCase("true"))
 
         // Fast path: client is presenting a Bearer that's an already-known
