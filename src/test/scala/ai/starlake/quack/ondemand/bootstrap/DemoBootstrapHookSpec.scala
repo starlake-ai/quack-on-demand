@@ -9,9 +9,8 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.util.{Failure, Success, Try}
 
-/** Unit tests for [[DemoBootstrapHook]]. The hook is dependency-injected
-  * (env reader + file reader + store) so the suite never touches the
-  * real filesystem nor the real process environment.
+/** Unit tests for [[DemoBootstrapHook]]. The hook is dependency-injected (env reader + file reader
+  * + store) so the suite never touches the real filesystem nor the real process environment.
   */
 class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
 
@@ -29,7 +28,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
        |    role: admin
        |""".stripMargin
 
-  private def emptyEnv: String => Option[String] = _ => None
+  private def emptyEnv: String => Option[String]                      = _ => None
   private def envWith(k: String, v: String): String => Option[String] = s =>
     if s == k then Some(v) else None
 
@@ -65,7 +64,9 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
 
   it should "skip import when a demo tenant already exists" in {
     val store = new InMemoryControlPlaneStore()
-    store.upsertTenant(Tenant(id = "t-pre", displayName = "acme"))
+    // The demo tenant's key is its slug id "acme"; pre-seed that id so the
+    // bootstrap guard (which keys collisions by tenant id) detects it.
+    store.upsertTenant(Tenant(id = "acme", displayName = "Acme"))
     val env  = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read = (_: String) => Success(ValidYaml)
     DemoBootstrapHook.run(env, read, store).unsafeRunSync()

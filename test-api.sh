@@ -24,7 +24,7 @@ echo "==> ensure tenant '$TENANT' exists (idempotent: 409 is OK; demo bootstrap 
 # `-f` would fail the script on 409, so use a plain curl and tolerate that case.
 HTTP=$(curl -s -o /tmp/test-api-tenant.out -w '%{http_code}' \
   -X POST "$BASE/tenant/create" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"$TENANT\",\"metastore\":{}}") || true
+  -d "{\"id\":\"$TENANT\",\"displayName\":\"$TENANT\",\"metastore\":{}}") || true
 if [ "$HTTP" != "200" ] && [ "$HTTP" != "409" ]; then
   echo "tenant/create returned HTTP $HTTP"; cat /tmp/test-api-tenant.out; exit 1
 fi
