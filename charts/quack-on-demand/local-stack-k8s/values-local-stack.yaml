@@ -18,6 +18,15 @@ flightsql:
   tls:
     enabled: true
 
+# Expose the gRPC+TLS FlightSQL edge on a fixed NodePort so kind's
+# host :31338 -> node :31338 extraPortMapping (kind-config.yaml) reaches it.
+# Makes 31338 host-reachable (and remote-reachable at <host>:31338) without a
+# manual `kubectl port-forward`.
+service:
+  flightsql:
+    type: NodePort
+    nodePort: 31338
+
 quackNode:
   image: starlakeai/quack-on-demand-node:local
 

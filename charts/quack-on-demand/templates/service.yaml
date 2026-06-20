@@ -40,3 +40,6 @@ spec:
       port: {{ .Values.service.flightsql.port }}
       targetPort: flightsql
       protocol: TCP
+      {{- if and (eq .Values.service.flightsql.type "NodePort") .Values.service.flightsql.nodePort }}
+      nodePort: {{ .Values.service.flightsql.nodePort }}
+      {{- end }}
