@@ -296,6 +296,7 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
         env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
             DB_NAME=acme_tpch SCHEMA_NAME=tpch1 \
             SF="$LOAD_TPCH" \
+            TEMP_DIR=/tmp/duckdb-tpch-load \
             DATA_PATH="s3://qod-ducklake/acme_tpch" \
             QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
@@ -309,12 +310,36 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
         env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
             DB_NAME=globex_tpcds SCHEMA_NAME=tpcds1 \
             SF="$LOAD_TPCDS" \
+            TEMP_DIR=/tmp/duckdb-tpcds-load \
             DATA_PATH="s3://qod-ducklake/globex_tpcds" \
             QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-tpcds-dbgen.sh
     fi
+  fi
+fi
+
+# ---- 5b. per-tenant admin-UI OIDC for acme -------------------------------
+#
+# The bootstrap manifest cannot express per-tenant authConfig, so wire acme's
+# OIDC for the /ui/?tenant=acme login via the REST API once the manager is up.
+# authProvider=keycloak is just the validation bucket; the admin-UI resolver
+# reads the generic authConfig keys (issuerUrl/clientId/clientSecretRef). The
+# /api namespace is open in the rig (no QOD_API_KEY), so no auth header is
+# needed. Best-effort: a non-zero exit must not fail the whole rig.
+if kubectl -n "$NAMESPACE" get configmap "$(kubectl -n "$NAMESPACE" get deploy \
+     -l app.kubernetes.io/name=quack-on-demand -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
+     -o jsonpath='{.data.QOD_MGMT_IDENTITY_SOURCE}' 2>/dev/null | grep -q oidc; then
+  echo "[5b] configuring per-tenant OIDC for tenant 'acme' (/ui/?tenant=acme)..."
+  acme_auth='{"name":"acme","authProvider":"keycloak","authConfig":{"issuerUrl":"http://keycloak:8080/auth/realms/qod","clientId":"qod-admin","clientSecretRef":"env:QOD_MGMT_OIDC_CLIENT_SECRET","scopes":"openid email profile"}}'
+  if curl -fsS -X POST http://localhost:20900/api/tenant/setAuth \
+       -H 'Content-Type: application/json' -d "$acme_auth" >/dev/null 2>&1; then
+    echo "  acme OIDC configured (issuer realm 'qod', client 'qod-admin')."
+  else
+    echo "  WARN: acme setAuth call failed; /ui/?tenant=acme SSO may not resolve." >&2
+    echo "        Retry once the manager is fully ready:" >&2
+    echo "        curl -X POST http://localhost:20900/api/tenant/setAuth -H 'Content-Type: application/json' -d '$acme_auth'" >&2
   fi
 fi
 
@@ -336,10 +361,15 @@ manager Ready. Open the landing page for links to every UI:
   http://localhost:20900/
 
 Direct links (all behind the same Traefik ingress):
-  admin UI / REST       http://localhost:20900/ui/        (admin / admin)
+  admin UI (OIDC SSO)   http://localhost:20900/ui/             -> redirects to Keycloak
   Grafana               http://localhost:20900/grafana/   (anonymous Admin)
   Prometheus            http://localhost:20900/prometheus/
   Keycloak admin        http://localhost:20900/auth/      (admin / admin · realm 'qod')
+
+admin UI is OIDC SSO (identitySource=oidc). Log in via Keycloak:
+  system / superuser    http://localhost:20900/ui/             (Keycloak user admin / admin)
+  tenant acme           http://localhost:20900/ui/?tenant=acme (Keycloak user alice / demo-alice)
+  (non-superusers must use the per-tenant URL; bare /ui/ is superuser-only.)
 
 FlightSQL is gRPC+TLS and stays on a dedicated port-forward:
   kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338
