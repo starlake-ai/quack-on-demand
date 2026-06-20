@@ -33,8 +33,9 @@ object TenantSelector:
     * FlightSQL edge.
     *
     *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are never
-    *     trusted for routing). User comes from the `sub` claim, falling back to the bare Basic
-    *     username if both are present.
+    *     trusted for routing). User is the validated `username` the auth module resolved (the JWT's
+    *     `preferred_username`, which is what `qodstate_user.username` matches); it falls back to
+    *     the raw `sub` claim only when no validated username is available (trust-the-client mode).
     *   - Basic path: bare username; `tenant` + `pool` headers required.
     *
     * Header names are plain (`tenant`, `pool`) so that Flight JDBC URL connection parameters route
@@ -60,7 +61,11 @@ object TenantSelector:
           pool   <- hPool.toRight("'pool' header required")
           key    <- resolvePoolKey(tenant, pool)
         yield
-          val user = usernameFromJwt(token).orElse(username).getOrElse("unknown")
+          // Prefer the username the auth module validated (the JWT's
+          // preferred_username, matched against qodstate_user.username). Fall
+          // back to the raw `sub` only when no validated username is available
+          // (e.g. trust-the-client mode with no providers configured).
+          val user = username.filter(_.nonEmpty).orElse(usernameFromJwt(token)).getOrElse("unknown")
           Resolved(key, user)
 
       case _ =>

@@ -29,6 +29,27 @@ class TenantSelectorSpec extends AnyFlatSpec with Matchers:
     )
     out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
 
+  it should "prefer the validated username over the JWT sub (OIDC preferred_username mapping)" in:
+    // validToken's `sub` is "alice", but the auth module resolved a different
+    // username (the JWT's preferred_username). The validated username must win:
+    // qodstate_user.username matches preferred_username, not the opaque sub.
+    val out = TenantSelector.resolve(
+      bearer  = Some(validToken),            // sub = "alice"
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = Some("alice-preferred"),    // validated preferred_username
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice-preferred"))
+
+  it should "fall back to the JWT sub only when no validated username is available" in:
+    val out = TenantSelector.resolve(
+      bearer  = Some(validToken),            // sub = "alice"
+      headers = Map("tenant" -> "acme", "pool" -> "sales"),
+      username = None,
+      lookupPool = lookup
+    )
+    out shouldBe Right(Resolved(PoolKey("acme", "acme_default", "sales"), "alice"))
+
   it should "reject when the tenant header is missing even if the JWT has a tenant claim" in:
     // URL is authoritative -- JWT claims are never trusted for routing.
     val out = TenantSelector.resolve(
