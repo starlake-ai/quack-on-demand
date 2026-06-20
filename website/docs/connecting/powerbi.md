@@ -51,7 +51,7 @@ Three install paths follow.
 The OAuth endpoints and client ID are **compiled into the `.mez`** (`OAuthConfig` in `QoD.pq`), so the generic released build cannot carry your identity provider. To use OAuth you must **build the connector from source** with `OAuthConfig` pointed at your IdP - see [Option 2 - Build with your own OAuth support](#option-2---build-with-your-own-oauth-support). The **Username / Password** and **Key (static JWT)** credential kinds work with the pre-built release in Option 1.
 :::
 
-### Option 1 - Unsigned `.mez` from GitHub Releases
+### Option 1 - Unsigned `.mez` from GitHub Releases (Dev only)
 
 A `.mez` is the connector packaged unsigned. It loads in Power BI Desktop after lowering the data-extensions security setting. This pre-built release supports **Username / Password** and **Key (static JWT)** authentication; for **OAuth** build from source (Option 2) so your IdP endpoints are baked in.
 
@@ -63,7 +63,7 @@ A `.mez` is the connector packaged unsigned. It loads in Power BI Desktop after 
 
 On the on-premises gateway, copy the same `.mez` into the gateway's custom-connectors folder, enable custom connectors in the gateway app, and restart the gateway service.
 
-### Option 2 - Build with your own OAuth support
+### Option 2 - Only if you need OAuth
 
 Build from source when you need **OAuth**, or want to change any compiled-in connector setting. A `.mez` is **just a flat zip** of the connector source plus icons - **no Power Query SDK or compiler is required**; any zip tool produces a valid connector.
 
