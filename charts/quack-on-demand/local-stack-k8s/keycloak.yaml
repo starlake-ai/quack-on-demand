@@ -59,6 +59,17 @@ spec:
               value: "false"
             - name: KC_PROXY
               value: edge
+            # Frontend (browser-facing) URL is the Traefik ingress. The admin
+            # UI OIDC SSO flow needs the discovery doc's authorize endpoint to
+            # be browser-reachable (localhost:20900), while the manager calls
+            # token/jwks in-cluster. KC_HOSTNAME_BACKCHANNEL_DYNAMIC makes
+            # backchannel (token/jwks/discovery) use the request host
+            # (keycloak:8080) so the manager reaches them, while frontchannel
+            # (authorize, issuer) uses this frontend URL.
+            - name: KC_HOSTNAME_URL
+              value: "http://localhost:20900/auth"
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
             # Serve every realm + admin endpoint under /auth/, so the
             # Traefik ingress can route /auth -> keycloak without
             # path-rewriting middleware. Manager's

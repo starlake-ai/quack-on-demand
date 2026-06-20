@@ -1,5 +1,5 @@
 # Minimal in-cluster Postgres for the local kind test. Single Pod, no PVC,
-# ephemeral. Not production-grade and intentionally so — the chart itself
+# ephemeral. Not production-grade and intentionally so - the chart itself
 # expects an external Postgres; this manifest exists only to back the
 # automated smoke run.
 ---

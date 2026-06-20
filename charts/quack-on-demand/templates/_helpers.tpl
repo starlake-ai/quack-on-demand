@@ -32,7 +32,7 @@ Standard naming helpers, copied from the chart-create scaffolding template.
 {{- end -}}
 
 {{/*
-Common labels — applied to every K8s object the chart manages, plus to the
+Common labels - applied to every K8s object the chart manages, plus to the
 spawned Quack node pods via the manager's `podLabel` config (matches the
 label selector used by KubernetesQuackBackend.discoverExisting()).
 */}}
@@ -126,7 +126,7 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 
 {{/*
-True when the chart should wire S3 env vars — i.e. the data path is
+True when the chart should wire S3 env vars - i.e. the data path is
 remote-scheme (s3://, s3a://, r2://) AND credentials are available
 (either inline or via existingSecret).
 */}}
