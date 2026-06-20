@@ -138,6 +138,14 @@ users:
     password: demo-root
     role: admin
 
+  # System superuser whose username matches the Keycloak realm user `admin`, so
+  # an OAuth/OIDC login as `admin` maps to this qodstate superuser (the manager
+  # maps the IdP `preferred_username` to a qodstate_user by name). The password
+  # is only used for Basic/DB auth; OAuth logins validate against Keycloak.
+  - username: admin
+    password: admin
+    role: admin
+
   # alice is a tenant admin of acme (so she can sign in to the admin UI via
   # OIDC at /ui/?tenant=acme) AND keeps her analyst data-plane role for the
   # RBAC/RLS demo.

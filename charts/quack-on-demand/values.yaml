@@ -75,6 +75,8 @@ service:
   flightsql:
     type: ClusterIP
     port: 31338
+    # Pin a NodePort (30000-32767) when type=NodePort; empty = let k8s assign.
+    nodePort: ""
     annotations: {}
 
 # --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
@@ -253,6 +255,11 @@ auth:
     baseUrl:  "http://keycloak:8080"
     realm:    "qod"
     clientId: "qod-flightsql"
+    # Expected token issuer override. Empty = derive from baseUrl + realm. Set
+    # when Keycloak's browser-facing issuer (KC_HOSTNAME_URL behind an ingress)
+    # differs from the in-cluster baseUrl used for JWKS, so bearer tokens minted
+    # via the ingress validate. JWKS is always fetched from baseUrl.
+    issuer: ""
     # Inline secret for dev/kind. Prefer existingSecret for production so the
     # value never lands in the ConfigMap.
     clientSecret: ""

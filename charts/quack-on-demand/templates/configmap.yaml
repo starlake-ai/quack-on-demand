@@ -48,6 +48,10 @@ data:
   QOD_AUTH_KEYCLOAK_BASE_URL:  {{ .Values.auth.keycloak.baseUrl   | quote }}
   QOD_AUTH_KEYCLOAK_REALM:     {{ .Values.auth.keycloak.realm     | quote }}
   QOD_AUTH_KEYCLOAK_CLIENT_ID: {{ .Values.auth.keycloak.clientId  | quote }}
+  {{- with .Values.auth.keycloak.issuer }}
+  # Expected-issuer override (split-horizon: browser issuer != in-cluster baseUrl).
+  QOD_AUTH_KEYCLOAK_ISSUER: {{ . | quote }}
+  {{- end }}
   {{- if and .Values.auth.keycloak.clientSecret (not .Values.auth.keycloak.existingSecret) }}
   QOD_AUTH_KEYCLOAK_CLIENT_SECRET: {{ .Values.auth.keycloak.clientSecret | quote }}
   {{- end }}
