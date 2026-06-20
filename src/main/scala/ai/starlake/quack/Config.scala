@@ -108,7 +108,8 @@ final case class ManagementAuthConfig(
     @field @ConfigField(
       envVar = "QOD_MGMT_IDENTITY_SOURCE",
       description =
-        "Management-plane identity source: 'db' (qodstate_user as identity+authz) or 'oidc' (IdP for identity, qodstate_user for role+tenants)."
+        "System-scope (bare /ui/) admin-UI login mode: 'db' (password form) or 'oidc' (SSO). " +
+          "Per-tenant login mode is read from the tenant's authProvider, not this key."
     )
     identitySource: String,
     @field @ConfigField(
