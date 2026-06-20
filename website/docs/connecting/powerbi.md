@@ -31,9 +31,6 @@ Download the latest Dremio build of the driver from the official Dremio download
 | Platform | Installer |
 |---|---|
 | **Windows** (Power BI Desktop, gateway) | [`arrow-flight-sql-odbc-LATEST-win64.msi`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST-win64.msi) |
-| macOS (Apple Silicon) | [`arrow-flight-sql-odbc-LATEST-armv8.dmg`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST-armv8.dmg) |
-| macOS (Intel) | [`arrow-flight-sql-odbc-LATEST.dmg`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST.dmg) |
-| Linux (RHEL / Fedora) | [`arrow-flight-sql-odbc-driver-LATEST.x86_64.rpm`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-driver-LATEST.x86_64.rpm) |
 
 The full release index (per-version artifacts) is at [download.dremio.com/arrow-flight-sql-odbc-driver/](https://download.dremio.com/arrow-flight-sql-odbc-driver/).
 
@@ -43,24 +40,20 @@ To confirm the install, open **ODBC Data Sources (64-bit) -> Drivers** tab and v
 
 ### Install the connector
 
-There are three install paths, in decreasing order of recommendation.
+The connector ships as two artifacts:
 
-### Option 1 - Signed `.pqx` (recommended) - not yet available
+- **`QoD.mez`** - the connector packaged **unsigned**; loads only with the data-extensions security setting **lowered** (Option 1).
+- **`QoD.pqx`** - a packed, **signed** connector; loads under the **Recommended** security setting once you trust its signing certificate's thumbprint (Option 3). This is how you allow **only** the QoD connector while still blocking other uncertified extensions.
 
-A signed connector loads under Power BI's default `Recommended` security setting once you trust the signing certificate's thumbprint. No need to lower data-extension security and no per-machine warning.
+Three install paths follow.
 
-This is the path we intend to ship for production / shared deployments, but the signed build is **not yet released**. The release feed is the [QoD connector repository releases page](https://github.com/starlake-ai/pbi-adbc-driver/releases). Watch the repo for the first `*.pqx` artifact.
+:::caution Using OAuth 2.0 / OIDC?
+The OAuth endpoints and client ID are **compiled into the `.mez`** (`OAuthConfig` in `QoD.pq`), so the generic released build cannot carry your identity provider. To use OAuth you must **build the connector from source** with `OAuthConfig` pointed at your IdP - see [Option 2 - Build with your own OAuth support](#option-2---build-with-your-own-oauth-support). The **Username / Password** and **Key (static JWT)** credential kinds work with the pre-built release in Option 1.
+:::
 
-When the signed build is available, the procedure will be:
+### Option 1 - Unsigned `.mez` from GitHub Releases
 
-1. Download `QoD-<version>.pqx` from the release.
-2. Copy it into `%UserProfile%\Documents\Power BI Desktop\Custom Connectors\` (create the folder if missing).
-3. Trust the signing certificate's thumbprint via Group Policy (`Trusted Certificate Thumbprints`) or the registry key `HKLM:\SOFTWARE\Policies\Microsoft\Power BI Desktop\TrustedCertificateThumbprints`.
-4. Restart Power BI Desktop.
-
-### Option 2 - Unsigned `.mez` from GitHub Releases
-
-A `.mez` is the same connector packaged unsigned. It loads in Power BI Desktop after lowering the data-extensions security setting. Suitable for dev, proof-of-concept and demos; for shared / production use prefer Option 1 once the signed build ships.
+A `.mez` is the connector packaged unsigned. It loads in Power BI Desktop after lowering the data-extensions security setting. This pre-built release supports **Username / Password** and **Key (static JWT)** authentication; for **OAuth** build from source (Option 2) so your IdP endpoints are baked in.
 
 1. Download `QoD-<version>.mez` from the [release page](https://github.com/starlake-ai/pbi-adbc-driver/releases).
 2. Copy it into `%UserProfile%\Documents\Power BI Desktop\Custom Connectors\` (create the folder if missing).
@@ -70,18 +63,102 @@ A `.mez` is the same connector packaged unsigned. It loads in Power BI Desktop a
 
 On the on-premises gateway, copy the same `.mez` into the gateway's custom-connectors folder, enable custom connectors in the gateway app, and restart the gateway service.
 
-### Option 3 - Build from source
+### Option 2 - Build with your own OAuth support
 
-Clone the connector repository and build it with the Power Query SDK. The full reference is the connector project's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md); the short version:
+Build from source when you need **OAuth**, or want to change any compiled-in connector setting. A `.mez` is **just a flat zip** of the connector source plus icons - **no Power Query SDK or compiler is required**; any zip tool produces a valid connector.
+
+**1. Get the source:**
 
 ```sh
 git clone https://github.com/starlake-ai/pbi-adbc-driver.git
 cd pbi-adbc-driver
-dotnet build src/QoD.proj -c Release
-# Output: bin/Release/QoD.mez
 ```
 
-The VS Code "Power Query SDK" extension provides the MSBuild SDK + the `MakePQX` CLI used for validation and packaging. Once the `.mez` is built, deploy it as in Option 2.
+**2. For OAuth, edit `OAuthConfig` in `src/QoD.pq`** to point at your identity provider. Example for a Keycloak realm `qod`:
+
+```m
+OAuthConfig = [
+    AuthorizeUrl = "https://<keycloak-host>/realms/qod/protocol/openid-connect/auth",
+    TokenUrl     = "https://<keycloak-host>/realms/qod/protocol/openid-connect/token",
+    LogoutUrl    = "https://<keycloak-host>/realms/qod/protocol/openid-connect/logout",
+    ClientId     = "quack-powerbi",
+    Scope        = "openid profile email offline_access",
+    RedirectUri  = "https://oauth.powerbi.com/views/oauthredirect.html"
+];
+```
+
+The IdP must have a **public client** (no secret) with **PKCE = S256** and the redirect URI `https://oauth.powerbi.com/views/oauthredirect.html` registered. Legacy Keycloak prefixes every path with `/auth` (e.g. `https://<host>/auth/realms/qod/...`). See [Authenticating](/connecting/authenticating) for the provider-side setup and the Quack-side token-trust configuration.
+
+**3. Package the `.mez`** - zip `QoD.pq`, `resources.resx` and the icon PNGs at the **root** of the archive (not inside a subfolder).
+
+Windows (PowerShell):
+
+```powershell
+$stage = Join-Path $env:TEMP qodmez
+Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item src\QoD.pq, src\resources.resx $stage
+Copy-Item src\icons\QoD*.png $stage
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, "$PWD\QoD.mez")
+```
+
+macOS / Linux:
+
+```sh
+mkdir -p stage
+cp src/QoD.pq src/resources.resx stage/
+cp src/icons/QoD*.png stage/
+( cd stage && zip -X ../QoD.mez QoD.pq resources.resx QoD*.png )
+```
+
+This produces `QoD.mez`. Deploy it as in Option 1.
+
+> Optionally validate the M syntax with the Power Query SDK's `MakePQX compile` before packaging - but it is not required to produce a working `.mez`.
+
+### Option 3 - Signed `.pqx` (production, keep the Recommended security setting)
+
+A `.pqx` is a **packed, signed** connector. Unlike the unsigned `.mez`, it loads **without** lowering the data-extensions setting: keep **`(Recommended) Only allow ... trusted`** and trust the signing certificate's thumbprint instead. That is the way to allow **only** the QoD connector while other uncertified extensions stay blocked. You need a code-signing certificate - either CA-issued or **self-signed** (fine for internal / enterprise use).
+
+**1. (self-signed) create a code-signing certificate** - Windows / PowerShell (skip if you have a CA-issued `.pfx`):
+
+```powershell
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=QoD Connector (self-signed)" `
+  -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -KeyUsage DigitalSignature -KeySpec Signature
+$cert.Thumbprint        # the SHA-1 thumbprint you trust below
+$pw = ConvertTo-SecureString "changeit" -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath code-signing.pfx -Password $pw   # private key, to sign
+Export-Certificate    -Cert $cert -FilePath qod-codesign.cer                 # public, for the trust store
+```
+
+**2. Sign** the `.mez` into a `.pqx` with the Power Query SDK's `MakePQX`:
+
+```sh
+MakePQX pack --mez QoD.mez --target QoD.pqx --certificate code-signing.pfx --password changeit
+MakePQX verify QoD.pqx
+```
+
+**3. Install + trust** on every machine that loads the connector:
+
+- Copy `QoD.pqx` into `%UserProfile%\Documents\Power BI Desktop\Custom Connectors\`.
+- Keep the security setting at **`(Recommended) Only allow ... trusted`**.
+- Allowlist the certificate thumbprint (deployable org-wide via the Group Policy *Trusted Certificate Thumbprints*):
+
+  ```powershell
+  $key = "HKLM:\SOFTWARE\Policies\Microsoft\Power BI Desktop"
+  New-Item -Path $key -Force | Out-Null
+  New-ItemProperty -Path $key -Name "TrustedCertificateThumbprints" -PropertyType MultiString -Value @($cert.Thumbprint) -Force
+  ```
+
+- **Self-signed certs only:** import the public cert into Trusted Root so the signature chain validates (CA-issued certs skip this):
+
+  ```powershell
+  Import-Certificate -FilePath qod-codesign.cer -CertStoreLocation Cert:\LocalMachine\Root
+  ```
+
+- **Restart** Power BI Desktop fully (or the gateway service).
+
+The same `.pqx` + thumbprint trust works on the on-premises gateway. Full publisher/admin detail is in the connector's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md).
 
 ## Connect
 
@@ -126,10 +203,10 @@ The connector advertises `SupportsDirectQuery = true`, so the **Connect** vs **I
 | Symptom | Cause and fix |
 |---|---|
 | Connector missing from **Get Data** | `.mez` is not in `Documents\Power BI Desktop\Custom Connectors\` or PBI was not restarted after lowering the security setting. |
-| `... couldn't load ... not trusted` | An unsigned `.mez` without the data-extension security downgrade (Option 2), or a signed `.pqx` whose certificate thumbprint is not in the trusted list (Option 1). |
+| `... couldn't load ... not trusted` | The `.mez` was loaded without the data-extension security downgrade. Enable *Allow any extension...* and restart Power BI Desktop (Option 1). |
 | `We couldn't convert a value of type Record to type Logical` | The 4th argument of `QoD.Database` is `trustServerCertificate` (logical). Put the `options` record in the 5th position. |
 | Navigator empty (no tree under the data source) | The deployed `.mez` is older than the catalog-support fix (see the connector repo's release notes). Update to the latest release. |
 | Auth fails with `no connection context for peer anonymous-...` | The deployed `.mez` is older than the per-call-credential fix. The credential must ride a custom call header (handled in the current `.mez`); update to the latest release. |
 | Slow refresh on Basic auth | Quack BCrypt-verifies on every RPC. For high-volume refresh prefer a JWT (Key) credential or set up OAuth - both are validated more cheaply (signature only, no hashing). |
 
-See also: the connector project's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md) for the build, sign and gateway-deployment details.
+See also: the connector project's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md) for build and gateway-deployment details.
