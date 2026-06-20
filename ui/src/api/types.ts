@@ -408,6 +408,13 @@ export interface EffectivePermissionsResponse {
 }
 
 // ----- Auth -----
+// Per-tenant admin-UI login mode resolved by GET /api/auth/mode?tenant=.
+// "db" -> render the password form; "oidc" -> redirect to /api/auth/oidc/start.
+export interface AuthModeResponse {
+  mode: 'db' | 'oidc';
+  ssoProviderName?: string;
+}
+
 export interface LoginRequest  { username: string; password: string; tenant?: string }
 export interface LoginResponse {
   token: string;
