@@ -19,6 +19,7 @@ import type {
   ClientConfigResponse,
   ConfigListResponse,
   ManifestImportSummary,
+  AuthModeResponse,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -132,6 +133,9 @@ export const api = {
   login:   (req: LoginRequest) => post<LoginResponse>('/auth/login', req),
   logout:  () => post<void>('/auth/logout'),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
+  // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
+  authMode: (tenant?: string) =>
+    get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),
 
   // Health + client config
   health:        () => fetch('/health').then(r => r.json() as Promise<HealthResponse>),

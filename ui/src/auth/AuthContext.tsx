@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { api, ApiError } from '../api/client';
+import { api } from '../api/client';
 
 interface AuthState {
   username: string | null;
@@ -40,45 +40,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // On mount:
   //   1. Ask the server whether auth is enabled (open endpoint, no token).
-  //   2. If disabled → set a synthetic "anonymous" user and skip everything.
-  //   3. Otherwise resume any existing session via /api/auth/whoami; on 401
-  //      drop the stale token and let the login screen render.
+  //   2. If disabled -> set a synthetic "anonymous" user and skip everything.
+  //   3. Resolve the per-tenant login mode from the URL's ?tenant= via
+  //      /api/auth/mode (db -> password form, oidc -> SSO redirect). The bare
+  //      /ui/ (no tenant) resolves to the manager-wide system mode.
+  //   4. Resume any existing session via /api/auth/whoami; on 401 fall through
+  //      to whichever login screen the resolved mode dictates.
   useEffect(() => {
-    api.clientConfig()
-      .then(cfg => {
-        setIdentitySource(cfg.identitySource ?? 'db');
-        setSsoProviderName(cfg.ssoProviderName ?? '');
-        if (!cfg.authEnabled) {
-          setAuthEnabled(false);
-          setUsername(ANONYMOUS_USERNAME);
-          setRole(ANONYMOUS_ROLE);
-          setTenant(null);
-          setSuperuser(true);
-          setManageableTenants([]);
-          setLoading(false);
-          return;
-        }
-        setAuthEnabled(true);
-        // No client-side session token to consult: the qod_session cookie is
-        // HttpOnly. Always ask whoami -- the browser auto-attaches the
-        // cookie if there is one. 401 = no live session, fall through to
-        // the login screen.
-        api.whoami()
-          .then(w => {
-            setUsername(w.username);
-            setRole(w.role);
-            setTenant(w.tenant ?? null);
-            setSuperuser(w.superuser ?? false);
-            setManageableTenants(w.manageableTenants ?? []);
-          })
-          .catch((_: ApiError) => { /* no live session; render login */ })
-          .finally(() => setLoading(false));
-      })
-      .catch(() => {
+    (async () => {
+      let cfg;
+      try {
+        cfg = await api.clientConfig();
+      } catch {
         // Network failure or 5xx - fall back to the login screen so the
         // user gets a clear error rather than a silent skip.
         setLoading(false);
-      });
+        return;
+      }
+      setSsoProviderName(cfg.ssoProviderName ?? '');
+      if (!cfg.authEnabled) {
+        setAuthEnabled(false);
+        setUsername(ANONYMOUS_USERNAME);
+        setRole(ANONYMOUS_ROLE);
+        setTenant(null);
+        setSuperuser(true);
+        setManageableTenants([]);
+        setLoading(false);
+        return;
+      }
+      setAuthEnabled(true);
+      // Resolve the login mode for the tenant in the URL BEFORE deciding what
+      // to render, so the gate does not flash the password form then swap to
+      // the SSO redirect (or vice versa).
+      const urlTenant =
+        new URLSearchParams(window.location.search).get('tenant') || undefined;
+      try {
+        const m = await api.authMode(urlTenant);
+        setIdentitySource(m.mode);
+        if (m.ssoProviderName) setSsoProviderName(m.ssoProviderName);
+      } catch {
+        setIdentitySource('db'); // safe fallback: show the password form
+      }
+      // No client-side session token to consult: the qod_session cookie is
+      // HttpOnly. Always ask whoami -- the browser auto-attaches the cookie if
+      // there is one. 401 = no live session, fall through to the login screen.
+      try {
+        const w = await api.whoami();
+        setUsername(w.username);
+        setRole(w.role);
+        setTenant(w.tenant ?? null);
+        setSuperuser(w.superuser ?? false);
+        setManageableTenants(w.manageableTenants ?? []);
+      } catch {
+        /* no live session; render login */
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
   async function login(u: string, p: string, t?: string) {
