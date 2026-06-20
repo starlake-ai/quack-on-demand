@@ -53,6 +53,27 @@ data:
   {{- end }}
   {{- end }}
 
+  {{- if eq (.Values.auth.management.identitySource | default "db") "oidc" }}
+  # ---- Admin-UI OIDC SSO (management plane) --------------------------------
+  # Provider-agnostic: endpoints are resolved from
+  # ${issuerUrl}/.well-known/openid-configuration. The browser is redirected
+  # to the IdP for /ui/ login (no password form). publicBaseUrl must match the
+  # redirect URI registered on the IdP client
+  # (${publicBaseUrl}/api/auth/oidc/callback).
+  QOD_MGMT_IDENTITY_SOURCE:   {{ .Values.auth.management.identitySource | quote }}
+  QOD_MGMT_PUBLIC_BASE_URL:   {{ .Values.auth.management.publicBaseUrl   | quote }}
+  QOD_MGMT_OIDC_ISSUER_URL:   {{ .Values.auth.management.oidc.issuerUrl  | quote }}
+  QOD_MGMT_OIDC_CLIENT_ID:    {{ .Values.auth.management.oidc.clientId   | quote }}
+  {{- if .Values.auth.management.oidc.scopes }}
+  QOD_MGMT_OIDC_SCOPES:       {{ .Values.auth.management.oidc.scopes     | quote }}
+  {{- end }}
+  {{- if and .Values.auth.management.oidc.clientSecret (not .Values.auth.management.oidc.existingSecret) }}
+  # Inline secret for dev/kind. Prefer existingSecret in production so the
+  # value never lands in the ConfigMap (see deployment.yaml secretKeyRef).
+  QOD_MGMT_OIDC_CLIENT_SECRET: {{ .Values.auth.management.oidc.clientSecret | quote }}
+  {{- end }}
+  {{- end }}
+
   {{- if eq (include "qod.s3Enabled" .) "true" }}
   # ---- Object store (S3 / SeaweedFS / MinIO / R2) --------------------------
   # storage.dataPath is an s3:// URL. These vars land on the manager pod's

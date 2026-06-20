@@ -40,6 +40,25 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "qod-admin",
+      "name": "Quack on Demand admin UI (OIDC SSO)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "qod-admin-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["http://localhost:20900/api/auth/oidc/callback"],
+      "webOrigins": ["http://localhost:20900"],
+      "attributes": {
+        "access.token.lifespan": "3600",
+        "post.logout.redirect.uris": "http://localhost:20900/ui/*"
+      }
     }
   ],
   "users": [
@@ -64,6 +83,18 @@
       "lastName": "Reader",
       "credentials": [
         { "type": "password", "value": "reader", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-qod"]
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@acme.io",
+      "firstName": "Alice",
+      "lastName": "Acme",
+      "credentials": [
+        { "type": "password", "value": "demo-alice", "temporary": false }
       ],
       "realmRoles": ["default-roles-qod"]
     }

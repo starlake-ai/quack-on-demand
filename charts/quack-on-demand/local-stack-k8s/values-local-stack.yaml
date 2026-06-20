@@ -45,3 +45,18 @@ auth:
     realm:        qod
     clientId:     qod-flightsql
     clientSecret: qod-flightsql-secret
+
+  # Admin-UI OIDC SSO (management plane). /ui/ becomes a pure SSO client.
+  # The manager runs OIDC Discovery against the IN-CLUSTER Keycloak
+  # (keycloak:8080); Keycloak is configured (keycloak.yaml: KC_HOSTNAME_URL +
+  # backchannel-dynamic) so the discovery doc hands the browser the ingress
+  # URL (localhost:20900/auth) for the authorize redirect while token/jwks
+  # stay on keycloak:8080 for the manager.
+  management:
+    identitySource: oidc
+    publicBaseUrl:  http://localhost:20900
+    oidc:
+      issuerUrl:    http://keycloak:8080/auth/realms/qod
+      clientId:     qod-admin
+      clientSecret: qod-admin-secret
+      scopes:       "openid email profil

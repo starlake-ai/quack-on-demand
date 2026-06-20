@@ -77,7 +77,7 @@ service:
     port: 31338
     annotations: {}
 
-# --- Ingress (REST/UI only — FlightSQL is gRPC and not handled here) --------
+# --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
 ingress:
   enabled: false
   className: ""
@@ -110,7 +110,7 @@ serviceMonitor:
   labels: {}
 
 # --- PodDisruptionBudget -----------------------------------------------------
-# Only created when replicaCount > 1 — single-manager deploys have no peer
+# Only created when replicaCount > 1 - single-manager deploys have no peer
 # to fail over to.
 pdb:
   enabled: false
@@ -121,7 +121,7 @@ pdb:
 # DuckLake catalog + qodstate_* control-plane tables. Production deploys
 # should point at a managed Postgres (RDS / Cloud SQL / AlloyDB / Azure DB).
 postgres:
-  host: ""                 # REQUIRED — e.g. "rds.example.com" or "postgres.svc"
+  host: ""                 # REQUIRED - e.g. "rds.example.com" or "postgres.svc"
   port: 5432
   user: postgres
   # Control-plane database name. Holds the qodstate_* tables. Per-tenant
@@ -131,7 +131,7 @@ postgres:
   # Postgres schema for the control-plane tables. Maps to QOD_PG_SCHEMA.
   schema: main
   # Pick exactly ONE secret strategy:
-  #   1. inline password (dev / kind only — discouraged for prod)
+  #   1. inline password (dev / kind only - discouraged for prod)
   #   2. existing secret reference (recommended)
   password: ""             # DEV ONLY: inline plaintext, rendered into a Secret by the chart
   existingSecret: ""       # PROD: reference an externally-managed Secret containing the key below
@@ -139,11 +139,11 @@ postgres:
 
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB
-# Quack server, NOT the manager — they're separate processes. Built from
+# Quack server, NOT the manager - they're separate processes. Built from
 # docker/quack-node/Dockerfile in this repo.
 quackNode:
   # Published image on Docker Hub. The default points at `:latest-snapshot`
-  # — the moving alias updated by the `quack-node-snapshot` GitHub Action
+  # - the moving alias updated by the `quack-node-snapshot` GitHub Action
   # on every push to main that touches docker/quack-node/**. The node
   # image is on a SEPARATE release lifecycle from the manager: the
   # current v0.1.0 manager release does NOT have a matching node
@@ -158,7 +158,7 @@ quackNode:
     # enforced; the wire is just unencrypted.
     #
     # Set `enabled: true` ONLY when the spawned node pods actually terminate
-    # TLS — e.g. when running behind a service mesh that injects mTLS, or
+    # TLS - e.g. when running behind a service mesh that injects mTLS, or
     # after extending spawn-quack-node.sh to call quack_serve with a cert
     # (tracked as a follow-up). Without those, flipping this to true breaks
     # all node health checks.
@@ -168,7 +168,7 @@ quackNode:
 # Path the DuckLake catalog persists for parquet files. The same string is
 # used by the manager-side loader and by every spawned Quack node, so it
 # must be reachable from both. Default is `s3://qod-ducklake/qod-test`
-# against the `s3:` block below — set s3.endpoint to your object store
+# against the `s3:` block below - set s3.endpoint to your object store
 # (SeaweedFS in the kind smoke; MinIO, real S3, R2, etc. elsewhere).
 # Override to a filesystem path only when the manager and the node pods
 # share a mount (rare in K8s; common in docker-compose).
@@ -244,8 +244,8 @@ flightsql:
 #   - set auth.management.oidc.{issuerUrl,clientId,clientSecret} (env
 #     QOD_MGMT_OIDC_ISSUER_URL / _CLIENT_ID / _CLIENT_SECRET); endpoints are
 #     resolved via OIDC Discovery so any compliant IdP works
-#   - set QOD_PUBLIC_BASE_URL and register
-#     ${QOD_PUBLIC_BASE_URL}/api/auth/oidc/callback as a redirect URI
+#   - set QOD_MGMT_PUBLIC_BASE_URL and register
+#     ${QOD_MGMT_PUBLIC_BASE_URL}/api/auth/oidc/callback as a redirect URI
 # See website/docs/operating/auth-providers.md ("Admin UI single sign-on").
 auth:
   keycloak:
@@ -258,6 +258,24 @@ auth:
     clientSecret: ""
     existingSecret: ""
     existingSecretKey: keycloakClientSecret
+
+  # --- Management plane (admin UI) identity ---------------------------------
+  # identitySource "db" (default) keeps the username/password/tenant form.
+  # Set to "oidc" to make /ui/ a pure OIDC SSO client (provider-agnostic via
+  # OIDC Discovery). When oidc, set oidc.issuerUrl/clientId/clientSecret and
+  # publicBaseUrl, and register ${publicBaseUrl}/api/auth/oidc/callback on the
+  # IdP client. See website/docs/operating/auth-providers.md.
+  management:
+    identitySource: "db"           # "db" | "oidc"
+    publicBaseUrl: ""              # externally visible manager URL (redirect_uri base)
+    oidc:
+      issuerUrl: ""                # e.g. https://idp.example.com/realms/qod
+      clientId: ""
+      scopes: "openid email profile"
+      # Inline secret for dev/kind. Prefer existingSecret for production.
+      clientSecret: ""
+      existingSecret: ""
+      existingSecretKey: mgmtOidcClientSecret
 
 # --- Metrics sink -----------------------------------------------------------
 # One of: "prometheus" | "aws" | "azure" | "gcp" | "none". Defaults to
