@@ -8,7 +8,7 @@ Quack on Demand ships as a single uber-jar. Three installation paths are support
 ## Prerequisites
 
 - **JDK 21 or later.** The assembly jar embeds an `Add-Opens` manifest attribute (JEP 261) so no extra `--add-opens` flags are required when running `java -jar`.
-- **`curl` + `unzip` on `$PATH`.** `run-jar.sh` uses them on first boot to self-install the DuckDB CLI + `libduckdb` shared library into `$REPO_DIR/.duckdb/<version>/` at the ABI libquackwire links against (overridable via `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR`). The install is mandatory by design — an operator's system duckdb at the wrong ABI crashes the first node spawn with a confusing dlopen error. Air-gapped operators can pre-populate the cache directory; the script skips the network fetch when the cached binaries match the pinned version.
+- **`curl` + `unzip` on `$PATH`.** `run-jar.sh` uses them on first boot to self-install the DuckDB CLI + `libduckdb` shared library into `$REPO_DIR/.duckdb/<version>/` at the ABI libquackwire links against (overridable via `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR`). The install is mandatory by design - an operator's system duckdb at the wrong ABI crashes the first node spawn with a confusing dlopen error. Air-gapped operators can pre-populate the cache directory; the script skips the network fetch when the cached binaries match the pinned version.
 - **Postgres 16 or later.** The control plane stores all state in a dedicated database (default name `qod`) on `localhost:5432`. The `run-jar.sh` startup script probes Postgres before the JVM boots and refuses to proceed against a server older than PG 16.
 
   If you do not have a local Postgres instance, the quickest path is:
@@ -47,7 +47,7 @@ To stop the manager:
 
 ### Seeding the demo dataset for a quick smoke test
 
-Pass `LOAD_TPCH=1` and/or `LOAD_TPCDS=1` to seed each benchmark independently before the JVM starts. The `run-jar.sh` self-install above already provisions the DuckDB CLI the loaders need — no extra steps.
+Pass `LOAD_TPCH=1` and/or `LOAD_TPCDS=1` to seed each benchmark independently before the JVM starts. The `run-jar.sh` self-install above already provisions the DuckDB CLI the loaders need - no extra steps.
 
 ```bash
 LOAD_TPCH=1 ./scripts/run-jar.sh                          # TPC-H only (acme, ~10 s)

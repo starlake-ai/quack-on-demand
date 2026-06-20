@@ -9,12 +9,12 @@ The FlightSQL edge authenticates every client connection before routing any quer
 
 The caller picks the realm at the wire:
 
-- **Tenant realm** (default) — manager UI login with a tenant filled in, or FlightSQL handshake with `?tenant=X&pool=Y` and no superuser flag. Credentials are validated against tenant `X`'s configured provider (`qodstate_tenant.authConfig`). The matching `qodstate_user` row must have `tenant = X`.
-- **System realm** — manager UI login with the tenant field left blank, or FlightSQL handshake with `?superuser=true`. Credentials are validated against the manager's global providers (`quack-flightsql.auth.*`). The matching `qodstate_user` row must have `tenant IS NULL`.
+- **Tenant realm** (default) - manager UI login with a tenant filled in, or FlightSQL handshake with `?tenant=X&pool=Y` and no superuser flag. Credentials are validated against tenant `X`'s configured provider (`qodstate_tenant.authConfig`). The matching `qodstate_user` row must have `tenant = X`.
+- **System realm** - manager UI login with the tenant field left blank, or FlightSQL handshake with `?superuser=true`. Credentials are validated against the manager's global providers (`quack-flightsql.auth.*`). The matching `qodstate_user` row must have `tenant IS NULL`.
 
 The two realms are strictly separated: a system credential cannot authenticate a tenant-scoped login, and vice versa. The DB authenticator uses two distinct queries (`auth.database.systemQuery` and `auth.database.tenantQuery`) instead of an `OR (tenant IS NULL OR tenant = ?)` fallback.
 
-For the FlightSQL edge the `superuser=true` URL flag is the only signal that picks the system realm — the `tenant` and `pool` URL params are still required for query routing, but they no longer also pick the realm. A system superuser addresses a specific tenant's pool for query routing while authenticating against the global config.
+For the FlightSQL edge the `superuser=true` URL flag is the only signal that picks the system realm - the `tenant` and `pool` URL params are still required for query routing, but they no longer also pick the realm. A system superuser addresses a specific tenant's pool for query routing while authenticating against the global config.
 
 ## How authentication works
 
@@ -59,7 +59,7 @@ For ADBC or any raw Flight client, pass the same headers directly in the call me
 
 ### Bearer auth (JWT or OIDC token)
 
-Pass the token in the `Authorization: Bearer <token>` header. The `tenant` and `pool` headers are always required — JWT claims are never trusted for routing; the URL is authoritative. If either header is missing the handshake is rejected.
+Pass the token in the `Authorization: Bearer <token>` header. The `tenant` and `pool` headers are always required - JWT claims are never trusted for routing; the URL is authoritative. If either header is missing the handshake is rejected.
 
 The authenticated username is taken from the JWT `sub` claim. For JDBC:
 
@@ -114,20 +114,20 @@ The TTL bounds the window during which a revoked credential or a rotated token r
 
 On a successful `/api/auth/login` the manager mints a **JWT** (HS256, signed with `QOD_SESSION_JWT_SECRET`) carrying `{sub, tenant, role, superuser, manageableTenants, jti, iat, exp}`. The token is delivered two ways:
 
-- as an `HttpOnly Secure SameSite=Lax` cookie (`qod_session`) set by the response — the browser auto-attaches it on subsequent same-origin `/api/*` requests. JavaScript cannot read it; XSS payloads cannot exfiltrate it.
-- as the `token` field in the JSON body — for CLI / static-key callers that send it via the `X-API-Key` header.
+- as an `HttpOnly Secure SameSite=Lax` cookie (`qod_session`) set by the response - the browser auto-attaches it on subsequent same-origin `/api/*` requests. JavaScript cannot read it; XSS payloads cannot exfiltrate it.
+- as the `token` field in the JSON body - for CLI / static-key callers that send it via the `X-API-Key` header.
 
 The `apiKeyGuard` middleware admits a request when EITHER path matches a verified JWT. Verification is stateless (signature + `exp` check); manager restart does not invalidate sessions as long as the JWT secret stays pinned, which makes horizontal scale-out possible.
 
-The JWT `exp` is **absolute** (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there is no sliding-window refresh. Revocation works against a small in-process jti denylist that survives only the current process — for a hard kill of all sessions, rotate `QOD_SESSION_JWT_SECRET`.
+The JWT `exp` is **absolute** (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there is no sliding-window refresh. Revocation works against a small in-process jti denylist that survives only the current process - for a hard kill of all sessions, rotate `QOD_SESSION_JWT_SECRET`.
 
 Cookie attributes are configurable:
 
-- `QOD_SESSION_COOKIE_SECURE` (default `auto`) — controls the `Secure` flag on the `qod_session` cookie.
+- `QOD_SESSION_COOKIE_SECURE` (default `auto`) - controls the `Secure` flag on the `qod_session` cookie.
   - `auto` (default): derive per request from the `X-Forwarded-Proto` header injected by any TLS-terminating ingress. `https` → `Secure`, `http` or no header → not `Secure`. This makes `scripts/run-jar.sh` on `http://localhost:20900` and helm behind a TLS ingress both work without an env var.
   - `true`: force `Secure` regardless of request scheme. Use behind a TLS terminator that does **not** inject `X-Forwarded-Proto` (some cloud LBs, TLS passthrough setups), or to require HTTPS by policy.
   - `false`: force not `Secure`. Use for stunnel-style local TLS termination where you want to opt out of derivation.
-- `QOD_SESSION_COOKIE_PATH` (default `/api`) — override behind a path-rewriting reverse proxy to match the browser-visible URL prefix.
+- `QOD_SESSION_COOKIE_PATH` (default `/api`) - override behind a path-rewriting reverse proxy to match the browser-visible URL prefix.
 
 The `application.conf` default `sessionJwtSecret` is a **well-known dev string**. Anyone with the source can forge admin sessions if you don't override it. Main emits a loud startup warning when the default is in use.
 
@@ -137,7 +137,7 @@ The management plane covers `/api/*` calls from the admin UI and any REST client
 
 ### Identity source
 
-`auth.management.identitySource` (env `QOD_AUTH_MANAGEMENT_IDENTITY_SOURCE`, default `db`):
+`auth.management.identitySource` (env `QOD_MGMT_IDENTITY_SOURCE`, default `db`):
 
 - **`db`** - the authenticating profile IS the grant. Whatever provider validated the password (Database or OIDC ROPC) determines `role` and `tenant`. JWT role claims directly mint admin sessions, so this is appropriate when an OIDC IdP is trusted as the role source, or in single-system DB-only deployments.
 - **`oidc`** - the JWT's role and tenant claims are **discarded**. After authentication succeeds, the management plane looks up the user in `qodstate_user` and resolves role + the set of tenants they may manage from the database. An OIDC-verified identity with no matching `qodstate_user` row is rejected with `403 not_provisioned`.
@@ -174,7 +174,7 @@ A per-request guard rejects management calls that target a tenant outside `manag
 Two cross-cutting refinements that the column structure above does not show:
 
 - **Per-tenant Google client (edge only).** When a tenant configures its own `clientId` / `clientSecretRef` on `qodstate_tenant.authConfig`, the OIDC Bearer entry for that tenant's handshakes validates tokens against the tenant's own Google client instead of the manager-wide one. Other providers and the chain shape are unchanged.
-- **Realm-aware DB lookup (edge + mgmt).** The DB authenticator uses `systemQuery` (matching `tenant IS NULL`) for system-realm logins — UI form with empty Tenant field, or FlightSQL handshake with `?superuser=true` — and `tenantQuery` (matching `tenant = ?`) for tenant-realm logins. Same chain placement, different row.
+- **Realm-aware DB lookup (edge + mgmt).** The DB authenticator uses `systemQuery` (matching `tenant IS NULL`) for system-realm logins - UI form with empty Tenant field, or FlightSQL handshake with `?superuser=true` - and `tenantQuery` (matching `tenant = ?`) for tenant-realm logins. Same chain placement, different row.
 
 Recommended combinations:
 
@@ -186,14 +186,14 @@ The combination `identitySource=db` with OIDC enabled trusts whatever role claim
 
 ## Per-tenant OIDC client override (Google)
 
-By default every Google OIDC tenant validates tokens against the single `quack-flightsql.auth.google.*` block — one `clientId` / `clientSecret` for the whole manager. Tenants on Google can OPT IN to a dedicated OAuth client by setting the per-tenant `clientId` + `clientSecretRef` fields on the tenant's auth provider in the UI (or via `setTenantAuth` in the REST API):
+By default every Google OIDC tenant validates tokens against the single `quack-flightsql.auth.google.*` block - one `clientId` / `clientSecret` for the whole manager. Tenants on Google can OPT IN to a dedicated OAuth client by setting the per-tenant `clientId` + `clientSecretRef` fields on the tenant's auth provider in the UI (or via `setTenantAuth` in the REST API):
 
-- `clientId` — the tenant's Google OAuth client ID (e.g. `<tenant>.apps.googleusercontent.com`).
-- `clientSecretRef` — a **reference** to the secret, never a literal value. Today only `env:NAME` is supported (e.g. `env:GOOGLE_CS_TPCH`); cloud-backed prefixes (`aws-sm:`, `gcp-sm:`, `azure-kv:`, `vault:`) are reserved.
+- `clientId` - the tenant's Google OAuth client ID (e.g. `<tenant>.apps.googleusercontent.com`).
+- `clientSecretRef` - a **reference** to the secret, never a literal value. Today only `env:NAME` is supported (e.g. `env:GOOGLE_CS_TPCH`); cloud-backed prefixes (`aws-sm:`, `gcp-sm:`, `azure-kv:`, `vault:`) are reserved.
 
 When set, the edge substitutes the per-tenant authenticator into the bearer chain for that tenant's handshakes; for every other tenant the global Google authenticator is used as before. The `setTenantAuth` REST endpoint invalidates the cached per-tenant entry so the next handshake re-reads `qodstate_tenant.authConfig`.
 
-Tenants that have NOT set `clientId` keep using the global block — adoption is incremental. Other selectors (`issuer`, `hd` for Google Workspace domain) keep working in both modes.
+Tenants that have NOT set `clientId` keep using the global block - adoption is incremental. Other selectors (`issuer`, `hd` for Google Workspace domain) keep working in both modes.
 
 This mechanism is currently Google-only. Keycloak / Azure / AWS still share a single per-manager OAuth client.
 

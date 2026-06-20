@@ -53,8 +53,8 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
 
 For Google, two optional extra keys give the tenant its own OAuth client instead of sharing the manager-wide one from `quack-flightsql.auth.google.*`:
 
-- `clientId` — the tenant's Google OAuth client ID.
-- `clientSecretRef` — a reference to the secret (e.g. `env:GOOGLE_CS_ACME`), never the literal value. Today only `env:NAME` is supported.
+- `clientId` - the tenant's Google OAuth client ID.
+- `clientSecretRef` - a reference to the secret (e.g. `env:GOOGLE_CS_ACME`), never the literal value. Today only `env:NAME` is supported.
 
 Both must be set together; leaving either blank falls back to the global client. See [Authentication providers](/operating/auth-providers) for the per-provider details.
 
