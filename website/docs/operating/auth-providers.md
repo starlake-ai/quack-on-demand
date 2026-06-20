@@ -15,8 +15,8 @@ Validates username and password against the `qodstate_user` table in the control
 
 The authenticator runs one of two queries, picked by the caller-declared auth realm:
 
-- `systemQuery` — used when the caller asked for the **system** realm (manager UI login with empty tenant; FlightSQL handshake with `?superuser=true`). Matches the row with `tenant IS NULL` — the bootstrap admin / system superuser.
-- `tenantQuery` — used when the caller asked for the **tenant** realm. Matches the row with `tenant = ?`.
+- `systemQuery` - used when the caller asked for the **system** realm (manager UI login with empty tenant; FlightSQL handshake with `?superuser=true`). Matches the row with `tenant IS NULL` - the bootstrap admin / system superuser.
+- `tenantQuery` - used when the caller asked for the **tenant** realm. Matches the row with `tenant = ?`.
 
 There is no fallback between the two: a system credential cannot authenticate a tenant-scoped login and vice versa.
 
@@ -184,13 +184,13 @@ QOD_MGMT_OIDC_SCOPES="openid email profile"         # default "openid email prof
 
 # Externally visible manager URL, used to build the redirect_uri. MUST match the
 # redirect URI registered on the IdP client. When unset, derived from the request.
-QOD_PUBLIC_BASE_URL=https://qod.example.com
+QOD_MGMT_PUBLIC_BASE_URL=https://qod.example.com
 ```
 
 Register this **redirect URI** on each IdP client:
 
 ```
-${QOD_PUBLIC_BASE_URL}/api/auth/oidc/callback
+${QOD_MGMT_PUBLIC_BASE_URL}/api/auth/oidc/callback
 ```
 
 ### Login URLs and scope

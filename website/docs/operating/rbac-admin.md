@@ -11,9 +11,9 @@ For a description of the underlying data model, the EffectiveSet, pool-access ga
 
 Every RBAC endpoint admits either of two transports:
 
-- **Static key** — set `QOD_API_KEY` in the manager environment and pass it as `X-API-Key`. Best for CLI scripts and CI.
-- **Session token** — `POST /api/auth/login` with `{"username":"...","password":"..."}`. Two ways to use the response:
-  - **Cookie** (browser default). The login response sets `qod_session=<jwt>` as an HttpOnly Secure SameSite=Lax cookie; the browser auto-attaches it on subsequent same-origin calls. JavaScript cannot read or send it manually — the `/api/auth/whoami` and `/api/auth/logout` endpoints accept the cookie automatically.
+- **Static key** - set `QOD_API_KEY` in the manager environment and pass it as `X-API-Key`. Best for CLI scripts and CI.
+- **Session token** - `POST /api/auth/login` with `{"username":"...","password":"..."}`. Two ways to use the response:
+  - **Cookie** (browser default). The login response sets `qod_session=<jwt>` as an HttpOnly Secure SameSite=Lax cookie; the browser auto-attaches it on subsequent same-origin calls. JavaScript cannot read or send it manually - the `/api/auth/whoami` and `/api/auth/logout` endpoints accept the cookie automatically.
   - **Header** (CLI). The JSON body still contains a `token` field; pass it as `X-API-Key: $TOKEN` for non-browser callers.
 
 ## Tenant scope on every endpoint
@@ -25,7 +25,7 @@ Every RBAC handler checks the caller's session scope before mutating. A tenant-A
   "message": "session has no admin grant on tenant 't-...'" }
 ```
 
-with HTTP `403`. Superuser and static-key sessions bypass the gate. Unknown ids return `404` (not `403`) so a probe cannot distinguish "exists in another tenant" from "doesn't exist at all". The pattern covers id-only endpoints (`/role/delete`, `/user/delete`, `/group/delete`, `/role/permission/revoke`, `/pool/permission/revoke`, all 6 membership ops, the per-user `/effective`) — those resolve the owning tenant from the resource before applying the check.
+with HTTP `403`. Superuser and static-key sessions bypass the gate. Unknown ids return `404` (not `403`) so a probe cannot distinguish "exists in another tenant" from "doesn't exist at all". The pattern covers id-only endpoints (`/role/delete`, `/user/delete`, `/group/delete`, `/role/permission/revoke`, `/pool/permission/revoke`, all 6 membership ops, the per-user `/effective`) - those resolve the owning tenant from the resource before applying the check.
 
 ```bash
 TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \

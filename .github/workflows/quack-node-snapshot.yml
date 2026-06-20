@@ -66,7 +66,7 @@ jobs:
 
   # -----------------------------------------------------------------------
   # 2. Per-platform build, push by digest. amd64 on ubuntu-latest, arm64
-  #    on ubuntu-24.04-arm (native arm runner — no QEMU emulation).
+  #    on ubuntu-24.04-arm (native arm runner - no QEMU emulation).
   # -----------------------------------------------------------------------
   docker-build:
     needs: version
@@ -100,7 +100,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Docker metadata (labels only — tags applied in merge step)
+      - name: Docker metadata (labels only - tags applied in merge step)
         id: meta
         uses: docker/metadata-action@v5
         with:

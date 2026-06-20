@@ -6,10 +6,10 @@ This document describes the control-plane REST API and Admin UI routes for Quack
 
 Every endpoint under `/api/*` is admitted via either path:
 
-- **`X-API-Key` header** — either the static `QOD_API_KEY` (set in the manager env; typical for CLI / CI) or a session JWT returned in the `LoginResponse.token` field.
-- **`qod_session` cookie** — set by `POST /api/auth/login` as `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/api`. The browser auto-attaches it on subsequent same-origin requests.
+- **`X-API-Key` header** - either the static `QOD_API_KEY` (set in the manager env; typical for CLI / CI) or a session JWT returned in the `LoginResponse.token` field.
+- **`qod_session` cookie** - set by `POST /api/auth/login` as `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/api`. The browser auto-attaches it on subsequent same-origin requests.
 
-The open endpoints (no auth required) are `GET /health` and `GET /api/config/client` (used by the UI to discover the FlightSQL host/port before login). The React SPA under `/ui/*` is open at the network layer — every authenticated route inside the SPA checks the session via `/api/auth/whoami` before rendering.
+The open endpoints (no auth required) are `GET /health` and `GET /api/config/client` (used by the UI to discover the FlightSQL host/port before login). The React SPA under `/ui/*` is open at the network layer - every authenticated route inside the SPA checks the session via `/api/auth/whoami` before rendering.
 
 Every RBAC mutation also enforces tenant scope: a tenant-A admin session that targets tenant B (by URL path, query param, or JSON body field) is rejected with `403 tenant_forbidden`. Superuser sessions and the static API key bypass the gate. Unknown ids return `404` so that probing cannot distinguish "exists in another tenant" from "doesn't exist".
 
@@ -64,7 +64,7 @@ Every RBAC mutation also enforces tenant scope: a tenant-A admin session that ta
 | `GET`  | `/api/config/server`         | resolved server config (superuser only) |
 | `GET`  | `/health`                    | liveness + pool/node counts (open) |
 
-`POST /api/node/setRole` and `POST /api/node/restart` were removed in mid-2026 — they were stubs that lied about persisting state. Use `POST /api/pool/scale` to rebalance role distribution; use `POST /api/node/quarantine` to drain a node without killing it.
+`POST /api/node/setRole` and `POST /api/node/restart` were removed in mid-2026 - they were stubs that lied about persisting state. Use `POST /api/pool/scale` to rebalance role distribution; use `POST /api/node/quarantine` to drain a node without killing it.
 
 ---
 

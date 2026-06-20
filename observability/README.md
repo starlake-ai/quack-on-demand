@@ -51,7 +51,7 @@ dashboard renders without manual datasource selection.
 Manager UI:    http://localhost:20900/ui/       (admin / admin)
 Prometheus:    http://localhost:9090            (try query: up)
 Grafana:       http://localhost:3000            (anonymous admin; no login)
-               Dashboard: "Quack-on-Demand — Operator Overview"
+               Dashboard: "Quack-on-Demand - Operator Overview"
 ```
 
 Tear down:
@@ -104,9 +104,9 @@ When a cloud sink is selected the manager pushes metrics on a fixed cadence (def
 
 | Sink | Set | Required config | Credential source |
 |---|---|---|---|
-| `aws` | `QOD_METRICS_SINK=aws` | `QOD_METRICS_AWS_NAMESPACE` (default `quack-on-demand`) | `DefaultCredentialsProvider` chain — IAM role, env, profile |
-| `azure` | `QOD_METRICS_SINK=azure` | `QOD_METRICS_AZURE_KEY` (Application Insights instrumentation key — **REQUIRED**) | `DefaultAzureCredential` — managed identity, env, CLI |
-| `gcp` | `QOD_METRICS_SINK=gcp` | `QOD_METRICS_GCP_PROJECT_ID` (**REQUIRED**) | ADC — `GOOGLE_APPLICATION_CREDENTIALS`, GCE metadata, gcloud |
+| `aws` | `QOD_METRICS_SINK=aws` | `QOD_METRICS_AWS_NAMESPACE` (default `quack-on-demand`) | `DefaultCredentialsProvider` chain - IAM role, env, profile |
+| `azure` | `QOD_METRICS_SINK=azure` | `QOD_METRICS_AZURE_KEY` (Application Insights instrumentation key - **REQUIRED**) | `DefaultAzureCredential` - managed identity, env, CLI |
+| `gcp` | `QOD_METRICS_SINK=gcp` | `QOD_METRICS_GCP_PROJECT_ID` (**REQUIRED**) | ADC - `GOOGLE_APPLICATION_CREDENTIALS`, GCE metadata, gcloud |
 
 Push cadence defaults to 60 s per backend. Override with:
 
@@ -160,15 +160,15 @@ export QOD_METRICS_REGION=eu-west-1
 
 **Expected metric names** (all registered by the manager):
 
-- `statements_total` — counter, labels: `tenant`, `pool`, `status`
-- `statement_duration_seconds` — histogram, labels: `tenant`, `pool`
-- `node_healthy` — gauge, labels: `tenant`, `pool`, `node_id`, `role`
-- `node_draining` — gauge, labels: `tenant`, `pool`, `node_id`, `role`
-- `node_in_flight` — gauge, labels: `tenant`, `pool`, `node_id`, `role`
-- `node_ewma_latency_seconds` — gauge, labels: `tenant`, `pool`, `node_id`, `role`
-- `pool_nodes` — gauge, labels: `tenant`, `pool`, `role`
-- `flightsql_sessions_active` — gauge
-- `jvm_memory_used_bytes` — gauge (Micrometer JVM binder)
-- `jvm_gc_pause_seconds_sum` — counter (Micrometer JVM binder)
-- `jvm_threads_live_threads` — gauge (Micrometer JVM binder)
-- `process_uptime_seconds` — gauge (Micrometer process binder)
+- `statements_total` - counter, labels: `tenant`, `pool`, `status`
+- `statement_duration_seconds` - histogram, labels: `tenant`, `pool`
+- `node_healthy` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
+- `node_draining` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
+- `node_in_flight` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
+- `node_ewma_latency_seconds` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
+- `pool_nodes` - gauge, labels: `tenant`, `pool`, `role`
+- `flightsql_sessions_active` - gauge
+- `jvm_memory_used_bytes` - gauge (Micrometer JVM binder)
+- `jvm_gc_pause_seconds_sum` - counter (Micrometer JVM binder)
+- `jvm_threads_live_threads` - gauge (Micrometer JVM binder)
+- `process_uptime_seconds` - gauge (Micrometer process binder)

@@ -16,16 +16,16 @@ Every scalar configuration key in `src/main/resources/application.conf` can be o
 | Postgres host | `QOD_PG_HOST` | `localhost` | Control-plane + DuckLake catalog Postgres host |
 | Postgres database | `QOD_PG_DBNAME` | `qod` | Control-plane database name |
 | Static admin key | `QOD_API_KEY` | *(unset)* | Static admin token sent as `X-API-Key`. If unset, the REST namespace is open and Main emits a startup warning. |
-| Session JWT secret | `QOD_SESSION_JWT_SECRET` | dev default | HS256 secret used to sign UI session JWTs. **Override in production** — the `application.conf` default is a well-known dev string; Main emits a startup warning if it's not overridden. |
+| Session JWT secret | `QOD_SESSION_JWT_SECRET` | dev default | HS256 secret used to sign UI session JWTs. **Override in production** - the `application.conf` default is a well-known dev string; Main emits a startup warning if it's not overridden. |
 | Session cookie path | `QOD_SESSION_COOKIE_PATH` | `/api` | Path attribute on the `qod_session` cookie. Override behind a path-rewriting reverse proxy. |
 | Session cookie Secure | `QOD_SESSION_COOKIE_SECURE` | `auto` | `auto` derives `Secure` from `X-Forwarded-Proto` per request (https → Secure, http or absent → not Secure); `true` / `false` force one value regardless of scheme. |
 | Session idle TTL | `QOD_SESSION_IDLE_TTL_SEC` | `28800` (8h) | Absolute JWT lifetime. |
 | Admin usernames | `QOD_ADMIN_USERNAME` | `admin@localhost.local,admin` | Comma-separated admin usernames seeded at boot |
-| Admin password | `QOD_ADMIN_PASSWORD` | `admin` | Re-hashed on every boot — change + restart rotates |
+| Admin password | `QOD_ADMIN_PASSWORD` | `admin` | Re-hashed on every boot - change + restart rotates |
 | Enable ACL | `QOD_ACL_ENABLED` | `false` | Enable per-statement table-level RBAC validation |
 | Federation secret store | `QOD_FEDERATION_SECRET_STORE` | `dispatch` | `dispatch` routes per secret by externalRef prefix; `postgres` and `env` are the only single-backend modes that are actually wired (cloud stubs are refused at config load) |
 
-The control-plane store is Postgres-only since 2026-06-12 — the `stateStorage` / `statePath` keys were dropped along with the legacy file-state mode. For the full configuration surface, including pluggable identity providers (OIDC / Keycloak / Google / Azure / AWS), session JWT semantics, and Kubernetes backend settings, see the inline documentation in `src/main/resources/application.conf` or the rendered `website/docs/reference/configuration.md`.
+The control-plane store is Postgres-only since 2026-06-12 - the `stateStorage` / `statePath` keys were dropped along with the legacy file-state mode. For the full configuration surface, including pluggable identity providers (OIDC / Keycloak / Google / Azure / AWS), session JWT semantics, and Kubernetes backend settings, see the inline documentation in `src/main/resources/application.conf` or the rendered `website/docs/reference/configuration.md`.
 
 ---
 
@@ -59,4 +59,4 @@ Before running Quack on Demand in production, ensure you understand the followin
 ### 6. Edge Session Caching Lag
 > [!IMPORTANT]
 > To maintain low-latency query routing, FlightSQL authentication validation is cached and only re-validated at the TTL boundary (`sessionTtlSec`, default `1h`).
-> If a token is revoked in your identity provider (OIDC/JWT), it may continue to be authorized for up to one TTL window at the edge. Shrink the TTL or restart the manager for immediate revocation. The management-plane JWT cookie has its own absolute exp (`QOD_SESSION_IDLE_TTL_SEC`, default 8h) — rotate `QOD_SESSION_JWT_SECRET` for a hard kill of all UI sessions.
+> If a token is revoked in your identity provider (OIDC/JWT), it may continue to be authorized for up to one TTL window at the edge. Shrink the TTL or restart the manager for immediate revocation. The management-plane JWT cookie has its own absolute exp (`QOD_SESSION_IDLE_TTL_SEC`, default 8h) - rotate `QOD_SESSION_JWT_SECRET` for a hard kill of all UI sessions.

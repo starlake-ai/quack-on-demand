@@ -231,7 +231,7 @@ flowchart TD
     REST --> API --> SUP --> BK
 
     %% --- node pool ---
-    subgraph POOL["Quack node pool · per tenant — DuckDB + quack_serve · /quack"]
+    subgraph POOL["Quack node pool · per tenant - DuckDB + quack_serve · /quack"]
         direction LR
         WO["WRITEONLY<br/>:21900 / pod"]
         RO["READONLY<br/>:21901 / pod"]

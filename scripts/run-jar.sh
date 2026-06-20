@@ -408,7 +408,7 @@ else
         | grep -oE '<latest>[^<]+</latest>' | sed 's/<[^>]*>//g' | head -1; } || true
   }
   # Fall-back: read the SNAPSHOT version pinned in version.sbt. Used when
-  # the snapshots-repo metadata index is missing — we still know which
+  # the snapshots-repo metadata index is missing - we still know which
   # snapshot the source tree corresponds to and can probe its jar URL.
   local_snapshot_version() {
     [[ -f "$REPO_DIR/version.sbt" ]] || return 0
