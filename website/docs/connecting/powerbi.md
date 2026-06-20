@@ -31,9 +31,6 @@ Download the latest Dremio build of the driver from the official Dremio download
 | Platform | Installer |
 |---|---|
 | **Windows** (Power BI Desktop, gateway) | [`arrow-flight-sql-odbc-LATEST-win64.msi`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST-win64.msi) |
-| macOS (Apple Silicon) | [`arrow-flight-sql-odbc-LATEST-armv8.dmg`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST-armv8.dmg) |
-| macOS (Intel) | [`arrow-flight-sql-odbc-LATEST.dmg`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-LATEST.dmg) |
-| Linux (RHEL / Fedora) | [`arrow-flight-sql-odbc-driver-LATEST.x86_64.rpm`](https://download.dremio.com/arrow-flight-sql-odbc-driver/arrow-flight-sql-odbc-driver-LATEST.x86_64.rpm) |
 
 The full release index (per-version artifacts) is at [download.dremio.com/arrow-flight-sql-odbc-driver/](https://download.dremio.com/arrow-flight-sql-odbc-driver/).
 
