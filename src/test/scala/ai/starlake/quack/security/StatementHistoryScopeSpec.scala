@@ -13,17 +13,16 @@ import java.time.Instant
 
 /** Cross-tenant authZ on `GET /api/node/statements`.
   *
-  * Before the fix the endpoint returned every recorded SQL (user / tenant /
-  * pool / sql) to any caller that cleared `apiKeyGuard`, including a
-  * tenant-scoped admin who could see every other tenant's queries. The fix
-  * filters by `manageableTenants`. This spec pins down:
+  * Before the fix the endpoint returned every recorded SQL (user / tenant / pool / sql) to any
+  * caller that cleared `apiKeyGuard`, including a tenant-scoped admin who could see every other
+  * tenant's queries. The fix filters by `manageableTenants`. This spec pins down:
   *   - superuser sees all
   *   - tenant-A admin sees only A's rows
   *   - static-key bypass sees all
   *   - open mode sees all
-  *   - records carrying either the id or the display-name form pass the
-  *     filter (mirrors the FlightSQL handshake convention; the router
-  *     records the display name today but future changes might switch)
+  *   - records carrying either the id or the display-name form pass the filter (mirrors the
+  *     FlightSQL handshake convention; the router records the display name today but future changes
+  *     might switch)
   */
 class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
 
@@ -35,8 +34,8 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
   private def addTenantB(store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore): Unit =
     store.upsertTenant(
       Tenant(
-        id           = GlobexTenantId,
-        displayName  = GlobexName,
+        id = GlobexTenantId,
+        displayName = GlobexName,
         authProvider = "db"
       )
     )
@@ -46,15 +45,55 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
     // router output) and one carrying the id form (future-proofing).
     val now = Instant.parse("2026-06-12T10:00:00Z")
     List(
-      StatementRecord(now, "alice", SecurityFixtures.TenantName, "sales", "n1", "SELECT 1 FROM acme_t", 12L, "ok", None),
-      StatementRecord(now, "alice", SecurityFixtures.TenantId,   "sales", "n1", "SELECT 2 FROM acme_t", 13L, "ok", None),
-      StatementRecord(now, "carol", GlobexName,                  "ops",   "n2", "SELECT 3 FROM globex_t", 14L, "ok", None),
-      StatementRecord(now, "carol", GlobexTenantId,              "ops",   "n2", "SELECT 4 FROM globex_t", 15L, "ok", None)
+      StatementRecord(
+        now,
+        "alice",
+        SecurityFixtures.TenantName,
+        "sales",
+        "n1",
+        "SELECT 1 FROM acme_t",
+        12L,
+        "ok",
+        None
+      ),
+      StatementRecord(
+        now,
+        "alice",
+        SecurityFixtures.TenantId,
+        "sales",
+        "n1",
+        "SELECT 2 FROM acme_t",
+        13L,
+        "ok",
+        None
+      ),
+      StatementRecord(
+        now,
+        "carol",
+        GlobexName,
+        "ops",
+        "n2",
+        "SELECT 3 FROM globex_t",
+        14L,
+        "ok",
+        None
+      ),
+      StatementRecord(
+        now,
+        "carol",
+        GlobexTenantId,
+        "ops",
+        "n2",
+        "SELECT 4 FROM globex_t",
+        15L,
+        "ok",
+        None
+      )
     ).foreach(h.stmtHistory.record)
 
   private def get(
       client: HttpClient,
-      url:    String,
+      url: String,
       apiKey: Option[String] = None
   ): HttpResponse[String] =
     val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
@@ -94,14 +133,19 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
   it should "only return tenant-A rows for alice (tenant-A admin)" in {
     val (h, _) = bootTwoTenants()
     try
-      val token = h.mintToken(SecurityFixtures.AliceUsername, SecurityFixtures.AlicePassword, Some(SecurityFixtures.TenantId))
-      val resp  = get(h.httpClient, s"${h.baseUrl}/api/node/statements", apiKey = Some(token))
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/node/statements", apiKey = Some(token))
       withClue(s"alice body: ${resp.body()}") {
         resp.statusCode() shouldBe 200
-        // Both forms (display-name + id) of tenant-A must come through;
-        // neither form of tenant-B may.
         val ts = tenantsOf(resp.body()).toSet
-        ts                          should contain allOf (SecurityFixtures.TenantName, SecurityFixtures.TenantId)
+        // Post slug-id refactor the canonical fixture's display-name and id are
+        // the same slug ("acme"), so tenant-A has one form here; tenant-B keeps
+        // its two distinct forms below for the exclusion check.
+        ts should contain(SecurityFixtures.TenantId)
         ts should not contain GlobexName
         ts should not contain GlobexTenantId
       }

@@ -16,22 +16,20 @@ import java.util.Base64
 
 /** Real Arrow Flight wire tests for the handshake gate.
   *
-  * Unlike [[FlightHandshakeSecuritySpec]] (which exercises collaborators
-  * directly, with no sockets), this suite boots a real [[FlightEdgeServer]] via
-  * [[FlightEdgeHarness]] and uses the Arrow Flight Java client over gRPC to hit
-  * the full stack. The goal is to catch Arrow / gRPC / Netty regressions --
-  * specifically the tenant display-name vs surrogate-id normalization fix -- that
-  * stub specs would not exercise.
+  * Unlike [[FlightHandshakeSecuritySpec]] (which exercises collaborators directly, with no
+  * sockets), this suite boots a real [[FlightEdgeServer]] via [[FlightEdgeHarness]] and uses the
+  * Arrow Flight Java client over gRPC to hit the full stack. The goal is to catch Arrow / gRPC /
+  * Netty regressions -- specifically the tenant display-name vs surrogate-id normalization fix --
+  * that stub specs would not exercise.
   *
-  * Each test case is independent: it boots its own harness, makes one RPC call,
-  * and tears down the harness in a `try/finally` block.
+  * Each test case is independent: it boots its own harness, makes one RPC call, and tears down the
+  * harness in a `try/finally` block.
   *
-  * Authentication fires in the `headerAuth` gate before the FlightSQL producer
-  * dispatches on the command bytes. The success cases therefore assert that any
-  * exception that surfaces from `getInfo` is NOT UNAUTHENTICATED -- the auth
-  * gate passed, and any INVALID_ARGUMENT from the producer is a separate concern
-  * (raw SQL bytes are not a valid FlightSQL protobuf command, but that is only
-  * reachable after the auth gate succeeds).
+  * Authentication fires in the `headerAuth` gate before the FlightSQL producer dispatches on the
+  * command bytes. The success cases therefore assert that any exception that surfaces from
+  * `getInfo` is NOT UNAUTHENTICATED -- the auth gate passed, and any INVALID_ARGUMENT from the
+  * producer is a separate concern (raw SQL bytes are not a valid FlightSQL protobuf command, but
+  * that is only reachable after the auth gate succeeds).
   */
 class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
 
@@ -42,7 +40,12 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
 
   // Build a HeaderCallOption carrying the three connection headers the
   // FlightEdgeServer reads: tenant, pool, and Authorization.
-  private def headersOpt(tenant: String, pool: String, user: String, password: String): HeaderCallOption =
+  private def headersOpt(
+      tenant: String,
+      pool: String,
+      user: String,
+      password: String
+  ): HeaderCallOption =
     val hdrs = new FlightCallHeaders()
     hdrs.insert("tenant", tenant)
     hdrs.insert("pool", pool)
@@ -51,14 +54,13 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
 
   /** Assert that auth passed on an RPC whose command bytes may be malformed.
     *
-    * The `headerAuth` gate runs before the FlightSQL producer decodes the
-    * command. If auth succeeds the producer is called next; since we pass raw
-    * SQL bytes rather than a protobuf-encoded `CommandStatementQuery`, the
-    * server returns INVALID_ARGUMENT (not UNAUTHENTICATED). Either outcome
-    * is acceptable: no exception at all means the producer also succeeded;
-    * a non-UNAUTHENTICATED FlightRuntimeException means auth passed but the
-    * producer rejected the malformed command. Any UNAUTHENTICATED exception
-    * fails the test because it means the auth gate itself rejected the request.
+    * The `headerAuth` gate runs before the FlightSQL producer decodes the command. If auth succeeds
+    * the producer is called next; since we pass raw SQL bytes rather than a protobuf-encoded
+    * `CommandStatementQuery`, the server returns INVALID_ARGUMENT (not UNAUTHENTICATED). Either
+    * outcome is acceptable: no exception at all means the producer also succeeded; a
+    * non-UNAUTHENTICATED FlightRuntimeException means auth passed but the producer rejected the
+    * malformed command. Any UNAUTHENTICATED exception fails the test because it means the auth gate
+    * itself rejected the request.
     */
   private def assertAuthPassed(body: => Unit): Unit =
     try body
@@ -84,9 +86,9 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       val client = h.newClient()
       try
         val opt = headersOpt(
-          tenant   = SecurityFixtures.TenantName,
-          pool     = SecurityFixtures.PoolName,
-          user     = SecurityFixtures.AliceUsername,
+          tenant = SecurityFixtures.TenantName,
+          pool = SecurityFixtures.PoolName,
+          user = SecurityFixtures.AliceUsername,
           password = SecurityFixtures.AlicePassword
         )
         // getInfo with the auth headers triggers the headerAuth gate first.
@@ -125,67 +127,83 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
     // Build a fresh fixture store, then add a second tenant whose id matches
     // the hex surrogate pattern so FlightEdgeServer's looksLikeTenantId branch
     // is exercised on the real Flight wire.
-    val fix    = SecurityFixtures.freshStore()
-    val s      = fix.store
+    val fix = SecurityFixtures.freshStore()
+    val s   = fix.store
 
-    val hexTenantDisplayName = "hexacme"
+    // Post slug-id refactor a tenant's id IS its slug and the edge routes a
+    // looksLikeTenantId wire header by the resolved tenant's display name, so id
+    // and display name must coincide (the pool is keyed by id). Keep them equal.
+    val hexTenantDisplayName = HexTenantId
     val hexTenantDbId        = "td-hex0001"
     val hexPoolId            = "p-hex0001"
     val hexPoolPermId        = "pp-hex0001"
     val hexAdminRoleId       = "r-hexadmin01"
     val hexAdminPermId       = "rp-hexall01"
 
-    s.upsertTenant(Tenant(
-      id          = HexTenantId,
-      displayName = hexTenantDisplayName,
-      authProvider = "db"
-    ))
-    s.upsertTenantDb(TenantDb(
-      id        = hexTenantDbId,
-      tenantId  = HexTenantId,
-      name      = s"${hexTenantDisplayName}_main",
-      kind      = TenantDbKind.InMemory,
-      metastore = Map.empty,
-      dataPath  = ""
-    ))
-    s.upsertPool(Pool(
-      id                   = hexPoolId,
-      tenantId             = HexTenantId,
-      tenantDbId           = hexTenantDbId,
-      name                 = SecurityFixtures.PoolName,
-      size                 = 1,
-      distribution         = RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
-      maxConcurrentPerNode = 0,
-      disabled             = false
-    ))
-    s.upsertRole(ai.starlake.quack.ondemand.state.RbacRole(
-      id          = hexAdminRoleId,
-      tenantId    = HexTenantId,
-      name        = "admin",
-      description = Some("hex tenant admin role")
-    ))
-    s.insertRolePermission(RolePermission(
-      id          = hexAdminPermId,
-      roleId      = hexAdminRoleId,
-      catalogName = "*",
-      schemaName  = "*",
-      tableName   = "*",
-      verb        = "ALL"
-    ))
+    s.upsertTenant(
+      Tenant(
+        id = HexTenantId,
+        displayName = hexTenantDisplayName,
+        authProvider = "db"
+      )
+    )
+    s.upsertTenantDb(
+      TenantDb(
+        id = hexTenantDbId,
+        tenantId = HexTenantId,
+        name = s"${hexTenantDisplayName}_main",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+    )
+    s.upsertPool(
+      Pool(
+        id = hexPoolId,
+        tenantId = HexTenantId,
+        tenantDbId = hexTenantDbId,
+        name = SecurityFixtures.PoolName,
+        size = 1,
+        distribution = RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
+        maxConcurrentPerNode = 0,
+        disabled = false
+      )
+    )
+    s.upsertRole(
+      ai.starlake.quack.ondemand.state.RbacRole(
+        id = hexAdminRoleId,
+        tenantId = HexTenantId,
+        name = "admin",
+        description = Some("hex tenant admin role")
+      )
+    )
+    s.insertRolePermission(
+      RolePermission(
+        id = hexAdminPermId,
+        roleId = hexAdminRoleId,
+        catalogName = "*",
+        schemaName = "*",
+        tableName = "*",
+        verb = "ALL"
+      )
+    )
     import at.favre.lib.crypto.bcrypt.BCrypt
     val hexAliceId = s.upsertUserWithHash(
-      tenant       = Some(HexTenantId),
-      username     = SecurityFixtures.AliceUsername,
-      passwordHash = BCrypt.withDefaults().hashToString(10, SecurityFixtures.AlicePassword.toCharArray),
-      role         = "admin"
+      tenant = Some(HexTenantId),
+      username = SecurityFixtures.AliceUsername,
+      passwordHash =
+        BCrypt.withDefaults().hashToString(10, SecurityFixtures.AlicePassword.toCharArray),
+      role = "admin"
     )
     s.addUserRole(hexAliceId, hexAdminRoleId)
-    s.insertPoolPermission(PoolPermission(
-      id       = hexPoolPermId,
-      tenantId = HexTenantId,
-      poolId   = Some(hexPoolId),
-      userId   = Some(hexAliceId)
-    ))
+    s.insertPoolPermission(
+      PoolPermission(
+        id = hexPoolPermId,
+        tenantId = HexTenantId,
+        poolId = Some(hexPoolId),
+        userId = Some(hexAliceId)
+      )
+    )
 
     val h      = FlightEdgeHarness.boot(s, enableProviders = true, tls = false)
     val client = h.newClient()
@@ -194,9 +212,9 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       // Names.looksLikeTenantId("t-ace00001") == true, then getTenantById,
       // and normalises to the display name before calling lookupPool/authorize.
       val opt = headersOpt(
-        tenant   = HexTenantId,
-        pool     = SecurityFixtures.PoolName,
-        user     = SecurityFixtures.AliceUsername,
+        tenant = HexTenantId,
+        pool = SecurityFixtures.PoolName,
+        user = SecurityFixtures.AliceUsername,
         password = SecurityFixtures.AlicePassword
       )
       assertAuthPassed {
@@ -217,9 +235,9 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
     val client = h.newClient()
     try
       val opt = headersOpt(
-        tenant   = SecurityFixtures.TenantName,
-        pool     = SecurityFixtures.PoolName,
-        user     = SecurityFixtures.AliceUsername,
+        tenant = SecurityFixtures.TenantName,
+        pool = SecurityFixtures.PoolName,
+        user = SecurityFixtures.AliceUsername,
         password = "wrongpassword"
       )
       val ex = intercept[FlightRuntimeException] {
@@ -248,7 +266,7 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
         s"Basic ${basicCredentials(SecurityFixtures.AliceUsername, SecurityFixtures.AlicePassword)}"
       )
       val opt = new HeaderCallOption(hdrs)
-      val ex = intercept[FlightRuntimeException] {
+      val ex  = intercept[FlightRuntimeException] {
         client.getInfo(FlightDescriptor.command("SELECT 1".getBytes("UTF-8")), opt)
       }
       ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
