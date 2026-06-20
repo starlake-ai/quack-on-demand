@@ -24,7 +24,13 @@ import ai.starlake.quack.edge.config.{
   OAuthConfig
 }
 import ai.starlake.quack.model.Tenant
-import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
+import ai.starlake.quack.ondemand.auth.{
+  GrantsLookup,
+  ManagementAuthMode,
+  ManagementAuthModeResolver,
+  ManagementIdentitySource,
+  SessionScope
+}
 import ai.starlake.quack.ondemand.state.UserGrant
 import ai.starlake.quack.secrets.SecretRefResolver
 import cats.effect.unsafe.implicits.global
@@ -190,6 +196,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = directory,
+      authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
       oidc = svc
     )
 

@@ -7,7 +7,13 @@ import ai.starlake.quack.edge.auth.{
   OidcScope,
   OidcSsoService
 }
-import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource, SessionScope}
+import ai.starlake.quack.ondemand.auth.{
+  GrantsLookup,
+  ManagementAuthMode,
+  ManagementAuthModeResolver,
+  ManagementIdentitySource,
+  SessionScope
+}
 import ai.starlake.quack.ondemand.state.UserGrant
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -50,6 +56,8 @@ final class AuthHandlers(
     grantsForIdentity: GrantsLookup,
     cookieSecureOverride: Option[Boolean] = None,
     cookiePath: String = "/api",
+    authModeResolver: ManagementAuthModeResolver =
+      new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
     /** Resolves a login form's tenant -- entered as either the surrogate id (`t-…`) or the
       * human-readable display name -- to the surrogate id stored in `qodstate_user.tenant`, which
       * is what the authenticator's tenant-scoped query matches on. Returns `None` for an unknown
@@ -194,7 +202,7 @@ final class AuthHandlers(
             val required = result.scope match
               case OidcScope.System    => RequiredScope.SystemStrict
               case OidcScope.Tenant(t) => RequiredScope.Tenant(t)
-            mintSessionFor(result.profile, required, forwardedProto) match
+            mintSessionFor(result.profile, required, forwardedProto, ManagementAuthMode.Oidc) match
               case Left((_, err)) =>
                 (
                   StatusCode.Found,
@@ -250,10 +258,17 @@ final class AuthHandlers(
         case Left(err) =>
           Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))
         case Right(profile) =>
+          val tenantOpt = scope match
+            case AuthScope.System    => None
+            case AuthScope.Tenant(t) => Some(t)
           val required = scope match
             case AuthScope.System    => RequiredScope.System
             case AuthScope.Tenant(t) => RequiredScope.Tenant(t)
-          mintSessionFor(profile, required, forwardedProto)
+          authModeResolver.modeFor(tenantOpt) match
+            case Left(err) =>
+              Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
+            case Right(mode) =>
+              mintSessionFor(profile, required, forwardedProto, mode)
   }
 
   /** Shared authorization + session minting for both the password login and the OIDC callback.
@@ -269,17 +284,15 @@ final class AuthHandlers(
   private def mintSessionFor(
       profile: AuthenticatedProfile,
       required: RequiredScope,
-      forwardedProto: Option[String]
+      forwardedProto: Option[String],
+      mode: ManagementAuthMode
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
-    val grants = identitySource match
-      case ManagementIdentitySource.Db =>
-        // The DB authenticator already encoded the (tenant, role) the operator
-        // provisioned in `qodstate_user`. Collapse it into a one-element grant
-        // set so the rest of the pipeline is uniform.
+    val grants = mode match
+      case ManagementAuthMode.Db =>
+        // The DB authenticator already encoded the (tenant, role) from qodstate_user.
         List(UserGrant(profile.tenant, profile.role))
-      case ManagementIdentitySource.Oidc =>
-        // Discard JWT role + tenant. The qodstate_user row is authoritative for
-        // management-plane authorization.
+      case ManagementAuthMode.Oidc =>
+        // Identity from the IdP; qodstate_user is authoritative for role + tenants.
         grantsForIdentity(profile.username, profile.claims.get("email"))
 
     val superuser = grants.exists(g => g.tenant.isEmpty && g.role.equalsIgnoreCase("admin"))
