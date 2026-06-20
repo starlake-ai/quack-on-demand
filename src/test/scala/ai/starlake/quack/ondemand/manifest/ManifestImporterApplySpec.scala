@@ -53,7 +53,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.getPasswordHash(None, "admin").get shouldBe pre
   }
 
-  it should "store a tenant-scoped user under the tenant surrogate id, not the display name" in {
+  it should "store a tenant-scoped user under the tenant id (the slug key)" in {
     val s = new InMemoryControlPlaneStore()
     val m = base.copy(
       tenants = List(ManifestTenant(name = "acme")),
@@ -63,14 +63,13 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     )
     ManifestImporter.apply(m, s) shouldBe Right(())
 
+    // The tenant id IS the slug "acme" (no separate surrogate). qodstate_user.tenant
+    // holds that id, which is what listUsers / findUserForLogin and `?tenant=acme`
+    // query against.
     val tenantId = s.listTenants().find(_.displayName == "acme").map(_.id).get
-    // qodstate_user.tenant must hold the surrogate id -- that is what
-    // createUser persists and what listUsers / findUserForLogin query against.
-    // Storing the display name here makes `?tenant=acme` listings and
-    // tenant-scoped login silently return nothing.
-    s.findUser(Some(tenantId), "alice")          should not be empty
-    s.findUser(Some("acme"), "alice")            shouldBe None
-    s.listUsers(Some(tenantId)).map(_.username)  shouldBe List("alice")
+    tenantId                                     shouldBe "acme"
+    s.findUser(Some("acme"), "alice")            should not be empty
+    s.listUsers(Some("acme")).map(_.username)    shouldBe List("alice")
   }
 
   it should "reject a new user without a password field and no prior credential" in {
@@ -83,14 +82,14 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
 
   it should "leave tenants absent from the YAML untouched" in {
     val s = new InMemoryControlPlaneStore()
-    s.upsertTenant(Tenant(id = "t-untouched", name = "untouched", displayName = "untouched"))
+    s.upsertTenant(Tenant(id = "t-untouched", displayName = "untouched"))
     ManifestImporter.apply(base, s) shouldBe Right(())
     s.listTenants().map(_.displayName) should contain ("untouched")
   }
 
   it should "drop tenant-db registry rows under a tenant with tenantDbs: [] but never call dropDatabase" in {
     val s = new InMemoryControlPlaneStore()
-    s.upsertTenant(Tenant(id = "t-tpch", name = "tpch", displayName = "tpch"))
+    s.upsertTenant(Tenant(id = "t-tpch", displayName = "tpch"))
     s.upsertTenantDb(TenantDb(
       id        = "td-1",
       tenantId  = "t-tpch",

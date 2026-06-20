@@ -384,9 +384,9 @@ object Main extends IOApp with LazyLogging:
         val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
         if mgrCfg.auth.management.publicBaseUrl.trim.isEmpty then
           logger.warn(
-            "identitySource=oidc but QOD_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults to " +
-              s"http://localhost:${mgrCfg.port}, which must match the IdP client's registered redirect " +
-              "URI. Set QOD_PUBLIC_BASE_URL for any non-localhost deploy."
+            "identitySource=oidc but QOD_MGMT_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults " +
+              s"to http://localhost:${mgrCfg.port}, which must match the IdP client's registered " +
+              "redirect URI. Set QOD_MGMT_PUBLIC_BASE_URL for any non-localhost deploy."
           )
         val publicBaseUrlOf = () =>
           val base = mgrCfg.auth.management.publicBaseUrl
@@ -474,7 +474,7 @@ object Main extends IOApp with LazyLogging:
           tenantCatalogs = tenantId =>
             sup
               .getTenantById(tenantId)
-              .map(t => sup.listTenantDbsByTenant(t.displayName).map(_.name).toSet)
+              .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
               .getOrElse(Set.empty)
         )
 
@@ -569,7 +569,7 @@ object Main extends IOApp with LazyLogging:
                     case None    => Nil
                     case Some(t) =>
                       val reader = catalogReaderCache.computeIfAbsent(
-                        (t.displayName, td.name),
+                        (t.id, td.name),
                         { case (tn, dn) =>
                           DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
                         }

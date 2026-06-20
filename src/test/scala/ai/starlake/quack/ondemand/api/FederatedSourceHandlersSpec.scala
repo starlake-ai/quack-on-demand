@@ -27,7 +27,7 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       new LiquibaseRunner(url, user, pass).run()
       val cp = new PostgresControlPlaneStore(url, user, pass)
       // Seed a tenant + tenant-db
-      cp.upsertTenant(Tenant(id = "t-1", name = "acme", displayName = "acme", disabled = false))
+      cp.upsertTenant(Tenant(id = "t-1", displayName = "acme", disabled = false))
       cp.upsertTenantDb(TenantDb(
         id        = "td-1",
         tenantId  = "t-1",
@@ -39,7 +39,7 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       val fs  = new FederatedSourceStore(url, user, pass)
       // resolver: looks up tenantDbId from (tenantName, tenantDbName)
       val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
-        cp.listTenants().find(_.name == tenantName).flatMap { t =>
+        cp.listTenants().find(_.id == tenantName).flatMap { t =>
           cp.listTenantDbs(t.id).find(_.name == tenantDbName).map(_.id)
         }
       val h = new FederatedSourceHandlers(fs, resolver)

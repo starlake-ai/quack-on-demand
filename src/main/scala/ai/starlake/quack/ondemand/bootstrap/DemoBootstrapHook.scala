@@ -62,7 +62,7 @@ object DemoBootstrapHook:
       fedStore: Option[FederatedSourceStore],
       path: String
   ): Unit =
-    val existing   = store.listTenants().map(_.name).toSet
+    val existing   = store.listTenants().map(_.id).toSet
     val collisions = existing.intersect(DemoNames)
     if collisions.nonEmpty then
       logger.info(

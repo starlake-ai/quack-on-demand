@@ -42,7 +42,7 @@ export default function Users() {
   const tenantForRoles = (selected && selected !== ALL && !superusersOnly)
     ? selected
     : null;
-  const tenantRow = tenants.find(t => t.name === tenantForRoles);
+  const tenantRow = tenants.find(t => t.id === tenantForRoles);
 
   return (
     <>
@@ -57,7 +57,7 @@ export default function Users() {
             <option value={ALL}>(all)</option>
             <option value="(superusers)">(superusers)</option>
             {tenants.map(t => (
-              <option key={t.name} value={t.name}>{t.name}</option>
+              <option key={t.id} value={t.id}>{t.displayName} ({t.id})</option>
             ))}
           </select>
         </label>
@@ -65,7 +65,7 @@ export default function Users() {
           <span className="subtle">
             Auth provider: <code>{tenantRow.authProvider}</code>
             {Object.keys(tenantRow.authConfig).length > 0 && (
-              <> — <code>{JSON.stringify(tenantRow.authConfig)}</code></>
+              <> - <code>{JSON.stringify(tenantRow.authConfig)}</code></>
             )}
           </span>
         )}

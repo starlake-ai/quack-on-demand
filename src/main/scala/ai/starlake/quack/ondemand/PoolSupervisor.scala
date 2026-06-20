@@ -145,7 +145,7 @@ final class PoolSupervisor(
         t  <- tenants.get(td.tenantId)
       yield (td, t)
       opt.foreach { case (td, t) =>
-        val key = PoolKey(t.displayName, td.name, p.name)
+        val key = PoolKey(t.id, td.name, p.name)
         poolIdByKey.put(key, p.id)
         val nodesHere = snap.nodes.filter(_.poolKey == key)
         val merged    = effectiveMetastoreFor(td)
@@ -365,7 +365,7 @@ final class PoolSupervisor(
   def listTenants(): List[Tenant]             = tenants.values.toList.sortBy(_.displayName)
   def getTenant(name: String): Option[Tenant] =
     val n = name.toLowerCase
-    tenants.values.find(_.displayName == n)
+    tenants.values.find(_.id == n)
 
   /** Lookup by surrogate id (`qodstate_tenant.id`, e.g. `t-02d0e86e`). The internal `tenants` map
     * is already keyed by id, so this is a direct hit.
@@ -443,15 +443,18 @@ final class PoolSupervisor(
   // ---------- Tenant API ----------
 
   def createTenant(t: Tenant): IO[Either[String, Tenant]] = IO.blocking {
-    Names.normalizeOrError(t.name, "tenant name") match
-      case Left(err)   => Left(err)
-      case Right(name) =>
-        if tenants.values.exists(_.displayName == name) then Left(s"tenant already exists: $name")
+    // The tenant id is the one key: a normalized lowercase slug. The display
+    // name is a free-form label (falls back to the id when blank).
+    Names.normalizeOrError(t.id, "tenant id") match
+      case Left(err) => Left(err)
+      case Right(id) if !id.headOption.exists(_.isLetter) =>
+        Left(s"tenant id '$id' must start with a letter")
+      case Right(id) =>
+        if tenants.values.exists(_.id == id) then Left(s"tenant already exists: $id")
         else
           val withId = t.copy(
-            name = name,
-            id = if t.id.nonEmpty then t.id else newId("t"),
-            displayName = name
+            id = id,
+            displayName = if t.displayName.trim.nonEmpty then t.displayName.trim else id
           )
           // Every new tenant gets a built-in `admin` role with a
           // wildcard ALL permission, inserted in the same transaction as
@@ -1553,8 +1556,13 @@ object PoolSupervisor:
     * unchanged; this helper only sanitizes for the node-id / pod-name surface.
     */
   def nodeId(key: ai.starlake.quack.model.PoolKey, index: Int): String =
-    val safeDb = key.tenantDb.replace('_', '-')
-    s"quack-${key.tenant}-$safeDb-${key.pool}-$index"
+    // RFC-1123 resource names forbid '_'; slugs may contain it. Map '_' -> '-'
+    // on every component (tenant / db / pool). Collision-free since a valid slug
+    // never contains '-'. Labels keep the raw slug (they permit '_').
+    val safeTenant = key.tenant.replace('_', '-')
+    val safeDb     = key.tenantDb.replace('_', '-')
+    val safePool   = key.pool.replace('_', '-')
+    s"quack-$safeTenant-$safeDb-$safePool-$index"
 
   /** Replace the last segment of a dataPath with `newSegment`, used to derive a per-tenant-db
     * dataPath alongside the configured root. URI-style paths (`<scheme>://...`) are handled with

@@ -20,6 +20,7 @@ exportedFrom:
 # demonstrated (multi-tenancy, RBAC, pools).
 tenants:
   - name: acme
+    displayName: Acme Corporation
     tenantDbs:
       - name: acme_tpch
         defaultDatabase: acme_tpch
@@ -33,6 +34,7 @@ tenants:
         roleDistribution: { writeonly: 1, readonly: 0, dual: 1 }
 
   - name: globex
+    displayName: Globex Inc
     tenantDbs:
       - name: globex_tpcds
         defaultDatabase: globex_tpcds
@@ -136,11 +138,14 @@ users:
     password: demo-root
     role: admin
 
+  # alice is a tenant admin of acme (so she can sign in to the admin UI via
+  # OIDC at /ui/?tenant=acme) AND keeps her analyst data-plane role for the
+  # RBAC/RLS demo.
   - tenant: acme
     username: alice
     password: demo-alice
-    role: user
-    roles: [analyst]
+    role: admin
+    roles: [analyst, tenant_admin]
     poolGrants:
       - { pool: bi }
 

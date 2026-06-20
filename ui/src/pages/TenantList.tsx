@@ -11,10 +11,25 @@ export default function TenantList() {
 
   // "+ New tenant" modal state.
   const [adding, setAdding]     = useState(false);
-  const [newName, setNewName]   = useState('');
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [newId, setNewId]                   = useState('');
+  // True once the operator hand-edits the id, so we stop auto-suggesting it.
+  const [idEdited, setIdEdited]             = useState(false);
   const [newProvider, setNewProvider] = useState<AuthProvider>('db');
   const [newConfig, setNewConfig]     = useState<Record<string, string>>({});
   const [createErr, setCreateErr]     = useState<string | null>(null);
+
+  // Lowercase identifier slug suggested for the tenant id from the display
+  // name: lowercase, non [a-z0-9_] runs collapsed to nothing, must start with
+  // a letter. e.g. "Acme Corp" -> "acme_corp".
+  function slugify(s: string): string {
+    // Must start with a letter, then letters/digits/underscore.
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+$/g, '').replace(/^[^a-z]+/, '');
+  }
+  function onDisplayNameChange(v: string) {
+    setNewDisplayName(v);
+    if (!idEdited) setNewId(slugify(v));
+  }
 
   function reload() {
     return api.listTenants()
@@ -25,7 +40,8 @@ export default function TenantList() {
   useEffect(() => { void reload(); }, []);
 
   function openCreate() {
-    setNewName(''); setNewProvider('db'); setNewConfig({}); setCreateErr(null);
+    setNewDisplayName(''); setNewId(''); setIdEdited(false);
+    setNewProvider('db'); setNewConfig({}); setCreateErr(null);
     setAdding(true);
   }
   function closeCreate() { setAdding(false); setCreateErr(null); }
@@ -39,7 +55,7 @@ export default function TenantList() {
     ev.preventDefault();
     setCreateErr(null);
     try {
-      await api.createTenant({ name: newName, authProvider: newProvider, authConfig: newConfig });
+      await api.createTenant({ id: newId, displayName: newDisplayName, authProvider: newProvider, authConfig: newConfig });
       setAdding(false);
       await reload();
     } catch (e) {
@@ -77,7 +93,7 @@ export default function TenantList() {
   }
 
   const fields = PROVIDER_FIELDS[newProvider];
-  const createReady = newName.length > 0 &&
+  const createReady = newDisplayName.trim().length > 0 && newId.trim().length > 0 &&
     fields.every(f => f.optional || (newConfig[f.key] ?? '').trim().length > 0);
 
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
@@ -106,8 +122,25 @@ export default function TenantList() {
         {createErr && <p style={{ color: 'var(--bad)' }}>{createErr}</p>}
         <form onSubmit={submitCreate}>
           <label>
-            Name
-            <input value={newName} onChange={ev => setNewName(ev.target.value)} required />
+            Display name
+            <input
+              value={newDisplayName}
+              onChange={ev => onDisplayNameChange(ev.target.value)}
+              placeholder="Acme Corporation"
+              required
+            />
+          </label>
+          <label>
+            Tenant ID
+            <input
+              value={newId}
+              onChange={ev => { setIdEdited(true); setNewId(ev.target.value); }}
+              placeholder="acme"
+              pattern="[a-zA-Z][a-zA-Z0-9_]*"
+              title="lowercase identifier: start with a letter, then letters/digits/underscore only"
+              required
+            />
+            <span className="subtle">The one key used in URLs and APIs. Suggested from the display name; edit if needed.</span>
           </label>
           <label>
             Auth provider
@@ -119,7 +152,7 @@ export default function TenantList() {
           </label>
           {fields.length === 0 ? (
             <p className="subtle" style={{ marginTop: 0 }}>
-              <code>db</code> needs no extra config — the username on the user
+              <code>db</code> needs no extra config - the username on the user
               record IS the identity.
             </p>
           ) : (
@@ -170,9 +203,9 @@ export default function TenantList() {
         </thead>
         <tbody>
           {tenants.map(t => (
-            <tr key={t.name} style={{ borderTop: '1px solid #eee', opacity: t.disabled ? 0.55 : 1 }}>
+            <tr key={t.id} style={{ borderTop: '1px solid #eee', opacity: t.disabled ? 0.55 : 1 }}>
               <td>
-                <Link to={`/tenant/${t.name}`}>{t.name}</Link>
+                <Link to={`/tenant/${t.id}`}>{t.displayName}</Link>
                 {t.disabled && <span className="subtle"> (disabled)</span>}
                 <div className="subtle" style={{ fontSize: '0.85em' }}>
                   <code>{t.id}</code>

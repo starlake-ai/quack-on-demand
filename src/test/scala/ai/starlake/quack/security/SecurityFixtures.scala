@@ -75,7 +75,6 @@ object SecurityFixtures:
     // Tenant
     s.upsertTenant(Tenant(
       id           = TenantId,
-      name         = TenantName,
       displayName  = TenantName,
       authProvider = "db"
     ))

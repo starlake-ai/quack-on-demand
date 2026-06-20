@@ -60,15 +60,15 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     val env   = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read  = (_: String) => Success(ValidYaml)
     DemoBootstrapHook.run(env, read, store).unsafeRunSync()
-    store.listTenants().map(_.name).toSet shouldBe Set("acme", "globex")
+    store.listTenants().map(_.id).toSet shouldBe Set("acme", "globex")
   }
 
   it should "skip import when a demo tenant already exists" in {
     val store = new InMemoryControlPlaneStore()
-    store.upsertTenant(Tenant(id = "t-pre", name = "acme", displayName = "acme"))
+    store.upsertTenant(Tenant(id = "t-pre", displayName = "acme"))
     val env  = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read = (_: String) => Success(ValidYaml)
     DemoBootstrapHook.run(env, read, store).unsafeRunSync()
     // 'globex' from the manifest must NOT have been added because the guard tripped on 'acme'.
-    store.listTenants().map(_.name).toSet shouldBe Set("acme")
+    store.listTenants().map(_.id).toSet shouldBe Set("acme")
   }
