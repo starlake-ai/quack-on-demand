@@ -37,7 +37,12 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
-import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource}
+import ai.starlake.quack.ondemand.auth.{
+  GrantsLookup,
+  ManagementAuthMode,
+  ManagementAuthModeResolver,
+  ManagementIdentitySource
+}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -334,6 +339,15 @@ object Main extends IOApp with LazyLogging:
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
     )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
+    // System scope (bare /ui/) login mode mirrors identitySource; per-tenant logins resolve their
+    // mode from the tenant's authProvider via the resolver below.
+    val systemAuthMode = identitySource match
+      case ManagementIdentitySource.Oidc => ManagementAuthMode.Oidc
+      case ManagementIdentitySource.Db   => ManagementAuthMode.Db
+    val authModeResolver = new ManagementAuthModeResolver(
+      loadTenant = id => sup.getTenantById(id),
+      systemMode = systemAuthMode
+    )
     val authUserStore: Option[UserStore] =
       Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
     val grantsForIdentity: GrantsLookup =
@@ -429,6 +443,7 @@ object Main extends IOApp with LazyLogging:
       tokens = sessionTokens,
       identitySource = identitySource,
       grantsForIdentity = grantsForIdentity,
+      authModeResolver = authModeResolver,
       cookieSecureOverride = cookieSecureOverride,
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
