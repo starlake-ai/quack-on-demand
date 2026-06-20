@@ -91,7 +91,16 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
   }
 
-  useEffect(() => { reloadGroups(); reloadTenantContext();
+  useEffect(() => {
+    // Empty the previous tenant's data before loading the new scope, so stale
+    // rows + detail don't linger during the fetch. Only on tenant change --
+    // mutation-triggered reloadGroups() calls keep the open detail pane.
+    setGroups([]);
+    setSelected(null);
+    setRoleCounts({});
+    setPoolCounts({});
+    reloadGroups();
+    reloadTenantContext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
