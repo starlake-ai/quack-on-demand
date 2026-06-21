@@ -118,7 +118,7 @@ pip install --user adbc_driver_flightsql adbc_driver_manager
 Run the bundled load tester as a one-shot client (defaults to the TPC-H workload against `acme`'s `tpch1` schema):
 
 ```bash
-python3 ./scripts/loadtest/loadtest.py \
+python3 ./scripts/tpch-load-test/tpch-load-test.py \
   --url grpc+tls://localhost:31338 --insecure \
   --user admin --password admin --superuser \
   --tenant acme --pool bi \
@@ -138,7 +138,7 @@ Each workload cycles a handful of representative queries (per-group aggregation,
 
 ```bash
 SF=1 ./scripts/load-tpcds-dbgen.sh                                            # seeds globex_tpcds.tpcds1
-python3 ./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi \
+python3 ./scripts/tpch-load-test/tpch-load-test.py --workload tpcds --tenant globex --pool bi \
   --user admin --password admin --superuser --insecure -w 4 -i 50
 ```
 

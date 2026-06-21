@@ -29,7 +29,7 @@ body:
       placeholder: |
         cp .env.example .env
         ./scripts/run-docker-compose.sh
-        ./scripts/loadtest/loadtest.py -w 2 -i 5
+        ./scripts/tpch-load-test/tpch-load-test.py -w 2 -i 5
     validations:
       required: true
 

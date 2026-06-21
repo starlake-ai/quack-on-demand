@@ -29,7 +29,7 @@ import java.sql.{DriverManager, PreparedStatement, SQLException}
   * [[queryNative]], which uses [[QuackProtocol]] to speak the Quack wire directly via the
   * libquackwire JNI shim. This removes the manager-side embedded-DuckDB + extension
   * upstream-connection cache from the request path (the source of the `Authentication failed` /
-  * `Invalid connection id` loadtest flaps). The lazy `nativeProtocol` ensures the JDK HttpClient is
+  * `Invalid connection id` tpch-load-test flaps). The lazy `nativeProtocol` ensures the JDK HttpClient is
   * only allocated when the flag is on, so the embedded path is byte-identical with the flag off.
   *
   * The class is named `QuackHttpClient` for historical compatibility with the surrounding code; the

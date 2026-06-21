@@ -94,7 +94,7 @@ cur.execute("SELECT count(*) FROM tpch1.customer")
 print(cur.fetchall())
 ```
 
-The `tenant` and `pool` are passed as per-RPC call headers through `RPC_CALL_HEADER_PREFIX`. A superuser keeps both headers in place and adds `hdr + "superuser": "true"`. The bundled `scripts/loadtest/loadtest.py` is a ready-made ADBC client built exactly this way; pass `--superuser` (or `LT_SUPERUSER=true`) when running it as the bootstrap `admin` user so the same gRPC header is forwarded. The runner cycles a curated TPC-H mix by default (`--workload tpch`, schema `tpch1`); pass `--workload tpcds` (schema `tpcds1`) to drive the TPC-DS benchmark against the `globex_tpcds` tenant-db seeded by `scripts/load-tpcds-dbgen.sh`.
+The `tenant` and `pool` are passed as per-RPC call headers through `RPC_CALL_HEADER_PREFIX`. A superuser keeps both headers in place and adds `hdr + "superuser": "true"`. The bundled `scripts/tpch-load-test/tpch-load-test.py` is a ready-made ADBC client built exactly this way; pass `--superuser` (or `LT_SUPERUSER=true`) when running it as the bootstrap `admin` user so the same gRPC header is forwarded. The runner cycles a curated TPC-H mix by default (`--workload tpch`, schema `tpch1`); pass `--workload tpcds` (schema `tpcds1`) to drive the TPC-DS benchmark against the `globex_tpcds` tenant-db seeded by `scripts/load-tpcds-dbgen.sh`.
 
 ## ODBC
 
