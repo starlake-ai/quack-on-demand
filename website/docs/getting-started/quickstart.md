@@ -115,7 +115,7 @@ Install the driver:
 pip install --user adbc_driver_flightsql adbc_driver_manager
 ```
 
-Run the bundled load tester as a one-shot client (defaults to the TPC-H workload against `acme`'s `tpch1` schema):
+Run the bundled `tpch-load-test` as a one-shot client (defaults to the TPC-H workload against `acme`'s `tpch1` schema):
 
 ```bash
 python3 ./scripts/tpch-load-test/tpch-load-test.py \
