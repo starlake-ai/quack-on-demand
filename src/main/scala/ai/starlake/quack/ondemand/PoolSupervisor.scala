@@ -8,6 +8,7 @@ import ai.starlake.quack.model.{
   Pool,
   PoolCohort,
   PoolKey,
+  Role,
   RoleDistribution,
   RunningNode,
   Tenant,
@@ -446,7 +447,7 @@ final class PoolSupervisor(
     // The tenant id is the one key: a normalized lowercase slug. The display
     // name is a free-form label (falls back to the id when blank).
     Names.normalizeOrError(t.id, "tenant id") match
-      case Left(err) => Left(err)
+      case Left(err)                                      => Left(err)
       case Right(id) if !id.headOption.exists(_.isLetter) =>
         Left(s"tenant id '$id' must start with a letter")
       case Right(id) =>
@@ -837,14 +838,38 @@ final class PoolSupervisor(
       case None        => IO.raiseError(new NoSuchElementException(s"pool not found: $key"))
       case Some(state) =>
         val poolId = poolIdByKey.getOrElse(key, "")
-        if targetSize > state.size then
-          val toAdd     = targetSize - state.size
-          val roles     = newDist.asRoleList.drop(state.size).take(toAdd)
+
+        // Reconcile per role against the ACTUAL roles of the running nodes,
+        // never a positional slice of `newDist.asRoleList`. The old
+        // `asRoleList.drop(state.size).take(toAdd)` assumed the existing nodes
+        // filled the first `state.size` entries of the new role list; because
+        // that list is ordered [WriteOnly, ReadOnly, Dual], adding one ReadOnly
+        // to a Dual-only pool dropped past the new ReadOnly and spawned a Dual.
+        // Diffing per role also lets one operation both add and remove (e.g.
+        // swapping a ReadOnly for a WriteOnly at constant size). Counts are read
+        // by name via `newDist.countFor`, never by slicing `asRoleList`.
+
+        // Surplus nodes of each over-provisioned role (newest first), and the
+        // deficit roles to spawn for each under-provisioned role.
+        val toRemove: List[RunningNode] = RoleDistribution.spawnOrder.flatMap { role =>
+          val have   = state.nodes.filter(_.role == role)
+          val excess = have.size - newDist.countFor(role)
+          if excess > 0 then have.takeRight(excess) else Nil
+        }
+        val rolesToAdd: List[Role] = RoleDistribution.spawnOrder.flatMap { role =>
+          List.fill((newDist.countFor(role) - state.nodes.count(_.role == role)).max(0))(role)
+        }
+
+        if toRemove.isEmpty && rolesToAdd.isEmpty then IO.pure(state.nodes)
+        else
           val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
-          val specs     = roles.zipWithIndex.map { case (role, i) =>
+          // Fresh ids start above the current high-water mark so they never
+          // collide with survivors during a mixed add/remove.
+          val baseIndex = state.size
+          val specs     = rolesToAdd.zipWithIndex.map { case (role, i) =>
             NodeSpec(
               key,
-              PoolSupervisor.nodeId(key, state.size + i + 1),
+              PoolSupervisor.nodeId(key, baseIndex + i + 1),
               role,
               state.metastore,
               state.s3,
@@ -853,38 +878,31 @@ final class PoolSupervisor(
               extraSetupSql = nodeExtra
             )
           }
-          specs
-            .foldLeft(IO.pure(state.nodes)) { (acc, spec) =>
-              acc.flatMap(rs => backend.start(spec).map(rs :+ _))
-            }
-            .flatMap { combined =>
-              pools.put(key, state.copy(nodes = combined, distribution = newDist))
-              updatePoolEntityDist(key, newDist, combined.size)
-              val added = combined.drop(state.nodes.size)
-              (if poolId.nonEmpty then
-                 added
-                   .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolId)))
-               else IO.unit).as(combined)
-            }
-        else if targetSize < state.size then
-          val toRemove  = state.nodes.takeRight(state.size - targetSize)
-          val remaining = state.nodes.dropRight(state.size - targetSize)
-          val stopAll   =
+          val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))
+
+          val stopRemoved =
             if force then toRemove.foldLeft(IO.unit)((acc, n) => acc *> backend.stop(n.nodeId))
             else
               toRemove.foldLeft(IO.unit) { (acc, n) =>
                 acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(n)
               }
-          stopAll *>
-            toRemove.foldLeft(IO.unit)((acc, n) =>
-              acc *> IO.blocking(store.deleteNode(n.nodeId))
-            ) *>
-            IO.delay {
-              pools.put(key, state.copy(nodes = remaining, distribution = newDist))
-              updatePoolEntityDist(key, newDist, remaining.size)
-              ()
-            }.as(remaining)
-        else IO.pure(state.nodes)
+          val deleteRemoved =
+            toRemove.foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.deleteNode(n.nodeId)))
+
+          stopRemoved *> deleteRemoved *>
+            specs
+              .foldLeft(IO.pure(survivors)) { (acc, spec) =>
+                acc.flatMap(rs => backend.start(spec).map(rs :+ _))
+              }
+              .flatMap { combined =>
+                pools.put(key, state.copy(nodes = combined, distribution = newDist))
+                updatePoolEntityDist(key, newDist, combined.size)
+                val added = combined.drop(survivors.size)
+                (if poolId.nonEmpty then
+                   added
+                     .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolId)))
+                 else IO.unit).as(combined)
+              }
 
   def stopPool(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match
