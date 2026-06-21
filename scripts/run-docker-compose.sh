@@ -377,6 +377,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
           postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
   done
 
+  # TEMP_DIR overrides the loader's default ($REPO_DIR/.tmp = /app/.tmp inside
+  # the image). /app is root-owned but the container runs as `quack`, so the
+  # default mkdir fails with "Permission denied". /app/ducklake is chowned to
+  # quack in the Dockerfile, so anchor DuckDB's spill dir there instead.
   if [[ "$_want_tpch" == "1" ]]; then
     echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$LOAD_TPCH) via docker compose exec quack ..."
     docker compose -f "$COMPOSE_FILE" exec \
@@ -387,6 +391,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
       -e DB_NAME="acme_tpch" \
       -e SCHEMA_NAME="tpch1" \
       -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCH" \
       quack /app/scripts/load-tpch-dbgen.sh
   fi
@@ -401,6 +406,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
       -e DB_NAME="globex_tpcds" \
       -e SCHEMA_NAME="tpcds1" \
       -e DATA_PATH="/app/ducklake/globex_tpcds" \
+      -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCDS" \
       quack /app/scripts/load-tpcds-dbgen.sh
   fi
