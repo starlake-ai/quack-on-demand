@@ -89,6 +89,38 @@ OAuthConfig = [
 
 The IdP must have a **public client** (no secret) with **PKCE = S256** and the redirect URI `https://oauth.powerbi.com/views/oauthredirect.html` registered. Legacy Keycloak prefixes every path with `/auth` (e.g. `https://<host>/auth/realms/qod/...`). See [Authenticating](/connecting/authenticating) for the provider-side setup and the Quack-side token-trust configuration.
 
+`RedirectUri` stays constant; swap the endpoints + `ClientId` for your provider. Ready-to-paste examples (also in the `src/QoD.pq` header comments):
+
+**Microsoft Entra ID (Azure AD), v2.0** - `{tenant}` = directory GUID or `organizations`; public client + PKCE; scope must include `offline_access` for refresh tokens:
+
+```m
+    AuthorizeUrl = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
+    TokenUrl     = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+    LogoutUrl    = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/logout",
+    ClientId     = "{application-client-id}",
+    Scope        = "openid profile email offline_access",
+```
+
+**AWS Cognito** (Hosted UI - needs an App client + a Cognito domain); `{domain}` = your prefix/custom domain, `{region}` = e.g. `eu-west-1`. Cognito issues a refresh token for the auth-code grant automatically (`offline_access` accepted but not required):
+
+```m
+    AuthorizeUrl = "https://{domain}.auth.{region}.amazoncognito.com/oauth2/authorize",
+    TokenUrl     = "https://{domain}.auth.{region}.amazoncognito.com/oauth2/token",
+    LogoutUrl    = "https://{domain}.auth.{region}.amazoncognito.com/logout",
+    ClientId     = "{app-client-id}",
+    Scope        = "openid profile email",
+```
+
+**Google Identity** (OAuth client of type "Web application"). Note: Google does **not** use the `offline_access` scope - it returns a refresh token only when the authorize request carries `access_type=offline` (+ `prompt=consent`), so refresh needs a connector tweak; the `LogoutUrl` is token revocation (best-effort):
+
+```m
+    AuthorizeUrl = "https://accounts.google.com/o/oauth2/v2/auth",
+    TokenUrl     = "https://oauth2.googleapis.com/token",
+    LogoutUrl    = "https://oauth2.googleapis.com/revoke",
+    ClientId     = "{client-id}.apps.googleusercontent.com",
+    Scope        = "openid profile email",
+```
+
 **3. Package the `.mez`** - zip `QoD.pq`, `resources.resx` and the icon PNGs at the **root** of the archive (not inside a subfolder).
 
 Windows (PowerShell):
@@ -131,7 +163,9 @@ Export-PfxCertificate -Cert $cert -FilePath code-signing.pfx -Password $pw   # p
 Export-Certificate    -Cert $cert -FilePath qod-codesign.cer                 # public, for the trust store
 ```
 
-**2. Sign** the `.mez` into a `.pqx` with the Power Query SDK's `MakePQX`:
+**2. Sign** the `.mez` into a `.pqx` with `MakePQX`.
+
+`MakePQX` ships with the **Power Query SDK** - install the [Power Query SDK extension](https://marketplace.visualstudio.com/items?itemName=PowerQuery.vscode-powerquery-sdk) in VS Code (or the [`Microsoft.PowerQuery.SdkTools` NuGet package](https://www.nuget.org/packages/Microsoft.PowerQuery.SdkTools)). It drops `MakePQX.exe` under the SDK tools folder (e.g. `%USERPROFILE%\.vscode\extensions\powerquery.vscode-powerquery-sdk-*\.nuget\Microsoft.PowerQuery.SdkTools.*\tools\`); add that to `PATH` or call it by full path.
 
 ```sh
 MakePQX pack --mez QoD.mez --target QoD.pqx --certificate code-signing.pfx --password changeit
