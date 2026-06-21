@@ -81,7 +81,7 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-dema
 > QOD_NATIVE_CLIENT=false LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 > ```
 
-That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / loadtest `--tenant`/`--pool` flag).
+That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db (catalog DB `tpch_tpch1`) and a `sales` pool of 3 nodes (WO/RO/Dual), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into schema `tpch1`. The admin UI is on `http://localhost:20900/ui/`. Log in as `admin` (or the equivalent `admin@localhost.local`; `QOD_ADMIN_USERNAME` is a comma-separated list) with password `admin`. Change both before exposing anything beyond `localhost`. The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales` (JDBC URL param / ADBC call-header / tpch-load-test `--tenant`/`--pool` flag).
 
 **Prefer a bare-JVM run?** `./scripts/run-jar.sh` downloads the latest released uber-jar, probes Postgres, and `exec`s `java -jar` with the Arrow allocator pinned. `BUILD=1 ./scripts/run-jar.sh` builds from this checkout first. See [`RUNNING.md`](guides/RUNNING.md) for the full native path (external Postgres, env vars, TLS).
 
@@ -101,10 +101,10 @@ pip install adbc_driver_flightsql adbc_driver_manager
 
 # TLS-on server (compose default). --tenant/--pool default to tpch/sales
 # (matching the bootstrap), so no flags are needed for the demo path.
-python3 ./scripts/loadtest/loadtest.py -w 2 -i 5
+python3 ./scripts/tpch-load-test/tpch-load-test.py -w 2 -i 5
 
 # Plaintext server (TLS=false in .env, or scripts/run-docker.sh default)
-./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+./scripts/tpch-load-test/tpch-load-test.py --url grpc://localhost:31338 -w 2 -i 5
 ```
 
 Expected tail: a healthy first run looks like this (numbers depend on `-w`/`-i` and hardware):
@@ -149,7 +149,7 @@ Latency  p50:     ~60 ms
 **Browse the admin UI (optional) - 10 seconds**
    Open http://localhost:20900/ui/ in a browser. Log in as admin / admin
 
-Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full loadtest parameter table, and the [operator's pre-prod checklist](guides/RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](guides/RUNNING.md)**. REST API reference is in **[`API.md`](guides/API.md)**.
+Everything else - native run, Docker against an external Postgres, TPC-H seeding, corporate proxy setup, JDBC client configuration, the full tpch-load-test parameter table, and the [operator's pre-prod checklist](guides/RUNNING.md#operational-notes) - lives in **[`RUNNING.md`](guides/RUNNING.md)**. REST API reference is in **[`API.md`](guides/API.md)**.
 
 ---
 

@@ -11,16 +11,16 @@ Dependencies:
     pip install adbc_driver_flightsql adbc_driver_manager
 
 Usage (tenant + pool are required; pass them or set LT_TENANT / LT_POOL):
-    ./scripts/loadtest/loadtest.py --tenant acme --pool bi
-    ./scripts/loadtest/loadtest.py --tenant acme --pool bi -w 32 -i 500
-    LT_QUERY='SELECT 1' ./scripts/loadtest/loadtest.py --tenant acme --pool bi
-    ./scripts/loadtest/loadtest.py --tenant acme --pool bi \
+    ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
+    ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi -w 32 -i 500
+    LT_QUERY='SELECT 1' ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
+    ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi \
         --url grpc+tls://localhost:31338 --insecure
-    ./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
+    ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi --superuser
 
     # TPC-DS workload against the globex demo (schema=tpcds1, populated by
     # scripts/load-tpcds-dbgen.sh):
-    ./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi
+    ./scripts/tpch-load-test/tpch-load-test.py --workload tpcds --tenant globex --pool bi
 """
 from __future__ import annotations
 

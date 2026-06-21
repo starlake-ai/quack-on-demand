@@ -64,4 +64,4 @@ Runs a single manager container against an external Postgres (requires `PG_HOST`
 - `load-tpch-dbgen.sh` - seed TPC-H into the `acme_tpch` tenant-db (invoked by the boot scripts via `LOAD_TPCH` or the legacy `LOAD_TPC`, or run directly inside a running container).
 - `load-tpcds-dbgen.sh` - seed TPC-DS into the `globex_tpcds` tenant-db (invoked by the boot scripts via `LOAD_TPCDS` or the legacy `LOAD_TPC`, or run directly inside a running container).
 - `spawn-quack-node.sh` - spawns one Quack node. Invoked by `LocalQuackBackend` with the right port, token, and metastore contract; do not run it directly.
-- `loadtest/loadtest.py` - the bundled ADBC load tester, usable as a one-shot client. Cycles a curated TPC-H or TPC-DS mix; switch via `--workload tpch` (default) / `--workload tpcds`. See [Connecting clients](/connecting/clients).
+- `tpch-load-test/tpch-load-test.py` - the bundled ADBC load tester, usable as a one-shot client. Cycles a curated TPC-H or TPC-DS mix; switch via `--workload tpch` (default) / `--workload tpcds`. See [Connecting clients](/connecting/clients).

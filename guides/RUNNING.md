@@ -324,13 +324,13 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge end-to-end.
 #    --tenant/--pool default to tpch/sales (the bootstrap), no flag needed.
-./scripts/loadtest/loadtest.py -w 2 -i 5
+./scripts/tpch-load-test/tpch-load-test.py -w 2 -i 5
 ```
 
 Verified path on a fresh boot: TPC-H at scale factor 1 -> ~313 MB of
 parquet under `./seaweedfs/` (the manager derives `s3://ducklake/tpch_tpch1/`
 from the `QOD_DUCKLAKE_DATA_PATH=s3://ducklake/tpch` root + the bootstrap
-tenant-db name). Loadtest 10/10 OK at p50 ~60 ms over TLS.
+tenant-db name). tpch-load-test 10/10 OK at p50 ~60 ms over TLS.
 
 Persistence: `./seaweedfs/` on the host (parquet) and
 `./seaweedfs-config/s3.json` (gateway credentials). `NUKE=1
@@ -381,7 +381,7 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 
 # 3. Smoke-test the FlightSQL edge.
 #    --tenant/--pool default to tpch/sales (the bootstrap), no flag needed.
-./scripts/loadtest/loadtest.py -w 2 -i 5
+./scripts/tpch-load-test/tpch-load-test.py -w 2 -i 5
 ```
 
 `spawn-quack-node.sh` and `load-tpch-dbgen.sh` use the same S3-secret
@@ -662,7 +662,7 @@ Once the manager is up:
 
   > **URL scheme must match the server's TLS setting.** Native and the
   > shipped compose `.env.example` both default to TLS **on**, so
-  > `grpc+tls://localhost:31338` (the loadtest default) works out of the
+  > `grpc+tls://localhost:31338` (the tpch-load-test default) works out of the
   > box. The `run-docker.sh` path defaults to TLS **off** - pass
   > `--url grpc://localhost:31338` against it. Mismatch surfaces as
   > *"tls: first record does not look like a TLS handshake"* (client TLS
@@ -673,28 +673,28 @@ Once the manager is up:
   pip install adbc_driver_flightsql adbc_driver_manager
 
   # Tiny smoke test (TLS-on default - works for native and shipped compose)
-  python ./scripts/loadtest/loadtest.py -w 2 -i 5
+  python ./scripts/tpch-load-test/tpch-load-test.py -w 2 -i 5
 
   # Same against a plaintext server (run-docker.sh default, or TLS=false)
-  python ./scripts/loadtest/loadtest.py --url grpc://localhost:31338 -w 2 -i 5
+  python ./scripts/tpch-load-test/tpch-load-test.py --url grpc://localhost:31338 -w 2 -i 5
 
   # Slightly heavier (with seeded auth)
   LT_USER=admin LT_PASSWORD=change-me \
-    python ./scripts/loadtest/loadtest.py -w 4 -i 20
+    python ./scripts/tpch-load-test/tpch-load-test.py -w 4 -i 20
 
   # Heavy: 32 concurrent sessions x 200 iterations = 6400 queries.
   # Bigger warmup so the pool is steady-state before we start counting.
   LT_USER=admin LT_PASSWORD=change-me \
-    ./scripts/loadtest/loadtest.py -w 32 -i 200 --warmup 20
+    ./scripts/tpch-load-test/tpch-load-test.py -w 32 -i 200 --warmup 20
 
   # Stress: 64 sessions x 500 iterations = 32000 queries against TPC-H at scale factor 10.
   # Expect minutes of runtime; watch the manager UI for pool scaling and
   # per-node QPS while it runs.
   LT_USER=admin LT_PASSWORD=change-me \
-    ./scripts/loadtest/loadtest.py -w 64 -i 500 --warmup 50
+    ./scripts/tpch-load-test/tpch-load-test.py -w 64 -i 500 --warmup 50
 
   # Custom URL, single query
-  ./scripts/loadtest/loadtest.py --url grpc+tls://host:31338 -q 'SELECT 1' -w 2 -i 5
+  ./scripts/tpch-load-test/tpch-load-test.py --url grpc+tls://host:31338 -q 'SELECT 1' -w 2 -i 5
   ```
 
   Parameters (each has a matching `LT_*` env var):
@@ -726,7 +726,7 @@ See the README for credentials, default login, and the full feature tour.
 Defaults and design choices an operator should be aware of before going to production:
 
 - **FlightSQL edge is authenticated by default; the admin password is `admin`.** `auth.database.enabled = true` and the manager seeds `qodstate_user` with the configured admin (as a superuser: `tenant IS NULL`) at boot. The default credentials (`admin@localhost.local / admin`) are fine for first-run; **rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.**
-- **Every FlightSQL client scopes by tenant + pool at handshake.** Even the superuser admin must pass `tenant` + `pool` gRPC headers (JDBC URL params, ODBC `adbc.flight.sql.rpc.call_header.*`, ADBC `RPC_CALL_HEADER_PREFIX` db_kwargs, loadtest `--tenant`/`--pool`); the routing layer needs them to pick a pool. The per-statement RBAC gate has the superuser bypass, the routing handshake does not.
+- **Every FlightSQL client scopes by tenant + pool at handshake.** Even the superuser admin must pass `tenant` + `pool` gRPC headers (JDBC URL params, ODBC `adbc.flight.sql.rpc.call_header.*`, ADBC `RPC_CALL_HEADER_PREFIX` db_kwargs, tpch-load-test `--tenant`/`--pool`); the routing layer needs them to pick a pool. The per-statement RBAC gate has the superuser bypass, the routing handshake does not.
 - **REST API is OPEN by default.** The control-plane REST API (`/api/...`) is a separate gate. Until you set `QOD_API_KEY`, anonymous requests are accepted. The manager logs a loud warning at startup. Set the env var, or restrict the listening interface, before exposing the manager beyond `localhost`.
 - **DML / DDL grants are coarse-grained.** `INSERT`/`UPDATE`/`DELETE` and `CREATE`/`DROP` are denied unless the principal holds a covering wildcard permission. Per-table DML grants need the SQL `TableExtractor` to also walk non-SELECT statements; today it only enumerates reads.
 - **K8s reconciliation is conservative.** Local mode detects dead child PIDs at startup and respawns; K8s mode trusts the apiserver's liveness probe (pods without a Linux PID are kept as-is, with the `HealthProbe` catching drift after one tick). Implementing pod-status reconciliation requires `KubernetesQuackBackend.discoverExisting()` to wire into the apiserver.

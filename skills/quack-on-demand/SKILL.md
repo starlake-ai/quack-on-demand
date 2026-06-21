@@ -20,7 +20,7 @@ Use this skill when the user wants to:
 
 - `scripts/run-jar.sh` - boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
 - `scripts/stop-jar.sh` - SIGTERM → wait → SIGKILL
-- `scripts/loadtest/loadtest.py` - Python FlightSQL load tester (ADBC driver)
+- `scripts/tpch-load-test/tpch-load-test.py` - Python FlightSQL load tester (ADBC driver)
 - `scripts/adbc.sh` - run one SQL query against the FlightSQL edge and print it as a table (ADBC driver, self-provisioning venv)
 - `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
 - `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
@@ -300,32 +300,32 @@ Flags: `--url` (required), `--user` / `--password` (or `LT_USER` / `LT_PASSWORD`
 
 ```bash
 # Defaults: 8 workers × 100 iterations against the live edge (TLS on)
-./scripts/loadtest/loadtest.py --tenant acme --pool bi
+./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
 
 # Higher concurrency
-./scripts/loadtest/loadtest.py --tenant acme --pool bi \
+./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi \
   --workers 24 --iterations 50 --warmup 5
 
 # Custom credentials / URL
 LT_USER=alice LT_PASSWORD=secret \
-  ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+  ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
 
 # Or pin tenant/pool via env vars
-LT_TENANT=acme LT_POOL=bi ./scripts/loadtest/loadtest.py
+LT_TENANT=acme LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
 
 # Single query repeated
 LT_QUERY='SELECT count(*) FROM lineitem' \
-  ./scripts/loadtest/loadtest.py --tenant acme --pool bi
+  ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
 
 # System-realm login (bootstrap `admin`, qodstate_user.tenant IS NULL).
 # Adds the `superuser=true` gRPC header; tenant/pool still drive routing.
-./scripts/loadtest/loadtest.py --tenant acme --pool bi --superuser
-LT_SUPERUSER=true LT_TENANT=acme LT_POOL=bi ./scripts/loadtest/loadtest.py
+./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi --superuser
+LT_SUPERUSER=true LT_TENANT=acme LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
 
 # TPC-DS workload (requires `scripts/load-tpcds-dbgen.sh` to have seeded the
 # globex_tpcds tenant-db; --schema defaults to tpcds1 to match the SF=1 seed).
-./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi
-LT_WORKLOAD=tpcds LT_TENANT=globex LT_POOL=bi ./scripts/loadtest/loadtest.py
+./scripts/tpch-load-test/tpch-load-test.py --workload tpcds --tenant globex --pool bi
+LT_WORKLOAD=tpcds LT_TENANT=globex LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
 ```
 
 Reports throughput, success rate, latency percentiles (p50/p95/p99). Two curated workloads ship:

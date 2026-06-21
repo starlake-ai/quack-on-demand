@@ -278,21 +278,21 @@ Swap `username=admin password=admin` for `reader/reader` to exercise the non-sup
 
 ## Run a load test
 
-[`scripts/loadtest/loadtest.py`](../../../scripts/loadtest/loadtest.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
+[`scripts/tpch-load-test/tpch-load-test.py`](../../../scripts/tpch-load-test/tpch-load-test.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
 
 ```bash
 # In one terminal:
 kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
 
 # In another -- defaults (8 workers x 100 iterations, TPC-H mix on schema tpch1):
-./scripts/loadtest/loadtest.py
+./scripts/tpch-load-test/tpch-load-test.py
 
 # Heavier mix:
-./scripts/loadtest/loadtest.py --workers 24 --iterations 50 --warmup 5
+./scripts/tpch-load-test/tpch-load-test.py --workers 24 --iterations 50 --warmup 5
 
 # Single query, no warmup, count-only:
 LT_QUERY='SELECT count(*) FROM tpch1.lineitem' \
-  ./scripts/loadtest/loadtest.py --iterations 200 --warmup 0
+  ./scripts/tpch-load-test/tpch-load-test.py --iterations 200 --warmup 0
 ```
 
 Defaults the script picks up via env vars (override on the CLI as shown):
@@ -321,4 +321,4 @@ The script auto-`pip install`s `adbc_driver_flightsql adbc_driver_manager pyarro
 
 - Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state - that's a feature for a smoke rig.
 - By default (`BUILD=0`) the script reuses the local `:local`-tagged images, pulling `:latest-snapshot` from Docker Hub if they're absent. Set `BUILD=1` to rebuild from the local Dockerfile (cached layers make reruns fast once JDK + sbt deps are cached).
-- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `LT_INSECURE=true` for `loadtest.py`). Production deploys should mount a CA-signed cert via the chart's `flightsql.tls.existingSecret` value (which sets the manager's `PROXY_TLS_CERT_CHAIN` / `PROXY_TLS_PRIVATE_KEY` env vars to the mounted chain + key paths).
+- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `LT_INSECURE=true` for `tpch-load-test.py`). Production deploys should mount a CA-signed cert via the chart's `flightsql.tls.existingSecret` value (which sets the manager's `PROXY_TLS_CERT_CHAIN` / `PROXY_TLS_PRIVATE_KEY` env vars to the mounted chain + key paths).

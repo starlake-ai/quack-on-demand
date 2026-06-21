@@ -30,7 +30,7 @@
 #   API_KEY          REST API X-API-Key                     (unset = open API + warning)
 #
 #   TLS              "true" to enable FlightSQL edge TLS    (default false)
-#                    With false, loadtest needs --url grpc://...
+#                    With false, tpch-load-test needs --url grpc://...
 #
 #   MANAGER_PORT     host port -> manager REST + UI         (default 20900)
 #   EDGE_PORT        host port -> FlightSQL edge            (default 31338)
