@@ -156,6 +156,28 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.scale(key, targetSize = 3, RoleDistribution(0, 2, 1), force = false).unsafeRunSync()
     sup.get(key).get.nodes.size shouldBe 3
 
+  it should "add the role the caller asked for, not a positional slice" in:
+    // Regression: scaling a Dual-only pool up to {readonly:1, dual:1} used to
+    // spawn a second Dual, because `asRoleList.drop(size)` skipped past the new
+    // ReadOnly entry ([... ReadOnly, Dual]) and landed on the trailing Dual.
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.scale(key, targetSize = 2, RoleDistribution(0, 1, 1), force = false).unsafeRunSync()
+    val roles = sup.get(key).get.nodes.map(_.role)
+    roles.count(_ == Role.ReadOnly) shouldBe 1
+    roles.count(_ == Role.Dual) shouldBe 1
+
+  it should "swap a node's role in place when the size is unchanged" in:
+    // {readonly:1, dual:1} -> {writeonly:1, dual:1}: same size, but the ReadOnly
+    // must be replaced by a WriteOnly rather than left untouched.
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    sup.scale(key, targetSize = 2, RoleDistribution(1, 0, 1), force = true).unsafeRunSync()
+    val roles = sup.get(key).get.nodes.map(_.role)
+    roles.count(_ == Role.WriteOnly) shouldBe 1
+    roles.count(_ == Role.ReadOnly) shouldBe 0
+    roles.count(_ == Role.Dual) shouldBe 1
+
   it should "remove nodes when target < current (graceful by default)" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 3, 0)).unsafeRunSync()
