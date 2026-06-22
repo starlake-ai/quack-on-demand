@@ -47,6 +47,19 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# ---- Purge Metals Scala-CLI scratch builds -------------------------------
+# Metals' interactive Scala-CLI / worksheet feature writes `.metals-scala-cli/`
+# scratch dirs (with their own `.scala-build/` + `.bloop/`) next to whatever
+# source file it ran on, compiled with Metals' OWN Scala version - which can be
+# newer than this build's 3.7.4. sbt copies their `.tasty` into target/classes,
+# and Scala 3 scaladoc walks that tree in from-tasty mode during publishSigned's
+# doc step. A 28.8 TASTy (Scala 3.8.x) there makes the 3.7.4 dottydoc abort with
+# "Forward incompatible TASTy file has version 28.8". The release skips `clean`,
+# so these survive into the publish. Nuke them up-front, in both src/ and target/.
+echo "purging Metals Scala-CLI scratch dirs (.metals-scala-cli / .scala-build)..."
+find src target -type d \( -name '.metals-scala-cli' -o -name '.scala-build' \) \
+  -prune -exec rm -rf {} + 2>/dev/null || true
+
 REGISTRY_IMAGE="${REGISTRY_IMAGE:-starlakeai/quack-on-demand}"
 NO_DOCKER="${NO_DOCKER:-0}"
 
