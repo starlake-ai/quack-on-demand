@@ -296,6 +296,17 @@ else
     major="$(echo "$release_version" | cut -d. -f1)"
     echo "building multi-arch image ($REGISTRY_IMAGE:$release_version + $minor + $major + latest)..."
 
+    # The image builds the assembly from source, so the jar version and the
+    # libquackwire coordinate come from version.sbt / build.sbt in the build
+    # context. By now both have been bumped to the next -SNAPSHOT (and that
+    # libquackwire snapshot isn't published anywhere yet), so building from the
+    # working tree would bake a -SNAPSHOT jar into the :$release_version image
+    # and fail `sbt update` resolving the unpublished libquackwire snapshot.
+    # Materialize the released versions from the v$release_version tag for the
+    # duration of the build, then restore the working tree (trap covers errors).
+    git checkout "v$release_version" -- build.sbt version.sbt
+    trap 'git checkout HEAD -- build.sbt version.sbt' EXIT
+
     if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
       echo "$DOCKER_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
     fi
@@ -314,6 +325,9 @@ else
       --push \
       .
     echo "pushed: $REGISTRY_IMAGE:$release_version (+ $minor + $major + latest)"
+
+    git checkout HEAD -- build.sbt version.sbt
+    trap - EXIT
   fi
 fi
 
