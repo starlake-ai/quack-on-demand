@@ -1,11 +1,35 @@
 # Changelog
 
-## 0.3.3-SNAPSHOT
+## 0.3.3
 
 ### Security
 
-- Row leval security support on SELECT statements 
+- **Row-level security.** Per-role row policies - a boolean SQL predicate authored via REST, the admin UI's Role "Row policy" tab, or a YAML manifest - are enforced on every SELECT before it reaches a Quack node. The gateway rewrites the query to fold the policy predicate into the statement's WHERE so a role only ever sees the rows its predicate admits; superusers bypass, matching the table- and column-level ACLs. New `qodstate_role_row_policy` table (Liquibase changelog `0013`), `RoleRowPolicy` model, an `EffectiveSet` row-policy field, REST + effective-set + manifest plumbing, a demo policy seeded on `acme/analyst`, and an `adbc.sh` query helper to exercise it. Documented in the rbac-model guide.
 
+### Admin-UI authentication (OIDC SSO)
+
+- **OIDC single sign-on for the admin UI.** Provider-agnostic OpenID Connect discovery (Keycloak, Google, Azure, AWS) drives an authorize / callback / end-session flow protected by a signed state token and PKCE. New `OidcSsoService` plus `AuthHandlers.oidcStart/oidcCallback/oidcLogout` (system scope, superuser-only); `auth.management.publicBaseUrl` builds the redirect URIs; `/api/config/client` surfaces `identitySource` + `ssoProviderName` so the UI shows a pure-SSO login branch when `identitySource=oidc`. Open-redirect guard and PKCE-verifier round-trip are test-covered. The Helm chart gains admin-UI OIDC SSO config and a local-stack demo.
+- **Per-tenant admin-UI login mode.** `GET /api/auth/mode` resolves the login mode (local password vs OIDC SSO) per tenant via `ManagementAuthModeResolver`; the UI queries it on the login screen so different tenants can present different flows. `mintSessionFor` keys grant derivation on the resolved per-scope mode, and `identitySource` is now a system-scope-only concept.
+- **Keycloak split-horizon bearer validation.** A Keycloak issuer override lets a bearer minted against an internal issuer URL validate when discovery advertises a public one. FlightSQL identity now maps from `preferred_username` (not `sub`), and `x-qod-superuser` is accepted as an alias of the superuser flag.
+
+### FlightSQL edge - Power BI / ODBC compatibility
+
+- **Apache Arrow Flight SQL ODBC driver compatibility (Power BI).** Conformance fixes for the Arrow Flight SQL ODBC driver: `GetSchema` for query commands, `parameter_schema` set on Prepare results (empty = 0 params), `FlightSqlServerTransaction=NONE` instead of `TRANSACTION`, R7/R12 conformance, per-RPC auth on `DoGet`, `x-qod-authorization` accepted as an alias for `Authorization`, and `LIKE` (not `=`) for the catalog filter in `getStreamSchemas` / `getStreamTables`. Adds a Power BI connector install/connect guide, the signed `.pqx` + self-signed cert path, and per-provider OAuth (Azure / AWS / Google) docs.
+- **Literal DML / DDL over FlightSQL.** `INSERT` / `UPDATE` / `DELETE` and DDL statements execute over the Flight SQL update path; the result advertises a `Count` schema so ADBC accepts the stream.
+
+### Features
+
+- **Per-pool `initSql`.** SQL set on a pool is prepended to the federation blob at node spawn (Liquibase changelog `0011`), so every node in the pool runs operator-supplied setup before serving queries.
+- **Remote-access local stack.** `PUBLIC_HOST`, a NodePort on `31338`, and Power BI OAuth wiring let the kind-based local stack be reached from off-box clients.
+
+### Fixes and internals
+
+- **Tenant slug as the single key.** A tenant's slug id is now the one identity key, decoupled from its display name; fixtures and specs realigned.
+- **Caches moved to Caffeine.** The RBAC effective-set cache and `GoogleGroupsLookup.groupsCache` migrated from `ConcurrentHashMap` to bounded Caffeine caches.
+- **UI clears the prior tenant's data on tenant switch** in the Users screen.
+- **`run-docker-compose.sh` made bash 3.2 compatible**; the truncated `scopes` value in the Helm `values-local-stack.yaml` fixed.
+- **Release hardening.** `scripts/release.sh` now purges stray Metals Scala-CLI scratch dirs before building (a Scala 3.8 TASTy left under the source tree broke `Compile / doc` during `publishSigned`) and builds the Docker image from the `v<version>` tag rather than the post-release `-SNAPSHOT` working tree.
+- Node distribution display uses the user name instead of the node position.
 
 ## 0.3.2
 
