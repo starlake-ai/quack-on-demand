@@ -58,10 +58,10 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 // JNI shim native binaries published as classifier-per-platform jars.
 //
 // Version format:  <duckdb-abi>-<duckdb-quack-short-sha>-<rev>[-SNAPSHOT]
-// Example:         1.5.3-87cd65b912a8-1-SNAPSHOT
+// Example:         1.5.4-40de7badae41-1-SNAPSHOT
 //
 //   duckdb-abi              the DuckDB libduckdb release the C++ shim
-//                           links against (1.5.3)
+//                           links against (1.5.4)
 //   duckdb-quack-short-sha  the pinned `native/quackwire/thirdparty/
 //                           duckdb-quack` commit
 //   rev                     monotonic patch number; bumps each time we
@@ -76,7 +76,7 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
-val libquackwireVersion = "1.5.3-87cd65b912a8-6-SNAPSHOT"
+val libquackwireVersion = "1.5.4-40de7badae41-1-SNAPSHOT"
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(

@@ -18,7 +18,7 @@
 FROM debian:bookworm-slim AS base
 
 ARG TARGETARCH
-ARG DUCKDB_VERSION=1.5.3
+ARG DUCKDB_VERSION=1.5.4
 
 RUN <<EOF
 set -eu
