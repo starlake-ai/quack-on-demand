@@ -51,7 +51,7 @@ the cached binaries are trivial to keep across runs (the cache survives
 
 Overrides:
 
-- `DUCKDB_VERSION=1.5.3` to pin a specific DuckDB release explicitly.
+- `DUCKDB_VERSION=1.5.4` to pin a specific DuckDB release explicitly.
 - `DUCKDB_CACHE_DIR=/var/cache/qod-duckdb` to relocate the cache.
 - For air-gapped / CI runs: pre-populate
   `$DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}` with the right binaries

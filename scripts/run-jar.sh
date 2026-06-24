@@ -50,7 +50,7 @@
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
 #                                 the native-jar path.                  (default 0)
 #
-#   DUCKDB_VERSION                pin a specific DuckDB release (e.g. 1.5.3).
+#   DUCKDB_VERSION                pin a specific DuckDB release (e.g. 1.5.4).
 #                                 Default = derived from build.sbt's
 #                                 libquackwireVersion so the CLI and libquackwire
 #                                 stay ABI-compatible. The script always installs
@@ -126,7 +126,7 @@ ensure_duckdb() {
     version="$(grep -E '^val libquackwireVersion' "$REPO_DIR/build.sbt" \
       | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
   fi
-  version="${version:-1.5.3}"
+  version="${version:-1.5.4}"
 
   local cache="$DUCKDB_CACHE_DIR/$version"
   local bin_dir="$cache/bin"
