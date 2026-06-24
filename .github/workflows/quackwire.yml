@@ -177,7 +177,8 @@ jobs:
   # -----------------------------------------------------------------------
   # 2. Publish per-platform classifier jars to Sonatype Central snapshots
   # -----------------------------------------------------------------------
-  # Only runs on push-to-main. Stages each platform binary into
+  # Runs on push-to-main and on manual workflow_dispatch from main.
+  # Stages each platform binary into
   # libquackwire/binaries/<platform>/ and runs `sbt libquackwire/publish`.
   # Mirrors the manager's `.github/workflows/snapshot.yml` pattern:
   # plain `publish` (no GPG signing required), targets Central snapshots
@@ -189,7 +190,9 @@ jobs:
   publish-central:
     name: publish libquackwire to Sonatype Central snapshots
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
