@@ -98,7 +98,7 @@ The Tenants page shows the two bootstrap tenants, `acme` and `globex`. Opening e
 Install the Apache Arrow Flight SQL JDBC driver (`org.apache.arrow:flight-sql-jdbc-driver`, available on Maven Central). In DBeaver, create a new connection and paste this URL directly into the JDBC URL field:
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi&superuser=true
 ```
 
 Set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
@@ -106,6 +106,8 @@ Set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
 The `disableCertificateVerification=true` parameter is required because the gateway starts with an auto-generated self-signed certificate (see the TLS guide for how to supply a CA-signed cert and remove that flag).
 
 The `tenant=acme&pool=bi` parameters are routing headers: the FlightSQL edge requires both to resolve which pool services the connection. Swap in `tenant=globex&pool=bi` to drive the TPC-DS demo instead.
+
+The `superuser=true` parameter is required when login as admin/admin.
 
 ### Python (ADBC)
 
