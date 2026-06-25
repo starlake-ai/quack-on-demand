@@ -94,8 +94,13 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
   -d '{"tenant":"acme","pool":"sales","targetSize":6,
        "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
 
-# Stop a pool (force=true skips graceful drain)
+# Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","pool":"sales","force":true}'
+
+# Delete a pool: stops nodes AND removes the pool from the registry
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","pool":"sales","force":true}'
 
@@ -345,7 +350,7 @@ The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager p
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `stop` + `start` (reconcile respawns) |
 | `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via the role-permission API or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
-| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/stop` + `pool/create` |
+| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/delete` + `pool/create` |
 | Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |
 | Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See README "Behind a corporate proxy". |
 
