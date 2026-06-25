@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.unsafe.IORuntime
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.memory.BufferAllocator
-import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.{VectorLoader, VectorSchemaRoot, VectorUnloader}
 import org.apache.arrow.vector.dictionary.Dictionary
 import org.apache.arrow.vector.ipc.ArrowReader
 
@@ -257,17 +257,46 @@ private[adapter] final class ChainedQuackArrowReader(
   private val moreFetchPending: AtomicBoolean = AtomicBoolean(initialNeedsMoreFetch)
   private val closed: AtomicBoolean           = AtomicBoolean(false)
 
+  // One STABLE root for the whole chained stream. Each child reader (the
+  // initial PREPARE_RESPONSE plus every FETCH_RESPONSE) imports its own
+  // `VectorSchemaRoot` from the C-data ABI; we copy each loaded child batch
+  // into `out` so consumers always see the same root object. This honours
+  // the `ArrowReader` contract that `getVectorSchemaRoot()` returns a stable
+  // root re-populated by each `loadNextBatch()` -- the Flight edge's
+  // `streamArrow` captures the root once via `listener.start(root)` and then
+  // loops `putNext()`, so a per-FETCH child swap would otherwise flush a
+  // closed (released) child root and emit a corrupt batch with a stale row
+  // count over empty columns.
+  //
+  // `VectorLoader.load` shares the child buffers by reference (same
+  // `allocator` for every child), so this is zero-copy; the next `load` (or
+  // `close`) releases the previous batch's buffers, which is why we keep the
+  // exhausted child open until after its batch has been loaded.
+  private val out: VectorSchemaRoot =
+    VectorSchemaRoot.create(initial.getVectorSchemaRoot.getSchema, allocator)
+  private val loader: VectorLoader = new VectorLoader(out)
+
+  /** Pull the next batch from `child` (if any) into the stable `out` root. */
+  private def loadInto(child: ArrowReader): Boolean =
+    if child.loadNextBatch() then
+      val batch = new VectorUnloader(child.getVectorSchemaRoot).getRecordBatch
+      try loader.load(batch)
+      finally batch.close()
+      true
+    else false
+
   override def loadNextBatch(): Boolean =
     if closed.get() then return false
     // Drain the current child first. If it has more batches, return.
     // Otherwise loop: close it, fire next FETCH, swap, retry -- until
     // either we land a batch or the FETCH loop terminates.
-    if currentRef.get().loadNextBatch() then return true
+    if loadInto(currentRef.get()) then return true
     while moreFetchPending.get() do
       // Close the exhausted child so its native ArrowArrayStream's
       // `release` callback runs (freeing the moved-out DataChunkWrappers)
       // before we open the next one. Otherwise two C-side holders would
-      // briefly co-exist.
+      // briefly co-exist. `out` already holds its own reference to the last
+      // loaded batch's buffers, so closing the child does not free them.
       currentRef.get().close()
       val fetchBytes = fetchSync()
       val wireOrd    = QuackNativeBridge.parseMessageType(fetchBytes)
@@ -285,7 +314,7 @@ private[adapter] final class ChainedQuackArrowReader(
           // batches; if loadNextBatch returns false we loop again
           // rather than recurse (avoids stack-overflow on a pathological
           // server that keeps sending non-empty-but-rowless responses).
-          if nextChild.loadNextBatch() then return true
+          if loadInto(nextChild) then return true
           // else: fall through to loop, fire another FETCH.
         case Some(MessageType.ErrorResponse) =>
           throw QuackWireError.Permanent(QuackNativeBridge.extractErrorMessage(fetchBytes))
@@ -298,8 +327,7 @@ private[adapter] final class ChainedQuackArrowReader(
     // moreFetchPending dropped to false without producing a batch -- done.
     false
 
-  override def getVectorSchemaRoot(): VectorSchemaRoot =
-    currentRef.get().getVectorSchemaRoot
+  override def getVectorSchemaRoot(): VectorSchemaRoot = out
 
   override def getDictionaryVectors(): java.util.Map[java.lang.Long, Dictionary] =
     currentRef.get().getDictionaryVectors
@@ -313,6 +341,11 @@ private[adapter] final class ChainedQuackArrowReader(
 
   override def close(closeReadSource: Boolean): Unit =
     if closed.compareAndSet(false, true) then
+      // Release the stable root first: it holds a reference to the last
+      // loaded batch's buffers (shared from the current child), so it must
+      // drop that reference before (or alongside) the child's own release.
+      try out.close()
+      catch case _: Throwable => ()
       try currentRef.get().close()
       catch case _: Throwable => ()
       if closeReadSource then
@@ -324,7 +357,7 @@ private[adapter] final class ChainedQuackArrowReader(
     * abstract-class signature.
     */
   override protected def readSchema(): org.apache.arrow.vector.types.pojo.Schema =
-    currentRef.get().getVectorSchemaRoot.getSchema
+    out.getSchema
 
   /** Closing of the underlying resources is handled by our `close` override directly. The parent
     * class only calls this if its own `initialized` flag is set, which never happens for us.
