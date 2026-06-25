@@ -107,11 +107,22 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     ), None)((_: String) => None).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
-  "stopPool" should "stop a known pool" in:
+  "stopPool" should "stop a known pool but keep it (scaled to 0)" in:
     val h = freshHandlers
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
     h.stopPool(StopPoolRequest("acme", "acme_default", "sales", force = true), None)((_: String) => None)
       .unsafeRunSync() shouldBe Right(())
+    // Pool still exists, just with no nodes.
+    h.poolStatus("acme", "acme_default", "sales").unsafeRunSync()
+      .toOption.map(_.nodes) shouldBe Some(Nil)
+
+  "deletePool" should "remove a known pool" in:
+    val h = freshHandlers
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    h.deletePool(DeletePoolRequest("acme", "acme_default", "sales", force = true), None)((_: String) => None)
+      .unsafeRunSync() shouldBe Right(())
+    h.poolStatus("acme", "acme_default", "sales").unsafeRunSync()
+      .left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   "listPools" should "return all pools" in:
     val h = freshHandlers

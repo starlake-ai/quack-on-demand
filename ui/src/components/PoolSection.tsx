@@ -85,17 +85,33 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
-  async function handleDelete(p: PoolResponse, force: boolean) {
+  async function handleStop(p: PoolResponse, force: boolean) {
     setError(null);
     const mode = force ? 'FORCE' : 'DRAIN';
     if (!window.confirm(
-      `Delete pool "${p.tenantDb}/${p.pool}" (${mode})?\n\n` +
+      `Stop pool "${p.tenantDb}/${p.pool}" (${mode})?\n\n` +
+      'The pool scales down to 0 nodes but is NOT deleted; scale it back up later.\n\n' +
       (force
         ? 'Nodes stop immediately; outstanding queries fail.'
         : 'Nodes stop accepting new queries first, then shut down.')
     )) return;
     try {
       await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force });
+      await reloadPools();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function handleDelete(p: PoolResponse) {
+    setError(null);
+    if (!window.confirm(
+      `Delete pool "${p.tenantDb}/${p.pool}"?\n\n` +
+      'This permanently removes the pool and all its nodes. ' +
+      'Running nodes are force-stopped; outstanding queries fail.'
+    )) return;
+    try {
+      await api.deletePool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force: true });
       await reloadPools();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -289,24 +305,31 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   {' '}
                   <button
                     type="button"
-                    className="danger"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                    onClick={() => void handleDelete(p, false)}
+                    onClick={() => void handleStop(p, false)}
                     aria-label={`Drain pool ${p.pool}`}
-                    title="Drain: stop accepting new queries, then shut down gracefully."
+                    title="Drain: stop accepting new queries, then shut down. Scales to 0 nodes; the pool is kept."
                   >
-                    <DeleteIcon /> Drain
+                    Drain
+                  </button>
+                  {' '}
+                  <button
+                    type="button"
+                    onClick={() => void handleStop(p, true)}
+                    aria-label={`Force-stop pool ${p.pool}`}
+                    title="Force: stop immediately; outstanding queries fail. Scales to 0 nodes; the pool is kept."
+                  >
+                    Force
                   </button>
                   {' '}
                   <button
                     type="button"
                     className="danger"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                    onClick={() => void handleDelete(p, true)}
-                    aria-label={`Force-stop pool ${p.pool}`}
-                    title="Force: stop immediately; outstanding queries fail."
+                    style={{ display: 'inline-flex', alignItems: 'center' }}
+                    onClick={() => void handleDelete(p)}
+                    aria-label={`Delete pool ${p.pool}`}
+                    title="Delete: permanently remove the pool and all its nodes."
                   >
-                    <DeleteIcon /> Force
+                    <DeleteIcon />
                   </button>
                 </td>
               </tr>

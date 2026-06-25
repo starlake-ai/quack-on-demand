@@ -62,6 +62,17 @@ object Endpoints:
       .in(jsonBody[StopPoolRequest])
       .in(header[Option[String]]("X-API-Key"))
 
+  val deletePool: PublicEndpoint[
+    (DeletePoolRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("pool" / "delete")
+      .in(jsonBody[DeletePoolRequest])
+      .in(header[Option[String]]("X-API-Key"))
+
   val listPools: PublicEndpoint[Option[
     String
   ], (sttp.model.StatusCode, ErrorResponse), PoolListResponse, Any] =

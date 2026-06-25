@@ -98,6 +98,13 @@ export interface StopPoolRequest {
   force?: boolean;
 }
 
+export interface DeletePoolRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  force?: boolean;
+}
+
 export interface SetMaxConcurrentRequest {
   tenant: string;
   tenantDb: string;
