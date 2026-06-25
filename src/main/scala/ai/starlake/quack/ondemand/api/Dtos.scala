@@ -118,6 +118,13 @@ final case class StopPoolRequest(
     force: Boolean = false
 )
 
+final case class DeletePoolRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    force: Boolean = false
+)
+
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
@@ -690,6 +697,26 @@ object Dtos:
         pool     <- c.get[String]("pool")
         force    <- c.getOrElse[Boolean]("force")(false)
       yield StopPoolRequest(tenant, tenantDb, pool, force)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"   -> r.tenant.asJson,
+          "tenantDb" -> r.tenantDb.asJson,
+          "pool"     -> r.pool.asJson,
+          "force"    -> r.force.asJson
+        )
+      )
+    }
+  )
+  given Codec[DeletePoolRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        tenant   <- c.get[String]("tenant")
+        tenantDb <- c.get[String]("tenantDb")
+        pool     <- c.get[String]("pool")
+        force    <- c.getOrElse[Boolean]("force")(false)
+      yield DeletePoolRequest(tenant, tenantDb, pool, force)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(

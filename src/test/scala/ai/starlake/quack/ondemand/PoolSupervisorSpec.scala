@@ -197,10 +197,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup.setMaxConcurrent(key, "nope", 5).unsafeRunSync() shouldBe None
 
-  "PoolSupervisor.stopPool" should "stop all nodes and forget the pool" in:
+  "PoolSupervisor.stopPool" should "stop all nodes but keep the pool (scaled to 0)" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.stopPool(key, force = true).unsafeRunSync()
+    // Pool survives; it is just scaled down to zero nodes.
+    sup.get(key).map(_.nodes) shouldBe Some(Nil)
+    sup.get(key).map(_.distribution) shouldBe Some(RoleDistribution(0, 0, 0))
+
+  "PoolSupervisor.deletePool" should "stop all nodes and forget the pool" in:
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    sup.deletePool(key, force = true).unsafeRunSync()
     sup.get(key) shouldBe None
 
   // ---------- Tenant CRUD ----------

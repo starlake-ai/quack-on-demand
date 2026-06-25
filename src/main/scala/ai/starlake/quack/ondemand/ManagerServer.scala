@@ -298,6 +298,9 @@ final class ManagerServer(
       Endpoints.stopPool.serverLogic { case (req, key) =>
         pools.stopPool(req, key)(sessions.scopeOf)
       },
+      Endpoints.deletePool.serverLogic { case (req, key) =>
+        pools.deletePool(req, key)(sessions.scopeOf)
+      },
       Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.scopeOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
       Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
