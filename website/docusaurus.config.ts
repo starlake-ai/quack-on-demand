@@ -80,7 +80,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright (c) ${new Date().getFullYear()} Starlake. Apache-2.0.`,
+      copyright: `Copyright (c) ${new Date().getFullYear()} Starlake. Elastic License 2.0.`,
     },
   } satisfies Preset.ThemeConfig,
 };
