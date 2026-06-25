@@ -170,6 +170,19 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
           case Some(_) =>
             sup.stopPool(key, req.force).map(_ => Right(()))
 
+  def deletePool(req: DeletePoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+        sup.get(key) match
+          case None =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(_) =>
+            sup.deletePool(key, req.force).map(_ => Right(()))
+
   def listPools(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolListResponse] = IO.delay {

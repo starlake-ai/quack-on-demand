@@ -904,7 +904,23 @@ final class PoolSupervisor(
                  else IO.unit).as(combined)
               }
 
+  /** Stop every node of the pool but KEEP the pool itself registered. The pool row survives in the
+    * control plane and the in-memory state stays with an empty node list and a zero distribution,
+    * so the pool is effectively scaled to 0 and stays drained across a manager restart (reconcile
+    * only respawns when the persisted distribution is non-zero). Use [[deletePool]] to remove the
+    * pool entirely. `force=true` kills nodes immediately; `force=false` drains them (stop accepting
+    * new queries, then shut down).
+    */
   def stopPool(key: PoolKey, force: Boolean): IO[Unit] =
+    pools.get(key) match
+      case None    => IO.unit
+      case Some(_) => scale(key, 0, RoleDistribution(0, 0, 0), force).void
+
+  /** Remove the pool entirely: stop every node, then delete the pool and its node rows from the
+    * control plane and forget it in memory. This is the only path that deletes a pool; [[stopPool]]
+    * merely scales it to 0.
+    */
+  def deletePool(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match
       case None        => IO.unit
       case Some(state) =>
