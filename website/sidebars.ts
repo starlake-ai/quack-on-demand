@@ -68,6 +68,7 @@ const sidebars: SidebarsConfig = {
         'connecting/authenticating',
         'connecting/sql',
         'connecting/powerbi',
+        'connecting/tableau',
       ],
     },
     {
