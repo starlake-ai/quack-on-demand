@@ -373,7 +373,7 @@ curl -sS -H "X-API-Key: $TOK" http://localhost:20900/api/user/5/effective
 
 ## License
 
-Elastic License 2.0 (ELv2). See [LICENSE](LICENSE).
+Apache 2.0.
 
 ## Community
 
