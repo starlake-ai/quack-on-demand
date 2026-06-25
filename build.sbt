@@ -34,7 +34,7 @@ ThisBuild / credentials += Credentials(
 )
 ThisBuild / homepage := Some(url("https://github.com/starlake-ai/quack-on-demand"))
 ThisBuild / licenses := Seq(
-  "Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt")
+  "Elastic-2.0" -> url("https://www.elastic.co/licensing/elastic-license")
 )
 ThisBuild / scmInfo := Some(
   ScmInfo(
