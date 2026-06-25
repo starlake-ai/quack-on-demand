@@ -324,12 +324,12 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   <button
                     type="button"
                     className="danger"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    style={{ display: 'inline-flex', alignItems: 'center' }}
                     onClick={() => void handleDelete(p)}
                     aria-label={`Delete pool ${p.pool}`}
                     title="Delete: permanently remove the pool and all its nodes."
                   >
-                    <DeleteIcon /> Delete
+                    <DeleteIcon />
                   </button>
                 </td>
               </tr>
