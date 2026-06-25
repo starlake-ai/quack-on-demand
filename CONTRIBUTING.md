@@ -19,7 +19,7 @@ you want a small, well-scoped task.
   writing code.
 - For larger work, open a discussion or draft PR early so we can align
   on direction before you sink hours into it.
-- All contributions are licensed under [Apache License 2.0](LICENSE),
+- All contributions are licensed under the [Elastic License 2.0](LICENSE),
   same as the project.
 
 ## Development setup

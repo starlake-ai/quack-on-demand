@@ -107,7 +107,7 @@ jobs:
           images: ${{ env.REGISTRY_IMAGE }}
           labels: |
             org.opencontainers.image.vendor=starlakeai
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=Elastic-2.0
             org.opencontainers.image.title=quack-on-demand-node
             org.opencontainers.image.description=DuckDB Quack server pod image used by quack-on-demand's KubernetesQuackBackend.
             org.opencontainers.image.url=https://github.com/starlake-ai/quack-on-demand
