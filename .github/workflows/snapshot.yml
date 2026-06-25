@@ -143,7 +143,7 @@ jobs:
           images: ${{ env.REGISTRY_IMAGE }}
           labels: |
             org.opencontainers.image.vendor=starlakeai
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=Elastic-2.0
             org.opencontainers.image.title=quack-on-demand
             org.opencontainers.image.description=Auto-scaling DuckDB-Quack manager with FlightSQL edge.
             org.opencontainers.image.url=https://github.com/starlake-ai/quack-on-demand
