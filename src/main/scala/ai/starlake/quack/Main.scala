@@ -875,8 +875,25 @@ object Main extends IOApp with LazyLogging:
                   backend.cleanup() *>
                   IO.delay(logger.info("graceful shutdown: complete"))
 
+              // Periodic reconcile: respawn nodes that die while the manager is
+              // up (boot only ran reconcile once). Disabled when the interval is
+              // 0, in which case the fiber is a no-op we still cancel uniformly.
+              val reconcileFiber =
+                if mgrCfg.reconcileIntervalSec > 0 then
+                  logger.info(s"periodic reconcile every ${mgrCfg.reconcileIntervalSec}s")
+                  sup
+                    .reconcileLoop(
+                      scala.concurrent.duration.DurationInt(mgrCfg.reconcileIntervalSec).seconds
+                    )
+                    .start
+                else
+                  logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
+                  IO.unit.start
+
               healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
-                IO.never[Unit].guarantee(fiber.cancel *> gracefulShutdown)
+                reconcileFiber.flatMap { rcFiber =>
+                  IO.never[Unit].guarantee(fiber.cancel *> rcFiber.cancel *> gracefulShutdown)
+                }
               }
             case Left(t) =>
               logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
