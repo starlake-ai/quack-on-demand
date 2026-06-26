@@ -202,6 +202,18 @@ final class PoolSupervisor(
     }
   }
 
+  /** Run [[reconcile]] forever, sleeping `interval` between passes. The boot path runs reconcile
+    * once; this keeps it running so a node that dies (or a pod evicted) while the manager is up is
+    * respawned on the next tick instead of staying dead until the next restart. A tick that throws
+    * is logged and swallowed so one bad pass doesn't kill the loop. Started as a cancelable fiber
+    * by `Main`; cancellation is the normal shutdown exit. Drained pools (zero distribution) are
+    * left alone -- reconcile only respawns when the persisted distribution is non-zero.
+    */
+  def reconcileLoop(interval: scala.concurrent.duration.FiniteDuration): IO[Unit] =
+    (reconcile().handleErrorWith { t =>
+      IO.delay(logger.warn(s"reconcile loop: pass failed, continuing: ${t.getMessage}"))
+    } *> IO.sleep(interval)).foreverM.void
+
   private def reconcilePool(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh
@@ -887,12 +899,24 @@ final class PoolSupervisor(
                 acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(n)
               }
           val deleteRemoved =
-            toRemove.foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.deleteNode(n.nodeId)))
+            // Drop both the store row and the tracker entry now that the node is
+            // stopped. setDraining (force=false above) created the entry; without
+            // this remove it lingers in snapshotAll with draining=true forever.
+            toRemove.foldLeft(IO.unit) { (acc, n) =>
+              acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
+            }
 
           stopRemoved *> deleteRemoved *>
             specs
               .foldLeft(IO.pure(survivors)) { (acc, spec) =>
-                acc.flatMap(rs => backend.start(spec).map(rs :+ _))
+                // Reset any stale tracker entry before (re)starting: scaling down
+                // with force=false sets draining=true and deletes the node row but
+                // leaves the tracker entry behind, and scaling back up reuses the
+                // freed node id. Without this remove the fresh node inherits the old
+                // draining=true flag (mirrors createPool / reconcile spawn paths).
+                acc.flatMap(rs =>
+                  IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
+                )
               }
               .flatMap { combined =>
                 pools.put(key, state.copy(nodes = combined, distribution = newDist))
@@ -932,7 +956,9 @@ final class PoolSupervisor(
             }
         stopAll *>
           state.nodes.foldLeft(IO.unit)((acc, n) =>
-            acc *> IO.blocking(store.deleteNode(n.nodeId))
+            // Store row and tracker entry both go now that the node is stopped,
+            // so a drained-then-deleted node leaves nothing behind in snapshotAll.
+            acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
           ) *>
           IO.blocking {
             poolIdByKey.get(key).foreach { pid =>
