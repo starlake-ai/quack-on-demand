@@ -359,14 +359,19 @@ rebuild_libquackwire_locally() {
   # 5. Publish all available classifiers into the local ivy cache so the
   # assembly task resolves them without round-tripping Central for the host.
   echo "sbt libquackwire/publishLocal..."
-  "$SBT_CMD" libquackwire/publishLocal
+  # </dev/null: keep sbt's JLine from seizing an interactive tty (raw/no-echo
+  # mode) on WSL. With a non-tty stdin JLine stays "dumb" and never reconfigures
+  # the pty -- the same reason CI runs never corrupt the terminal.
+  "$SBT_CMD" libquackwire/publishLocal </dev/null
 }
 
 build_locally() {
   ensure_sbt
   rebuild_libquackwire_locally
   echo "running '$SBT_CMD assembly' (local build)..."
-  "$SBT_CMD" assembly
+  # </dev/null: see the publishLocal note above -- prevents sbt/JLine from
+  # leaving the WSL pty in raw mode for the foreground java run that follows.
+  "$SBT_CMD" assembly </dev/null
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
 }
@@ -726,6 +731,10 @@ preflight_ports
 #                   leave the WSL pty in raw / no-echo mode. We do NOT
 #                   `exec` so the trap still fires after Java returns.
 trap 'stty sane 2>/dev/null || true' EXIT INT TERM
+# Reset the pty now, after the (possibly tty-grabbing) build/seed tooling and
+# before the long-lived foreground java run, so a corrupted terminal can't
+# persist for the manager's whole lifetime waiting on the EXIT trap.
+stty sane 2>/dev/null || true
 "${JAVA_BIN:-java}" \
   -Darrow.allocation.manager.type=Unsafe \
   ${JAVA_OPTS:-} \
