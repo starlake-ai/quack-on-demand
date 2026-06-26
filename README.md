@@ -48,14 +48,14 @@ Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-star
 
 |                              | DuckDB<br/>embedded | OSS Flight SQL servers<br/>(GizmoSQL, sqlflite) | MotherDuck | Trino /<br/>Dremio | **Quack on<br/>Demand** |
 |------------------------------|:---:|:---:|:---:|:---:|:---:|
-| Self-hosted                  | ✅ | ✅ | ❌ cloud-only | ✅ | ✅ |
+| Self-hosted                  | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Open source                  | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Multi-user serving           | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ catalog-DB per tenant |
-| Table-level RBAC in OSS      | ❌ | ❌ paywalled | ✅ | ✅ | ✅ |
-| Column security + masking    | ❌ | ❌ | ❌ db-level only | add-on | ✅ built-in |
-| Autoscaling node pools       | ❌ | ❌ single-node | ✅ | ✅ | ✅ |
-| BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ Flight SQL |
+| Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Table-level RBAC in OSS      | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Column security + masking    | ❌ | ❌ | ❌ | add-on | ✅ |
+| Autoscaling node pools       | ❌ | ❌ | ✅ | ✅ | ✅ |
+| BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
 | DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
 | Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
 
