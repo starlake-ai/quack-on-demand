@@ -35,6 +35,7 @@ import json
 import os
 import statistics
 import sys
+import threading
 import time
 from typing import List, Optional
 
@@ -378,10 +379,16 @@ def parse_args() -> argparse.Namespace:
                    help="pool gRPC routing header")
     p.add_argument("--schema", default=os.environ.get("LT_SCHEMA", "tpch1"),
                    help="schema the 22 queries are prefixed with")
+    p.add_argument("-w", "--workers", type=int,
+                   default=int(os.environ.get("LT_WORKERS", "1")),
+                   help="concurrent workers that each run EVERY query "
+                        "simultaneously (one ADBC connection per worker); a "
+                        "barrier keeps all workers on the same query at once")
     p.add_argument("--runs", type=int, default=int(os.environ.get("LT_RUNS", "5")),
-                   help="timed executions per query (median reported)")
+                   help="timed executions per query PER WORKER "
+                        "(median reported over workers x runs samples)")
     p.add_argument("--warmup", type=int, default=int(os.environ.get("LT_WARMUP", "1")),
-                   help="throwaway executions per query before timing")
+                   help="throwaway executions per query per worker before timing")
     p.add_argument("--superuser", action="store_true",
                    default=os.environ.get("LT_SUPERUSER", "true").lower() == "true",
                    help="add the superuser=true gRPC header (bootstrap admin)")
@@ -423,62 +430,177 @@ class Result:
         self.median_ms: Optional[float] = None
         self.min_ms: Optional[float] = None
         self.max_ms: Optional[float] = None
+        self.p95_ms: Optional[float] = None
         self.rows: Optional[int] = None
+        self.samples: int = 0
+        self.qps: Optional[float] = None
         self.status = "ok"
         self.error = ""
 
 
+def _first_line(e: Exception) -> str:
+    s = str(e)
+    return s.splitlines()[0] if s else "(no message)"
+
+
+def _percentile(sorted_vals: List[float], pct: float) -> float:
+    """Nearest-rank percentile on an already-sorted list."""
+    if not sorted_vals:
+        return 0.0
+    k = max(0, min(len(sorted_vals) - 1,
+                   int(round((pct / 100.0) * len(sorted_vals) + 0.5)) - 1))
+    return sorted_vals[k]
+
+
 def run_benchmark(args: argparse.Namespace) -> List[Result]:
     queries = tpch_queries(args.schema)
-    results: List[Result] = []
+    workers = max(1, args.workers)
+    runs = max(1, args.runs)
+    warmup = max(0, args.warmup)
+    nq = len(queries)
+
     print(f"connecting to {args.url} "
-          f"(tenant={args.tenant} pool={args.pool} schema={args.schema}) ...",
-          file=sys.stderr)
-    conn = connect(args)
+          f"(tenant={args.tenant} pool={args.pool} schema={args.schema}) "
+          f"with {workers} worker(s) ...", file=sys.stderr)
+
+    # Open one connection per worker up front. A connect failure is fatal and
+    # surfaces here, BEFORE any barrier exists, so it cannot deadlock the run.
+    conns = []
     try:
-        with conn.cursor() as cur:
-            for name, sql in queries:
-                r = Result(name)
-                try:
-                    for _ in range(max(0, args.warmup)):
-                        cur.execute(sql)
-                        cur.fetchall()
-                    samples: List[float] = []
-                    rows = 0
-                    for _ in range(max(1, args.runs)):
-                        t0 = time.perf_counter()
-                        cur.execute(sql)
-                        fetched = cur.fetchall()
-                        samples.append((time.perf_counter() - t0) * 1000.0)
-                        rows = len(fetched)
-                    r.median_ms = statistics.median(samples)
-                    r.min_ms = min(samples)
-                    r.max_ms = max(samples)
-                    r.rows = rows
-                    print(f"  {name:>4}  median={r.median_ms:8.1f} ms  "
-                          f"min={r.min_ms:8.1f}  max={r.max_ms:8.1f}  rows={rows}",
-                          file=sys.stderr)
-                except Exception as e:
-                    r.status = "error"
-                    r.error = str(e).splitlines()[0] if str(e) else "(no message)"
-                    print(f"  {name:>4}  ERROR: {r.error}", file=sys.stderr)
-                results.append(r)
+        for _ in range(workers):
+            conns.append(connect(args))
+    except Exception:
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        raise
+
+    # Per-query shared accumulators, guarded by `lock`. The barrier makes all
+    # workers execute query q at the same time; each worker contributes
+    # `runs` latency samples, so a query gets `workers x runs` samples total.
+    lock = threading.Lock()
+    samples: List[List[float]] = [[] for _ in range(nq)]
+    rows: List[Optional[int]] = [None] * nq
+    errors: List[Optional[str]] = [None] * nq
+    elapsed_s: List[float] = [0.0] * nq  # max single-worker wall time per query
+    results: List[Optional[Result]] = [None] * nq
+    # Two barriers per query: `start` releases all workers onto query q at
+    # once; `done` blocks until every worker has finished q and written its
+    # samples, so worker 0 can aggregate + print q's row PROGRESSIVELY (as
+    # each query completes) rather than only at the very end.
+    start = threading.Barrier(workers)
+    done = threading.Barrier(workers)
+
+    def build_result(q: int) -> Result:
+        r = Result(queries[q][0])
+        s = sorted(samples[q])
+        if s:
+            r.median_ms = statistics.median(s)
+            r.min_ms = s[0]
+            r.max_ms = s[-1]
+            r.p95_ms = _percentile(s, 95)
+            r.samples = len(s)
+            r.rows = rows[q]
+            # Concurrent throughput: total timed executions / wall time the
+            # slowest worker spent on this query (workers ran it in parallel).
+            if elapsed_s[q] > 0:
+                r.qps = (workers * runs) / elapsed_s[q]
+        if errors[q] is not None:
+            r.status = "error" if not s else "partial"
+            r.error = errors[q]
+        return r
+
+    def report(r: Result) -> None:
+        if r.status == "ok":
+            print(f"  {r.name:>4}  median={r.median_ms:8.1f} ms  "
+                  f"p95={r.p95_ms:8.1f}  min={r.min_ms:8.1f}  max={r.max_ms:8.1f}  "
+                  f"n={r.samples}  qps={r.qps:6.1f}  rows={r.rows}",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"  {r.name:>4}  {r.status.upper()}: {r.error}",
+                  file=sys.stderr, flush=True)
+
+    def worker(wid: int, conn) -> None:
+        cur = conn.cursor()
+        for q, (_, sql) in enumerate(queries):
+            # Re-sync so every worker fires query q concurrently. A generous
+            # timeout means a wedged peer aborts the barrier instead of
+            # hanging the whole run forever.
+            try:
+                start.wait(timeout=600)
+            except threading.BrokenBarrierError:
+                return
+            local: List[float] = []
+            local_rows = 0
+            err: Optional[str] = None
+            w0 = time.perf_counter()
+            try:
+                for _ in range(warmup):
+                    cur.execute(sql)
+                    cur.fetchall()
+                for _ in range(runs):
+                    t0 = time.perf_counter()
+                    cur.execute(sql)
+                    fetched = cur.fetchall()
+                    local.append((time.perf_counter() - t0) * 1000.0)
+                    local_rows = len(fetched)
+            except Exception as e:  # noqa: BLE001 - record and keep cadence
+                err = _first_line(e)
+            w_elapsed = time.perf_counter() - w0
+            with lock:
+                samples[q].extend(local)
+                if local_rows:
+                    rows[q] = local_rows
+                if err and errors[q] is None:
+                    errors[q] = err
+                if w_elapsed > elapsed_s[q]:
+                    elapsed_s[q] = w_elapsed
+            # Wait for all workers to finish q, then worker 0 emits q's row.
+            try:
+                done.wait(timeout=600)
+            except threading.BrokenBarrierError:
+                return
+            if wid == 0:
+                r = build_result(q)
+                results[q] = r
+                report(r)
+
+    threads = [threading.Thread(target=worker, args=(i, c), name=f"w{i}")
+               for i, c in enumerate(conns)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
     finally:
-        conn.close()
-    return results
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    # Backfill any rows a broken barrier skipped (normal runs fill them all).
+    return [results[q] if results[q] is not None else build_result(q)
+            for q in range(nq)]
 
 
 def write_csv(path: str, results: List[Result]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["query", "median_ms", "min_ms", "max_ms", "rows", "status", "error"])
+        w.writerow(["query", "median_ms", "p95_ms", "min_ms", "max_ms",
+                    "rows", "samples", "qps", "status", "error"])
         for r in results:
             w.writerow([
                 r.name,
                 f"{r.median_ms:.3f}" if r.median_ms is not None else "",
+                f"{r.p95_ms:.3f}" if r.p95_ms is not None else "",
                 f"{r.min_ms:.3f}" if r.min_ms is not None else "",
                 f"{r.max_ms:.3f}" if r.max_ms is not None else "",
                 r.rows if r.rows is not None else "",
+                r.samples,
+                f"{r.qps:.2f}" if r.qps is not None else "",
                 r.status,
                 r.error,
             ])
@@ -512,7 +634,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="meta">
   endpoint <code>{url}</code> &middot; tenant <code>{tenant}</code> &middot;
   pool <code>{pool}</code> &middot; schema <code>{schema}</code> &middot;
-  {runs} timed run(s) / query (warmup {warmup}) &middot; generated {generated}
+  <code>{workers}</code> worker(s) &middot;
+  {runs} timed run(s) / query / worker (warmup {warmup}) &middot;
+  generated {generated}
 </div>
 
 <div class="card">
@@ -521,8 +645,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <div class="card">
   <table>
-    <thead><tr><th>Query</th><th>Median (ms)</th><th>Min (ms)</th>
-      <th>Max (ms)</th><th>Rows</th><th>Status</th></tr></thead>
+    <thead><tr><th>Query</th><th>Median (ms)</th><th>p95 (ms)</th><th>Min (ms)</th>
+      <th>Max (ms)</th><th>Rows</th><th>Samples</th><th>QPS</th><th>Status</th></tr></thead>
     <tbody>
       {rows_html}
     </tbody>
@@ -532,26 +656,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 const labels = {labels_json};
 const medians = {medians_json};
+const p95s = {p95s_json};
 const ctx = document.getElementById('chart').getContext('2d');
 new Chart(ctx, {{
   type: 'bar',
   data: {{
     labels: labels,
-    datasets: [{{
-      label: 'Median query duration (ms)',
-      data: medians,
-      backgroundColor: 'rgba(91, 95, 222, 0.75)',
-      borderColor: 'rgba(91, 95, 222, 1)',
-      borderWidth: 1
-    }}]
+    datasets: [
+      {{
+        label: 'Median (ms)',
+        data: medians,
+        backgroundColor: 'rgba(91, 95, 222, 0.75)',
+        borderColor: 'rgba(91, 95, 222, 1)',
+        borderWidth: 1
+      }},
+      {{
+        label: 'p95 (ms)',
+        data: p95s,
+        backgroundColor: 'rgba(222, 95, 132, 0.55)',
+        borderColor: 'rgba(222, 95, 132, 1)',
+        borderWidth: 1
+      }}
+    ]
   }},
   options: {{
     responsive: true,
     plugins: {{
       legend: {{ display: true }},
-      title: {{ display: true, text: 'TPC-H query latency (median ms)' }},
+      title: {{ display: true,
+                text: 'TPC-H query latency across {workers} concurrent worker(s)' }},
       tooltip: {{ callbacks: {{
-        label: (c) => c.parsed.y === null ? 'failed' : c.parsed.y.toFixed(1) + ' ms'
+        label: (c) => c.parsed.y === null
+          ? 'failed'
+          : c.dataset.label + ': ' + c.parsed.y.toFixed(1) + ' ms'
       }} }}
     }},
     scales: {{
@@ -578,21 +715,28 @@ def write_html(path: str, results: List[Result], args: argparse.Namespace,
         rows_html_parts.append(
             f'<tr{cls}><td>{r.name}</td>'
             f'<td class="num">{fmt(r.median_ms)}</td>'
+            f'<td class="num">{fmt(r.p95_ms)}</td>'
             f'<td class="num">{fmt(r.min_ms)}</td>'
             f'<td class="num">{fmt(r.max_ms)}</td>'
             f'<td class="num">{r.rows if r.rows is not None else "-"}</td>'
+            f'<td class="num">{r.samples}</td>'
+            f'<td class="num">{f"{r.qps:.1f}" if r.qps is not None else "-"}</td>'
             f'<td>{status_cell}</td></tr>'
         )
     labels = [r.name for r in results]
     medians = [round(r.median_ms, 2) if r.median_ms is not None else None
                for r in results]
+    p95s = [round(r.p95_ms, 2) if r.p95_ms is not None else None
+            for r in results]
     out = HTML_TEMPLATE.format(
         url=html.escape(args.url), tenant=html.escape(args.tenant),
         pool=html.escape(args.pool), schema=html.escape(args.schema),
-        runs=args.runs, warmup=args.warmup, generated=generated,
+        workers=args.workers, runs=args.runs, warmup=args.warmup,
+        generated=generated,
         rows_html="\n      ".join(rows_html_parts),
         labels_json=json.dumps(labels),
         medians_json=json.dumps(medians),
+        p95s_json=json.dumps(p95s),
     )
     with open(path, "w") as f:
         f.write(out)
@@ -603,12 +747,16 @@ def main() -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     results = run_benchmark(args)
     generated = time.strftime("%Y-%m-%d %H:%M:%S %Z")
-    csv_path = os.path.join(args.out_dir, "tpch-bench.csv")
-    html_path = os.path.join(args.out_dir, "tpch-bench.html")
+    # Worker count is in the filename so runs at different concurrency levels
+    # do not clobber each other (e.g. tpch-bench-w1.csv vs tpch-bench-w16.csv).
+    stem = f"tpch-bench-w{max(1, args.workers)}"
+    csv_path = os.path.join(args.out_dir, f"{stem}.csv")
+    html_path = os.path.join(args.out_dir, f"{stem}.html")
     write_csv(csv_path, results)
     write_html(html_path, results, args, generated)
     ok = sum(1 for r in results if r.status == "ok")
-    print(f"\n{ok}/{len(results)} queries succeeded", file=sys.stderr)
+    print(f"\n{ok}/{len(results)} queries succeeded "
+          f"({max(1, args.workers)} worker(s))", file=sys.stderr)
     print(f"CSV : {csv_path}", file=sys.stderr)
     print(f"HTML: {html_path}", file=sys.stderr)
     return 0 if ok == len(results) else 1
