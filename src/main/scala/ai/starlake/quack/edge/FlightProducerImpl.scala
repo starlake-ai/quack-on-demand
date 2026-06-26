@@ -104,11 +104,11 @@ final class FlightProducerImpl(
     ByteString.copyFrom(baos.toByteArray)
 
   /** Diagnostic-only `getStream` override. Earlier in this branch we shipped a self-auth ticket
-    * envelope here to bridge a Flight SQL ODBC driver that claimed to skip the bearer on DoGet;
-    * the wire evidence (see commit log of `0282a37`) showed the real Power BI build never sends
+    * envelope here to bridge a Flight SQL ODBC driver that claimed to skip the bearer on DoGet; the
+    * wire evidence (see commit log of `0282a37`) showed the real Power BI build never sends
     * credentials on any RPC, so the envelope had nothing useful to do and was reverted. The
-    * override stays as a per-call observability hook: it logs the DoGet peer + ticket shape
-    * before forwarding to the FlightSqlProducer dispatcher.
+    * override stays as a per-call observability hook: it logs the DoGet peer + ticket shape before
+    * forwarding to the FlightSqlProducer dispatcher.
     */
   override def getStream(
       context: FlightProducer.CallContext,
@@ -1348,10 +1348,10 @@ final class FlightProducerImpl(
     )
 
   /** Probe the result-set Schema for a literal statement using the same PrepareStrategy split as
-    * [[createPreparedStatement]]. Returns `Some(schema)` for queries (LIMIT-0 wrap on SELECT,
-    * full execute on SHOW/DESCRIBE/EXPLAIN) and `None` for DML/DDL (no result schema to advertise
-    * up front - the stream emits a single-row Count instead). Run with `recordExecution = false`
-    * so the probe stays invisible in operator history and per-node load metrics.
+    * [[createPreparedStatement]]. Returns `Some(schema)` for queries (LIMIT-0 wrap on SELECT, full
+    * execute on SHOW/DESCRIBE/EXPLAIN) and `None` for DML/DDL (no result schema to advertise up
+    * front - the stream emits a single-row Count instead). Run with `recordExecution = false` so
+    * the probe stays invisible in operator history and per-node load metrics.
     *
     * Throws a Flight RuntimeException on auth / router failure. Used by [[getSchemaStatement]]
     * (dedicated RPC) and [[getFlightInfoStatement]] (the FlightInfo.schema path the Apache Arrow
@@ -1367,9 +1367,9 @@ final class FlightProducerImpl(
       ConnectionContext.userFor(peer)
     ) match
       case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff      = ConnectionContext.effectiveSetFor(peer)
-        val kind     = router.classifier.classify(sql)
-        val strategy = PrepareStrategy.choose(sql, kind)
+        val eff                         = ConnectionContext.effectiveSetFor(peer)
+        val kind                        = router.classifier.classify(sql)
+        val strategy                    = PrepareStrategy.choose(sql, kind)
         val probeSqlOpt: Option[String] = strategy match
           case PrepareStrategy.SkipExecute      => None
           case PrepareStrategy.ProbeWrap(probe) => Some(probe)
@@ -1397,8 +1397,8 @@ final class FlightProducerImpl(
           .toRuntimeException()
 
   /** R5 / Power BI ODBC: serve the dedicated GetSchema RPC for `CommandStatementQuery`. Driver
-    * teams that read the schema from this RPC (rather than from `FlightInfo.schema`) get the
-    * same probed schema. Empty schema for DML/DDL - the documented contract for the RPC.
+    * teams that read the schema from this RPC (rather than from `FlightInfo.schema`) get the same
+    * probed schema. Empty schema for DML/DDL - the documented contract for the RPC.
     */
   override def getSchemaStatement(
       command: FlightSql.CommandStatementQuery,
