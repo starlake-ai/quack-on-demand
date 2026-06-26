@@ -117,23 +117,6 @@ ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load te
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    client["Client<br/>(ODBC · JDBC · ADBC · curl · browser)"]
-    manager["Manager<br/>FlightSQL edge · REST · UI"]
-    nodes["Quack node pool<br/>DuckDB · per-tenant"]
-    pg["Postgres<br/>control plane · DuckLake catalog"]
-    obj["Object storage<br/>S3 · GCS · local FS"]
-
-    client  --> manager
-    manager --> nodes
-    manager --> pg
-    nodes   --> pg
-    nodes   --> obj
-```
-
-One Manager process fronts every client (FlightSQL on `:31338`, REST + admin UI on `:20900`) and routes each statement to a single Quack node it spawned for the matching tenant + pool. Control-plane state and per-tenant DuckLake catalogs live in Postgres; Parquet data lives in object storage. The full auth → ACL → routing pipeline diagram is in the [Architecture docs](https://starlake-ai.github.io/quack-on-demand/concepts/architecture).
-
 ### Data residency - the base tables never leave the server
 
 When Power BI or Tableau connect with a **live / DirectQuery** connection, each user interaction issues SQL over the FlightSQL wire. The query runs on a Quack node, against DuckLake data that stays in your object storage, and only the *result rows* stream back as an Arrow batch. The base tables never cross the trust boundary onto the analyst's machine.
