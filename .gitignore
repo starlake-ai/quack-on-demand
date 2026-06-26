@@ -122,3 +122,4 @@ website/static/openapi.yaml
 website/docs/reference/configuration.md
 docs/superpowers/
 src/main/scala/ai/starlake/quack/edge/.metals-scala-cli
+screens

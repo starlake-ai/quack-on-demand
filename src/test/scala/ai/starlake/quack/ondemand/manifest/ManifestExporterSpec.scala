@@ -11,10 +11,10 @@ class ManifestExporterSpec extends AnyFlatSpec with Matchers:
 
   private def populated: InMemoryControlPlaneStore =
     val s = new InMemoryControlPlaneStore()
-    s.upsertTenant(Tenant(id = "t-1", name = "tpch", displayName = "tpch"))
+    s.upsertTenant(Tenant(id = "tpch", displayName = "tpch"))
     s.upsertTenantDb(TenantDb(
       id        = "td-1",
-      tenantId  = "t-1",
+      tenantId  = "tpch",
       name      = "tpch_tpch1",
       kind      = TenantDbKind.DuckLake,
       metastore = Map.empty,
@@ -23,7 +23,7 @@ class ManifestExporterSpec extends AnyFlatSpec with Matchers:
     ))
     s.upsertPool(Pool(
       id                   = "p-1",
-      tenantId             = "t-1",
+      tenantId             = "tpch",
       tenantDbId           = "td-1",
       name                 = "sales",
       size                 = 3,

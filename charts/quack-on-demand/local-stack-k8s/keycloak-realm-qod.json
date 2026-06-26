@@ -40,6 +40,70 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "qod-admin",
+      "name": "Quack on Demand admin UI (OIDC SSO)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "qod-admin-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["http://localhost:20900/api/auth/oidc/callback"],
+      "webOrigins": ["http://localhost:20900"],
+      "attributes": {
+        "access.token.lifespan": "3600",
+        "post.logout.redirect.uris": "http://localhost:20900/ui/*"
+      }
+    },
+    {
+      "clientId": "quack-powerbi",
+      "name": "Quack on Demand Power BI / ODBC (OAuth auth-code + PKCE)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["https://oauth.powerbi.com/views/oauthredirect.html"],
+      "webOrigins": ["https://oauth.powerbi.com"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "qod-flightsql-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "qod-flightsql",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
@@ -64,6 +128,18 @@
       "lastName": "Reader",
       "credentials": [
         { "type": "password", "value": "reader", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-qod"]
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@acme.io",
+      "firstName": "Alice",
+      "lastName": "Acme",
+      "credentials": [
+        { "type": "password", "value": "demo-alice", "temporary": false }
       ],
       "realmRoles": ["default-roles-qod"]
     }

@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "qod.labels" . | nindent 4 }}
 spec:
-  # Default replicas=1 — multi-manager active-active is not yet safe.
+  # Default replicas=1 - multi-manager active-active is not yet safe.
   # See guides/RESILIENCE.md and issue #11.
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -101,6 +101,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.auth.keycloak.existingSecret | quote }}
                   key:  {{ .Values.auth.keycloak.existingSecretKey | default "keycloakClientSecret" | quote }}
+            {{- end }}
+            {{- if and (eq (.Values.auth.management.identitySource | default "db") "oidc") .Values.auth.management.oidc.existingSecret }}
+            - name: QOD_MGMT_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.management.oidc.existingSecret | quote }}
+                  key:  {{ .Values.auth.management.oidc.existingSecretKey | default "mgmtOidcClientSecret" | quote }}
             {{- end }}
             {{- if eq (include "qod.s3Enabled" .) "true" }}
             - name: QOD_S3_ACCESS_KEY_ID

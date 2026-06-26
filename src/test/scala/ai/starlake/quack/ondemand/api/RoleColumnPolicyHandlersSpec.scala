@@ -36,7 +36,7 @@ class RoleColumnPolicyHandlersSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    val tenantId = sup.listTenants().find(_.name == "acme").get.id
+    val tenantId = sup.listTenants().find(_.id == "acme").get.id
     // createTenant seeds a built-in 'admin' role - fetch its id
     val roleId = sup.listRoles(tenantId).find(_.name == "admin").get.id
     val handler = new RoleColumnPolicyHandlers(sup)

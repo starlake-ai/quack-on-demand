@@ -724,7 +724,7 @@
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Quack-on-Demand — Operator Overview",
+  "title": "Quack-on-Demand - Operator Overview",
   "uid": "quack-on-demand-overview",
   "version": 1,
   "weekStart": ""

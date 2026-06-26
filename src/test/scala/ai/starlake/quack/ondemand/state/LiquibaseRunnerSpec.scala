@@ -8,21 +8,20 @@ import java.sql.{Connection, DriverManager}
 import scala.sys.process._
 import scala.util.Try
 
-/** Integration test for [[LiquibaseRunner]]. Requires a local Postgres
-  * reachable with the SL_TEST_PG_* env vars (defaults: localhost:5432,
-  * user `postgres`, password `azizam`). The test creates a throwaway
-  * database, runs the changelog against it, verifies the four control-
-  * plane tables exist with the expected columns, then drops the DB. */
+/** Integration test for [[LiquibaseRunner]]. Requires a local Postgres reachable with the
+  * SL_TEST_PG_* env vars (defaults: localhost:5432, user `postgres`, password `azizam`). The test
+  * creates a throwaway database, runs the changelog against it, verifies the four control- plane
+  * tables exist with the expected columns, then drops the DB.
+  */
 class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
 
   // One-shot sweep: drops any `qodlb_test_%` database left behind by a
   // previously-interrupted suite.
   TestPostgres.dropStrayTestDatabases("qodlb")
 
-
-  private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
-  private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
-  private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
+  private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST", "localhost")
+  private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT", "5432").toInt
+  private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
   private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
 
   Class.forName("org.postgresql.Driver")
@@ -33,7 +32,8 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
   private def pgReachable: Boolean =
     Try {
       val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
-      try c.isValid(2) finally c.close()
+      try c.isValid(2)
+      finally c.close()
     }.getOrElse(false)
 
   private def psql(targetDb: String, sql: String): Unit =
@@ -45,36 +45,50 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
     assert(rc == 0, s"psql ($sql) exit=$rc")
 
   private def withFreshDb(test: String => Unit): Unit =
-    if !pgReachable then cancel(
-      s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
-    )
+    if !pgReachable then
+      cancel(
+        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
+      )
     val dbName = s"qodlb_test_${System.nanoTime()}"
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try test(dbName)
     finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
 
-  "LiquibaseRunner" should "apply the changelog and create the qodstate_* tables" in withFreshDb { db =>
-    new LiquibaseRunner(dbUrl(db), pgUser, pgPass).run()
+  "LiquibaseRunner" should "apply the changelog and create the qodstate_* tables" in withFreshDb {
+    db =>
+      new LiquibaseRunner(dbUrl(db), pgUser, pgPass).run()
 
-    val c = DriverManager.getConnection(dbUrl(db), pgUser, pgPass)
-    try
-      val rs = c.createStatement().executeQuery(
-        """SELECT table_name FROM information_schema.tables
+      val c = DriverManager.getConnection(dbUrl(db), pgUser, pgPass)
+      try
+        val rs = c
+          .createStatement()
+          .executeQuery(
+            """SELECT table_name FROM information_schema.tables
           |WHERE table_schema = 'public' AND table_name LIKE 'qodstate_%'
           |ORDER BY table_name""".stripMargin
-      )
-      val tables = scala.collection.mutable.ListBuffer.empty[String]
-      while rs.next() do tables += rs.getString(1)
-      rs.close()
-      tables.toList shouldBe List(
-        "qodstate_federated_secret", "qodstate_federated_source",
-        "qodstate_group", "qodstate_group_role",
-        "qodstate_node", "qodstate_pool", "qodstate_pool_permission",
-        "qodstate_role", "qodstate_role_column_policy", "qodstate_role_permission",
-        "qodstate_tenant", "qodstate_tenant_db",
-        "qodstate_user", "qodstate_user_group", "qodstate_user_role"
-      )
-    finally c.close()
+          )
+        val tables = scala.collection.mutable.ListBuffer.empty[String]
+        while rs.next() do tables += rs.getString(1)
+        rs.close()
+        tables.toList shouldBe List(
+          "qodstate_federated_secret",
+          "qodstate_federated_source",
+          "qodstate_group",
+          "qodstate_group_role",
+          "qodstate_node",
+          "qodstate_pool",
+          "qodstate_pool_permission",
+          "qodstate_role",
+          "qodstate_role_column_policy",
+          "qodstate_role_permission",
+          "qodstate_role_row_policy",
+          "qodstate_tenant",
+          "qodstate_tenant_db",
+          "qodstate_user",
+          "qodstate_user_group",
+          "qodstate_user_role"
+        )
+      finally c.close()
   }
 
   it should "be idempotent on a second run" in withFreshDb { db =>
@@ -83,17 +97,20 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
     new LiquibaseRunner(dbUrl(db), pgUser, pgPass).run()
     val c = DriverManager.getConnection(dbUrl(db), pgUser, pgPass)
     try
-      val rs = c.createStatement().executeQuery(
-        "SELECT count(*) FROM information_schema.tables " +
-          "WHERE table_schema = 'public' AND table_name LIKE 'qodstate_%'"
-      )
+      val rs = c
+        .createStatement()
+        .executeQuery(
+          "SELECT count(*) FROM information_schema.tables " +
+            "WHERE table_schema = 'public' AND table_name LIKE 'qodstate_%'"
+        )
       rs.next()
       // 5 control-plane tables (tenant, tenant_db, pool, node, user) +
       // 7 RBAC tables (role, role_permission, group, user_group,
       // user_role, group_role, pool_permission) +
       // 2 federation tables (federated_source, federated_secret) +
-      // 1 column-level security table (role_column_policy, Liquibase 0012).
+      // 2 policy tables (role_column_policy, Liquibase 0012;
+      // role_row_policy, Liquibase 0013).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 15
+      rs.getInt(1) shouldBe 16
     finally c.close()
   }

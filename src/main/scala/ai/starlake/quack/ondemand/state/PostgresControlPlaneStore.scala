@@ -77,7 +77,7 @@ final class PostgresControlPlaneStore(
     )
     try
       ps.setString(1, t.id)
-      ps.setString(2, if t.displayName.nonEmpty then t.displayName else t.name)
+      ps.setString(2, if t.displayName.nonEmpty then t.displayName else t.id)
       ps.setBoolean(3, t.disabled)
       ps.setString(4, t.authProvider)
       ps.setString(5, mapToJson(t.authConfig))
@@ -114,7 +114,7 @@ final class PostgresControlPlaneStore(
       )
       try
         tps.setString(1, tenant.id)
-        tps.setString(2, if tenant.displayName.nonEmpty then tenant.displayName else tenant.name)
+        tps.setString(2, if tenant.displayName.nonEmpty then tenant.displayName else tenant.id)
         tps.setBoolean(3, tenant.disabled)
         tps.setString(4, tenant.authProvider)
         tps.setString(5, mapToJson(tenant.authConfig))
@@ -158,11 +158,9 @@ final class PostgresControlPlaneStore(
   }
 
   private def readTenant(rs: ResultSet): Tenant =
-    val dn = rs.getString("display_name")
     Tenant(
       id = rs.getString("id"),
-      name = dn,
-      displayName = dn,
+      displayName = rs.getString("display_name"),
       disabled = rs.getBoolean("disabled"),
       authProvider = rs.getString("auth_provider"),
       authConfig = jsonToMap(rs.getString("auth_config"))

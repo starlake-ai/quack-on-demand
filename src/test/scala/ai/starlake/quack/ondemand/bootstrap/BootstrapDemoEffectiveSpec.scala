@@ -17,36 +17,48 @@ import java.time.Instant
 import scala.io.Source
 import scala.util.Using
 
-/** End-to-end ACL behavior of the bundled `bootstrap-demo.yaml`. Each
-  * row of the decision matrix in the design spec is one test. The matrix
-  * is the contract the YAML must keep producing; if a yaml edit breaks
-  * a row, this spec fires before the docs go stale.
+/** End-to-end ACL behavior of the bundled `bootstrap-demo.yaml`. Each row of the decision matrix in
+  * the design spec is one test. The matrix is the contract the YAML must keep producing; if a yaml
+  * edit breaks a row, this spec fires before the docs go stale.
   *
-  * Note: ManifestImporter stores RbacUser.tenant as the tenant surrogate
-  * id (resolved from the YAML tenant name), which is what the validator
-  * keys catalogs by. The tenantCatalogs function therefore matches on the
-  * id resolved from the imported store.
+  * Note: ManifestImporter stores RbacUser.tenant as the tenant surrogate id (resolved from the YAML
+  * tenant name), which is what the validator keys catalogs by. The tenantCatalogs function
+  * therefore matches on the id resolved from the imported store.
   */
 class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
 
   // ---- one-time setup -----------------------------------------------
 
   private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] = IO.pure(RunningNode(
-      s.nodeId, s.poolKey, s.role, "127.0.0.1", 21000, "tok",
-      Some(1L), None, Instant.EPOCH, maxConcurrent = s.maxConcurrent))
+    def start(s: NodeSpec): IO[RunningNode] = IO.pure(
+      RunningNode(
+        s.nodeId,
+        s.poolKey,
+        s.role,
+        "127.0.0.1",
+        21000,
+        "tok",
+        Some(1L),
+        None,
+        Instant.EPOCH,
+        maxConcurrent = s.maxConcurrent
+      )
+    )
     def stop(id: String)    = IO.unit
     def isAlive(id: String) = true
     def discoverExisting()  = IO.pure(Nil)
     def cleanup()           = IO.unit
 
   private val (store, sup) =
-    val s        = new InMemoryControlPlaneStore()
+    val s      = new InMemoryControlPlaneStore()
     val stream = Option(getClass.getClassLoader.getResourceAsStream("bootstrap-demo.yaml"))
       .getOrElse(fail("bootstrap-demo.yaml not found on classpath"))
-    val yaml = Using.resource(Source.fromInputStream(stream, "UTF-8"))(_.mkString)
-    val manifest = parser.parse(yaml).flatMap(_.as[ConfigManifest])
-      .toOption.getOrElse(fail("bootstrap-demo.yaml failed to parse"))
+    val yaml     = Using.resource(Source.fromInputStream(stream, "UTF-8"))(_.mkString)
+    val manifest = parser
+      .parse(yaml)
+      .flatMap(_.as[ConfigManifest])
+      .toOption
+      .getOrElse(fail("bootstrap-demo.yaml failed to parse"))
     ManifestImporter.apply(manifest, s) match
       case Left(errs) => fail(s"importer rejected the demo YAML: ${errs.mkString("; ")}")
       case Right(())  => ()
@@ -54,18 +66,16 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
     supervisor.restore()
     (s, supervisor)
 
-  // The store keys users (and the validator keys catalogs) by tenant
-  // surrogate id, so resolve the demo tenants' ids and build tenantCatalogs
-  // around them.
-  private val tenantIdByName: Map[String, String] =
-    store.listTenants().map(t => t.displayName -> t.id).toMap
-  private val acmeId   = tenantIdByName("acme")
-  private val globexId = tenantIdByName("globex")
+  // The store keys users (and the validator keys catalogs) by tenant id.
+  // Post slug-id refactor the tenant id IS the slug ("acme"/"globex"); the
+  // display name is decoupled ("Acme Corporation"), so the ids are the slugs.
+  private val acmeId   = "acme"
+  private val globexId = "globex"
 
   private val validator = new PostgresAclValidator(
     defaultDatabase = "acme_tpch",
-    defaultSchema   = "tpch1",
-    tenantCatalogs  = {
+    defaultSchema = "tpch1",
+    tenantCatalogs = {
       case `acmeId`   => Set("acme_tpch")
       case `globexId` => Set("globex_tpcds")
       case _          => Set.empty
@@ -73,42 +83,49 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
   )
 
   private def effective(username: String, tenant: Option[String]): EffectiveSet =
-    // Callers pass the tenant display name; users are keyed by surrogate id.
-    val tenantId = tenant.map(n => tenantIdByName.getOrElse(n, n))
-    val user = store.findUser(tenantId, username).getOrElse(
-      fail(s"user $username (tenant=$tenant) missing from store")
-    )
-    sup.effectiveSetForUser(user.id).getOrElse(
-      fail(s"EffectiveSet missing for $username")
-    )
+    // Callers pass the tenant slug, which post-refactor IS the tenant id.
+    val tenantId = tenant
+    val user     = store
+      .findUser(tenantId, username)
+      .getOrElse(
+        fail(s"user $username (tenant=$tenant) missing from store")
+      )
+    sup
+      .effectiveSetForUser(user.id)
+      .getOrElse(
+        fail(s"EffectiveSet missing for $username")
+      )
 
   private def ctx(
-      sql:            String,
-      eff:            EffectiveSet,
+      sql: String,
+      eff: EffectiveSet,
       defaultCatalog: String = "acme_tpch",
-      defaultSchema:  String = "tpch1"
+      defaultSchema: String = "tpch1"
   ): ValidationContext = ValidationContext(
-    username        = eff.user.username,
-    database        = s"${eff.user.tenant.getOrElse("?")}/${defaultCatalog}/bi",
-    statement       = sql,
-    peer            = "spec",
+    username = eff.user.username,
+    database = s"${eff.user.tenant.getOrElse("?")}/${defaultCatalog}/bi",
+    statement = sql,
+    peer = "spec",
     defaultDatabase = Some(defaultCatalog),
-    defaultSchema   = Some(defaultSchema),
-    effectiveSet    = Some(eff)
+    defaultSchema = Some(defaultSchema),
+    effectiveSet = Some(eff)
   )
 
   // ---- the decision matrix (one row per test) -----------------------
 
-  "alice (analyst)" should "SELECT a covered table" in {
+  // alice holds [analyst, tenant_admin] in the demo YAML: analyst for the RO/RLS
+  // demo, tenant_admin so she can sign in to the admin UI at /ui/?tenant=acme.
+  // Her effective grants are the union, so tenant_admin's *.*.* ALL covers Write.
+  "alice (analyst + tenant_admin)" should "SELECT a covered table" in {
     validator.validate(
       ctx("SELECT * FROM customer", effective("alice", Some("acme")))
     ) shouldBe Allowed
   }
 
-  it should "be denied INSERT (RO does not cover Write)" in {
+  it should "be allowed INSERT via her tenant_admin role (ALL covers Write)" in {
     validator.validate(
       ctx("INSERT INTO customer VALUES (1)", effective("alice", Some("acme")))
-    ) shouldBe a [Denied]
+    ) shouldBe Allowed
   }
 
   it should "be denied cross-tenant SELECT against globex" in {
@@ -117,7 +134,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM globex_tpcds.tpcds1.store_sales",
         effective("alice", Some("acme"))
       )
-    ) shouldBe a [Denied]
+    ) shouldBe a[Denied]
   }
 
   "bob (data-eng group: etl + dba)" should "INSERT into lineitem (RW via etl role)" in {
@@ -135,7 +152,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
   "dave (dba only)" should "be denied SELECT (DDL does not cover Read)" in {
     validator.validate(
       ctx("SELECT * FROM customer", effective("dave", Some("acme")))
-    ) shouldBe a [Denied]
+    ) shouldBe a[Denied]
   }
 
   "acme-admin (tenant_admin)" should "SELECT inside acme" in {
@@ -150,7 +167,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM globex_tpcds.tpcds1.store_sales",
         effective("acme-admin", Some("acme"))
       )
-    ) shouldBe a [Denied]
+    ) shouldBe a[Denied]
   }
 
   "carol (globex analyst via group)" should "SELECT store_sales" in {
@@ -159,9 +176,23 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM store_sales",
         effective("carol", Some("globex")),
         defaultCatalog = "globex_tpcds",
-        defaultSchema  = "tpcds1"
+        defaultSchema = "tpcds1"
       )
     ) shouldBe Allowed
+  }
+
+  // RO does not cover Write: carol's globex `analyst` role is read-only, and
+  // she holds no write grant on globex, so an INSERT is denied. (This row used
+  // to be demonstrated by alice, before she gained the tenant_admin role.)
+  it should "be denied INSERT into store_sales (RO does not cover Write)" in {
+    validator.validate(
+      ctx(
+        "INSERT INTO store_sales VALUES (1)",
+        effective("carol", Some("globex")),
+        defaultCatalog = "globex_tpcds",
+        defaultSchema = "tpcds1"
+      )
+    ) shouldBe a[Denied]
   }
 
   it should "SELECT from the federated acme_pg via cross_tenant_analyst role" in {
@@ -170,7 +201,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM acme_pg.tpch1.customer",
         effective("carol", Some("globex")),
         defaultCatalog = "globex_tpcds",
-        defaultSchema  = "tpcds1"
+        defaultSchema = "tpcds1"
       )
     ) shouldBe Allowed
   }
@@ -181,9 +212,9 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM acme_pg.tpch1.lineitem",
         effective("carol", Some("globex")),
         defaultCatalog = "globex_tpcds",
-        defaultSchema  = "tpcds1"
+        defaultSchema = "tpcds1"
       )
-    ) shouldBe a [Denied]
+    ) shouldBe a[Denied]
   }
 
   "globex-admin (tenant_admin)" should "be denied federated SELECT (wildcard not in tenantCatalogs)" in {
@@ -195,9 +226,9 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM acme_pg.tpch1.customer",
         effective("globex-admin", Some("globex")),
         defaultCatalog = "globex_tpcds",
-        defaultSchema  = "tpcds1"
+        defaultSchema = "tpcds1"
       )
-    ) shouldBe a [Denied]
+    ) shouldBe a[Denied]
   }
 
   "root (superuser)" should "SELECT in any catalog" in {

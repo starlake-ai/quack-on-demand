@@ -182,7 +182,7 @@ export default function EffectivePermsCard({
             Closure of direct + group-inherited grants for
             <code> {data.user.username}</code>
             {data.user.tenant ? <> in tenant <code>{data.user.tenant}</code></>
-                              : <> (<em>superuser</em> — bypasses every gate)</>}.
+                              : <> (<em>superuser</em> - bypasses every gate)</>}.
           </p>
 
           <h4>Roles ({data.roles.length})</h4>

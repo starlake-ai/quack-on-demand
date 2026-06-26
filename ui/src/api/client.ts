@@ -2,6 +2,7 @@ import type {
   CreatePoolRequest,
   ScalePoolRequest,
   StopPoolRequest,
+  DeletePoolRequest,
   SetMaxConcurrentRequest,
   SetPoolDisabledRequest,
   SetTenantAuthRequest,
@@ -19,6 +20,7 @@ import type {
   ClientConfigResponse,
   ConfigListResponse,
   ManifestImportSummary,
+  AuthModeResponse,
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
@@ -132,6 +134,9 @@ export const api = {
   login:   (req: LoginRequest) => post<LoginResponse>('/auth/login', req),
   logout:  () => post<void>('/auth/logout'),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
+  // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
+  authMode: (tenant?: string) =>
+    get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),
 
   // Health + client config
   health:        () => fetch('/health').then(r => r.json() as Promise<HealthResponse>),
@@ -161,6 +166,7 @@ export const api = {
   createPool:  (req: CreatePoolRequest) => post<PoolResponse>('/pool/create', req),
   scalePool:   (req: ScalePoolRequest) => post<PoolResponse>('/pool/scale', req),
   stopPool:    (req: StopPoolRequest) => post<void>('/pool/stop', req),
+  deletePool:  (req: DeletePoolRequest) => post<void>('/pool/delete', req),
   setMaxConcurrent: (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
   setPoolDisabled:  (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
 

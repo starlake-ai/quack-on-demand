@@ -8,9 +8,13 @@
 #   * Forward host :20900 -> control-plane container :80, so the
 #     Traefik web entrypoint becomes the single host-visible port for
 #     every HTTP service in the rig (manager REST/UI, Grafana,
-#     Prometheus, Keycloak admin console). FlightSQL stays on a
-#     separate `kubectl port-forward svc/...-flightsql 31338` because
-#     it's gRPC over its own TLS chain.
+#     Prometheus, Keycloak admin console).
+#   * Forward host :31338 -> control-plane container :31338 so the
+#     gRPC+TLS FlightSQL edge is reachable on the host (and, since kind
+#     binds extraPortMappings on 0.0.0.0, from a remote desktop at
+#     <host>:31338) without a manual `kubectl port-forward`. The
+#     flightsql Service is a NodePort pinned to 31338 in
+#     values-local-stack.yaml so node :31338 routes to the pod.
 #
 # If you reuse a kind cluster created before this file existed, the
 # port mapping is missing -- the smoke script detects this and asks
@@ -30,4 +34,7 @@ nodes:
     extraPortMappings:
       - containerPort: 80
         hostPort: 20900
+        protocol: TCP
+      - containerPort: 31338
+        hostPort: 31338
         protocol: TCP

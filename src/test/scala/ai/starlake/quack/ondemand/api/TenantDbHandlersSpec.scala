@@ -31,7 +31,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
 
   private def freshHandlers(): TenantDbHandlers =
     val sup = new PoolSupervisor(new StubBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
-    sup.createTenant(Tenant("acme", Map.empty)).unsafeRunSync()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
     new TenantDbHandlers(sup)
 
   "TenantDbHandlers.createTenantDb" should

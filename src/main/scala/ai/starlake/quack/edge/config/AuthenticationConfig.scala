@@ -64,7 +64,17 @@ case class KeycloakAuthConfig(
       description = "Keycloak client secret.",
       sensitive = true
     )
-    clientSecret: String
+    clientSecret: String,
+    @field @ConfigField(
+      envVar = "QOD_AUTH_KEYCLOAK_ISSUER",
+      description =
+        "Override for the expected token issuer (the `iss` claim the bearer validator requires). " +
+          "Leave empty to derive it from baseUrl + realm. Set it when Keycloak's browser-facing " +
+          "issuer (KC_HOSTNAME_URL) differs from the in-cluster baseUrl used to fetch JWKS: tokens " +
+          "minted via an ingress carry iss=https://host/auth/realms/<realm> while the manager " +
+          "fetches JWKS in-cluster. JWKS is always derived from baseUrl, not this value."
+    )
+    issuer: String = ""
 ) derives ConfigReader
 
 case class GoogleAuthConfig(

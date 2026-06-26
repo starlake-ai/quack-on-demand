@@ -13,7 +13,7 @@ Access to a database is granted through pools, so it helps to be precise about h
 
 - A **tenant** owns one or more **tenant-dbs**. A tenant-db *is* a database: in the default `ducklake` kind it is a Postgres database holding a DuckLake catalog, with a catalog name and a default schema.
 - A **pool** is a set of DuckDB Quack nodes and is bound to exactly one tenant-db (`qodstate_pool.tenant_db_id`). Every node in the pool opens that tenant-db's catalog. A pool's full identity is the triple `(tenant, tenantDb, pool)`, the `PoolKey`.
-- A client handshake supplies only a `tenant` and a `pool` (via gRPC headers / URL params). The gateway resolves which tenant-db that pool belongs to server-side; the client never names the database directly. JWT claims are never trusted for routing — the URL is authoritative.
+- A client handshake supplies only a `tenant` and a `pool` (via gRPC headers / URL params). The gateway resolves which tenant-db that pool belongs to server-side; the client never names the database directly. JWT claims are never trusted for routing - the URL is authoritative.
 
 The consequence is the part that is easy to miss: **admission to a pool is admission to that pool's database.** The pool-access check (gate 1 below) is therefore the database-access gate. Granting a user or group a `qodstate_pool_permission` row for pool `p` is what lets them open a session against `p`'s tenant-db; a principal with no pool permission reaching a tenant-db cannot query that database at all, regardless of any table grants they hold. Once admitted, the tenant-db's catalog name and default schema become the session's defaults, which the per-statement gate uses to qualify unqualified table names.
 
@@ -64,7 +64,7 @@ Where:
 
 The `RbacResolver` holds the schema-bounded slice of the graph (roles, groups, role permissions, group-role edges, group-scoped pool permissions). Its memory footprint is bounded by tenant cardinality, not by the number of users. User-bound state (user-role and user-group edges) is intentionally excluded from the cache and fetched per-handshake so user revocations take effect on the next connection.
 
-The full `EffectiveSet` is also cached in `PoolSupervisor` with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)` — under load the same user + claims tuple repeats every few seconds, so the cache collapses N handshakes' worth of work into one. Every RBAC mutator (`createRole`, `grantRolePermission`, `addUserRole`, `addGroupRole`, `grantPoolPermission`, etc.) calls `invalidateEffectiveCache()`, so a freshly-granted role takes effect on the next handshake regardless of the TTL.
+The full `EffectiveSet` is also cached in `PoolSupervisor` with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)` - under load the same user + claims tuple repeats every few seconds, so the cache collapses N handshakes' worth of work into one. Every RBAC mutator (`createRole`, `grantRolePermission`, `addUserRole`, `addGroupRole`, `grantPoolPermission`, etc.) calls `invalidateEffectiveCache()`, so a freshly-granted role takes effect on the next handshake regardless of the TTL.
 
 The handshake produces an `AuthorizedHandshake` that carries the resolved `PoolKey`, the matched user row, and the full `EffectiveSet`. The edge server stores this on the connection and reads it for every subsequent ACL gate evaluation.
 
@@ -151,7 +151,7 @@ Policies live in `qodstate_role_column_policy` (one row per `(role, catalog, sch
 |---|---|
 | `role_id`        | The role that carries the policy. |
 | `catalog_name` / `schema_name` / `table_name` | The protected table. `*` wildcards work the same way as for table permissions, including tenant scoping on `catalog_name`. |
-| `column_name`    | The protected column. **Always literal — `*` is rejected.** A wildcard column policy would mean "deny everything", which is already expressible via absence of a table-level grant. |
+| `column_name`    | The protected column. **Always literal - `*` is rejected.** A wildcard column policy would mean "deny everything", which is already expressible via absence of a table-level grant. |
 | `action`         | `deny` (refuse any query that references the column) or `mask` (return a transformed value). |
 | `transform_sql`  | The transform expression. `NULL` for `deny`; a strict-containment-validated scalar SQL expression for `mask`. |
 
@@ -177,7 +177,7 @@ client SQL
    ▼  adapter sends the rewritten SQL to the Quack node
 ```
 
-The rewriter only runs for SELECT-shaped statements; DML and DDL pass through unchanged (the table-level ACL has already gated whether the user can write to the target). Statements that fail to parse are passed through unmodified — DuckDB returns the syntax error to the client, just as it does today.
+The rewriter only runs for SELECT-shaped statements; DML and DDL pass through unchanged (the table-level ACL has already gated whether the user can write to the target). Statements that fail to parse are passed through unmodified - DuckDB returns the syntax error to the client, just as it does today.
 
 Superusers bypass the rewriter, matching the bypass behaviour of the table-level ACL.
 
@@ -197,7 +197,7 @@ FROM x` is masked according to the base table's policy. For FROM-item subqueries
 outer-scope policy keyed on `(subAlias, exposedName)` so the outer projection is masked too,
 since jsqltranspiler's lineage stops at the FROM boundary.
 
-### Kill switch (feature flag — EXPERIMENTAL)
+### Kill switch (feature flag - EXPERIMENTAL)
 
 Column-level security is **experimental** and ships **disabled by default**. Operators opt in
 by setting `quack-on-demand.cls.enabled = true` (or env `QOD_CLS_ENABLED=true`). When disabled,
@@ -237,7 +237,7 @@ under one statement; until then this is operator-visible.
 
 ### Action: deny
 
-A `deny` policy refuses any query that references the protected column anywhere — projection, WHERE clause, HAVING, GROUP BY, ORDER BY, JOIN condition, subquery, CTE body — and short-circuits with a 403 carrying the column qualifier. `SELECT *` deny is fail-closed: if star expansion uncovers a denied column, the query is refused rather than silently dropping the column from the projection.
+A `deny` policy refuses any query that references the protected column anywhere - projection, WHERE clause, HAVING, GROUP BY, ORDER BY, JOIN condition, subquery, CTE body - and short-circuits with a 403 carrying the column qualifier. `SELECT *` deny is fail-closed: if star expansion uncovers a denied column, the query is refused rather than silently dropping the column from the projection.
 
 ### Action: mask + transform_sql
 
@@ -264,7 +264,7 @@ A failed validation returns `400 invalid_policy` with the violated rule named in
 
 ### SELECT * expansion
 
-When the user issues `SELECT *` (or `SELECT t.*`), the rewriter reads the column list from the DuckLake catalog and expands the star to a literal projection BEFORE applying policies. Operators see the same number of columns the table actually has, with masked columns rewritten in place. When the catalog cannot enumerate the table (federated source temporarily unreachable, etc.), the rewriter passes the original `*` through — table-level ACL still decided whether the user could read the table in the first place. A `column_policy_catalog_lookups_total{result=error}` metric surfaces this case for operators.
+When the user issues `SELECT *` (or `SELECT t.*`), the rewriter reads the column list from the DuckLake catalog and expands the star to a literal projection BEFORE applying policies. Operators see the same number of columns the table actually has, with masked columns rewritten in place. When the catalog cannot enumerate the table (federated source temporarily unreachable, etc.), the rewriter passes the original `*` through - table-level ACL still decided whether the user could read the table in the first place. A `column_policy_catalog_lookups_total{result=error}` metric surfaces this case for operators.
 
 ### Effective policies and caching
 
@@ -302,7 +302,7 @@ Column policies are administered the same way as table permissions: via REST end
 
 ## Row-level policies
 
-Column policies restrict *which columns* a role sees; row policies restrict *which rows*. Where column-level security blanks out `c_ssn`, row-level security drops the customer records a role is not allowed to see in the first place — a salesperson sees only their own region's orders, a tenant analyst sees only rows tagged with their tenant id, an auditor sees everything. Like column policies, row policies are enforced by rewriting the user's SELECT before it reaches a Quack node; unlike column policies, the rewrite pushes a boolean filter down onto each protected table rather than transforming the projection.
+Column policies restrict *which columns* a role sees; row policies restrict *which rows*. Where column-level security blanks out `c_ssn`, row-level security drops the customer records a role is not allowed to see in the first place - a salesperson sees only their own region's orders, a tenant analyst sees only rows tagged with their tenant id, an auditor sees everything. Like column policies, row policies are enforced by rewriting the user's SELECT before it reaches a Quack node; unlike column policies, the rewrite pushes a boolean filter down onto each protected table rather than transforming the projection.
 
 ### Data model
 
@@ -311,7 +311,7 @@ Policies live in `qodstate_role_row_policy` (one row per `(role, catalog, schema
 | Column | Meaning |
 |---|---|
 | `role_id`        | The role that carries the policy. |
-| `catalog_name` / `schema_name` / `table_name` | The protected table. `*` wildcards work the same way as for table permissions, including tenant scoping on `catalog_name`. A `table_name = '*'` policy filters every table the query touches — useful for a tenant-id predicate that should apply everywhere. |
+| `catalog_name` / `schema_name` / `table_name` | The protected table. `*` wildcards work the same way as for table permissions, including tenant scoping on `catalog_name`. A `table_name = '*'` policy filters every table the query touches - useful for a tenant-id predicate that should apply everywhere. |
 | `predicate_sql`  | A boolean SQL expression that admits a row when it evaluates true. May embed identity-substitution tokens (see below). Validated at create time. |
 
 `UNIQUE (role_id, catalog_name, schema_name, table_name)` so updates replace in place; a role carries at most one predicate per exact table tuple (a wildcard policy and a specific-table policy are different tuples and both apply). `ON DELETE CASCADE from qodstate_role` so dropping a role drops its policies.
@@ -343,26 +343,26 @@ The rewriter only runs for SELECT-shaped statements; DML and DDL pass through un
 
 ### Row-level security guarantees
 
-Every table occurrence reachable from the statement is considered: the top-level `FROM` item, each `JOIN` right-hand item, parenthesised subqueries, and CTE (`WITH`) bodies are recursed into. A table matches a policy when its `(catalog, schema, table)` — resolved against the session's default catalog/schema for bare names — equals the policy tuple component-wise, with `*` matching anything. When a table matches more than one of the principal's policies (e.g. a wildcard tenant-id policy plus a specific-table policy, or policies from two different roles), the predicates are combined (see "Combining policies").
+Every table occurrence reachable from the statement is considered: the top-level `FROM` item, each `JOIN` right-hand item, parenthesised subqueries, and CTE (`WITH`) bodies are recursed into. A table matches a policy when its `(catalog, schema, table)` - resolved against the session's default catalog/schema for bare names - equals the policy tuple component-wise, with `*` matching anything. When a table matches more than one of the principal's policies (e.g. a wildcard tenant-id policy plus a specific-table policy, or policies from two different roles), the predicates are combined (see "Combining policies").
 
-### Kill switch (feature flag — EXPERIMENTAL)
+### Kill switch (feature flag - EXPERIMENTAL)
 
-Row-level security is **experimental** and ships **disabled by default**. Operators opt in by setting `quack-on-demand.rls.enabled = true` (or env `QOD_RLS_ENABLED=true`). When disabled, every statement bypasses the rewriter completely — no parse, no table walk, no per-statement overhead. Treat the toggle as a kill switch you can flip off in an incident: change the env var and restart the manager. It is independent of `QOD_CLS_ENABLED`; either feature can run without the other.
+Row-level security is **experimental** and ships **disabled by default**. Operators opt in by setting `quack-on-demand.rls.enabled = true` (or env `QOD_RLS_ENABLED=true`). When disabled, every statement bypasses the rewriter completely - no parse, no table walk, no per-statement overhead. Treat the toggle as a kill switch you can flip off in an incident: change the env var and restart the manager. It is independent of `QOD_CLS_ENABLED`; either feature can run without the other.
 
 ### Predicate validation
 
 `predicate_sql` is validated once at policy create/update time and rejected (`400 invalid_policy`, with the violated rule named) when it:
 
 1. Fails to parse as a single boolean SQL expression (after identity tokens are neutralised).
-2. Contains a subquery or `EXISTS` — nesting a SELECT inside the predicate is refused.
-3. Calls a side-effect or escape function: the denylist matches column-level security's — `read_csv`, `read_parquet`, `read_json`, `query`, `sql`, `attach`, `detach`, `install`, `load`, `system`, `current_setting`, `set_setting`, `pg_read_server_files`, `pg_read_binary_file`, and anything matching `pragma_*`.
+2. Contains a subquery or `EXISTS` - nesting a SELECT inside the predicate is refused.
+3. Calls a side-effect or escape function: the denylist matches column-level security's - `read_csv`, `read_parquet`, `read_json`, `query`, `sql`, `attach`, `detach`, `install`, `load`, `system`, `current_setting`, `set_setting`, `pg_read_server_files`, `pg_read_binary_file`, and anything matching `pragma_*`.
 4. Exceeds 1024 characters.
 
-Detection runs on the parsed, canonicalised expression with string literals stripped, so a denylisted function nested inside any wrapper (`read_csv(...) IS NOT NULL`) is still caught, while a harmless literal like `note = 'select one'` is not mistaken for a subquery. Unlike a column mask transform, the predicate may reference *any* column of the protected table — it filters rows, so there is no single-column containment rule.
+Detection runs on the parsed, canonicalised expression with string literals stripped, so a denylisted function nested inside any wrapper (`read_csv(...) IS NOT NULL`) is still caught, while a harmless literal like `note = 'select one'` is not mistaken for a subquery. Unlike a column mask transform, the predicate may reference *any* column of the protected table - it filters rows, so there is no single-column containment rule.
 
 ### Identity substitution tokens
 
-Predicates may embed identity tokens that are filled from the principal's `EffectiveSet` at query time (never at authoring time — the stored predicate keeps the tokens). Each token expands to a complete SQL literal, so a single value is quoted and escaped and a list is rendered for `IN (…)`:
+Predicates may embed identity tokens that are filled from the principal's `EffectiveSet` at query time (never at authoring time - the stored predicate keeps the tokens). Each token expands to a complete SQL literal, so a single value is quoted and escaped and a list is rendered for `IN (…)`:
 
 | Token | Expands to | Example expansion |
 |---|---|---|
@@ -371,7 +371,7 @@ Predicates may embed identity tokens that are filled from the principal's `Effec
 | `${roles}`    | the effective role names as a quoted list | `'analyst', 'auditor'` |
 | `${groups}`   | the effective group names as a quoted list | `'sales', 'eng'` |
 
-Single-quotes in a value are doubled (`o'brien` → `'o''brien'`), so substitution is injection-safe. A **list token that resolves to the empty set becomes `NULL`**, so `dept IN (${groups})` becomes `dept IN (NULL)` — a predicate that matches no rows. This is the safe-restrictive default: a principal in no groups sees nothing through a group-keyed policy rather than erroring on `IN ()`.
+Single-quotes in a value are doubled (`o'brien` → `'o''brien'`), so substitution is injection-safe. A **list token that resolves to the empty set becomes `NULL`**, so `dept IN (${groups})` becomes `dept IN (NULL)` - a predicate that matches no rows. This is the safe-restrictive default: a principal in no groups sees nothing through a group-keyed policy rather than erroring on `IN ()`.
 
 Typical predicates:
 
@@ -392,7 +392,7 @@ When both features are on, the row filter is injected inside the column rewrite,
 
 ### Effective policies and caching
 
-Row policies join column policies and the `RolePermission` / pool-permission rows in the per-user `EffectiveSet.rowPolicies`. The same 60-second `PoolSupervisor` cache covers them, and the same mutator-invalidation contract applies: `createRowPolicy`, `updateRowPolicy`, and `deleteRowPolicy` each call `invalidateEffectiveCache()`, so a freshly-authored policy takes effect on the next handshake regardless of the TTL. Per-statement cost is in-memory only: an AST table-walk plus per-table lookup against the cached list — no Postgres traffic on the hot path.
+Row policies join column policies and the `RolePermission` / pool-permission rows in the per-user `EffectiveSet.rowPolicies`. The same 60-second `PoolSupervisor` cache covers them, and the same mutator-invalidation contract applies: `createRowPolicy`, `updateRowPolicy`, and `deleteRowPolicy` each call `invalidateEffectiveCache()`, so a freshly-authored policy takes effect on the next handshake regardless of the TTL. Per-statement cost is in-memory only: an AST table-walk plus per-table lookup against the cached list - no Postgres traffic on the hot path.
 
 ### Observability
 

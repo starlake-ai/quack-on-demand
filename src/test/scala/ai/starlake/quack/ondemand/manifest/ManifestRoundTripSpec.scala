@@ -30,12 +30,12 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val s = new InMemoryControlPlaneStore()
 
     // Tenant
-    s.upsertTenant(Tenant(id = "t-1", name = "tpch", displayName = "tpch", authProvider = "db"))
+    s.upsertTenant(Tenant(id = "tpch", displayName = "tpch", authProvider = "db"))
 
     // TenantDb
     s.upsertTenantDb(TenantDb(
       id          = "td-1",
-      tenantId    = "t-1",
+      tenantId    = "tpch",
       name        = "tpch_tpch1",
       kind        = TenantDbKind.DuckLake,
       metastore   = Map.empty,
@@ -46,7 +46,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Pool
     s.upsertPool(Pool(
       id                   = "p-1",
-      tenantId             = "t-1",
+      tenantId             = "tpch",
       tenantDbId           = "td-1",
       name                 = "sales",
       size                 = 3,
@@ -56,7 +56,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     ))
 
     // Role with one table permission
-    s.upsertRole(RbacRole(id = "r-1", tenantId = "t-1", name = "reader",
+    s.upsertRole(RbacRole(id = "r-1", tenantId = "tpch", name = "reader",
                           description = Some("read-only")))
     s.insertRolePermission(RolePermission(
       id          = "rp-1",

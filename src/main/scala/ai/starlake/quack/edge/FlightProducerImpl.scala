@@ -9,7 +9,7 @@ import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
 import org.apache.arrow.flight.sql.impl.FlightSql
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.VectorSchemaRoot
-import org.apache.arrow.vector.types.pojo.{Field, Schema}
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
 import java.nio.charset.StandardCharsets
 import java.util.Collections
@@ -67,6 +67,26 @@ final class FlightProducerImpl(
 
   private val emptySchemaBytes: ByteString =
     serializeSchema(emptySchema)
+
+  /** Schema a Quack node streams back for a non-result statement (DML / DDL / transaction control
+    * via [[PrepareStrategy.SkipExecute]]): DuckDB materializes every such statement as a single-row
+    * `Count BIGINT`. Both the prepared (`getFlightInfoPreparedStatement`) and non-prepared
+    * (`getFlightInfoStatement`) FlightInfo paths must advertise THIS schema, not an empty one,
+    * because ADBC enforces `FlightInfo.schema == DoGet stream schema`; a zero-field schema there
+    * fails with "expected schema fields: 0 but got schema fields: 1 (Count int64)". ADBC's
+    * `cursor.execute()` drives the prepared path, so the empty-schema "this is an executeUpdate"
+    * convention can't be used here. Verified live across DML, DDL and BEGIN - all stream this one
+    * column.
+    */
+  private val countSchema: Schema =
+    new Schema(
+      Collections.singletonList(
+        new Field("Count", FieldType.nullable(new ArrowType.Int(64, true)), null)
+      )
+    )
+
+  private val countSchemaBytes: ByteString =
+    serializeSchema(countSchema)
 
   private val preparedStatements =
     scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
@@ -146,7 +166,10 @@ final class FlightProducerImpl(
 
         probeSqlOpt match
           case None =>
-            // SkipExecute: empty Arrow schema, no node call, no soft pin, no prep duration.
+            // SkipExecute (DML / DDL / txn control): no node call, no soft pin, no prep duration.
+            // Advertise `countSchema` (single-row Count BIGINT) - the node streams exactly that on
+            // Execute, and ADBC (which drives Execute through this prepared path) rejects any
+            // FlightInfo schema that doesn't match the DoGet stream. See `countSchema`.
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(
               handle,
@@ -158,13 +181,13 @@ final class FlightProducerImpl(
                 eff,
                 preferredNode = None,
                 prepareDurationMs = None,
-                datasetSchema = emptySchema
+                datasetSchema = countSchema
               )
             )
             val resp = FlightSql.ActionCreatePreparedStatementResult
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
-              .setDatasetSchema(emptySchemaBytes)
+              .setDatasetSchema(countSchemaBytes)
               // Apache Arrow Flight SQL ODBC reads parameter_schema to learn
               // the parameter count. An absent field throws "Tried reading
               // schema message, was null or length 0". Quack has no parameter
@@ -1309,14 +1332,15 @@ final class FlightProducerImpl(
     // the result schema from FlightInfo.schema (via FlightSqlResultSet::Init)
     // rather than the dedicated GetSchema RPC. We probe with the same
     // LIMIT-0 wrap createPreparedStatement uses and embed the result here.
-    // For DML/DDL (SkipExecute) we keep the schema null - the stream emits
-    // a single-row Count, and advertising an empty schema here would 400
-    // ADBC's stream-schema-mismatch guard. The driver team confirmed a
-    // CORRECT schema that matches the DoGet stream passes ADBC's check;
-    // only an empty/wrong schema breaks it.
-    val schemaOrNull = probeStatementSchema(peer, command.getQuery).orNull
+    // For DML/DDL (SkipExecute) probeStatementSchema returns None; we then
+    // advertise `countSchema` - the single-row `Count BIGINT` the node streams
+    // for those statements. A null/empty schema here serializes as a zero-field
+    // schema and trips ADBC's `FlightInfo.schema == DoGet stream` guard, which
+    // is exactly the "CORRECT schema passes, empty schema breaks" case the
+    // driver team flagged.
+    val schema = probeStatementSchema(peer, command.getQuery).getOrElse(countSchema)
     new FlightInfo(
-      schemaOrNull,
+      schema,
       descriptor,
       Collections.singletonList(endpoint),
       -1L,

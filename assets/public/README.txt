@@ -1,8 +1,8 @@
-QOD — logo assets (all transparent backgrounds)
+QOD - logo assets (all transparent backgrounds)
 SVG = vector, self-contained (text outlined, no font needed).
 
 svg/  lockupA-*  : abstract mark + "QOD" (O in orange)
-      lockupB-*  : Q [mark] D  — the mark is the "O" (recommended)
+      lockupB-*  : Q [mark] D  - the mark is the "O" (recommended)
       monogram-* : "QOD" letters only, no tile
       mark-*     : abstract hub+pool mark only (favicon source)
       *-light    : dark art (place on light surfaces)

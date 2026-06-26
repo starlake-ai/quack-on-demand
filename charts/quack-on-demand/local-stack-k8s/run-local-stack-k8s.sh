@@ -23,6 +23,11 @@
 #   NODE_IMAGE       Quack node image ref           (default starlakeai/quack-on-demand-node:local)
 #   NAMESPACE        install namespace              (default qod)
 #   RELEASE          helm release name              (default qod)
+#   PUBLIC_HOST      browser-facing host for OIDC redirects + printed URLs.
+#                    Default localhost (same-host). Set to the server's
+#                    ip/hostname to log in from a remote desktop (threads into
+#                    Keycloak KC_HOSTNAME_URL, the manager publicBaseUrl, and
+#                    the qod-admin OIDC redirect URIs).   (default localhost)
 #   BUILD            "1" rebuilds the manager + node images from
 #                    $REPO_DIR before loading. "0" reuses local
 #                    `:local`-tagged images, pulling `:latest-snapshot`
@@ -49,6 +54,15 @@ NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
+# Browser-facing host for the OIDC redirects + the printed URLs. Default
+# localhost (same-host access). Set PUBLIC_HOST=<server-ip-or-hostname> to reach
+# the rig from a remote desktop: it threads into Keycloak's frontchannel URL
+# (KC_HOSTNAME_URL), the manager's publicBaseUrl, and the qod-admin OIDC redirect
+# URIs so the auth-code redirect no longer points the remote browser at
+# localhost. The manager <-> Keycloak backchannel (token/jwks) stays in-cluster
+# (keycloak:8080) via KC_HOSTNAME_BACKCHANNEL_DYNAMIC, unchanged.
+PUBLIC_HOST="${PUBLIC_HOST:-localhost}"
+PUBLIC_BASE="http://${PUBLIC_HOST}:20900"
 LOAD_TPC="${LOAD_TPC:-}"
 # Per-benchmark opt-ins. Explicit per-bench vars override LOAD_TPC.
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
@@ -70,13 +84,16 @@ REPO_DIR="$(cd "$CHART_DIR/../.." && pwd)"
 # recreate.
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
   control_plane_node="${KIND_CLUSTER}-control-plane"
-  if docker port "$control_plane_node" 80/tcp 2>/dev/null | grep -q ":20900$"; then
-    echo "[1/5] reusing kind cluster '${KIND_CLUSTER}' (host :20900 mapping present)"
+  have_20900=0; docker port "$control_plane_node" 80/tcp 2>/dev/null | grep -q ":20900$" && have_20900=1
+  have_31338=0; docker port "$control_plane_node" 31338/tcp 2>/dev/null | grep -q ":31338$" && have_31338=1
+  if [[ "$have_20900" == "1" && "$have_31338" == "1" ]]; then
+    echo "[1/5] reusing kind cluster '${KIND_CLUSTER}' (host :20900 + :31338 mappings present)"
   else
     cat <<EOM >&2
-[1/5] ERROR: kind cluster '${KIND_CLUSTER}' exists but is missing the
-      host :20900 -> container :80 port mapping needed by the Traefik
-      ingress. Recreate it:
+[1/5] ERROR: kind cluster '${KIND_CLUSTER}' exists but is missing a host
+      port mapping (:20900 -> :80 for the Traefik ingress, :31338 -> :31338
+      for the FlightSQL edge). Present: 20900=$have_20900 31338=$have_31338.
+      Recreate it to pick up kind-config.yaml:
 
         kind delete cluster --name ${KIND_CLUSTER}
         $0
@@ -145,14 +162,28 @@ kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/grafana.yaml"
 # `create --dry-run=client | apply` trick.
 KEYCLOAK_REALM_JSON="$SCRIPT_DIR/keycloak-realm-qod.json"
 if [[ -f "$KEYCLOAK_REALM_JSON" ]]; then
+  # When PUBLIC_HOST is overridden, register the public OIDC callback alongside
+  # the localhost one so Keycloak accepts the auth-code redirect from a remote
+  # browser. Default (localhost) imports the file verbatim.
+  realm_apply="$KEYCLOAK_REALM_JSON"
+  if [[ "$PUBLIC_HOST" != "localhost" ]]; then
+    realm_apply="$(mktemp)"
+    sed 's#"redirectUris": \["http://localhost:20900/api/auth/oidc/callback"\]#"redirectUris": ["http://localhost:20900/api/auth/oidc/callback", "'"$PUBLIC_BASE"'/api/auth/oidc/callback"]#' \
+      "$KEYCLOAK_REALM_JSON" > "$realm_apply"
+  fi
   kubectl -n "$NAMESPACE" create configmap keycloak-realm-import \
-    --from-file="qod-realm.json=$KEYCLOAK_REALM_JSON" \
+    --from-file="qod-realm.json=$realm_apply" \
     --dry-run=client -o yaml \
     | kubectl -n "$NAMESPACE" apply -f -
+  [[ "$realm_apply" != "$KEYCLOAK_REALM_JSON" ]] && rm -f "$realm_apply"
 else
   echo "  WARN: '$KEYCLOAK_REALM_JSON' missing; Keycloak will boot without the qod realm." >&2
 fi
-kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/keycloak.yaml"
+# KC_HOSTNAME_URL (the browser-facing frontchannel base) is pinned to localhost
+# in the manifest; rewrite it to PUBLIC_BASE so discovery hands a remote browser
+# a reachable authorize endpoint. No-op when PUBLIC_HOST=localhost.
+sed "s#http://localhost:20900/auth#${PUBLIC_BASE}/auth#g" "$SCRIPT_DIR/keycloak.yaml" \
+  | kubectl -n "$NAMESPACE" apply -f -
 
 # Static landing page at `/` -- the ingress in step 4b routes the root
 # to this nginx pod, so opening http://localhost:20900/ shows links to
@@ -195,6 +226,8 @@ fi
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   -f "$SCRIPT_DIR/values-local-stack.yaml" \
+  --set auth.management.publicBaseUrl="$PUBLIC_BASE" \
+  --set auth.keycloak.issuer="${PUBLIC_BASE}/auth/realms/qod" \
   "${HELM_EXTRA_ARGS[@]}" \
   --wait --timeout=300s
 
@@ -296,6 +329,7 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
         env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
             DB_NAME=acme_tpch SCHEMA_NAME=tpch1 \
             SF="$LOAD_TPCH" \
+            TEMP_DIR=/tmp/duckdb-tpch-load \
             DATA_PATH="s3://qod-ducklake/acme_tpch" \
             QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
@@ -309,12 +343,36 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
         env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
             DB_NAME=globex_tpcds SCHEMA_NAME=tpcds1 \
             SF="$LOAD_TPCDS" \
+            TEMP_DIR=/tmp/duckdb-tpcds-load \
             DATA_PATH="s3://qod-ducklake/globex_tpcds" \
             QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-tpcds-dbgen.sh
     fi
+  fi
+fi
+
+# ---- 5b. per-tenant admin-UI OIDC for acme -------------------------------
+#
+# The bootstrap manifest cannot express per-tenant authConfig, so wire acme's
+# OIDC for the /ui/?tenant=acme login via the REST API once the manager is up.
+# authProvider=keycloak is just the validation bucket; the admin-UI resolver
+# reads the generic authConfig keys (issuerUrl/clientId/clientSecretRef). The
+# /api namespace is open in the rig (no QOD_API_KEY), so no auth header is
+# needed. Best-effort: a non-zero exit must not fail the whole rig.
+if kubectl -n "$NAMESPACE" get configmap "$(kubectl -n "$NAMESPACE" get deploy \
+     -l app.kubernetes.io/name=quack-on-demand -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
+     -o jsonpath='{.data.QOD_MGMT_IDENTITY_SOURCE}' 2>/dev/null | grep -q oidc; then
+  echo "[5b] configuring per-tenant OIDC for tenant 'acme' (/ui/?tenant=acme)..."
+  acme_auth='{"name":"acme","authProvider":"keycloak","authConfig":{"issuerUrl":"http://keycloak:8080/auth/realms/qod","clientId":"qod-admin","clientSecretRef":"env:QOD_MGMT_OIDC_CLIENT_SECRET","scopes":"openid email profile"}}'
+  if curl -fsS -X POST http://localhost:20900/api/tenant/setAuth \
+       -H 'Content-Type: application/json' -d "$acme_auth" >/dev/null 2>&1; then
+    echo "  acme OIDC configured (issuer realm 'qod', client 'qod-admin')."
+  else
+    echo "  WARN: acme setAuth call failed; /ui/?tenant=acme SSO may not resolve." >&2
+    echo "        Retry once the manager is fully ready:" >&2
+    echo "        curl -X POST http://localhost:20900/api/tenant/setAuth -H 'Content-Type: application/json' -d '$acme_auth'" >&2
   fi
 fi
 
@@ -333,16 +391,21 @@ cat <<EOM
 
 manager Ready. Open the landing page for links to every UI:
 
-  http://localhost:20900/
+  http://${PUBLIC_HOST}:20900/
 
 Direct links (all behind the same Traefik ingress):
-  admin UI / REST       http://localhost:20900/ui/        (admin / admin)
-  Grafana               http://localhost:20900/grafana/   (anonymous Admin)
-  Prometheus            http://localhost:20900/prometheus/
-  Keycloak admin        http://localhost:20900/auth/      (admin / admin · realm 'qod')
+  admin UI (OIDC SSO)   http://${PUBLIC_HOST}:20900/ui/             -> redirects to Keycloak
+  Grafana               http://${PUBLIC_HOST}:20900/grafana/   (anonymous Admin)
+  Prometheus            http://${PUBLIC_HOST}:20900/prometheus/
+  Keycloak admin        http://${PUBLIC_HOST}:20900/auth/      (admin / admin · realm 'qod')
 
-FlightSQL is gRPC+TLS and stays on a dedicated port-forward:
-  kubectl -n $NAMESPACE port-forward svc/$FS_SVC 31338:31338
+admin UI is OIDC SSO (identitySource=oidc). Log in via Keycloak:
+  system / superuser    http://${PUBLIC_HOST}:20900/ui/             (Keycloak user admin / admin)
+  tenant acme           http://${PUBLIC_HOST}:20900/ui/?tenant=acme (Keycloak user alice / demo-alice)
+  (non-superusers must use the per-tenant URL; bare /ui/ is superuser-only.)
+
+FlightSQL (gRPC+TLS) is host-mapped directly (NodePort + kind extraPortMapping):
+  ${PUBLIC_HOST}:31338   (TLS cert CN=localhost -> clients set disableCertificateVerification=true)
 
 watch Quack node pods:
   kubectl -n $NAMESPACE get pods -l managed-by=quack-on-demand -w

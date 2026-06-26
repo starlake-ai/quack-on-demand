@@ -23,7 +23,7 @@ When `acl.enabled=true`, every statement is validated:
 
 1. `PostgresAclValidator` parses each incoming SQL statement.
 2. It extracts all referenced table and view names.
-3. It looks up the EffectiveSet for `(tenant, user)` — already cached on the FlightSQL `ConnectionContext` at handshake time, AND cached in the `PoolSupervisor` with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`.
+3. It looks up the EffectiveSet for `(tenant, user)` - already cached on the FlightSQL `ConnectionContext` at handshake time, AND cached in the `PoolSupervisor` with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`.
 4. Each parsed statement is reduced to a set of `TableAccess(table, verb)` tuples with `verb` in `Read | Write | Ddl`. A grant of `verb=ALL` covers any access verb; granular grants map as follows:
 
    | Statement                                  | Emitted accesses                                                |
@@ -60,7 +60,7 @@ The schema-bounded slice (roles, groups, role permissions, group-role edges, gro
 
 ## Managing grants
 
-All grants are managed via the REST API or the Admin UI (Tenant detail page → RBAC editor). Each call is gated by `TenantScopeCheck` — a tenant-A admin session cannot touch a tenant-B role / group / user / permission. See [API.md](API.md) for the endpoint list.
+All grants are managed via the REST API or the Admin UI (Tenant detail page → RBAC editor). Each call is gated by `TenantScopeCheck` - a tenant-A admin session cannot touch a tenant-B role / group / user / permission. See [API.md](API.md) for the endpoint list.
 
 Example: grant SELECT on `tpch.tpch1.customer` to role `analyst`:
 

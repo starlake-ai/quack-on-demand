@@ -207,12 +207,13 @@ object ManifestImporter:
       // 2. Tenants + their nested collections (tenant-dbs, pools).
       m.tenants.foreach { mt =>
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
-          val newId = Names.newSurrogateId("t")
+          // The tenant id IS the slug name; no opaque surrogate. displayName
+          // falls back to the slug when the manifest leaves it blank.
+          val newId = Names.normalize(mt.name, "tenant id")
           store.upsertTenant(
             Tenant(
               id = newId,
-              name = mt.name,
-              displayName = mt.name,
+              displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else newId,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
               authConfig = mt.authConfig
@@ -226,8 +227,7 @@ object ManifestImporter:
           store.upsertTenant(
             Tenant(
               id = tenantId,
-              name = mt.name,
-              displayName = mt.name,
+              displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else mt.name,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
               authConfig = mt.authConfig
@@ -499,7 +499,7 @@ object ManifestImporter:
     * `Tenant.name` for fixtures that only populate one of the two.
     */
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
-    store.listTenants().find(t => t.displayName == name || t.name == name).map(_.id)
+    store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
 
   /** Apply federated sources from a manifest tenant-db into the federated source store.
     * Replace-by-alias semantics: sources not present in the manifest are deleted; each present

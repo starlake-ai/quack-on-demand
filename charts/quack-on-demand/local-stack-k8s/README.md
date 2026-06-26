@@ -1,6 +1,6 @@
 # WIP Local test rig (kind + Helm)
 
-End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) cluster. The rig is intentionally self-contained — it does not require an external Postgres or a published image.
+End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) cluster. The rig is intentionally self-contained - it does not require an external Postgres or a published image.
 
 ## Prerequisites
 
@@ -32,11 +32,11 @@ This:
 1. Creates a kind cluster named `qod-test` (reused if it already exists).
 2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
 3. Loads both images into the kind cluster.
-4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) — one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard.json`](../../../observability/grafana-dashboard.json) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** — that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) - one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard.json`](../../../observability/grafana-dashboard.json) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** - that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
 5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
-6. `helm install`s Traefik v3 as a single-replica DaemonSet on the control-plane node, then applies [`ingress.yaml`](ingress.yaml) — one `Ingress` that routes `/grafana`, `/prometheus`, `/auth` and `/` (catch-all → manager) to the right Services. Combined with the kind `extraPortMappings` from [`kind-config.yaml`](kind-config.yaml) (host `:20900` → container `:80`), every HTTP UI in the rig becomes reachable at a single `http://localhost:20900/...` URL.
+6. `helm install`s Traefik v3 as a single-replica DaemonSet on the control-plane node, then applies [`ingress.yaml`](ingress.yaml) - one `Ingress` that routes `/grafana`, `/prometheus`, `/auth` and `/` (catch-all → manager) to the right Services. Combined with the kind `extraPortMappings` from [`kind-config.yaml`](kind-config.yaml) (host `:20900` → container `:80`), every HTTP UI in the rig becomes reachable at a single `http://localhost:20900/...` URL.
 7. Waits for the manager pod to be `Ready` and `/health` to return OK.
-8. Verifies the manager spawned the bootstrap Quack node pods (3 by default — one each of WriteOnly / ReadOnly / Dual).
+8. Verifies the manager spawned the bootstrap Quack node pods (3 by default - one each of WriteOnly / ReadOnly / Dual).
 
 ## Architecture
 
@@ -153,7 +153,7 @@ The pieces, one per row of the diagram:
 | `NAMESPACE` | `qod` | install namespace |
 | `RELEASE` | `qod` | helm release name |
 | `BUILD` | `0` | `0` reuses local `:local`-tagged images (falling back to `:latest-snapshot` from Docker Hub if absent); `1` runs `docker build` first. Same convention as `scripts/run-jar.sh`. |
-| `NUKE` | `0` | `1` deletes the namespace before reinstalling — wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
+| `NUKE` | `0` | `1` deletes the namespace before reinstalling - wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
 | `LOAD_TPC` | unset | Demo seed. Unset = skip; positive integer = scale factor. Seeds both acme_tpch (TPC-H, `LOAD_TPC=1` approx 6M lineitem rows) and globex_tpcds (TPC-DS, `LOAD_TPC=1` approx 2.8M store_sales rows) inside the manager pod via the bundled loader scripts. No host duckdb required. |
 
 ```bash
@@ -167,11 +167,11 @@ NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 BUILD=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
-The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing — so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
+The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing - so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
 
 ## Verify by hand
 
-Every HTTP UI is reachable on host `:20900` via the Traefik ingress — no per-service port-forward needed. Only FlightSQL keeps its own port-forward because gRPC ingress is its own can of worms (the manager's self-signed TLS is terminated directly by the FlightSQL edge):
+Every HTTP UI is reachable on host `:20900` via the Traefik ingress - no per-service port-forward needed. Only FlightSQL keeps its own port-forward because gRPC ingress is its own can of worms (the manager's self-signed TLS is terminated directly by the FlightSQL edge):
 
 ```bash
 # Landing page with links to every UI (nginx-served, ConfigMap-mounted)
@@ -219,7 +219,7 @@ jdbc:arrow-flight-sql://localhost:31338?useEncryption=true
   &tenant=tpch&pool=sales
 ```
 
-(All on one line. `disableCertificateVerification=true` is required because the smoke rig uses the manager's self-signed cert — see Known limitations.)
+(All on one line. `disableCertificateVerification=true` is required because the smoke rig uses the manager's self-signed cert - see Known limitations.)
 
 **Python (ADBC FlightSQL driver):**
 
@@ -244,20 +244,20 @@ print(cur.fetchall())
 
 **REST API + admin UI:**
 
-No port-forward needed — the rig's Traefik ingress sits on host `:20900` and the catch-all rule routes `/` → manager.
+No port-forward needed - the rig's Traefik ingress sits on host `:20900` and the catch-all rule routes `/` → manager.
 
 ```bash
 # Open http://localhost:20900/ui/  (login admin / admin)
 curl -s -u admin:admin http://localhost:20900/api/tenants
 ```
 
-The `tenant` / `pool` headers are mandatory on FlightSQL — the edge's tenant selector rejects sessions that don't carry them. Defaults shipped by the chart are `tpch` / `sales`; if you changed `bootstrap.tenant` / `bootstrap.pool`, match those.
+The `tenant` / `pool` headers are mandatory on FlightSQL - the edge's tenant selector rejects sessions that don't carry them. Defaults shipped by the chart are `tpch` / `sales`; if you changed `bootstrap.tenant` / `bootstrap.pool`, match those.
 
 **Bearer token from Keycloak (OIDC ROPC):**
 
-The rig provisions a `qod` realm with the `qod-flightsql` client (ROPC enabled, secret `qod-flightsql-secret`) and two users — `admin/admin` (mirrors the bootstrap superuser) and `reader/reader` (demo non-superuser). Every issued token carries a hardcoded `tenant: tpch` claim so the FlightSQL edge picks up the tenant without a client-side header.
+The rig provisions a `qod` realm with the `qod-flightsql` client (ROPC enabled, secret `qod-flightsql-secret`) and two users - `admin/admin` (mirrors the bootstrap superuser) and `reader/reader` (demo non-superuser). Every issued token carries a hardcoded `tenant: tpch` claim so the FlightSQL edge picks up the tenant without a client-side header.
 
-Mint a token from the host — Keycloak hangs off the same `:20900` ingress under `/auth/`:
+Mint a token from the host - Keycloak hangs off the same `:20900` ingress under `/auth/`:
 
 ```bash
 TOKEN=$(curl -s -X POST \
@@ -274,25 +274,25 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 For FlightSQL, the manager's `AuthenticationService` chain accepts the same bearer (the Keycloak provider runs alongside Basic auth, so `admin/admin` over Basic still works for clients that don't speak OIDC).
 
-Swap `username=admin password=admin` for `reader/reader` to exercise the non-superuser path — `reader` lands in `qodstate_user` on first auth and starts with zero RBAC grants, so SELECTs return `permission denied` until you grant a role via the admin UI or `/api/rbac/*`.
+Swap `username=admin password=admin` for `reader/reader` to exercise the non-superuser path - `reader` lands in `qodstate_user` on first auth and starts with zero RBAC grants, so SELECTs return `permission denied` until you grant a role via the admin UI or `/api/rbac/*`.
 
 ## Run a load test
 
-[`scripts/loadtest/loadtest.py`](../../../scripts/loadtest/loadtest.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
+[`scripts/tpch-load-test/tpch-load-test.py`](../../../scripts/tpch-load-test/tpch-load-test.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
 
 ```bash
 # In one terminal:
 kubectl -n qod port-forward svc/qod-quack-on-demand-flightsql 31338:31338
 
 # In another -- defaults (8 workers x 100 iterations, TPC-H mix on schema tpch1):
-./scripts/loadtest/loadtest.py
+./scripts/tpch-load-test/tpch-load-test.py
 
 # Heavier mix:
-./scripts/loadtest/loadtest.py --workers 24 --iterations 50 --warmup 5
+./scripts/tpch-load-test/tpch-load-test.py --workers 24 --iterations 50 --warmup 5
 
 # Single query, no warmup, count-only:
 LT_QUERY='SELECT count(*) FROM tpch1.lineitem' \
-  ./scripts/loadtest/loadtest.py --iterations 200 --warmup 0
+  ./scripts/tpch-load-test/tpch-load-test.py --iterations 200 --warmup 0
 ```
 
 Defaults the script picks up via env vars (override on the CLI as shown):
@@ -319,6 +319,6 @@ The script auto-`pip install`s `adbc_driver_flightsql adbc_driver_manager pyarro
 
 ## Known limitations
 
-- Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state — that's a feature for a smoke rig.
+- Postgres data is ephemeral (`emptyDir`). Recreating the cluster wipes all state - that's a feature for a smoke rig.
 - By default (`BUILD=0`) the script reuses the local `:local`-tagged images, pulling `:latest-snapshot` from Docker Hub if they're absent. Set `BUILD=1` to rebuild from the local Dockerfile (cached layers make reruns fast once JDK + sbt deps are cached).
-- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `LT_INSECURE=true` for `loadtest.py`). Production deploys should mount a CA-signed cert via the chart's `flightsql.tls.existingSecret` value (which sets the manager's `PROXY_TLS_CERT_CHAIN` / `PROXY_TLS_PRIVATE_KEY` env vars to the mounted chain + key paths).
+- FlightSQL TLS is on with a manager-issued self-signed cert. Clients must skip cert verification (`useEncryption=true&disableCertificateVerification=true` for JDBC, `LT_INSECURE=true` for `tpch-load-test.py`). Production deploys should mount a CA-signed cert via the chart's `flightsql.tls.existingSecret` value (which sets the manager's `PROXY_TLS_CERT_CHAIN` / `PROXY_TLS_PRIVATE_KEY` env vars to the mounted chain + key paths).

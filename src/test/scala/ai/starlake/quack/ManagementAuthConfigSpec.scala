@@ -34,3 +34,17 @@ class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
     mac.identitySource shouldBe "oidc"
     mac.identityClaim shouldBe "email"
   }
+
+  it should "default publicBaseUrl to empty and accept an override" in {
+    val cfg = ManagementAuthConfig(
+      identitySource      = "db",
+      identityClaim       = "preferred_username",
+      sessionJwtSecret    = "x",
+      sessionCookieSecure = "auto",
+      sessionCookiePath   = "/api",
+      publicBaseUrl       = ""
+    )
+    cfg.publicBaseUrl shouldBe ""
+    cfg.copy(publicBaseUrl = "https://qod.example.com").publicBaseUrl shouldBe
+      "https://qod.example.com"
+  }

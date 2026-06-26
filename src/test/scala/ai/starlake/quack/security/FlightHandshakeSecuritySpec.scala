@@ -236,7 +236,6 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     import at.favre.lib.crypto.bcrypt.BCrypt
     s.upsertTenant(Tenant(
       id           = otherTenantId,
-      name         = "other",
       displayName  = "other",
       authProvider = "db"
     ))

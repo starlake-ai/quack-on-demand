@@ -100,12 +100,12 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
         <tbody>
           <tr>
             <th style={{ textAlign: 'left', width: 160 }}>Provider</th>
-            <td><code>{tenant.authProvider}</code> <span className="subtle">— {PROVIDER_LABELS[tenant.authProvider]}</span></td>
+            <td><code>{tenant.authProvider}</code> <span className="subtle">- {PROVIDER_LABELS[tenant.authProvider]}</span></td>
           </tr>
           {fields.length === 0 ? (
             <tr>
               <th style={{ textAlign: 'left' }}>Config</th>
-              <td className="subtle">(none — the username on each user record IS the identity)</td>
+              <td className="subtle">(none - the username on each user record IS the identity)</td>
             </tr>
           ) : (
             fields.map(f => (
@@ -148,7 +148,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
               </label>
               {fields.length === 0 ? (
                 <p className="subtle" style={{ marginTop: 0 }}>
-                  <code>db</code> needs no extra config — the username on each
+                  <code>db</code> needs no extra config - the username on each
                   user record IS the identity.
                 </p>
               ) : (

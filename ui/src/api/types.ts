@@ -54,7 +54,7 @@ export interface PoolResponse {
   metastore: Record<string, string>;
   disabled: boolean;
   // Persisted placement plan. Empty array (the default) means no
-  // placement constraint — all nodes scheduled wherever the runtime puts
+  // placement constraint - all nodes scheduled wherever the runtime puts
   // them. Only meaningful on the Kubernetes backend.
   cohorts?: PoolCohort[];
 }
@@ -98,6 +98,13 @@ export interface StopPoolRequest {
   force?: boolean;
 }
 
+export interface DeletePoolRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  force?: boolean;
+}
+
 export interface SetMaxConcurrentRequest {
   tenant: string;
   tenantDb: string;
@@ -123,6 +130,10 @@ export interface ClientConfigResponse {
   // True iff the runtime backend supports node placement (Kubernetes).
   // The UI hides cohort/placement controls when false.
   placementSupported?: boolean;
+  // "db" (default) = password form; "oidc" = redirect to the IdP via /api/auth/oidc/start.
+  identitySource?: 'db' | 'oidc';
+  // Human-readable IdP label shown in the SSO redirect card (e.g. "Keycloak", "Google").
+  ssoProviderName?: string;
 }
 
 /** One row of the Config page. `value` is masked ("(set)" / "(unset)")
@@ -152,14 +163,20 @@ export interface ManifestImportSummary {
 export type AuthProvider = 'db' | 'keycloak' | 'google' | 'azure' | 'aws';
 
 export interface TenantRequest {
-  name: string;
+  // Slug key (required), e.g. "acme". The one tenant key in URLs/sessions/FKs.
+  id: string;
+  // Free-form human label, e.g. "Acme Corporation".
+  displayName: string;
   authProvider?: AuthProvider;
   authConfig?: Record<string, string>;
 }
 
 export interface TenantResponse {
   id: string;
+  // Equal to id (kept for callers that key on `name`); both hold the slug.
   name: string;
+  // Free-form human label; may differ from id.
+  displayName: string;
   pools: string[];
   disabled: boolean;
   authProvider: AuthProvider;
@@ -398,6 +415,13 @@ export interface EffectivePermissionsResponse {
 }
 
 // ----- Auth -----
+// Per-tenant admin-UI login mode resolved by GET /api/auth/mode?tenant=.
+// "db" -> render the password form; "oidc" -> redirect to /api/auth/oidc/start.
+export interface AuthModeResponse {
+  mode: 'db' | 'oidc';
+  ssoProviderName?: string;
+}
+
 export interface LoginRequest  { username: string; password: string; tenant?: string }
 export interface LoginResponse {
   token: string;

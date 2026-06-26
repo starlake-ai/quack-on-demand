@@ -26,10 +26,9 @@ package ai.starlake.quack.model
   *     `quack-flightsql.auth.<provider>.*` config.
   */
 final case class Tenant(
-    name: String,
-    metastore: Map[String, String] = Map.empty,
-    id: String = "",
+    id: String,
     displayName: String = "",
+    metastore: Map[String, String] = Map.empty,
     disabled: Boolean = false,
     authProvider: String = "db",
     authConfig: Map[String, String] = Map.empty

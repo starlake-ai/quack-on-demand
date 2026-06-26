@@ -98,7 +98,7 @@ The Tenants page shows the two bootstrap tenants, `acme` and `globex`. Opening e
 Install the Apache Arrow Flight SQL JDBC driver (`org.apache.arrow:flight-sql-jdbc-driver`, available on Maven Central). In DBeaver, create a new connection and paste this URL directly into the JDBC URL field:
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi&superuser=true
 ```
 
 Set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
@@ -106,6 +106,8 @@ Set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`.
 The `disableCertificateVerification=true` parameter is required because the gateway starts with an auto-generated self-signed certificate (see the TLS guide for how to supply a CA-signed cert and remove that flag).
 
 The `tenant=acme&pool=bi` parameters are routing headers: the FlightSQL edge requires both to resolve which pool services the connection. Swap in `tenant=globex&pool=bi` to drive the TPC-DS demo instead.
+
+The `superuser=true` parameter is required when login as admin/admin.
 
 ### Python (ADBC)
 
@@ -115,10 +117,10 @@ Install the driver:
 pip install --user adbc_driver_flightsql adbc_driver_manager
 ```
 
-Run the bundled load tester as a one-shot client (defaults to the TPC-H workload against `acme`'s `tpch1` schema):
+Run the bundled `tpch-load-test` as a one-shot client (defaults to the TPC-H workload against `acme`'s `tpch1` schema):
 
 ```bash
-python3 ./scripts/loadtest/loadtest.py \
+python3 ./scripts/tpch-load-test/tpch-load-test.py \
   --url grpc+tls://localhost:31338 --insecure \
   --user admin --password admin --superuser \
   --tenant acme --pool bi \
@@ -138,7 +140,7 @@ Each workload cycles a handful of representative queries (per-group aggregation,
 
 ```bash
 SF=1 ./scripts/load-tpcds-dbgen.sh                                            # seeds globex_tpcds.tpcds1
-python3 ./scripts/loadtest/loadtest.py --workload tpcds --tenant globex --pool bi \
+python3 ./scripts/tpch-load-test/tpch-load-test.py --workload tpcds --tenant globex --pool bi \
   --user admin --password admin --superuser --insecure -w 4 -i 50
 ```
 
