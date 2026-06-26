@@ -119,7 +119,7 @@ ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load te
 
 ```mermaid
 flowchart TD
-    client["Client<br/>(JDBC · ADBC · curl · browser)"]
+    client["Client<br/>(ODBC · JDBC · ADBC · curl · browser)"]
     manager["Manager<br/>FlightSQL edge · REST · UI"]
     nodes["Quack node pool<br/>DuckDB · per-tenant"]
     pg["Postgres<br/>control plane · DuckLake catalog"]
@@ -133,6 +133,30 @@ flowchart TD
 ```
 
 One Manager process fronts every client (FlightSQL on `:31338`, REST + admin UI on `:20900`) and routes each statement to a single Quack node it spawned for the matching tenant + pool. Control-plane state and per-tenant DuckLake catalogs live in Postgres; Parquet data lives in object storage. The full auth → ACL → routing pipeline diagram is in the [Architecture docs](https://starlake-ai.github.io/quack-on-demand/concepts/architecture).
+
+### Data residency - the base tables never leave the server
+
+When Power BI or Tableau connect with a **live / DirectQuery** connection, each user interaction issues SQL over the FlightSQL wire. The query runs on a Quack node, against DuckLake data that stays in your object storage, and only the *result rows* stream back as an Arrow batch. The base tables never cross the trust boundary onto the analyst's machine.
+
+```mermaid
+flowchart LR
+    subgraph client["BI client (Power BI / Tableau)"]
+        bi["user / password<br/>or OAuth (OIDC / JWT)"]
+    end
+
+    subgraph server["Quack on Demand · your infrastructure"]
+        edge["FlightSQL edge :31338<br/>authn + RBAC"]
+        node["Quack nodes<br/>DuckDB + DuckLake"]
+        store[("Postgres catalog +<br/>object storage<br/>S3 · GCS · FS")]
+        edge --> node
+        node -. data at rest .-> store
+    end
+
+    bi -- "SQL over TLS" --> edge
+    edge -- "Arrow result rows only" --> bi
+```
+
+> **Live / DirectQuery only.** Power BI **Import** mode and Tableau **extract** mode copy the full dataset into a local `.pbix` / `.hyper` file by design - that data lands on the client regardless of the gateway. Use a live / DirectQuery connection when server-side residency is the goal.
 
 ---
 
