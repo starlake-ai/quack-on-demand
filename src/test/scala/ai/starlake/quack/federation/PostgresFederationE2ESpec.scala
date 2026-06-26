@@ -85,7 +85,7 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
   ): Unit =
     val tenantId = s"t-${System.nanoTime()}"
     val tdId     = s"td-${System.nanoTime()}"
-    cp.upsertTenant(Tenant(id = tenantId, name = tenantId, displayName = tenantId, disabled = false))
+    cp.upsertTenant(Tenant(id = tenantId, displayName = tenantId, disabled = false))
     val metastore = kind match
       case TenantDbKind.DuckLake   => Map("pgHost" -> pgHost, "pgPort" -> pgPort.toString,
                                           "pgUser" -> pgUser, "pgPassword" -> pgPass,

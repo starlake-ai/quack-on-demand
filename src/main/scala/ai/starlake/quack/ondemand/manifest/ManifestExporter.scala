@@ -129,7 +129,7 @@ object ManifestExporter:
 
       val manifestRoles = roleRows.map { r =>
         ManifestRole(
-          tenant = t.displayName,
+          tenant = t.id,
           name = r.name,
           description = r.description.filter(_.nonEmpty),
           permissions = rolePermsByRole
@@ -172,7 +172,7 @@ object ManifestExporter:
 
       val manifestGroups = groupRows.map { g =>
         ManifestGroup(
-          tenant = t.displayName,
+          tenant = t.id,
           name = g.name,
           description = g.description.filter(_.nonEmpty),
           roles = rolesByGroup.getOrElse(g.id, Nil).flatMap(roleIdToName.get).sorted
@@ -183,7 +183,7 @@ object ManifestExporter:
       // how they were seeded; union both keys and dedup by user id.
       val tenantUsers = (
         usersByTenant.getOrElse(Some(t.id), Nil) ++
-          usersByTenant.getOrElse(Some(t.name), Nil)
+          usersByTenant.getOrElse(Some(t.id), Nil)
       ).distinctBy(_.id)
         .sortBy(_.username)
         .map { u =>
@@ -198,7 +198,7 @@ object ManifestExporter:
             // Emit the tenant DISPLAY NAME -- manifests are human-facing and
             // keyed by name (matching role/group emission above), not the
             // stored surrogate id. Superusers (tenant = None) stay None.
-            tenant = u.tenant.map(_ => t.displayName),
+            tenant = u.tenant.map(_ => t.id),
             username = u.username,
             password = None,
             role = u.role,
@@ -211,7 +211,8 @@ object ManifestExporter:
 
       (
         ManifestTenant(
-          name = t.displayName,
+          name = t.id,
+          displayName = t.displayName,
           disabled = t.disabled,
           authProvider = t.authProvider,
           authConfig = t.authConfig,

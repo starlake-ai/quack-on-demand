@@ -9,7 +9,13 @@ object OidcProviderFactory:
 
   def createKeycloak(config: KeycloakAuthConfig, roleClaim: String): OidcBearerAuthenticator =
     val jwksUrl = s"${config.baseUrl}/realms/${config.realm}/protocol/openid-connect/certs"
-    val issuer  = s"${config.baseUrl}/realms/${config.realm}"
+    // JWKS always comes from baseUrl (reachable in-cluster). The expected issuer
+    // is the override when set, else derived from baseUrl -- they differ when
+    // Keycloak's browser-facing issuer (KC_HOSTNAME_URL behind an ingress) is not
+    // the in-cluster baseUrl. See KeycloakAuthConfig.issuer.
+    val issuer =
+      if config.issuer.nonEmpty then config.issuer
+      else s"${config.baseUrl}/realms/${config.realm}"
     new OidcBearerAuthenticator("keycloak", jwksUrl, issuer, config.clientId, roleClaim)
 
   def createGoogle(config: GoogleAuthConfig, roleClaim: String): OidcBearerAuthenticator =

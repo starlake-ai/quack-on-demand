@@ -257,26 +257,35 @@ fi
 #   2. Explicit: PROFILES=foo,bar from the caller's env. Merges with the
 #      auto-detected set. De-duplicated. Lets the user add `observability`
 #      etc. without touching .env.
-declare -A _profile_set=()
+# Compose profiles to activate. A plain indexed array + membership check keeps
+# this bash 3.2 compatible (macOS /bin/bash); associative arrays (`declare -A`)
+# and `${!arr[@]}` need bash 4+.
+_profiles=()
+_has_profile() {
+  local x
+  for x in "${_profiles[@]:-}"; do [[ "$x" == "$1" ]] && return 0; done
+  return 1
+}
 s3_endpoint="$(grep -E '^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
   | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
 if [[ "$s3_endpoint" == seaweedfs:* ]]; then
   echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'seaweedfs' compose profile"
-  _profile_set[seaweedfs]=1
+  _has_profile seaweedfs || _profiles+=("seaweedfs")
 fi
 if [[ -n "${PROFILES:-}" ]]; then
   IFS=',' read -ra _user_profiles <<< "$PROFILES"
   for p in "${_user_profiles[@]}"; do
     p="${p//[[:space:]]/}"
     [[ -n "$p" ]] || continue
-    if [[ -z "${_profile_set[$p]:-}" ]]; then
+    if ! _has_profile "$p"; then
       echo "PROFILES: activating '$p' compose profile"
-      _profile_set[$p]=1
+      _profiles+=("$p")
     fi
   done
 fi
 COMPOSE_PROFILES=()
-for p in "${!_profile_set[@]}"; do
+for p in "${_profiles[@]:-}"; do
+  [[ -n "$p" ]] || continue
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
@@ -294,12 +303,12 @@ fi
 # ---- Acquire image + up ----
 if [[ "${BUILD:-0}" == "1" ]]; then
   echo "BUILD=1: starting stack with 'docker compose up -d --build'..."
-  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d --build
+  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
 else
   echo "pulling starlakeai/quack-on-demand:$QOD_VERSION + postgres:16-alpine..."
-  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" pull
+  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} pull
   echo "starting stack..."
-  docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" up -d
+  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
 fi
 
 # ---- Wait for manager ----
@@ -368,6 +377,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
           postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
   done
 
+  # TEMP_DIR overrides the loader's default ($REPO_DIR/.tmp = /app/.tmp inside
+  # the image). /app is root-owned but the container runs as `quack`, so the
+  # default mkdir fails with "Permission denied". /app/ducklake is chowned to
+  # quack in the Dockerfile, so anchor DuckDB's spill dir there instead.
   if [[ "$_want_tpch" == "1" ]]; then
     echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$LOAD_TPCH) via docker compose exec quack ..."
     docker compose -f "$COMPOSE_FILE" exec \
@@ -378,6 +391,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
       -e DB_NAME="acme_tpch" \
       -e SCHEMA_NAME="tpch1" \
       -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCH" \
       quack /app/scripts/load-tpch-dbgen.sh
   fi
@@ -392,6 +406,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
       -e DB_NAME="globex_tpcds" \
       -e SCHEMA_NAME="tpcds1" \
       -e DATA_PATH="/app/ducklake/globex_tpcds" \
+      -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCDS" \
       quack /app/scripts/load-tpcds-dbgen.sh
   fi

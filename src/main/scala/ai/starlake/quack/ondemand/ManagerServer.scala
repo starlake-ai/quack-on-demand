@@ -41,9 +41,17 @@ final class ManagerServer(
     rowPolicies: RoleRowPolicyHandlers
 ) extends LazyLogging:
 
+  /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
+  private def issuerHost(issuerUrl: String): String =
+    try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
+    catch case _: Exception => ""
+
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
-    path == "/api/auth/login" || path == "/api/config/client"
+    path == "/api/auth/login" || path == "/api/config/client" ||
+      path == "/api/auth/mode" ||
+      path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
+      path == "/api/auth/oidc/logout"
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
@@ -139,8 +147,18 @@ final class ManagerServer(
         auth.logout(apiKey, cookie, proto)
       },
       Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
+      Endpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
       Endpoints.statementHistory.serverLogic { case (limit, key) =>
         statementHistory.recent(limit, key)(sessions.scopeOf)
+      },
+      Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
+        auth.oidcStart(tenant, returnTo, proto)
+      },
+      Endpoints.oidcCallback.serverLogicSuccess { case (code, state, stateCookie, proto) =>
+        auth.oidcCallback(code, state, stateCookie, proto)
+      },
+      Endpoints.oidcLogout.serverLogicSuccess { case (sessionCookie, proto) =>
+        auth.oidcLogout(sessionCookie, proto)
       }
     )
 
@@ -280,6 +298,9 @@ final class ManagerServer(
       Endpoints.stopPool.serverLogic { case (req, key) =>
         pools.stopPool(req, key)(sessions.scopeOf)
       },
+      Endpoints.deletePool.serverLogic { case (req, key) =>
+        pools.deletePool(req, key)(sessions.scopeOf)
+      },
       Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.scopeOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
       Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
@@ -320,7 +341,14 @@ final class ManagerServer(
               flightSqlPort = edgeCfg.port,
               flightSqlTls = edgeCfg.tlsEnabled,
               authEnabled = authEnabled,
-              placementSupported = pools.supportsPlacement
+              placementSupported = pools.supportsPlacement,
+              identitySource =
+                if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then "oidc"
+                else "db",
+              ssoProviderName =
+                if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then
+                  issuerHost(cfg.auth.management.oidc.issuerUrl)
+                else ""
             )
           )
         )

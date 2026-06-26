@@ -12,7 +12,7 @@ The chart does **not** bundle Postgres. Production deploys should point at a man
 
 ## Quick install
 
-The chart is **not yet published to any registry** — install it from a checkout.
+The chart is **not yet published to any registry** - install it from a checkout.
 
 ### Local kind cluster (recommended for first-run)
 
@@ -61,10 +61,10 @@ OCI publication to a public registry is a planned follow-up.
 | `Service` (REST) | ClusterIP on `:20900` for `/api`, `/ui`, `/metrics`. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `ServiceAccount` | Bound to the `Role` below. |
-| `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** — the manager only ever talks to its own namespace. |
-| `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides — everything in `application.conf` that isn't a secret. |
+| `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
+| `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
 | `Secret` | Chart-managed only when `postgres.password` / `admin.password` / `apiKey.value` are inline. Production deploys should use `existingSecret` references instead. |
-| `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here — front it with a Gateway / Envoy / Istio. |
+| `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here - front it with a Gateway / Envoy / Istio. |
 | `ServiceMonitor` | Optional, for the Prometheus Operator. |
 | `PodDisruptionBudget` | Optional, only created when `replicaCount > 1`. |
 
@@ -80,7 +80,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
 | `admin.existingSecret` | `""` | Recommended for prod. Inline `admin.password` is dev-only. |
-| `apiKey.value` | `""` | Static `X-API-Key` for `/api/*`. Optional — UI login still works without it. |
+| `apiKey.value` | `""` | Static `X-API-Key` for `/api/*`. Optional - UI login still works without it. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
 | `ingress.enabled` | `false` | REST/UI only. |
@@ -90,7 +90,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 
 ## Quack node image
 
-The chart's `quackNode.image` value points at the DuckDB Quack server image — a **different artifact** from the manager image, on a **separate release lifecycle**. The manager spawns one pod per Quack node and references this image in the pod spec.
+The chart's `quackNode.image` value points at the DuckDB Quack server image - a **different artifact** from the manager image, on a **separate release lifecycle**. The manager spawns one pod per Quack node and references this image in the pod spec.
 
 The default is `starlakeai/quack-on-demand-node:latest-snapshot`, the moving alias the `quack-node-snapshot` GitHub Action publishes on every push to `main` that touches `docker/quack-node/**`. There is no pinned release yet (no `:0.x.y` tag); pin to a specific digest if you need reproducibility:
 
@@ -112,22 +112,22 @@ The chart's default is **plain HTTP** on the manager↔node wire (`quackNode.tls
 
 Why HTTP by default:
 - Intra-namespace traffic. Anyone with pod-network access to your namespace has bigger problems than sniffing this.
-- The FlightSQL edge between clients and the manager *does* carry TLS by default (`flightsql.tls.enabled: true`) — that's the surface that crosses trust boundaries.
+- The FlightSQL edge between clients and the manager *does* carry TLS by default (`flightsql.tls.enabled: true`) - that's the surface that crosses trust boundaries.
 - The spawn-quack-node.sh script doesn't yet plumb TLS certs into `quack_serve()`, so flipping the manager to TLS without first adding cert mounting would just break every health probe.
 
 When you should turn it on (`--set quackNode.tls.enabled=true`):
-- You run a service mesh (Istio / Linkerd) that injects mTLS between pods — the spawned nodes will be encrypted transparently. The manager already passes `disable_ssl=false` correctly in that case.
+- You run a service mesh (Istio / Linkerd) that injects mTLS between pods - the spawned nodes will be encrypted transparently. The manager already passes `disable_ssl=false` correctly in that case.
 - You need the wire encrypted for compliance (SOC2 / HIPAA / PCI) and accept the follow-up work of cert plumbing into the spawn script.
 
 Without one of those two, leave it off.
 
 ## Operational notes
 
-- **Replicas** — keep at 1 until `roadmap:v0.4 #11` (Postgres advisory-lock leader election) lands. Two managers against the same Postgres will race on pod create/delete.
-- **K8s API scope** — manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
-- **TLS** — leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
-- **Probes** — both liveness and readiness target `/health`. Readiness gates traffic until `PoolSupervisor.restore() + reconcile()` finish, so a rolling restart doesn't briefly 503.
-- **terminationGracePeriodSeconds** — default 60 s. Gives in-flight FlightSQL statements a chance to finish before the JVM is killed.
+- **Replicas** - keep at 1 until `roadmap:v0.4 #11` (Postgres advisory-lock leader election) lands. Two managers against the same Postgres will race on pod create/delete.
+- **K8s API scope** - manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
+- **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
+- **Probes** - both liveness and readiness target `/health`. Readiness gates traffic until `PoolSupervisor.restore() + reconcile()` finish, so a rolling restart doesn't briefly 503.
+- **terminationGracePeriodSeconds** - default 60 s. Gives in-flight FlightSQL statements a chance to finish before the JVM is killed.
 
 ## Uninstall
 

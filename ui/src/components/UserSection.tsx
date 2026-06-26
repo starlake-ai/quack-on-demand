@@ -135,6 +135,11 @@ export default function UserSection({
 
   useEffect(() => {
     setNewTenant(tenant ?? SUPERUSER);
+    // Empty the previous scope's rows + collapse any open detail before loading
+    // the new scope, so stale rows don't linger during the fetch. Only here --
+    // mutation-triggered reload() calls keep the list/expansion in place.
+    setRows([]);
+    setExpandedId(null);
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, superusersOnly]);
@@ -205,7 +210,7 @@ export default function UserSection({
         <div className="external-provider-notice">
           Users for tenant <code>{tenant}</code> are managed by the external
           {' '}<code>{externalProvider}</code> identity provider. Accounts
-          authenticate against the IdP — the rows below are local
+          authenticate against the IdP - the rows below are local
           pre-provisioned shells used only to attach roles, groups, and
           pool grants. Password edits are disabled.
         </div>
@@ -352,7 +357,7 @@ export default function UserSection({
                   <option value={SUPERUSER}>(superuser)</option>
                   {tenants.map(t => (
                     <option key={t.name} value={t.name}>
-                      {t.name} — {t.authProvider}
+                      {t.name} - {t.authProvider}
                     </option>
                   ))}
                 </select>

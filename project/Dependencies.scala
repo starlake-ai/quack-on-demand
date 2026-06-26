@@ -58,7 +58,7 @@ object Dependencies {
   val hikariCp              = "com.zaxxer" % "HikariCP" % Versions.hikariCp
   val jbcrypt               = "at.favre.lib" % "bcrypt" % Versions.jbcrypt
   val postgresql            = "org.postgresql" % "postgresql" % Versions.postgresql
-  // Liquibase applies YAML changelogs under `db/changelog/` at startup —
+  // Liquibase applies YAML changelogs under `db/changelog/` at startup -
   // one source of truth for the `qodstate_*` control-plane schema.
   val liquibaseCore         = "org.liquibase" % "liquibase-core" % Versions.liquibase
 

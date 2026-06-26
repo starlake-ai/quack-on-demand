@@ -18,6 +18,15 @@ flightsql:
   tls:
     enabled: true
 
+# Expose the gRPC+TLS FlightSQL edge on a fixed NodePort so kind's
+# host :31338 -> node :31338 extraPortMapping (kind-config.yaml) reaches it.
+# Makes 31338 host-reachable (and remote-reachable at <host>:31338) without a
+# manual `kubectl port-forward`.
+service:
+  flightsql:
+    type: NodePort
+    nodePort: 31338
+
 quackNode:
   image: starlakeai/quack-on-demand-node:local
 
@@ -45,3 +54,18 @@ auth:
     realm:        qod
     clientId:     qod-flightsql
     clientSecret: qod-flightsql-secret
+
+  # Admin-UI OIDC SSO (management plane). /ui/ becomes a pure SSO client.
+  # The manager runs OIDC Discovery against the IN-CLUSTER Keycloak
+  # (keycloak:8080); Keycloak is configured (keycloak.yaml: KC_HOSTNAME_URL +
+  # backchannel-dynamic) so the discovery doc hands the browser the ingress
+  # URL (localhost:20900/auth) for the authorize redirect while token/jwks
+  # stay on keycloak:8080 for the manager.
+  management:
+    identitySource: oidc
+    publicBaseUrl:  http://localhost:20900
+    oidc:
+      issuerUrl:    http://keycloak:8080/auth/realms/qod
+      clientId:     qod-admin
+      clientSecret: qod-admin-secret
+      scopes:       "openid email profile"

@@ -19,8 +19,8 @@ import java.util.Date
 class OidcBearerAuthenticator(
     val providerName: String,
     jwksUrl: String,
-    expectedIssuer: String,
-    expectedAudience: String,
+    val expectedIssuer: String,
+    val expectedAudience: String,
     roleClaim: String,
     groupsLookup: Option[String => Set[String]] = None
 ) extends BearerAuthProvider,

@@ -8,9 +8,9 @@ name: quackwire native build
 # need a local C/C++ toolchain.
 #
 # Co-pinned versions (single source of truth: design doc §9.9):
-#   - duckdb-quack : 87cd65b912a85f38a8522cabcb7514b1854c08bf
-#                    (branch v1.5-variegata, short 87cd65b912a8)
-#   - libduckdb    : v1.5.3 (matches Homebrew stable; matches the
+#   - duckdb-quack : 40de7badae4193c29d9c0834473fb76acc6c51e6
+#                    (branch v1.5-variegata, short 40de7badae41)
+#   - libduckdb    : v1.5.4 (matches Homebrew stable; matches the
 #                    libduckdb-{linux-amd64,linux-arm64,osx-universal}.zip
 #                    release artifacts)
 #
@@ -90,14 +90,14 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # --- libduckdb v1.5.3 install ---------------------------------------
-      # macOS: Homebrew currently ships duckdb 1.5.3 as the stable bottle
-      # (verified 2026-06-01: `brew info --json=v2 duckdb` -> stable 1.5.3
+      # --- libduckdb v1.5.4 install ---------------------------------------
+      # macOS: Homebrew currently ships duckdb 1.5.4 as the stable bottle
+      # (verified 2026-06-24: `brew info --json=v2 duckdb` -> stable 1.5.4
       # with bottle tags arm64_sequoia / sonoma / arm64_linux / x86_64_linux).
       # The find_path / find_library in native/quackwire/CMakeLists.txt
       # already probes /opt/homebrew/{include,lib} (Apple Silicon) and
       # /usr/local/{include,lib} (Intel) so no extra hint is needed.
-      - name: Install libduckdb v1.5.3 (macOS)
+      - name: Install libduckdb v1.5.4 (macOS)
         if: matrix.os == 'macos'
         run: |
           set -euo pipefail
@@ -105,19 +105,19 @@ jobs:
           brew install duckdb
           INSTALLED=$(brew list --versions duckdb | awk '{print $2}')
           echo "libduckdb installed: $INSTALLED"
-          if [[ "$INSTALLED" != 1.5.3* ]]; then
-            echo "::error::Homebrew duckdb is not 1.5.3 (got: $INSTALLED). The duckdb-quack pin requires the v1.5.3 ABI." >&2
+          if [[ "$INSTALLED" != 1.5.4* ]]; then
+            echo "::error::Homebrew duckdb is not 1.5.4 (got: $INSTALLED). The duckdb-quack pin requires the v1.5.4 ABI." >&2
             exit 1
           fi
 
       # Linux: download the official libduckdb release zip and stage into
       # /usr/local. The CMake `find_path / find_library` hints in
       # native/quackwire/CMakeLists.txt cover /usr/local/{include,lib}.
-      # Verified asset names on the v1.5.3 release page:
+      # Verified asset names on the v1.5.4 release page:
       #   libduckdb-linux-amd64.zip   (x86_64)
       #   libduckdb-linux-arm64.zip   (aarch64)
-      # (gh api repos/duckdb/duckdb/releases/tags/v1.5.3 .assets[].name)
-      - name: Install libduckdb v1.5.3 (Linux)
+      # (gh api repos/duckdb/duckdb/releases/tags/v1.5.4 .assets[].name)
+      - name: Install libduckdb v1.5.4 (Linux)
         if: matrix.os == 'linux'
         env:
           DUCKDB_ZIP: ${{ matrix.duckdb_zip }}
@@ -128,7 +128,7 @@ jobs:
           tmp=$(mktemp -d)
           # 1. Binary + amalgamated public headers from the official release.
           curl -fsSL -o "$tmp/$DUCKDB_ZIP" \
-            "https://github.com/duckdb/duckdb/releases/download/v1.5.3/$DUCKDB_ZIP"
+            "https://github.com/duckdb/duckdb/releases/download/v1.5.4/$DUCKDB_ZIP"
           unzip -o "$tmp/$DUCKDB_ZIP" -d "$tmp/extracted"
           sudo install -m 0644 "$tmp/extracted/duckdb.h"   /usr/local/include/duckdb.h
           sudo install -m 0644 "$tmp/extracted/duckdb.hpp" /usr/local/include/duckdb.hpp
@@ -139,7 +139,7 @@ jobs:
           # binary_serializer.hpp` directly. Homebrew's duckdb formula
           # installs them under /opt/homebrew/include/duckdb/ on macOS;
           # on Linux we grab them from a shallow clone at the same tag.
-          git clone --depth 1 --branch v1.5.3 https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          git clone --depth 1 --branch v1.5.4 https://github.com/duckdb/duckdb "$tmp/duckdb-src"
           sudo cp -r "$tmp/duckdb-src/src/include/duckdb" /usr/local/include/
           sudo ldconfig
           ls -l /usr/local/lib/libduckdb.so /usr/local/include/duckdb.hpp
@@ -177,7 +177,8 @@ jobs:
   # -----------------------------------------------------------------------
   # 2. Publish per-platform classifier jars to Sonatype Central snapshots
   # -----------------------------------------------------------------------
-  # Only runs on push-to-main. Stages each platform binary into
+  # Runs on push-to-main and on manual workflow_dispatch from main.
+  # Stages each platform binary into
   # libquackwire/binaries/<platform>/ and runs `sbt libquackwire/publish`.
   # Mirrors the manager's `.github/workflows/snapshot.yml` pattern:
   # plain `publish` (no GPG signing required), targets Central snapshots
@@ -189,7 +190,9 @@ jobs:
   publish-central:
     name: publish libquackwire to Sonatype Central snapshots
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout

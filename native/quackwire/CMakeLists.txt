@@ -38,18 +38,18 @@ target_include_directories(quackwire PRIVATE
   ${DUCKDB_QUACK_DIR}/src/include
 )
 
-# libduckdb v1.5.3 link target.
+# libduckdb v1.5.4 link target.
 #
 # Path 1 (chosen): system install via Homebrew on macOS / apt on Linux.
-# On this developer machine `brew info duckdb` reports stable 1.5.3 - an
-# exact match for the version duckdb-quack at f62b3ea was built against.
-# Task 8 (CI matrix) will likely switch CI to FetchContent on the v1.5.3
+# On this developer machine `brew info duckdb` reports stable 1.5.4 - an
+# exact match for the version duckdb-quack at 40de7badae41 was built against.
+# Task 8 (CI matrix) will likely switch CI to FetchContent on the v1.5.4
 # release artifact for reproducibility, but for local dev the system
 # package is the fastest path to a working link.
 find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /opt/homebrew/include /usr/local/include /usr/include)
 find_library(DUCKDB_LIB duckdb HINTS /opt/homebrew/lib /usr/local/lib /usr/lib)
 if(NOT DUCKDB_INCLUDE_DIR OR NOT DUCKDB_LIB)
-  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS) or 'apt install libduckdb-dev' (Linux), or wire up FetchContent against the v1.5.3 release artifact.")
+  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS) or 'apt install libduckdb-dev' (Linux), or wire up FetchContent against the v1.5.4 release artifact.")
 endif()
 message(STATUS "quackwire: using libduckdb headers at ${DUCKDB_INCLUDE_DIR}")
 message(STATUS "quackwire: linking libduckdb at ${DUCKDB_LIB}")

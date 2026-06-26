@@ -56,7 +56,6 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
     s.upsertTenant(
       Tenant(
         id           = GlobexTenantId,
-        name         = "globex",
         displayName  = "globex",
         authProvider = "db"
       )

@@ -118,6 +118,13 @@ final case class StopPoolRequest(
     force: Boolean = false
 )
 
+final case class DeletePoolRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    force: Boolean = false
+)
+
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
@@ -132,7 +139,13 @@ final case class ClientConfigResponse(
     // True iff the runtime backend is Kubernetes (i.e. supports
     // nodeSelector / tolerations placement). The UI hides the per-pool
     // cohort/placement controls when false.
-    placementSupported: Boolean = false
+    placementSupported: Boolean = false,
+    // "db" or "oidc". When "oidc" the UI renders no password form and instead
+    // redirects to /api/auth/oidc/start.
+    identitySource: String = "db",
+    // Best-effort label for the SSO provider (the issuer host, e.g.
+    // "accounts.google.com"); empty in db mode. Cosmetic only (UI copy).
+    ssoProviderName: String = ""
 )
 
 /** One row of the admin UI Config page: a single scalar from `application.conf` with its env-var
@@ -171,7 +184,12 @@ final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, n
 final case class ErrorResponse(error: String, message: String)
 
 final case class TenantRequest(
-    name: String,
+    // Slug key (required): a lowercase identifier that IS the tenant's one
+    // key, used in URLs, sessions, scope checks, and FKs. e.g. "acme".
+    id: String,
+    // Free-form human label (caps / spaces allowed). Defaults to `id` when
+    // empty. e.g. "Acme Corporation".
+    displayName: String = "",
     // Auth provider for every user in this tenant. One of
     // {db, keycloak, google, azure, aws}; defaults to `db` so existing
     // wire callers and the bootstrap path keep working.
@@ -182,8 +200,12 @@ final case class TenantRequest(
     authConfig: Map[String, String] = Map.empty
 )
 final case class TenantResponse(
+    // The slug key. Also exposed as `id` (identical) for callers that key on
+    // either field; both hold the slug.
     name: String,
     id: String,
+    // Free-form human label. May differ from `id` (e.g. "Acme Corporation").
+    displayName: String,
     // Pool natural keys under this tenant, formatted as `tenantDb/pool`
     // (the tenant prefix is implicit). Storage configuration lives on
     // `qodstate_tenant_db` rows, not here.
@@ -307,6 +329,17 @@ final case class WhoamiResponse(
     tenant: Option[String] = None,
     superuser: Boolean = false,
     manageableTenants: List[String] = Nil
+)
+
+/** Resolved admin-UI login mode for a scope, returned by the unauthenticated `GET /api/auth/mode`.
+  * The SPA reads this per the tenant in the URL to decide whether to render the password form
+  * (`db`) or redirect to `/api/auth/oidc/start` (`oidc`).
+  */
+final case class AuthModeResponse(
+    // "db" -> render the password form; "oidc" -> redirect to /api/auth/oidc/start.
+    mode: String,
+    // Cosmetic provider label (issuer host for a tenant, manager-wide provider for system).
+    ssoProviderName: String = ""
 )
 
 // ----- Recent statement history -----
@@ -676,6 +709,26 @@ object Dtos:
       )
     }
   )
+  given Codec[DeletePoolRequest] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        tenant   <- c.get[String]("tenant")
+        tenantDb <- c.get[String]("tenantDb")
+        pool     <- c.get[String]("pool")
+        force    <- c.getOrElse[Boolean]("force")(false)
+      yield DeletePoolRequest(tenant, tenantDb, pool, force)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "tenant"   -> r.tenant.asJson,
+          "tenantDb" -> r.tenantDb.asJson,
+          "pool"     -> r.pool.asJson,
+          "force"    -> r.force.asJson
+        )
+      )
+    }
+  )
   // Custom codec for NodeInfo so all metric fields default to zero / true
   // when absent in JSON; lets clients and UI poll responses share one shape.
   given Codec[NodeInfo] = Codec.from(
@@ -741,15 +794,17 @@ object Dtos:
   given Codec[TenantRequest] = Codec.from(
     Decoder.instance { (c: HCursor) =>
       for
-        name         <- c.get[String]("name")
+        id           <- c.get[String]("id")
+        displayName  <- c.getOrElse[String]("displayName")("")
         authProvider <- c.getOrElse[String]("authProvider")("db")
         authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
-      yield TenantRequest(name, authProvider, authConfig)
+      yield TenantRequest(id, displayName, authProvider, authConfig)
     },
     Encoder.instance { r =>
       Json.fromJsonObject(
         JsonObject(
-          "name"         -> r.name.asJson,
+          "id"           -> r.id.asJson,
+          "displayName"  -> r.displayName.asJson,
           "authProvider" -> r.authProvider.asJson,
           "authConfig"   -> r.authConfig.asJson
         )
@@ -864,6 +919,23 @@ object Dtos:
       )
     }
   )
+  given Codec[AuthModeResponse] = Codec.from(
+    Decoder.instance { (c: HCursor) =>
+      for
+        mode            <- c.get[String]("mode")
+        ssoProviderName <- c.getOrElse[String]("ssoProviderName")("")
+      yield AuthModeResponse(mode, ssoProviderName)
+    },
+    Encoder.instance { r =>
+      Json.fromJsonObject(
+        JsonObject(
+          "mode"            -> r.mode.asJson,
+          "ssoProviderName" -> r.ssoProviderName.asJson
+        )
+      )
+    }
+  )
+
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
 

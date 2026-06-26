@@ -83,7 +83,7 @@ void throw_runtime(JNIEnv* env, const char* what) {
 //   - inability to resolve the `toByteArray` method (should not happen on
 //     a real BigInteger, but a malicious / mis-typed caller could trigger it)
 //   - a magnitude that does not fit in 128 bits (i.e. byte array longer
-//     than 17 bytes — 16 magnitude + 1 optional sign byte for positive
+//     than 17 bytes - 16 magnitude + 1 optional sign byte for positive
 //     values with the high bit set)
 // On any of those paths the function leaves a pending Java exception and
 // returns hugeint_t(0,0); callers MUST check `env->ExceptionCheck()`
@@ -110,9 +110,9 @@ duckdb::hugeint_t jbiginteger_to_hugeint(JNIEnv* env, jobject big_integer) {
   jsize len = env->GetArrayLength(bytes_j);
   // A 128-bit BigInteger occupies at most 17 bytes in its two's-complement
   // byte[] form: 16 magnitude bytes plus an optional leading 0x00 for a
-  // positive value whose high bit is set. Anything larger — or a 17-byte
+  // positive value whose high bit is set. Anything larger - or a 17-byte
   // encoding whose leading byte is non-zero (meaning the magnitude itself
-  // is >128 bits, e.g. 2^128 encodes as 0x01 followed by 16 zero bytes) —
+  // is >128 bits, e.g. 2^128 encodes as 0x01 followed by 16 zero bytes) -
   // is outside the wire format and we refuse it rather than silently truncate.
   if (len > 17) {
     throw_runtime(env, "FetchRequest resultUuid does not fit in 128 bits");
@@ -361,7 +361,7 @@ Java_ai_starlake_quack_edge_adapter_QuackNativeBridge_00024_extractErrorMessage(
 
 // Only `PrepareResponseMessage` carries `needs_more_fetch` upstream
 // (see quack_message.hpp:165 `NeedsMoreFetch`). `FetchResponseMessage` does
-// not expose a needs-more-fetch flag in the current submodule pin — it
+// not expose a needs-more-fetch flag in the current submodule pin - it
 // only carries `results` + optional `batch_index`. Until upstream changes
 // that, we accept PREPARE_RESPONSE only; passing a FETCH_RESPONSE here is
 // a programming error and we surface it as a Java RuntimeException.
@@ -534,7 +534,7 @@ namespace {
 // `optional_ptr<ClientContext>`, which surfaces at runtime as
 // `InternalException("Attempting to dereference an optional pointer
 // that is not set")`. Construct one in-memory DuckDB once per process
-// and reuse its ClientContext for every stream we hand out — the
+// and reuse its ClientContext for every stream we hand out - the
 // instance is otherwise unused (no SQL is ever run on it).
 //
 // This is the cheapest viable workaround. A v2 would let the gateway
@@ -554,21 +554,21 @@ duckdb::ClientProperties& shared_client_properties() {
 }
 
 struct ChunkStreamHolder {
-  // `duckdb::vector` is what `Mutable*Results()` returns — keep the same
+  // `duckdb::vector` is what `Mutable*Results()` returns - keep the same
   // alias so we can `std::move` straight in without a transcribe loop.
   duckdb::vector<duckdb::unique_ptr<duckdb::DataChunkWrapper>> chunks;
   duckdb::vector<duckdb::LogicalType> types;
   // Column names, populated from `PrepareResponseMessage::Names()` for a
   // PREPARE_RESPONSE; synthesised as `column_0..N-1` for FETCH_RESPONSE
   // (which carries no schema). The Scala driver actually never sees a
-  // FETCH_RESPONSE-derived schema in production — it only consults the
-  // schema once, from the initial PREPARE_RESPONSE-derived reader — but
+  // FETCH_RESPONSE-derived schema in production - it only consults the
+  // schema once, from the initial PREPARE_RESPONSE-derived reader - but
   // synthesising names keeps a stand-alone test of `extractArrowStream`
   // on a FETCH_RESPONSE fixture working.
   duckdb::vector<duckdb::string> names;
   size_t next = 0;
   // Copy of the shared process-wide ClientProperties; copying is cheap
-  // (a few scalars + a shared_ptr — the client_context optional_ptr is
+  // (a few scalars + a shared_ptr - the client_context optional_ptr is
   // observer-style and does not refcount).
   duckdb::ClientProperties properties = shared_client_properties();
   std::string last_error;

@@ -50,6 +50,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'operating/authentication',
             'operating/auth-providers',
+            'operating/oauth-server-setup',
             'operating/rbac-model',
             'operating/rbac-admin',
           ],
@@ -67,6 +68,7 @@ const sidebars: SidebarsConfig = {
         'connecting/authenticating',
         'connecting/sql',
         'connecting/powerbi',
+        'connecting/tableau',
       ],
     },
     {

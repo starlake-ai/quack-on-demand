@@ -71,7 +71,10 @@ final case class ManifestPool(
 )
 
 final case class ManifestTenant(
+    // The tenant slug key (e.g. "acme").
     name: String,
+    // Free-form display label; defaults to `name` on import when blank.
+    displayName: String = "",
     disabled: Boolean = false,
     authProvider: String = "db",
     authConfig: Map[String, String] = Map.empty,
@@ -295,12 +298,13 @@ object ConfigManifest:
     Decoder.instance { (c: HCursor) =>
       for
         name         <- c.get[String]("name")
+        displayName  <- c.getOrElse[String]("displayName")("")
         disabled     <- c.getOrElse[Boolean]("disabled")(false)
         authProvider <- c.getOrElse[String]("authProvider")("db")
         authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
         tenantDbs    <- c.getOrElse[List[ManifestTenantDb]]("tenantDbs")(Nil)
         pools        <- c.getOrElse[List[ManifestPool]]("pools")(Nil)
-      yield ManifestTenant(name, disabled, authProvider, authConfig, tenantDbs, pools)
+      yield ManifestTenant(name, displayName, disabled, authProvider, authConfig, tenantDbs, pools)
     },
     deriveEncoder[ManifestTenant]
   )

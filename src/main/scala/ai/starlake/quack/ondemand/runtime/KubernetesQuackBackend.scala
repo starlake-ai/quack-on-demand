@@ -301,13 +301,16 @@ final class KubernetesQuackBackend(
       yield PoolKey(tenant, tenantDb, pool)
     }
 
-  /** K8s Secret name for a pool's federation SQL. Hyphenizes the `tenantDb` underscore the same way
-    * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]] does so the result is RFC-1123
-    * compatible. All segments are already Postgres-identifier-safe so no further escaping needed.
+  /** K8s Secret name for a pool's federation SQL. Hyphenizes the underscore on every segment
+    * (tenant / tenantDb / pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]
+    * does, so the result is RFC-1123 compatible. Slugs never contain '-', so '_' -> '-' is
+    * collision-free.
     */
   private def secretNameFor(key: PoolKey): String =
-    val safeDb = key.tenantDb.replace('_', '-')
-    s"qod-fedsql-${key.tenant}-$safeDb-${key.pool}"
+    val safeTenant = key.tenant.replace('_', '-')
+    val safeDb     = key.tenantDb.replace('_', '-')
+    val safePool   = key.pool.replace('_', '-')
+    s"qod-fedsql-$safeTenant-$safeDb-$safePool"
 
   /** K8s Secret name for a node's bearer token. `nodeId` is already RFC-1123 safe (see
     * [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]), so the prefix is the only addition.

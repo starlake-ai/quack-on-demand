@@ -156,6 +156,28 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.scale(key, targetSize = 3, RoleDistribution(0, 2, 1), force = false).unsafeRunSync()
     sup.get(key).get.nodes.size shouldBe 3
 
+  it should "add the role the caller asked for, not a positional slice" in:
+    // Regression: scaling a Dual-only pool up to {readonly:1, dual:1} used to
+    // spawn a second Dual, because `asRoleList.drop(size)` skipped past the new
+    // ReadOnly entry ([... ReadOnly, Dual]) and landed on the trailing Dual.
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.scale(key, targetSize = 2, RoleDistribution(0, 1, 1), force = false).unsafeRunSync()
+    val roles = sup.get(key).get.nodes.map(_.role)
+    roles.count(_ == Role.ReadOnly) shouldBe 1
+    roles.count(_ == Role.Dual) shouldBe 1
+
+  it should "swap a node's role in place when the size is unchanged" in:
+    // {readonly:1, dual:1} -> {writeonly:1, dual:1}: same size, but the ReadOnly
+    // must be replaced by a WriteOnly rather than left untouched.
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    sup.scale(key, targetSize = 2, RoleDistribution(1, 0, 1), force = true).unsafeRunSync()
+    val roles = sup.get(key).get.nodes.map(_.role)
+    roles.count(_ == Role.WriteOnly) shouldBe 1
+    roles.count(_ == Role.ReadOnly) shouldBe 0
+    roles.count(_ == Role.Dual) shouldBe 1
+
   it should "remove nodes when target < current (graceful by default)" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 3, 0)).unsafeRunSync()
@@ -175,10 +197,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup.setMaxConcurrent(key, "nope", 5).unsafeRunSync() shouldBe None
 
-  "PoolSupervisor.stopPool" should "stop all nodes and forget the pool" in:
+  "PoolSupervisor.stopPool" should "stop all nodes but keep the pool (scaled to 0)" in:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.stopPool(key, force = true).unsafeRunSync()
+    // Pool survives; it is just scaled down to zero nodes.
+    sup.get(key).map(_.nodes) shouldBe Some(Nil)
+    sup.get(key).map(_.distribution) shouldBe Some(RoleDistribution(0, 0, 0))
+
+  "PoolSupervisor.deletePool" should "stop all nodes and forget the pool" in:
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    sup.deletePool(key, force = true).unsafeRunSync()
     sup.get(key) shouldBe None
 
   // ---------- Tenant CRUD ----------
@@ -188,7 +218,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val res = sup.createTenant(Tenant("foo")).unsafeRunSync()
     res.isRight shouldBe true
     val t = res.toOption.get
-    t.name        shouldBe "foo"
+    t.id        shouldBe "foo"
     t.displayName shouldBe "foo"
     t.id            should not be empty
     sup.getTenant("foo").map(_.displayName) shouldBe Some("foo")

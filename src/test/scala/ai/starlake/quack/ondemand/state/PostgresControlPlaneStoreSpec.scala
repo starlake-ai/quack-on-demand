@@ -51,7 +51,6 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
 
   private val tenant = Tenant(
     id          = "tenant-1",
-    name        = "acme",
     displayName = "acme",
     disabled    = false
   )
@@ -111,7 +110,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
       defaultDatabase = Some("fedpg"),
       defaultSchema   = Some("public")
     )
-    store.upsertTenant(Tenant(id = "tenant-1", name = "t1"))
+    store.upsertTenant(Tenant(id = "tenant-1"))
     store.upsertTenantDb(td)
     val read = store.listTenantDbs("tenant-1").find(_.id == "td-mem").get
     read.kind            shouldBe TenantDbKind.InMemory
@@ -128,7 +127,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
       metastore = Map("dbName" -> "mydata", "schemaName" -> "main"),
       dataPath  = "/tmp/file.duckdb"
     )
-    store.upsertTenant(Tenant(id = "tenant-1", name = "t1"))
+    store.upsertTenant(Tenant(id = "tenant-1"))
     store.upsertTenantDb(td)
     val read = store.listTenantDbs("tenant-1").find(_.id == "td-file").get
     read.kind shouldBe TenantDbKind.DuckDbFile

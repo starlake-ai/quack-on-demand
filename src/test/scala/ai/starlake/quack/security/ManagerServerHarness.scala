@@ -29,9 +29,9 @@ import java.time.Instant
   * directly from the [[InMemoryControlPlaneStore]]. No Postgres or network call is made for
   * authentication.
   *
-  * [[UserStore]] (for the create/update user REST endpoints): backed by an in-memory DuckDB instance
-  * with the `qodstate_user` table pre-created. This keeps the harness self-contained while still
-  * wiring a valid [[UserHandlers]] instance.
+  * [[UserStore]] (for the create/update user REST endpoints): backed by an in-memory DuckDB
+  * instance with the `qodstate_user` table pre-created. This keeps the harness self-contained while
+  * still wiring a valid [[UserHandlers]] instance.
   */
 object ManagerServerHarness:
 
@@ -40,47 +40,47 @@ object ManagerServerHarness:
   // All fields that affect boot must be set to safe no-op values.
   // ------------------------------------------------------------------
   private def minimalManagerConfig(port: Int = 0): ManagerConfig = ManagerConfig(
-    host                  = "127.0.0.1",
-    port                  = port,
-    apiKey                = None,          // open REST namespace
-    runtimeType           = "local",
-    minPort               = 40000,
-    maxPort               = 41000,
-    maxNodesTotal         = 0,
-    nativeClient          = false,
-    nodeDisableSsl        = true,
-    spawnScript           = "",
-    drainTimeoutSec       = 5,
+    host = "127.0.0.1",
+    port = port,
+    apiKey = None, // open REST namespace
+    runtimeType = "local",
+    minPort = 40000,
+    maxPort = 41000,
+    maxNodesTotal = 0,
+    nativeClient = false,
+    nodeDisableSsl = true,
+    spawnScript = "",
+    drainTimeoutSec = 5,
     healthCheckIntervalSec = 30,
-    sessionIdleTtlSec     = 28800,
-    defaultMetastore      = DefaultMetastoreConfig(
-      pgHost     = "localhost",
-      pgPort     = "5432",
-      pgUser     = "postgres",
+    sessionIdleTtlSec = 28800,
+    defaultMetastore = DefaultMetastoreConfig(
+      pgHost = "localhost",
+      pgPort = "5432",
+      pgUser = "postgres",
       pgPassword = "postgres",
-      dbName     = "qod",
+      dbName = "qod",
       schemaName = "main",
-      dataPath   = ""
+      dataPath = ""
     ),
-    admin      = AdminConfig(username = "", password = "", role = "admin"),
-    k8s        = K8sConfig(
-      namespace          = "default",
-      image              = "",
-      serviceAccount     = None,
-      serviceType        = "ClusterIP",
-      quackPort          = 21900,
-      startupTimeoutSec  = 60,
-      podLabel           = "app=quack-node"
+    admin = AdminConfig(username = "", password = "", role = "admin"),
+    k8s = K8sConfig(
+      namespace = "default",
+      image = "",
+      serviceAccount = None,
+      serviceType = "ClusterIP",
+      quackPort = 21900,
+      startupTimeoutSec = 60,
+      podLabel = "app=quack-node"
     ),
     federation = FederationConfig(secretStore = "env"),
-    auth       = ManagerAuthConfig(
+    auth = ManagerAuthConfig(
       management = ManagementAuthConfig(
-        identitySource      = "db",
-        identityClaim       = "preferred_username",
+        identitySource = "db",
+        identityClaim = "preferred_username",
         // 44-char base64 = 32 raw bytes; meets HS256 min-key-length.
-        sessionJwtSecret    = "test-harness-jwt-secret-padding-padding-pad=",
+        sessionJwtSecret = "test-harness-jwt-secret-padding-padding-pad=",
         sessionCookieSecure = "false",
-        sessionCookiePath   = "/api"
+        sessionCookiePath = "/api"
       )
     )
   )
@@ -90,9 +90,9 @@ object ManagerServerHarness:
   // by the ManagerServer constructor (it surfaced in /api/config/client).
   // ------------------------------------------------------------------
   private val minimalFlightConfig = FlightConfig(
-    host         = "127.0.0.1",
-    port         = 31338,
-    tlsEnabled   = false,
+    host = "127.0.0.1",
+    port = 31338,
+    tlsEnabled = false,
     tlsCertChain = "",
     tlsPrivateKey = "",
     sessionTtlSec = 3600L
@@ -155,8 +155,9 @@ object ManagerServerHarness:
     val jdbcUrl = s"jdbc:duckdb:${tmpFile.toAbsolutePath}"
     val c       = DriverManager.getConnection(jdbcUrl)
     try
-      c.createStatement().execute(
-        """CREATE TABLE IF NOT EXISTS qodstate_user (
+      c.createStatement()
+        .execute(
+          """CREATE TABLE IF NOT EXISTS qodstate_user (
           |  id            TEXT PRIMARY KEY,
           |  tenant        TEXT,
           |  username      TEXT NOT NULL,
@@ -165,7 +166,7 @@ object ManagerServerHarness:
           |  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           |  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
           |)""".stripMargin
-      )
+        )
     finally c.close()
     new UserStore(jdbcUrl, "", "")
 
@@ -174,20 +175,20 @@ object ManagerServerHarness:
   // ------------------------------------------------------------------
 
   final case class Harness(
-      baseUrl:    String,
-      tokens:     SessionTokenStore,
+      baseUrl: String,
+      tokens: SessionTokenStore,
       httpClient: HttpClient,
       stmtHistory: ai.starlake.quack.edge.StatementHistoryStore,
-      shutdown:   () => Unit
+      shutdown: () => Unit
   ):
 
-    /** Mint a UI session token via real POST /api/auth/login. Returns the
-      * `token` field from LoginResponse. Throws on non-200.
+    /** Mint a UI session token via real POST /api/auth/login. Returns the `token` field from
+      * LoginResponse. Throws on non-200.
       */
     def mintToken(
         username: String,
         password: String,
-        tenant:   Option[String] = None
+        tenant: Option[String] = None
     ): String =
       val tenantJson = tenant.fold("")(t => s""","tenant":"$t"""")
       val body       =
@@ -216,34 +217,33 @@ object ManagerServerHarness:
   /** Boot a ManagerServer on an ephemeral port backed by the supplied
     * [[InMemoryControlPlaneStore]].
     *
-    * The returned [[Harness]] holds `baseUrl`, `tokens` (for direct test
-    * introspection), and `shutdown()` to stop the server.
+    * The returned [[Harness]] holds `baseUrl`, `tokens` (for direct test introspection), and
+    * `shutdown()` to stop the server.
     *
-    *   - `staticApiKey` flows into [[ManagerConfig.apiKey]] so the
-    *     [[ManagerServer.apiKeyGuard]] enforces it (`Some("...")` enables the
-    *     static-key path; `None`, the default, leaves the REST namespace open).
-    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]]
-    *     report `false`, driving the `auth_disabled` 503 branch in
-    *     [[AuthHandlers.login]].
+    *   - `staticApiKey` flows into [[ManagerConfig.apiKey]] so the [[ManagerServer.apiKeyGuard]]
+    *     enforces it (`Some("...")` enables the static-key path; `None`, the default, leaves the
+    *     REST namespace open).
+    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`,
+    *     driving the `auth_disabled` 503 branch in [[AuthHandlers.login]].
     *
     * Call [[Harness.shutdown]] in `afterAll` / `afterEach` to release the port.
     */
   def boot(
-      store:           InMemoryControlPlaneStore,
-      staticApiKey:    Option[String] = None,
-      enableProviders: Boolean        = true
+      store: InMemoryControlPlaneStore,
+      staticApiKey: Option[String] = None,
+      enableProviders: Boolean = true
   ): Harness =
-    val mgrCfg     =
+    val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
-    val edgeCfg    = minimalFlightConfig
-    val tracker    = new NodeLoadTracker
-    val backend    = stubBackend
-    val sup        = new PoolSupervisor(backend, tracker, store)
+    val edgeCfg = minimalFlightConfig
+    val tracker = new NodeLoadTracker
+    val backend = stubBackend
+    val sup     = new PoolSupervisor(backend, tracker, store)
 
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
 
-    val userStore   = makeDuckDbUserStore()
+    val userStore            = makeDuckDbUserStore()
     val userHandlers         = new UserHandlers(sup, userStore)
     val roleHandlers         = new RoleHandlers(sup, userHandlers)
     val groupHandlers        = new GroupHandlers(sup, userHandlers)
@@ -252,13 +252,19 @@ object ManagerServerHarness:
     val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
     val rowPolicyHandlers    = new RoleRowPolicyHandlers(sup)
 
-    val sessions   = new SessionTokenStore
-    val authSvc    = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    val sessions     = new SessionTokenStore
+    val authSvc      = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
     val authHandlers = new AuthHandlers(
-      authService       = authSvc,
-      tokens            = sessions,
-      identitySource    = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil
+      authService = authSvc,
+      tokens = sessions,
+      identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil,
+      // Mirror Main: resolve per-tenant login mode from the registry so a db
+      // tenant login resolves to Db instead of the no-op default's TenantNotFound.
+      authModeResolver = new ai.starlake.quack.ondemand.auth.ManagementAuthModeResolver(
+        id => sup.getTenantById(id),
+        ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
+      )
     )
 
     val statementStore  = new StatementHistoryStore()
@@ -275,10 +281,10 @@ object ManagerServerHarness:
     val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
 
     val manifestHandlers = new ManifestHandlers(
-      store          = store,
-      supervisor     = sup,
+      store = store,
+      supervisor = sup,
       managerVersion = "test-harness",
-      hostname       = "localhost"
+      hostname = "localhost"
     )
 
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
@@ -293,9 +299,9 @@ object ManagerServerHarness:
       health,
       authHandlers,
       sessions,
-      authEnabled  = enableProviders,
+      authEnabled = enableProviders,
       historyHandlers,
-      catalog      = None,
+      catalog = None,
       metricsEndpoint,
       userHandlers,
       roleHandlers,
@@ -305,8 +311,8 @@ object ManagerServerHarness:
       serverConfigHandlers,
       manifestHandlers,
       federatedSources = None,
-      columnPolicies   = columnPolicyHandlers,
-      rowPolicies      = rowPolicyHandlers
+      columnPolicies = columnPolicyHandlers,
+      rowPolicies = rowPolicyHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port
@@ -344,24 +350,23 @@ object ManagerServerHarness:
       catch case _: Throwable => ()
 
     Harness(
-      baseUrl     = baseUrl,
-      tokens      = sessions,
-      httpClient  = httpClient,
+      baseUrl = baseUrl,
+      tokens = sessions,
+      httpClient = httpClient,
       stmtHistory = statementStore,
-      shutdown    = () => {
+      shutdown = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which
         // makes the test suite unacceptably slow. We run the release on a
         // background thread and wait at most 3 s; if it doesn't finish in
         // time we abandon the fiber (the port will be released by the OS
         // when the JVM exits, and each test uses a fresh ephemeral port).
-        val future  = release.unsafeToFuture()
+        val future = release.unsafeToFuture()
         try
           scala.concurrent.Await.result(
             future,
             scala.concurrent.duration.FiniteDuration(3, java.util.concurrent.TimeUnit.SECONDS)
           )
-        catch
-          case _: Throwable => ()
+        catch case _: Throwable => ()
       }
     )

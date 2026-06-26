@@ -2,7 +2,16 @@ package ai.starlake.quack
 
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.auth.{
+  AuthenticationService,
+  OidcBearerAuthenticator,
+  OidcDiscovery,
+  OidcEndpointResolver,
+  OidcEndpoints,
+  OidcSsoService,
+  OidcStateCodec
+}
+import ai.starlake.quack.secrets.SecretRefResolver
 import ai.starlake.quack.edge.config.{
   AclConfig,
   AuthenticationConfig,
@@ -28,7 +37,12 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
-import ai.starlake.quack.ondemand.auth.{GrantsLookup, ManagementIdentitySource}
+import ai.starlake.quack.ondemand.auth.{
+  GrantsLookup,
+  ManagementAuthMode,
+  ManagementAuthModeResolver,
+  ManagementIdentitySource
+}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -67,6 +81,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[K8sConfig]                 = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]               = ProductHint[AdminConfig](camelMapping)
   given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
+  given ProductHint[ManagementOidcConfig]      = ProductHint[ManagementOidcConfig](camelMapping)
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
@@ -84,6 +99,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
   given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
   given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
+  given ConfigReader[ManagementOidcConfig]   = deriveReader[ManagementOidcConfig]
   given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
@@ -323,6 +339,15 @@ object Main extends IOApp with LazyLogging:
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
     )
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
+    // System scope (bare /ui/) login mode mirrors identitySource; per-tenant logins resolve their
+    // mode from the tenant's authProvider via the resolver below.
+    val systemAuthMode = identitySource match
+      case ManagementIdentitySource.Oidc => ManagementAuthMode.Oidc
+      case ManagementIdentitySource.Db   => ManagementAuthMode.Db
+    val authModeResolver = new ManagementAuthModeResolver(
+      loadTenant = id => sup.getTenantById(id),
+      systemMode = systemAuthMode
+    )
     val authUserStore: Option[UserStore] =
       Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
     val grantsForIdentity: GrantsLookup =
@@ -341,15 +366,89 @@ object Main extends IOApp with LazyLogging:
               "Treating as 'auto' (derive from X-Forwarded-Proto)."
           )
           None
+    // Build the admin-UI OIDC SSO service only in oidc mode. Discovery + token exchange use a shared
+    // java.net.http client; id_token validation reuses OidcBearerAuthenticator against the discovered
+    // jwks_uri. redirect_uri is built from the public base URL (must match the IdP client's
+    // registered redirect URI).
+    val oidcSso: Option[OidcSsoService] =
+      if identitySource == ManagementIdentitySource.Oidc then
+        val httpClient = java.net.http.HttpClient
+          .newBuilder()
+          .connectTimeout(java.time.Duration.ofSeconds(10))
+          .build()
+        val discovery = new OidcDiscovery(httpGet =
+          url =>
+            try
+              val req = java.net.http.HttpRequest
+                .newBuilder()
+                .uri(java.net.URI.create(url))
+                .GET()
+                .timeout(java.time.Duration.ofSeconds(15))
+                .build()
+              val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+              if resp.statusCode() == 200 then Right(resp.body())
+              else Left(s"discovery HTTP ${resp.statusCode()}")
+            catch case e: Exception => Left(e.getMessage)
+        )
+        val resolver = new OidcEndpointResolver(
+          loadTenant = id => sup.getTenantById(id),
+          secrets = SecretRefResolver.default,
+          discovery = discovery
+        )
+        val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
+        if mgrCfg.auth.management.publicBaseUrl.trim.isEmpty then
+          logger.warn(
+            "identitySource=oidc but QOD_MGMT_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults " +
+              s"to http://localhost:${mgrCfg.port}, which must match the IdP client's registered " +
+              "redirect URI. Set QOD_MGMT_PUBLIC_BASE_URL for any non-localhost deploy."
+          )
+        val publicBaseUrlOf = () =>
+          val base = mgrCfg.auth.management.publicBaseUrl
+          if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
+        val httpExchange = (url: String, form: String) =>
+          try
+            val req = java.net.http.HttpRequest
+              .newBuilder()
+              .uri(java.net.URI.create(url))
+              .header("Content-Type", "application/x-www-form-urlencoded")
+              .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
+              .timeout(java.time.Duration.ofSeconds(15))
+              .build()
+            val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+            if resp.statusCode() == 200 then Right(resp.body())
+            else Left(s"token endpoint HTTP ${resp.statusCode()}")
+          catch case e: Exception => Left(e.getMessage)
+        val buildValidator = (ep: OidcEndpoints) =>
+          new OidcBearerAuthenticator(
+            ep.provider,
+            ep.jwksUrl,
+            ep.issuer,
+            ep.clientId,
+            authCfg.roleClaim
+          )
+        Some(
+          new OidcSsoService(
+            resolver = resolver,
+            mgmt = mgrCfg.auth.management.oidc,
+            codec = codec,
+            roleClaim = authCfg.roleClaim,
+            publicBaseUrlOf = publicBaseUrlOf,
+            httpExchange = httpExchange,
+            buildValidator = buildValidator
+          )
+        )
+      else None
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
       identitySource = identitySource,
       grantsForIdentity = grantsForIdentity,
+      authModeResolver = authModeResolver,
       cookieSecureOverride = cookieSecureOverride,
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
-      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
+      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
+      oidc = oidcSso
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
@@ -390,7 +489,7 @@ object Main extends IOApp with LazyLogging:
           tenantCatalogs = tenantId =>
             sup
               .getTenantById(tenantId)
-              .map(t => sup.listTenantDbsByTenant(t.displayName).map(_.name).toSet)
+              .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
               .getOrElse(Set.empty)
         )
 
@@ -485,7 +584,7 @@ object Main extends IOApp with LazyLogging:
                     case None    => Nil
                     case Some(t) =>
                       val reader = catalogReaderCache.computeIfAbsent(
-                        (t.displayName, td.name),
+                        (t.id, td.name),
                         { case (tn, dn) =>
                           DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
                         }

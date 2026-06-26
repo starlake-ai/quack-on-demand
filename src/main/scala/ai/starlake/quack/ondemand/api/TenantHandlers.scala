@@ -21,9 +21,10 @@ final class TenantHandlers(
 
   private def toResponse(t: Tenant): TenantResponse =
     TenantResponse(
-      name = t.displayName,
+      name = t.id,
       id = t.id,
-      pools = sup.listPoolsOfTenant(t.displayName),
+      displayName = t.displayName,
+      pools = sup.listPoolsOfTenant(t.id),
       disabled = t.disabled,
       authProvider = t.authProvider,
       authConfig = t.authConfig
@@ -47,10 +48,30 @@ final class TenantHandlers(
           )
         )
       )
-    else if req.name.isEmpty then
+    else if req.id.isEmpty then
       IO.pure(
         Left(
-          (StatusCode.BadRequest, ErrorResponse("invalid_name", "tenant name must be non-empty"))
+          (StatusCode.BadRequest, ErrorResponse("invalid_id", "tenant id must be non-empty"))
+        )
+      )
+    else if !ai.starlake.quack.model.Names.isValid(req.id) || !req.id.headOption.exists(_.isLetter)
+    then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse(
+              "invalid_id",
+              "tenant id must be a slug: 1..63 chars, start with a letter, " +
+                "and contain only letters, digits and underscore"
+            )
+          )
+        )
+      )
+    else if req.displayName.trim.isEmpty then
+      IO.pure(
+        Left(
+          (StatusCode.BadRequest, ErrorResponse("invalid_display_name", "display name is required"))
         )
       )
     else if !Tenant.ValidAuthProviders.contains(req.authProvider) then
@@ -69,7 +90,8 @@ final class TenantHandlers(
       sup
         .createTenant(
           Tenant(
-            name = req.name,
+            id = req.id,
+            displayName = req.displayName.trim,
             authProvider = req.authProvider,
             authConfig = req.authConfig
           )

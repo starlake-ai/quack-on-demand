@@ -75,15 +75,45 @@ final case class FederationConfig(
     secretStore: String
 )
 
+/** Generic OIDC client for admin-UI SSO (system/superuser scope). Endpoints are resolved from
+  * `${issuerUrl}/.well-known/openid-configuration` via OIDC Discovery, so any compliant IdP works.
+  */
+final case class ManagementOidcConfig(
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_ISSUER_URL",
+      description = "OIDC issuer URL for admin-UI SSO (system scope), e.g. " +
+        "https://accounts.google.com or http://keycloak:8080/auth/realms/qod. Discovery reads " +
+        "${issuerUrl}/.well-known/openid-configuration. Empty disables system-scope SSO."
+    )
+    issuerUrl: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_CLIENT_ID",
+      description = "OIDC client id for admin-UI SSO (system scope)."
+    )
+    clientId: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_CLIENT_SECRET",
+      description = "OIDC client secret for admin-UI SSO (system scope).",
+      sensitive = true
+    )
+    clientSecret: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MGMT_OIDC_SCOPES",
+      description = "OIDC scopes requested for admin-UI SSO. Default 'openid email profile'."
+    )
+    scopes: String = "openid email profile"
+)
+
 final case class ManagementAuthConfig(
     @field @ConfigField(
-      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_SOURCE",
+      envVar = "QOD_MGMT_IDENTITY_SOURCE",
       description =
-        "Management-plane identity source: 'db' (qodstate_user as identity+authz) or 'oidc' (IdP for identity, qodstate_user for role+tenants)."
+        "System-scope (bare /ui/) admin-UI login mode: 'db' (password form) or 'oidc' (SSO). " +
+          "Per-tenant login mode is read from the tenant's authProvider, not this key."
     )
     identitySource: String,
     @field @ConfigField(
-      envVar = "QOD_AUTH_MANAGEMENT_IDENTITY_CLAIM",
+      envVar = "QOD_MGMT_IDENTITY_CLAIM",
       description =
         "JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback)."
     )
@@ -115,7 +145,15 @@ final case class ManagementAuthConfig(
           "URL prefix, not the backend's. E.g. proxy at https://platform/quack/api/* -> " +
           "QOD_SESSION_COOKIE_PATH=/quack/api."
     )
-    sessionCookiePath: String
+    sessionCookiePath: String,
+    @field @ConfigField(
+      envVar = "QOD_MGMT_PUBLIC_BASE_URL",
+      description = "Externally visible manager base URL (e.g. https://qod.example.com). " +
+        "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
+        "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
+    )
+    publicBaseUrl: String = "",
+    oidc: ManagementOidcConfig = ManagementOidcConfig()
 )
 
 final case class ManagerAuthConfig(

@@ -60,7 +60,7 @@ class SessionTokenStoreExpirySpec extends AnyFlatSpec, Matchers:
     val (s, now) = fixture(maxLifetime = 10.minutes)
     val token    = s.mintWithScope(baseProfile, baseScope)
 
-    // Multiple reads under the deadline — all admit. There's no sliding-
+    // Multiple reads under the deadline - all admit. There's no sliding-
     // window any more, but the JWT keeps verifying until exp.
     now.set(now.get().plusSeconds(3 * 60))
     s.get(token) shouldBe defined

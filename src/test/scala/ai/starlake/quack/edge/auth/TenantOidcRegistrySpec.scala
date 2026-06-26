@@ -18,7 +18,6 @@ class TenantOidcRegistrySpec extends AnyFlatSpec with Matchers:
       cfg: Map[String, String] = Map.empty
   ): Tenant =
     Tenant(
-      name = id,
       id = id,
       displayName = id,
       authProvider = provider,

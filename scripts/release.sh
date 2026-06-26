@@ -47,6 +47,19 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# ---- Purge Metals Scala-CLI scratch builds -------------------------------
+# Metals' interactive Scala-CLI / worksheet feature writes `.metals-scala-cli/`
+# scratch dirs (with their own `.scala-build/` + `.bloop/`) next to whatever
+# source file it ran on, compiled with Metals' OWN Scala version - which can be
+# newer than this build's 3.7.4. sbt copies their `.tasty` into target/classes,
+# and Scala 3 scaladoc walks that tree in from-tasty mode during publishSigned's
+# doc step. A 28.8 TASTy (Scala 3.8.x) there makes the 3.7.4 dottydoc abort with
+# "Forward incompatible TASTy file has version 28.8". The release skips `clean`,
+# so these survive into the publish. Nuke them up-front, in both src/ and target/.
+echo "purging Metals Scala-CLI scratch dirs (.metals-scala-cli / .scala-build)..."
+find src target -type d \( -name '.metals-scala-cli' -o -name '.scala-build' \) \
+  -prune -exec rm -rf {} + 2>/dev/null || true
+
 REGISTRY_IMAGE="${REGISTRY_IMAGE:-starlakeai/quack-on-demand}"
 NO_DOCKER="${NO_DOCKER:-0}"
 
@@ -283,6 +296,17 @@ else
     major="$(echo "$release_version" | cut -d. -f1)"
     echo "building multi-arch image ($REGISTRY_IMAGE:$release_version + $minor + $major + latest)..."
 
+    # The image builds the assembly from source, so the jar version and the
+    # libquackwire coordinate come from version.sbt / build.sbt in the build
+    # context. By now both have been bumped to the next -SNAPSHOT (and that
+    # libquackwire snapshot isn't published anywhere yet), so building from the
+    # working tree would bake a -SNAPSHOT jar into the :$release_version image
+    # and fail `sbt update` resolving the unpublished libquackwire snapshot.
+    # Materialize the released versions from the v$release_version tag for the
+    # duration of the build, then restore the working tree (trap covers errors).
+    git checkout "v$release_version" -- build.sbt version.sbt
+    trap 'git checkout HEAD -- build.sbt version.sbt' EXIT
+
     if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
       echo "$DOCKER_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
     fi
@@ -301,6 +325,9 @@ else
       --push \
       .
     echo "pushed: $REGISTRY_IMAGE:$release_version (+ $minor + $major + latest)"
+
+    git checkout HEAD -- build.sbt version.sbt
+    trap - EXIT
   fi
 fi
 
