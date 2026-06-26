@@ -37,6 +37,65 @@ When a client runs a statement, it passes through a fixed sequence:
 - **One endpoint, many nodes.** Clients see a single Flight SQL endpoint; the gateway hides node placement, load balancing, transaction pinning, and failover-with-retry.
 - **Access control at the gateway.** Authentication and per-statement authorization happen once, at the edge, independent of which node executes, so the same RBAC model covers native and federated tables alike.
 
+## The pipeline in detail
+
+```mermaid
+flowchart TD
+    C1["JDBC / ADBC client"]
+    C2["Browser · admin UI"]
+
+    EDGE["FlightEdgeServer · :31338 TLS<br/>Arrow FlightSQL"]
+    REST["ManagerServer REST · :20900<br/>Tapir + http4s Ember · Prometheus /metrics"]
+
+    C1 --> EDGE
+    C2 --> REST
+
+    %% --- edge data-plane pipeline (native only) ---
+    AUTH["AuthenticationService<br/>Database · JWT · OIDC · ROPC<br/>GoogleGroupsLookup · RoleExtractor"]
+    FSR["FlightSqlRouter + FlightProducerImpl<br/>SessionRegistry"]
+    ACL["ACL check · PostgresAclValidator<br/>acl.parser: SqlParser · TableExtractor"]
+    ROUTE["StatementClassifier → RoleMatcher → Router<br/>NodeLoadTracker · read / write / dual"]
+    WIRE["QuackHttpAdapter → QuackHttpClient<br/>QuackProtocol (JNI) · queryNative<br/>application/vnd.duckdb"]
+
+    EDGE --> AUTH --> FSR --> ACL --> ROUTE --> WIRE
+
+    %% --- manager control plane ---
+    API["api handlers · Tapir Endpoints<br/>tenant · pool · node · user · role · group<br/>catalog · config · session · history · rbac"]
+    SUP["PoolSupervisor<br/>HealthProbe · drain · restart"]
+    BK["QuackBackend · selected by runtimeType<br/>LocalQuackBackend | KubernetesQuackBackend"]
+
+    REST --> API --> SUP --> BK
+
+    %% --- node pool ---
+    subgraph POOL["Quack node pool · per tenant — DuckDB + quack_serve · /quack"]
+        direction LR
+        WO["WRITEONLY<br/>:21900 / pod"]
+        RO["READONLY<br/>:21901 / pod"]
+        DU["DUAL<br/>:21902 / pod"]
+    end
+
+    WIRE -->|"vnd.duckdb wire"| POOL
+    BK -->|"spawn · scale · quarantine"| POOL
+
+    %% --- persistence ---
+    PG[("PostgreSQL<br/>control plane: qodstate_*<br/>Liquibase · RBAC<br/>per-tenant DuckLake catalogs")]
+    OBJ[("Object storage<br/>S3 · GCS · local FS")]
+
+    API -.->|control-plane state| PG
+    SUP -.->|pool / node state| PG
+    POOL -->|catalog| PG
+    POOL -->|data read/write| OBJ
+
+    %% --- observability ---
+    MET["MetricsRegistry · StatementInstruments"]
+    SINK[("Metrics sink<br/>Prometheus · CloudWatch · Azure · GCP")]
+    EDGE -.-> MET
+    SUP -.-> MET
+    MET --> SINK
+```
+
+**Two paths into Postgres.** The **manager** owns the control plane: it writes `qodstate_tenant` / `qodstate_tenant_db` / `qodstate_pool` / `qodstate_node` on tenant + pool CRUD, and resolves the cached `EffectiveSet` for each authenticated session at handshake. Each **Quack node** owns the data plane against its tenant-db, reading and writing that DB's DuckLake `__ducklake_*` catalog tables directly. Two databases per tenant-db deployment (control-plane `qod` + tenant-db `${tenant}_${tenantDb}`) keep the control plane and DuckLake catalog cleanly separated while sharing one Postgres cluster.
+
 ## Where to go next
 
 - Operators: start with [Deployment](/operating/deploy-local) and [Tenants and databases](/operating/tenants-databases).
