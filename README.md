@@ -205,7 +205,7 @@ One Manager process fronts every client (FlightSQL on `:31338`, REST + admin UI 
 
 ```mermaid
 flowchart TD
-    C1["JDBC / ADBC client"]
+    C1["ODBC / JDBC / ADBC client"]
     C2["Browser · admin UI"]
 
     EDGE["FlightEdgeServer · :31338 TLS<br/>Arrow FlightSQL"]
