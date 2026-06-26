@@ -11,6 +11,7 @@ import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.DurationInt
 
 class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
@@ -210,6 +211,83 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.deletePool(key, force = true).unsafeRunSync()
     sup.get(key) shouldBe None
+
+  // ---------- reconcileLoop ----------
+
+  "PoolSupervisor.reconcileLoop" should "run reconcile repeatedly, respawning a node that stays dead" in {
+    // CapturingBackend nodes carry pid=Some(1) with an unreachable socket, so
+    // isReachable returns false every pass: each reconcile tick finds the node
+    // dead and respawns it, appending one NodeSpec. Watching specs grow past the
+    // initial spawn proves the loop fired reconcile more than once.
+    val (sup, b) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val before = b.specs.size // 1: the initial createPool spawn
+
+    val fiber      = sup.reconcileLoop(20.millis).start.unsafeRunSync()
+    val deadlineMs = System.currentTimeMillis() + 3000
+    while (b.specs.size < before + 2 && System.currentTimeMillis() < deadlineMs) Thread.sleep(10)
+    fiber.cancel.unsafeRunSync()
+
+    b.specs.size should be >= before + 2
+  }
+
+  "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
+    // Repro for "node stuck in draining after drain + rescale": draining a node
+    // (force=false) sets draining=true and deletes its store row but leaves the
+    // tracker entry behind. Rescaling up reuses the freed node id, so the fresh
+    // node must NOT inherit the old draining=true flag. scale's spawn path has to
+    // reset the tracker entry the way createPool/reconcile do.
+    val backend = new CapturingBackend
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val created = sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId  = created.head.nodeId
+
+    sup.stopPool(key, force = false).unsafeRunSync() // drain the node
+
+    val respawned = sup.scale(key, 1, RoleDistribution(0, 0, 1), force = false).unsafeRunSync()
+    respawned.map(_.nodeId) shouldBe List(nodeId)    // the drained id is reused
+    tracker.snapshot(nodeId).draining shouldBe false // fresh node must start clean
+  }
+
+  it should "remove the tracker entry of a drained node once it is stopped" in {
+    // The drained node's row leaves the store; its tracker entry must go too,
+    // otherwise snapshotAll accumulates phantom draining=true entries for every
+    // node id ever drained.
+    val backend = new CapturingBackend
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val nodeId = sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync().head.nodeId
+
+    sup.stopPool(key, force = false).unsafeRunSync()
+    tracker.snapshotAll.keySet should not contain nodeId
+  }
+
+  "PoolSupervisor.deletePool" should "remove the tracker entries of its drained nodes" in {
+    val backend = new CapturingBackend
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val ids = sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync().map(_.nodeId)
+
+    sup.deletePool(key, force = false).unsafeRunSync()
+    ids.foreach(id => tracker.snapshotAll.keySet should not contain id)
+  }
 
   // ---------- Tenant CRUD ----------
 

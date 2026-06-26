@@ -274,6 +274,13 @@ final case class ManagerConfig(
     )
     healthCheckIntervalSec: Int,
     @field @ConfigField(
+      envVar = "QOD_RECONCILE_INTERVAL_SEC",
+      description =
+        "Seconds between supervisor reconcile passes that respawn dead nodes. 0 disables the " +
+          "periodic loop (reconcile still runs once at boot)."
+    )
+    reconcileIntervalSec: Int,
+    @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
         "UI session idle TTL in seconds. A session unused for this long is dropped on the next " +
