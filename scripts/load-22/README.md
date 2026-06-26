@@ -6,7 +6,23 @@ parameter values) against the quack-on-demand FlightSQL edge and writes a
 X axis and median query duration (ms) on the Y axis.
 
 Each query is run once as a warmup, then `--runs` timed executions; the
-report shows the per-query median / min / max latency.
+report shows the per-query median / p95 / min / max latency.
+
+## Concurrency
+
+`--workers N` runs every query with `N` workers **simultaneously**. Each
+worker opens its own ADBC connection, and a barrier keeps all workers on the
+same query at the same time before they advance to the next one. So a query
+gets `workers x runs` latency samples, and the report adds a `p95` column and
+a concurrent `QPS` throughput per query.
+
+- `--workers 1` (default): serial, one execution at a time.
+- `--workers 2`: each query is executed by 2 workers at once.
+- `--workers 16`: 16 simultaneous executions per query (load test).
+
+The worker count is encoded in the output filename
+(`tpch-bench-w<N>.{csv,html}`) so runs at different concurrency levels do not
+overwrite each other.
 
 ## Prerequisites
 
@@ -18,8 +34,9 @@ report shows the per-query median / min / max latency.
 ## Run
 
 ```bash
-scripts/load-22/run.sh                          # acme / bi / tpch1, 5 runs
-scripts/load-22/run.sh --runs 10 --warmup 2
+scripts/load-22/run.sh                          # acme / bi / tpch1, 1 worker, 5 runs
+scripts/load-22/run.sh --workers 8              # 8 workers run each query at once
+scripts/load-22/run.sh --workers 16 --runs 10 --warmup 2
 scripts/load-22/run.sh --tenant globex --pool bi --schema tpch1
 scripts/load-22/run.sh --out-dir /tmp/tpch-bench
 ```
@@ -31,10 +48,10 @@ through to `benchmark.py`.
 
 ## Output
 
-- `out/tpch-bench.csv` - columns: `query, median_ms, min_ms, max_ms, rows, status, error`
-- `out/tpch-bench.html` - Chart.js bar chart (query number vs median ms) + a results table
+- `out/tpch-bench-w<N>.csv` - columns: `query, median_ms, p95_ms, min_ms, max_ms, rows, samples, qps, status, error`
+- `out/tpch-bench-w<N>.html` - Chart.js bar chart (query number vs median + p95 ms) + a results table
 
-(`out/` is the default; override with `--out-dir`.)
+(`<N>` is the worker count. `out/` is the default; override with `--out-dir`.)
 
 ## Flags
 
@@ -44,11 +61,12 @@ through to `benchmark.py`.
 | `--user` / `--password` | `admin` / `admin` | Basic auth |
 | `--tenant` / `--pool` | `acme` / `bi` | gRPC routing headers |
 | `--schema` | `tpch1` | schema the queries are prefixed with |
-| `--runs` | `5` | timed executions per query (median reported) |
-| `--warmup` | `1` | throwaway executions before timing |
+| `--workers` / `-w` | `1` | workers that run each query simultaneously (one connection each) |
+| `--runs` | `5` | timed executions per query **per worker** (median over workers x runs) |
+| `--warmup` | `1` | throwaway executions per worker before timing |
 | `--superuser` / `--no-superuser` | superuser on | system-realm login (bootstrap admin) |
 | `--insecure` | on | skip TLS verification (dev self-signed cert) |
 | `--out-dir` | `scripts/load-22/out` | where the CSV + HTML land |
 
-Every flag also has an `LT_*` env-var equivalent (`LT_TENANT`, `LT_RUNS`,
-`LT_SCHEMA`, ...), matching `scripts/tpch-load-test/tpch-load-test.py`.
+Every flag also has an `LT_*` env-var equivalent (`LT_TENANT`, `LT_WORKERS`,
+`LT_RUNS`, `LT_SCHEMA`, ...), matching `scripts/tpch-load-test/tpch-load-test.py`.
