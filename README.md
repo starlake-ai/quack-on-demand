@@ -48,13 +48,16 @@ Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-star
 
 |                              | DuckDB<br/>embedded | OSS Flight SQL servers<br/>(GizmoSQL, sqlflite) | MotherDuck | Trino /<br/>Dremio | **Quack on<br/>Demand** |
 |------------------------------|:---:|:---:|:---:|:---:|:---:|
+| Embedded / in-process        | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Self-hosted                  | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Open source                  | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Fully managed SaaS (zero ops)| ❌ | ❌ | ✅ | vendor cloud | ❌ |
 | Multi-user serving           | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Table-level RBAC in OSS      | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Table-level RBAC            | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Column security + masking    | ❌ | ❌ | ❌ | add-on | ✅ |
 | Autoscaling node pools       | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Distributed joins (TB-scale) | ❌ | ❌ | ❌ | ✅ | ❌ |
 | BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
 | DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
 | Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
