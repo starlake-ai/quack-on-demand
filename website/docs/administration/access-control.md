@@ -22,7 +22,7 @@ Access control is **off by default** (`acl.enabled=false`). Set `QOD_ACL_ENABLED
 
    ![Groups tab](/img/ui/rbac-groups.png)
 
-4. Go to the **Users** tab. For each user who needs access, open their record and assign them to the `bi-team` group. Optionally add a pool grant directly on the user if you need a finer scope than the group provides.
+4. Go to the **Users** tab. For each user who needs access, open their record, assign them to the `bi-team` group, and add a pool grant for the target pool. The pool grant is required for the user to connect to that pool.
 
    ![Users tab](/img/ui/rbac-users.png)
 
@@ -36,7 +36,7 @@ The snippet below is the minimal REST path: create a role permission for `user:a
 # Grant RO (read-only) on tpch.tpch1.customer to user:alice
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenantId":"default","principal":"user:alice",
+  -d '{"tenantId":"acme","principal":"user:alice",
        "catalogName":"tpch","schemaName":"tpch1","tableName":"customer",
        "permission":"RO"}'
 ```
@@ -73,7 +73,7 @@ Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`.
 # Wildcard ALL for the admin role (NULL catalog/schema/table = any)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenantId":"default","principal":"role:admin","permission":"ALL"}'
+  -d '{"tenantId":"acme","principal":"role:admin","permission":"ALL"}'
 ```
 
 Replace `"permission":"ALL"` with `"permission":"INSERT"` (or any other verb) and add `catalogName`/`schemaName`/`tableName` fields to scope the grant to a specific table.
@@ -104,7 +104,7 @@ Replace `"permission":"ALL"` with `"permission":"INSERT"` (or any other verb) an
 
 ```bash
 # List + delete
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=default'
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=acme'
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/delete/7
 ```
 
@@ -113,7 +113,7 @@ Replace `7` with the grant ID returned by the list call.
 **Verify:** Re-run the list endpoint and confirm the deleted grant no longer appears:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=default'
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=acme'
 ```
 
 **Related:**

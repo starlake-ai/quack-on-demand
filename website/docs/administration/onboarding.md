@@ -109,8 +109,8 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
 The example below creates an in-memory database. Replace `"kind": "memory"` with `"kind": "ducklake"` (the default) and supply `dataPath` for a production tenant-db.
 
 ```bash
-curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/database/create" \
+curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:20900/api/database/create" \
   -d '{
     "tenant": "acme",
     "name": "fed",
@@ -160,7 +160,7 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","size":3,
+  -d '{"tenant":"acme","pool":"bi","size":3,
        "roleDistribution":{"writeonly":1,"readonly":1,"dual":1},
        "metastore":{}}'
 ```
