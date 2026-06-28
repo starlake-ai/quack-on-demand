@@ -22,6 +22,17 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Administration',
+      items: [
+        'administration/index',
+        'administration/onboarding',
+        'administration/access-control',
+        'administration/day-2-operations',
+        'administration/lifecycle-config',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Operating',
       items: [
         {
