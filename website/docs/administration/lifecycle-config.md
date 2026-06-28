@@ -13,7 +13,7 @@ Attach external catalogs, rotate secrets, back up and restore configuration, and
 
 - The tenant and database already exist. See [Tenants and databases](/operating/tenants-databases).
 - The target external system is reachable from the Quack nodes at startup time.
-- An admin session token or API key in `$TOKEN`; manager base URL in `$MGR`.
+- An admin session token or API key in `$TOKEN`. The manager runs at `http://localhost:20900` (the default dev address; adjust the host and port for other environments).
 
 **Steps (UI)**:
 
@@ -31,8 +31,8 @@ Attach external catalogs, rotate secrets, back up and restore configuration, and
 
 ```bash
 # Register the federated source
-curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
+curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
   -d '{
     "alias": "fedpg",
     "description": "Prod warehouse Postgres",
@@ -40,8 +40,8 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
   }'
 
 # Add the secret referenced by {{secret.PG_PWD}}
-curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
+curl -X PUT -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
   -d '{"name": "PG_PWD", "value": "hunter2"}'
 ```
 
@@ -78,8 +78,8 @@ Placeholders in `setupSql`:
 
 ```bash
 # Re-PUT the secret with the new value (same endpoint as the initial add)
-curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
+curl -X PUT -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
   -d '{"name": "PG_PWD", "value": "hunter2"}'
 ```
 
@@ -115,10 +115,10 @@ Note: the Config/Manifest tab and the manifest endpoints are restricted to super
 
 ```bash
 # Export - returns application/yaml; superuser only
-curl -sS -H "X-API-Key: $TOKEN" "$MGR/api/manifest/export" > manifest.yaml
+curl -sS -H "X-API-Key: $TOKEN" "http://localhost:20900/api/manifest/export" > manifest.yaml
 
 # Import after editing
-curl -sS -H "X-API-Key: $TOKEN" -X POST "$MGR/api/manifest/import" \
+curl -sS -H "X-API-Key: $TOKEN" -X POST "http://localhost:20900/api/manifest/import" \
   -H 'Content-Type: text/plain' --data-binary @manifest.yaml
 ```
 
