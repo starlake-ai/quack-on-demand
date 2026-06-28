@@ -49,7 +49,7 @@ PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 
 The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `QOD_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
 
-Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. The run scripts default it to the bundled `classpath:bootstrap-demo.yaml`; when the env var is unset no bootstrap runs. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe.
+Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` to `run-jar.sh`, or the equivalent bench flag to `run-docker-compose.sh`. In that case the script sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`run-jar.sh` uses the filesystem path `src/main/resources/bootstrap-demo.yaml`; `run-docker-compose.sh` uses `classpath:bootstrap-demo.yaml`). A bare `./scripts/run-jar.sh` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe.
 
 ## Auth flow (REST + UI)
 
@@ -84,25 +84,24 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1},
-       "metastore":{}}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":3,
+       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1}}'
 
 # Scale up
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","targetSize":6,
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","targetSize":6,
        "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
 
 # Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","force":true}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
 
 # Delete a pool: stops nodes AND removes the pool from the registry
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","force":true}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
 
 # Delete a tenant (must have no pools first)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \

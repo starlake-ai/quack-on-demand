@@ -72,7 +72,7 @@ Per-node fields surfaced via `/api/pool/list`:
 # Scale up
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","targetSize":6,
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","targetSize":6,
        "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
 ```
 
@@ -103,7 +103,7 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
 # Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","force":true}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
 ```
 
 Pass `"force":false` to drain instead of force-stopping.
