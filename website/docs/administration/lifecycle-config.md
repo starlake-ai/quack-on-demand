@@ -151,7 +151,7 @@ The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}`
 # Delete a pool: stops nodes AND removes the pool from the registry
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","force":true}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
 
 # Delete a tenant (must have no pools first)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \

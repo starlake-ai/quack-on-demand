@@ -160,9 +160,8 @@ curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"bi","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1},
-       "metastore":{}}'
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":3,
+       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1}}'
 ```
 
 **Verify:** The pool row appears in the Pools tab and the node count starts incrementing as nodes come up. You can watch the progress on the Nodes tab.
