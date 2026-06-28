@@ -37,6 +37,13 @@ served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p
      for p in d['pools'] for n in p['nodes']]"
 ```
 
+Per-node fields surfaced via `/api/pool/list`:
+- `inFlight` - currently executing statements
+- `totalServed` - lifetime counter since manager start
+- `avgDurationMs` - EWMA latency
+- `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
+- `healthy` / `draining` - tracker flags
+
 **Verify:** Run a query through the FlightSQL edge and reload the Nodes board. The in-flight counter briefly increments during execution, and total-served increments by one after it completes.
 
 **Related:** [Observability](/operating/observability), [Metrics reference](/reference/metrics).
@@ -55,7 +62,7 @@ served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p
 2. On the **Pools** tab, click the pool name to open its detail page.
 3. Click **Scale**.
 4. Set the new **Target size** (total node count) and adjust the **Role distribution** sliders (WriteOnly, ReadOnly, Dual). The distribution must sum to the target size.
-5. Click **Apply**. The manager computes the diff: surplus nodes are stopped (or drained, depending on the drain flag), and deficit nodes are spawned.
+5. Click **Apply**. The manager computes the diff: surplus nodes are stopped, and deficit nodes are spawned.
 
 ![Pool detail](/img/ui/pool-detail.png)
 
@@ -85,7 +92,7 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
 
 1. Click **Tenants**, select the tenant, and open the **Pools** tab.
 2. Two stop actions appear per pool:
-   - **Drain** - graceful stop. Each node is marked as draining in the router so no new statements are routed to it, then the node process is stopped. Use this during planned maintenance or before a scale-down when you want to avoid mid-query interruptions.
+   - **Drain** - graceful stop. Each node is marked as draining in the router so no new statements are routed to it, then the node process is stopped. Use this during planned maintenance when you want to stop routing new queries to the pool before it shuts down. Drain does not wait for in-flight queries to finish, so statements already executing on a node can still be interrupted.
    - **Force** - immediate stop. Nodes are stopped without a draining period. Any statements in flight on those nodes are failed and returned to the client as errors. Use this when a pool is wedged and drain is not making progress.
 3. After either action the pool row stays in the registry with zero nodes and a zero distribution. It is not deleted. Reconcile will not respawn nodes because the persisted distribution is zero.
 4. To bring the pool back: use **Scale** and set a non-zero target size.
@@ -126,13 +133,6 @@ Pass `"force":false` to drain instead of force-stopping.
 curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/node/statements?limit=20' \
   | python3 -m json.tool
 ```
-
-Per-node fields surfaced via `/api/pool/list`:
-- `inFlight` - currently executing statements
-- `totalServed` - lifetime counter since manager start
-- `avgDurationMs` - EWMA latency
-- `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
-- `healthy` / `draining` - tracker flags
 
 **Verify:** Run a known query through the FlightSQL edge. Refresh the Recent statements panel. The query appears at the top of the list.
 
