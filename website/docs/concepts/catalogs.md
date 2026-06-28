@@ -17,7 +17,7 @@ Each database (tenant-db) is backed by a catalog that the Quack nodes open. The 
 
 A `ducklake` database splits metadata from data:
 
-- **Metadata** lives in the tenant-db's Postgres database as `ducklake_*` tables: the schema, table, and file-manifest records that make up the catalog. This database is separate from the control-plane `qod` database, which only ever holds `qodstate_*` / `slkstate_*` tables and never `ducklake_*` ones.
+- **Metadata** lives in the tenant-db's Postgres database as `ducklake_*` tables: the schema, table, and file-manifest records that make up the catalog. This database is separate from the control-plane `qod` database, which only ever holds `qodstate_*` tables and never `ducklake_*` ones.
 - **Data** is Parquet, written under the database's `dataPath`, which can be a local filesystem path or an `s3://` / `gs://` / `az://` / `abfss://` object-store URI.
 
 Because the catalog metadata lives in shared Postgres and the data lives in shared storage, **every Quack node in a pool attaches the same DuckLake catalog and sees one consistent view**. That is what makes a `ducklake` database safe to serve from many nodes at once, and why `duckdb-file` (a single local file) is effectively single-node.
