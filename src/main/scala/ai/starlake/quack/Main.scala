@@ -762,7 +762,7 @@ object Main extends IOApp with LazyLogging:
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own
       // Postgres database has been provisioned. The control-plane
-      // database holds qodstate_* / slkstate_* only and must never carry
+      // database holds qodstate_* tables only and must never carry
       // ducklake_* tables.
       // Order matters: the bootstrap hook may insert tenants/pools/users
       // into the store. We must run it BEFORE restore() so the supervisor's

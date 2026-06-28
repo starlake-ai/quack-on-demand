@@ -30,8 +30,7 @@ import java.sql.DriverManager
   * the `ducklake_*` tables exist; every per-node `ATTACH` from `spawn-quack-node.sh` is then
   * read-only on the metadata and the pg_type race cannot fire.
   *
-  * The control-plane database (`qod`) is never touched by this code - it holds `qodstate_*` /
-  * `slkstate_*` only.
+  * The control-plane database (`qod`) is never touched by this code - it holds `qodstate_*` only.
   *
   * Idempotent on the *same* dataPath: a re-init that matches the recorded
   * `ducklake_metadata.data_path` is a no-op. Re-init with a different dataPath is rejected by
