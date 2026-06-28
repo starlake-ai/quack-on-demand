@@ -30,18 +30,45 @@ Access control is **off by default** (`acl.enabled=false`). Set `QOD_ACL_ENABLED
 
 **REST equivalent:**
 
-The snippet below is the minimal REST path: create a role permission for `user:alice` directly (skip the role/group layer when a single user needs a quick one-off grant). Adapt `principal` to `group:bi-team` or `role:bi-readers` for the group-based flow.
+The six steps below mirror the UI flow exactly. Surrogate ids (`<roleId>`, `<groupId>`, etc.) are returned by each create call; capture them from the JSON response.
 
 ```bash
-# Grant RO (read-only) on tpch.tpch1.customer to user:alice
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
+# 1. Create a role
+ROLE_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenantId":"acme","principal":"user:alice",
-       "catalogName":"tpch","schemaName":"tpch1","tableName":"customer",
-       "permission":"RO"}'
+  -d '{"tenant":"acme","name":"analyst","description":"Read-only analyst"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+
+# 2. Grant SELECT on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"tpch1\",\"table\":\"customer\",\"verb\":\"SELECT\"}"
+
+# 3. Create a group
+GROUP_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/group/create \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"analysts"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+
+# 4. Attach the role to the group
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/add \
+  -H 'Content-Type: application/json' \
+  -d "{\"groupId\":\"$GROUP_ID\",\"roleId\":\"$ROLE_ID\"}"
+
+# 5. Add a user to the group (or use membership/user-role/add to attach the role directly to a user)
+#    Retrieve <userId> from GET /api/user/list?tenant=acme
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/add \
+  -H 'Content-Type: application/json' \
+  -d "{\"userId\":\"<userId>\",\"groupId\":\"$GROUP_ID\"}"
+
+# 6. Grant the group access to the pool (REQUIRED - without this the group cannot reach the pool)
+#    Retrieve <poolId> from GET /api/pool/list
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d "{\"tenant\":\"acme\",\"poolId\":\"<poolId>\",\"groupId\":\"$GROUP_ID\"}"
 ```
 
-Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`. At validation time the authenticated session expands into `user:<username>` + `group:<g>` per group + `role:<r>`; a grant matches any of them.
+The permission graph is: user -> roles (direct), user -> groups -> roles (via group membership), plus a required pool permission that gates which pools the principal can reach.
 
 **Verify:** See [Verify access](#verify-access) below.
 
@@ -70,13 +97,18 @@ Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`.
 **REST equivalent:**
 
 ```bash
-# Wildcard ALL for the admin role (NULL catalog/schema/table = any)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
+# Grant INSERT on acme_tpch.tpch1.orders to an existing role
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
   -H 'Content-Type: application/json' \
-  -d '{"tenantId":"acme","principal":"role:admin","permission":"ALL"}'
+  -d '{"roleId":"<roleId>","catalog":"acme_tpch","schema":"tpch1","table":"orders","verb":"INSERT"}'
+
+# Grant ALL verbs on every table in the catalog (wildcard schema and table)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d '{"roleId":"<roleId>","catalog":"acme_tpch","schema":"*","table":"*","verb":"ALL"}'
 ```
 
-Replace `"permission":"ALL"` with `"permission":"INSERT"` (or any other verb) and add `catalogName`/`schemaName`/`tableName` fields to scope the grant to a specific table.
+Replace `verb` with `UPDATE`, `DELETE`, `CREATE`, `DROP`, or `ALTER` as needed. Omitting `catalog`/`schema`/`table` (or setting them to `"*"`) wildcards that field.
 
 **Verify:** See [Verify access](#verify-access) below.
 
@@ -103,17 +135,30 @@ Replace `"permission":"ALL"` with `"permission":"INSERT"` (or any other verb) an
 **REST equivalent:**
 
 ```bash
-# List + delete
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=acme'
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/delete/7
+# Remove a table permission from a role (get <permissionId> from role/permission/list)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/revoke \
+  -H 'Content-Type: application/json' -d '{"id":"<permissionId>"}'
+
+# Detach a role from a group
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/remove \
+  -H 'Content-Type: application/json' -d '{"groupId":"<groupId>","roleId":"<roleId>"}'
+
+# Remove a user from a group
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/remove \
+  -H 'Content-Type: application/json' -d '{"userId":"<userId>","groupId":"<groupId>"}'
+
+# Remove pool access from a group (get <id> from pool/permission/list?tenant=acme)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/revoke \
+  -H 'Content-Type: application/json' -d '{"id":"<id>"}'
 ```
 
-Replace `7` with the grant ID returned by the list call.
-
-**Verify:** Re-run the list endpoint and confirm the deleted grant no longer appears:
+**Verify:** Re-run the relevant list endpoint and confirm the entry no longer appears:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=acme'
+# List role permissions
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/role/permission/list?roleId=<roleId>'
+# List pool permissions
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/pool/permission/list?tenant=acme'
 ```
 
 **Related:**

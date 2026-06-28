@@ -49,7 +49,7 @@ PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
 
 The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `QOD_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
 
-On every boot the manager bootstraps a starter tenant + pool: tenant `acme`, pool `sales`, 3 nodes (1 WriteOnly + 1 ReadOnly + 1 Dual). `defaultTenant`/`defaultPool` are pointed at the same pair so unrouted FlightSQL requests land here. Idempotent - already-existing tenant/pool are left alone. Override with `QOD_BOOTSTRAP_{TENANT,POOL,WRITEONLY,READONLY,DUAL}` or disable with `QOD_BOOTSTRAP_ENABLED=false`.
+Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. The run scripts default it to the bundled `classpath:bootstrap-demo.yaml`; when the env var is unset no bootstrap runs. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe.
 
 ## Auth flow (REST + UI)
 
@@ -84,54 +84,124 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","size":3,
+  -d '{"tenant":"acme","pool":"bi","size":3,
        "roleDistribution":{"writeonly":1,"readonly":1,"dual":1},
        "metastore":{}}'
 
 # Scale up
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","targetSize":6,
+  -d '{"tenant":"acme","pool":"bi","targetSize":6,
        "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
 
 # Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","force":true}'
+  -d '{"tenant":"acme","pool":"bi","force":true}'
 
 # Delete a pool: stops nodes AND removes the pool from the registry
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","pool":"sales","force":true}'
+  -d '{"tenant":"acme","pool":"bi","force":true}'
 
 # Delete a tenant (must have no pools first)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \
   -H 'Content-Type: application/json' -d '{"name":"acme"}'
 ```
 
-## ACL grants (Postgres-relational)
+## RBAC grants
 
-Grants live in `slkstate_acl_grant` in the same Postgres database as DuckLake's metadata. The endpoints are always mounted (Postgres is the only control-plane store since 2026-06-12).
+Grants live in the normalized `qodstate_*` tables in Postgres. The endpoints are always mounted (Postgres is the only control-plane store since 2026-06-12).
+
+### Endpoint reference
 
 ```bash
-# Grant RO (read-only) on tpch.tpch1.customer to user:alice
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenantId":"default","principal":"user:alice",
-       "catalogName":"tpch","schemaName":"tpch1","tableName":"customer",
-       "permission":"RO"}'
+# Roles
+GET  /api/role/list?tenant=acme
+POST /api/role/create       body: {"tenant":"acme","name":"analyst","description":"..."}
+POST /api/role/delete       body: {"id":"<roleId>"}
 
-# Wildcard ALL for the admin role (NULL catalog/schema/table = any)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenantId":"default","principal":"role:admin","permission":"ALL"}'
+# Role table permissions  (verb: SELECT | INSERT | UPDATE | DELETE | ALL)
+GET  /api/role/permission/list?roleId=<roleId>
+POST /api/role/permission/grant   body: {"roleId":"<roleId>","catalog":"acme_tpch","schema":"tpch1","table":"customer","verb":"SELECT"}
+POST /api/role/permission/revoke  body: {"id":"<permissionId>"}
 
-# List + delete
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/acl/grant/list?tenant=default'
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/acl/grant/delete/7
+# Users
+POST /api/user/create       body: {"tenant":"acme","username":"alice","password":"...","role":"user"}
+
+# Groups
+POST /api/group/create      body: {"tenant":"acme","name":"analysts"}
+
+# Memberships (each has a matching /remove)
+POST /api/membership/group-role/add   body: {"groupId":"<groupId>","roleId":"<roleId>"}
+POST /api/membership/user-group/add   body: {"userId":"<userId>","groupId":"<groupId>"}
+POST /api/membership/user-role/add    body: {"userId":"<userId>","roleId":"<roleId>"}
+
+# Pool access - governs which pools a principal can reach
+GET  /api/pool/permission/list?tenant=acme
+POST /api/pool/permission/grant   body: {"tenant":"acme","poolId":"<poolId>","groupId":"<groupId>"}
+POST /api/pool/permission/revoke  body: {"id":"<id>"}
 ```
 
-Principal format is `type:name` - `user:alice`, `group:engineers`, `role:admin`. At validation time the authenticated session expands into `user:<username>` + `group:<g>` per group + `role:<r>`; a grant matches any of them.
+### Grant a team read access (6-step flow)
+
+```bash
+# 1. Create a role
+ROLE_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/create \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"analyst","description":"Read-only analyst"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+
+# 2. Grant SELECT on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"tpch1\",\"table\":\"customer\",\"verb\":\"SELECT\"}"
+
+# 3. Create a group
+GROUP_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/group/create \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"analysts"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+
+# 4. Attach the role to the group
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/add \
+  -H 'Content-Type: application/json' \
+  -d "{\"groupId\":\"$GROUP_ID\",\"roleId\":\"$ROLE_ID\"}"
+
+# 5. Add a user to the group (or use membership/user-role/add to attach the role directly to a user)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/add \
+  -H 'Content-Type: application/json' \
+  -d "{\"userId\":\"<userId>\",\"groupId\":\"$GROUP_ID\"}"
+
+# 6. Grant the group access to the pool (REQUIRED - without this the group cannot reach the pool)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d "{\"tenant\":\"acme\",\"poolId\":\"<poolId>\",\"groupId\":\"$GROUP_ID\"}"
+```
+
+Retrieve `<userId>` and `<poolId>` from `/api/user/list?tenant=acme` and `/api/pool/list` respectively.
+
+### DML and DDL grants
+
+Use the same `role/permission/grant` endpoint with `verb` set to `INSERT` / `UPDATE` / `DELETE` for DML writes, or `CREATE` / `DROP` / `ALTER` for DDL. Use `ALL` to cover every verb on a table at once. The validator collapses granular verbs to `Read`, `Write`, or `Ddl` per table at enforcement time.
+
+### Revoking access
+
+```bash
+# Remove a table permission from a role
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/revoke \
+  -H 'Content-Type: application/json' -d '{"id":"<permissionId>"}'
+
+# Detach a role from a group
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/remove \
+  -H 'Content-Type: application/json' -d "{\"groupId\":\"<groupId>\",\"roleId\":\"<roleId>\"}"
+
+# Remove pool access
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/revoke \
+  -H 'Content-Type: application/json' -d '{"id":"<poolPermissionId>"}'
+```
+
+The EffectiveSet cache is invalidated on every RBAC mutation, so changes take effect on the next handshake - no TTL window to wait for.
 
 ACL is *off* by default (`acl.enabled=false`). Flip with `QOD_ACL_ENABLED=true` to actually enforce.
 
