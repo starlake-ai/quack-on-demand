@@ -39,6 +39,7 @@ tenants:
             description: Prod warehouse Postgres
             setupSql: |
               INSTALL postgres; LOAD postgres;
+              CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}');
               ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);
             secrets:
               - { name: PG_PWD, value: hunter2 }
@@ -102,6 +103,10 @@ tenants:
       - name: acme_fed
         federatedSources:
           - alias: fedpg
+            setupSql: |
+              INSTALL postgres; LOAD postgres;
+              CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}');
+              ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);
             secrets:
               - { name: PG_PWD, value: <new-value> }
 ```

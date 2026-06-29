@@ -121,7 +121,7 @@ roles:
   - tenant: acme
     name: loader
     permissions:
-      - { catalog: acme_tpch, schema: tpch1, table: staging, verb: INSERT }
+      - { catalog: acme_tpch, schema: tpch1, table: orders, verb: INSERT }
 ```
 
 **REST equivalent:**
