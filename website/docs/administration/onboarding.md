@@ -62,6 +62,16 @@ curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
 
 The form does not have a dedicated screenshot; it is a single-field dialog on the Tenants list page.
 
+**Manifest (YAML)**
+
+This is a fragment of the full config manifest; see [Manage by manifest](/administration/manage-by-manifest) to assemble and apply it.
+
+```yaml
+tenants:
+  - name: acme
+    displayName: Acme Corporation
+```
+
 **REST equivalent:**
 
 ```bash
@@ -103,6 +113,18 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create
 5. Click **Create**.
 
 ![Databases tab](/img/ui/databases.png)
+
+**Manifest (YAML)**
+
+```yaml
+tenants:
+  - name: acme
+    tenantDbs:
+      - name: fed
+        kind: memory
+        defaultDatabase: fedpg
+        defaultSchema: public
+```
 
 **REST equivalent:**
 
@@ -153,6 +175,17 @@ curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
 5. Click **Create**.
 
 ![Pools tab](/img/ui/tenant-pools.png)
+
+**Manifest (YAML)**
+
+```yaml
+tenants:
+  - name: acme
+    pools:
+      - name: bi
+        tenantDb: acme_tpch
+        roleDistribution: { writeonly: 1, readonly: 1, dual: 1 }
+```
 
 **REST equivalent:**
 

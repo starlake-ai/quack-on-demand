@@ -49,3 +49,9 @@ Use the table below to jump straight to the playbook for what you need to do.
 | Rotate a federated secret | [Rotate a federated secret](/administration/lifecycle-config#rotate-a-federated-secret) |
 | Back up and restore the control plane | [Back up and restore](/administration/lifecycle-config#back-up-and-restore) |
 | Decommission a tenant or pool | [Decommission](/administration/lifecycle-config#decommission) |
+
+**Configuration as code**
+
+| Task | Playbook |
+|------|----------|
+| Manage the whole config as YAML | [Manage by manifest](/administration/manage-by-manifest) |
