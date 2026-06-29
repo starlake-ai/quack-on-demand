@@ -29,6 +29,7 @@ const sidebars: SidebarsConfig = {
         'administration/access-control',
         'administration/day-2-operations',
         'administration/lifecycle-config',
+        'administration/manage-by-manifest',
       ],
     },
     {
