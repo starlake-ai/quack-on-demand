@@ -29,7 +29,7 @@ users:
   - { tenant: acme, username: alice, groups: [analysts], poolGrants: [{ pool: bi }] }
 ```
 
-`src/main/resources/bootstrap-demo.yaml` is a complete worked example.
+The fields `exportedAt` (an ISO-8601 instant) and `exportedFrom` (`{managerVersion, hostname}`) are required by the decoder and written automatically on export; when authoring a manifest from scratch, use any valid ISO-8601 instant and any `managerVersion`/`hostname` string, or start from `src/main/resources/bootstrap-demo.yaml`, which is a complete importable example.
 
 ## Export the current state
 
@@ -60,11 +60,10 @@ User passwords are omitted and secret values are redacted on export, so a downlo
 **REST equivalent**
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -H 'Content-Type: text/plain' \
-  --data-binary @manifest.yaml http://localhost:20900/api/manifest/import
+curl -sS -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: text/plain' --data-binary @manifest.yaml http://localhost:20900/api/manifest/import
 ```
 
-Import is upsert plus prune-within-parent: resources present in the YAML are created or updated; siblings omitted under a parent that IS in the YAML are deleted. For example, listing a tenant with two of its three pools deletes the third; a tenant absent from the YAML is left untouched. Re-supply any secret values, and set a `password` on a user to (re)set it.
+Import uses two different strategies depending on nesting level. At the top level the import is purely additive (upsert only): tenants, roles, groups, and users present in the YAML are created or updated; top-level resources absent from the manifest are left untouched - importing only `tenant: acme` does not delete `tenant: widgets`, and an omitted user is never deleted. Within a parent that IS in the manifest, nested collections are replaced (delete-then-upsert): the child collection in the database is made to match the manifest exactly, so a child absent from the YAML is deleted. For example, listing a tenant with only two of its three pools drops the third; a role's `permissions` and a user's `poolGrants` are fully replaced on import. Re-supply any secret values, and set a `password` on a user to (re)set it.
 
 **Verify:** re-export and diff, or confirm the change on the relevant Administration page (Nodes board, Users tab, and so on).
 
