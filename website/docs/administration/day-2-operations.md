@@ -66,6 +66,19 @@ Per-node fields surfaced via `/api/pool/list`:
 
 ![Pool detail](/img/ui/pool-detail.png)
 
+**Manifest (YAML)**
+
+Re-importing the manifest upserts the pool to this distribution, which is the scale operation.
+
+```yaml
+tenants:
+  - name: acme
+    pools:
+      - name: bi
+        tenantDb: acme_tpch
+        roleDistribution: { writeonly: 1, readonly: 2, dual: 3 }
+```
+
 **REST equivalent:**
 
 ```bash

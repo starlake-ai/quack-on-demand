@@ -27,6 +27,24 @@ Attach external catalogs, rotate secrets, back up and restore configuration, and
 5. Click **Add secret** and enter the secret name (e.g. `PG_PWD`) and its inline value (or an `externalRef` for an externally-managed secret).
 6. Save. The source takes effect the next time a node starts in this pool.
 
+**Manifest (YAML)**
+
+```yaml
+tenants:
+  - name: acme
+    tenantDbs:
+      - name: acme_fed
+        federatedSources:
+          - alias: fedpg
+            description: Prod warehouse Postgres
+            setupSql: |
+              INSTALL postgres; LOAD postgres;
+              CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}');
+              ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);
+            secrets:
+              - { name: PG_PWD, value: hunter2 }
+```
+
 **REST equivalent**:
 
 ```bash
@@ -73,6 +91,25 @@ Placeholders in `setupSql`:
 3. Click the secret row and enter the new value. The `PUT` is an upsert; only the value field changes, not the `setupSql`.
 4. Go to the **Pools** tab and select the pool that uses this database.
 5. Click **Drain** to stop accepting new queries, then wait for in-flight statements to complete. Click **Scale** to bring nodes back up (or use **Force** if immediate replacement is acceptable). New nodes start with the updated secret value injected into their `setupSql`.
+
+**Manifest (YAML)**
+
+Re-import the full source with every secret you want to keep: omitted secrets under a listed source are pruned.
+
+```yaml
+tenants:
+  - name: acme
+    tenantDbs:
+      - name: acme_fed
+        federatedSources:
+          - alias: fedpg
+            setupSql: |
+              INSTALL postgres; LOAD postgres;
+              CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}');
+              ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);
+            secrets:
+              - { name: PG_PWD, value: <new-value> }
+```
 
 **REST equivalent**:
 
@@ -144,6 +181,8 @@ The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}`
 1. **Delete a pool**: Go to **Tenants**, select the tenant, open the **Pools** tab, select the pool, and click **Delete**. This stops all nodes and removes the pool from the registry. To stop nodes temporarily without removing the pool, click **Drain** instead.
 2. **Delete a tenant**: Once all pools are removed, go to **Tenants**, select the tenant, and click **Delete**.
 3. **Remove a user, role, or group**: Go to **Users**, select the tenant scope at the top, find the object on the appropriate tab, and click **Delete**.
+
+**Manifest (YAML):** Declaratively, drop a pool from a tenant that is still in the manifest and re-import; nested collections are replaced, so the omitted pool is pruned. Top-level tenants are upsert-only, so deleting a whole tenant uses the REST delete above, not omission. See [Manage by manifest](/administration/manage-by-manifest).
 
 **REST equivalent**:
 

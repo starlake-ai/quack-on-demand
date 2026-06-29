@@ -28,6 +28,26 @@ Access control is **off by default** (`acl.enabled=false`). Set `QOD_ACL_ENABLED
 
 5. Confirm the pool grant: in the **Users** tab, verify the user's row shows the pool grant for the target pool.
 
+**Manifest (YAML)**
+
+```yaml
+roles:
+  - tenant: acme
+    name: analyst
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: SELECT }
+groups:
+  - tenant: acme
+    name: analysts
+    roles: [analyst]
+users:
+  - tenant: acme
+    username: alice
+    groups: [analysts]
+    poolGrants:
+      - { pool: bi }
+```
+
 **REST equivalent:**
 
 The six steps below mirror the UI flow exactly. Surrogate ids (`<roleId>`, `<groupId>`, etc.) are returned by each create call; capture them from the JSON response.
@@ -94,6 +114,16 @@ The permission graph is: user -> roles (direct), user -> groups -> roles (via gr
    - `ALL` to cover every verb at once
 3. Save. The verbs are collapsed to `Read`, `Write`, or `Ddl` at enforcement time; see [Access control model](/operating/rbac-model) for the exact mapping.
 
+**Manifest (YAML)**
+
+```yaml
+roles:
+  - tenant: acme
+    name: loader
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: orders, verb: INSERT }
+```
+
 **REST equivalent:**
 
 ```bash
@@ -131,6 +161,8 @@ Replace `verb` with `UPDATE`, `DELETE`, `CREATE`, `DROP`, or `ALTER` as needed. 
 4. To delete a role permission entirely: open the **Roles** tab, edit the role, and delete the permission row.
 
 **Effect on active sessions:** `invalidateEffectiveCache()` is called on every RBAC mutation in `PoolSupervisor`. This drops the entire in-process EffectiveSet cache immediately, so the revoked grant takes effect on the **next handshake** - there is no TTL window to wait for.
+
+**Manifest (YAML):** Declaratively, remove the entry from its parent's nested list (a `permissions` entry on the role, or a role/group/grant on the user) and re-import; nested collections are replaced to match the file, so the omitted entry is deleted. Top-level roles, groups, and users are upsert-only, so this prunes grants, not whole roles. See [Manage by manifest](/administration/manage-by-manifest).
 
 **REST equivalent:**
 
