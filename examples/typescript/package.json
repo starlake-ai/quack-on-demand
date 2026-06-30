@@ -1,0 +1,22 @@
+{
+  "name": "quack-on-demand-typescript-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FlightSQL query client for Quack-on-Demand, in TypeScript over raw gRPC + Apache Arrow.",
+  "scripts": {
+    "query": "tsx src/query.ts",
+    "tpch": "tsx src/tpch.ts"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.9",
+    "@grpc/proto-loader": "^0.7.13",
+    "apache-arrow": "^17.0.0",
+    "protobufjs": "^7.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}
