@@ -228,7 +228,7 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   -f "$SCRIPT_DIR/values-local-stack.yaml" \
   --set auth.management.publicBaseUrl="$PUBLIC_BASE" \
   --set auth.keycloak.issuer="${PUBLIC_BASE}/auth/realms/qod" \
-  "${HELM_EXTRA_ARGS[@]}" \
+  "${HELM_EXTRA_ARGS[@]+"${HELM_EXTRA_ARGS[@]}"}" \
   --wait --timeout=300s
 
 # ---- 4b. Traefik ingress -------------------------------------------------

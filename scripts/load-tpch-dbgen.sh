@@ -73,6 +73,36 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMP_DIR="${TEMP_DIR:-$REPO_DIR/.tmp/duckdb-tpch-load}"
 mkdir -p "$TEMP_DIR"
 
+# DuckDB's default memory budget is ~80% of *host* RAM and ignores the cgroup
+# limit, so inside a memory-capped container (e.g. a 4Gi pod, where this loader
+# also shares the cgroup with the manager JVM) dbgen() at SF>=10 overruns the
+# limit and the kernel OOM-kills the process (`command terminated with exit code
+# 137`). Bound it instead, so DuckDB spills to TEMP_DIR rather than overcommit.
+# Default = 40% of the cgroup limit (leaving the rest for the JVM); override with
+# MEMORY_LIMIT (e.g. MEMORY_LIMIT=3GiB), or MEMORY_LIMIT= to keep DuckDB's default.
+cgroup_memory_bytes() {
+  local v=""
+  if [[ -r /sys/fs/cgroup/memory.max ]]; then                       # cgroup v2
+    v="$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then   # cgroup v1
+    v="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"
+  fi
+  [[ "$v" =~ ^[0-9]+$ ]] || return 0                                # "max"/empty -> unset
+  # Skip the v1 "unlimited" sentinel (~2^63); treat only real caps as limits.
+  (( v > 0 && v < 9000000000000000000 )) && echo "$v"
+}
+default_memory_limit() {
+  local bytes mib
+  bytes="$(cgroup_memory_bytes)"
+  [[ -n "$bytes" ]] || return 0
+  mib=$(( bytes / 1024 / 1024 * 40 / 100 ))
+  (( mib < 1024 )) && mib=1024
+  echo "${mib}MiB"
+}
+MEMORY_LIMIT="${MEMORY_LIMIT-$(default_memory_limit)}"
+MEMORY_LIMIT_SQL=""
+[[ -n "$MEMORY_LIMIT" ]] && MEMORY_LIMIT_SQL="SET memory_limit='$MEMORY_LIMIT';"
+
 # Default DATA_PATH matches `scripts/run-docker.sh` (CWD-anchored, not
 # repo-anchored) so a native loader and a same-CWD `docker run` agree on
 # the same absolute string. Override DATA_PATH to point at any location
@@ -174,6 +204,7 @@ echo "postgres:    $PG_USER@$PG_HOST:$PG_PORT/$DB_NAME"
 echo "catalog:     $DB_NAME.$SCHEMA_NAME"
 echo "data path:   $DATA_PATH"
 echo "scale:       SF=$SF (approx $((SF * 6))M lineitem rows)"
+echo "memory:      ${MEMORY_LIMIT:-DuckDB default} (spill dir: $TEMP_DIR)"
 echo ""
 
 # ---- Idempotency probe ----
@@ -249,6 +280,9 @@ cat > "$INIT_SQL" <<SQL
 -- needs to spill (dbgen at SF>=10 will) writes into a directory we know
 -- exists, rather than DuckDB's cwd-relative default ./.tmp/.
 SET temp_directory='$TEMP_DIR';
+-- Bound DuckDB's memory so dbgen() spills to temp_directory instead of
+-- overrunning the container cgroup limit and getting OOM-killed (exit 137).
+$MEMORY_LIMIT_SQL
 
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
