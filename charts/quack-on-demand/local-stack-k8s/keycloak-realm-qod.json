@@ -15,11 +15,11 @@
       "publicClient": false,
       "secret": "qod-flightsql-secret",
       "directAccessGrantsEnabled": true,
-      "standardFlowEnabled": false,
+      "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": true,
-      "redirectUris": [],
+      "redirectUris": ["http://localhost:20900/api/auth/sql-token/callback"],
       "webOrigins": [],
       "attributes": {
         "access.token.lifespan": "3600"
