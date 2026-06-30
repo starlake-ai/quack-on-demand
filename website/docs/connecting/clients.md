@@ -72,7 +72,13 @@ When the edge is wired to an OIDC provider (Keycloak / Azure AD / Google), there
 
 1. **Password (ROPC)** - put the user's IdP username/password in the `user` / `password` params. The edge exchanges them with the IdP (resource-owner-password grant). IdP side: a confidential client with *Direct access grants* enabled. No browser needed.
 
-2. **Bearer token from the login page** - open `https://<gateway>:20900/api/auth/sql-token/start` in a browser, log in (SSO / MFA), and copy the access token the page shows into DBeaver's **`token`** driver property (Driver Properties tab) - or append `&token=<access_token>` to the URL. The edge validates the bearer against the provider's JWKS. Zero install; just a browser. Because the page logs in against the edge's own OIDC provider, the returned token already carries the audience the edge expects.
+2. **Bearer token from the login page** - the manager serves a browser token page on its own port; no extra service and no Python on the client. Walk through:
+
+   1. Open `https://<gateway>:20900/api/auth/sql-token/start` in a browser. The manager 302-redirects you to the provider's browser-facing login (the URL is resolved via OIDC discovery, so it is reachable from your host even when the manager reaches the IdP at a different in-cluster address).
+   2. Log in (SSO / MFA). The provider redirects back to `/api/auth/sql-token/callback`, which renders the **"Quack on Demand token"** page.
+   3. Click **Copy** and paste the token into DBeaver's **`token`** driver property (Driver Properties tab) - or append `&token=<jwt>` to the URL.
+
+   The page mints an **id token** whose `aud` is the edge's own client id, which is exactly what the edge requires (it rejects access tokens whose audience is the provider's resource). The edge then validates the bearer against the provider's JWKS. Because the page logs in against the edge's own OIDC provider, the returned token already carries the audience and issuer the edge expects.
 
 3. **Headless (no browser on the host)** - fetch a token directly from the IdP's device-code endpoint and use it as `token` (no Python required):
 
@@ -87,7 +93,13 @@ When the edge is wired to an OIDC provider (Keycloak / Azure AD / Google), there
      | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
    ```
 
-`tenant` / `pool` are still required as URL params in every case. The interactive browser flow that ODBC drivers do in-process is not available from the Arrow Flight SQL JDBC driver, which is why the login page exists.
+`tenant` / `pool` are still required as URL params in every case (the bearer carries identity, not routing). A token-based URL drops `user` / `password` and rides the JWT instead:
+
+```
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&tenant=acme&pool=bi&token=<jwt>
+```
+
+The interactive browser flow that ODBC drivers do in-process is not available from the Arrow Flight SQL JDBC driver, which is why the login page exists.
 
 Any JDBC-based tool uses the same driver and URL. For **Spark**, point the JDBC data source at this URL with the same driver class; each Spark task opens its own Flight SQL connection.
 
