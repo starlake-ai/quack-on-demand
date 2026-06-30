@@ -444,6 +444,16 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       sqlToken = svc
     )
 
+  private val sqlTokenDiscovery = new OidcDiscovery(httpGet =
+    _ =>
+      Right(
+        """|{"issuer":"https://idp.example.com/auth/realms/qod",
+           |"authorization_endpoint":"https://idp.example.com/auth/realms/qod/protocol/openid-connect/auth",
+           |"token_endpoint":"https://idp.example.com/auth/realms/qod/protocol/openid-connect/token",
+           |"jwks_uri":"https://idp.example.com/auth/realms/qod/protocol/openid-connect/certs"}""".stripMargin
+      )
+  )
+
   private def sqlTokenSvc(
       exchange: (String, String) => Either[String, String]
   ): SqlTokenOidcService =
@@ -451,6 +461,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       sqlTokenConfig,
       () => "https://gw.example",
       "state-secret-aaaaaaaaaaaaaaaaaaaaaaaa",
+      sqlTokenDiscovery,
       httpExchange = exchange
     )
 

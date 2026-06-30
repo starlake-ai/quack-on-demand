@@ -30,6 +30,7 @@ class SqlTokenOidcService(
     config: AuthenticationConfig,
     publicBaseUrl: () => String,
     stateSecret: String,
+    discovery: OidcDiscovery,
     httpExchange: (String, String) => Either[String, String] = SqlTokenOidcService.defaultExchange,
     nowMillis: () => Long = () => System.currentTimeMillis()
 ) extends LazyLogging:
@@ -41,29 +42,39 @@ class SqlTokenOidcService(
 
   def redirectUri: String = s"${publicBaseUrl()}/api/auth/sql-token/callback"
 
-  /** (authorizeEndpoint, tokenEndpoint, clientId, clientSecret) for the first enabled provider. */
-  private def endpoints: Either[String, (String, String, String, String)] =
+  /** (issuerUrl, clientId, clientSecret) for the first enabled provider. */
+  private def issuerAndClient: Either[String, (String, String, String)] =
     if config.keycloak.enabled then
-      val base =
-        s"${config.keycloak.baseUrl}/realms/${config.keycloak.realm}/protocol/openid-connect"
-      Right(
-        (s"$base/auth", s"$base/token", config.keycloak.clientId, config.keycloak.clientSecret)
-      )
+      val issuer = s"${config.keycloak.baseUrl.stripSuffix("/")}/realms/${config.keycloak.realm}"
+      Right((issuer, config.keycloak.clientId, config.keycloak.clientSecret))
     else if config.google.enabled then
+      Right(("https://accounts.google.com", config.google.clientId, config.google.clientSecret))
+    else if config.azure.enabled then
       Right(
         (
-          "https://accounts.google.com/o/oauth2/v2/auth",
-          "https://oauth2.googleapis.com/token",
-          config.google.clientId,
-          config.google.clientSecret
+          s"https://login.microsoftonline.com/${config.azure.tenantId}/v2.0",
+          config.azure.clientId,
+          config.azure.clientSecret
         )
       )
-    else if config.azure.enabled then
-      val b = s"https://login.microsoftonline.com/${config.azure.tenantId}/oauth2/v2.0"
-      Right(
-        (s"$b/authorize", s"$b/token", config.azure.clientId, config.azure.clientSecret)
-      )
     else Left("no interactive OIDC provider is enabled")
+
+  /** (authorizeEndpoint, tokenEndpoint, clientId, clientSecret), resolved via OIDC discovery.
+    *
+    * Discovery is fetched server-side from the in-cluster issuer (e.g. keycloak:8080), but the
+    * provider returns its BROWSER-facing `authorization_endpoint` (Keycloak's KC_HOSTNAME_URL) so
+    * the 302 the user follows is reachable from their host, while the `token_endpoint` stays
+    * back-channel (in-cluster) for the server-side code exchange. Hand-building the URLs from
+    * `baseUrl` would 302 the browser to the unreachable in-cluster host.
+    */
+  private def endpoints: Either[String, (String, String, String, String)] =
+    issuerAndClient.flatMap { case (issuer, clientId, clientSecret) =>
+      discovery
+        .resolve(issuer)
+        .left
+        .map(e => s"OIDC discovery failed for $issuer: $e")
+        .map(doc => (doc.authorizationEndpoint, doc.tokenEndpoint, clientId, clientSecret))
+    }
 
   private def sign(value: String): String =
     val mac = Mac.getInstance("HmacSHA256")

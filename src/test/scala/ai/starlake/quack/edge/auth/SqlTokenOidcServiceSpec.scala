@@ -18,11 +18,24 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
 
   private def cfg = AuthenticationConfig.disabled.copy(keycloak = kc, oauthScopes = "openid email")
 
+  // Stub discovery: returns the issuer's endpoints without a network call. The authorize endpoint
+  // is the provider's browser-facing URL (which the service must use for the 302).
+  private val stubDiscovery = new OidcDiscovery(httpGet =
+    _ =>
+      Right(
+        """|{"issuer":"https://idp.example/auth/realms/qod",
+           |"authorization_endpoint":"https://idp.example/auth/realms/qod/protocol/openid-connect/auth",
+           |"token_endpoint":"https://idp.example/auth/realms/qod/protocol/openid-connect/token",
+           |"jwks_uri":"https://idp.example/auth/realms/qod/protocol/openid-connect/certs"}""".stripMargin
+      )
+  )
+
   private def svc(exchange: (String, String) => Either[String, String]) =
     new SqlTokenOidcService(
       cfg,
       () => "https://gw.example",
       "test-secret-32-chars-long-xxxxxx",
+      stubDiscovery,
       httpExchange = exchange,
       nowMillis = () => 1000L
     )
