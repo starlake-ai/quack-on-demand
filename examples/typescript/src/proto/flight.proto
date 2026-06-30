@@ -1,0 +1,70 @@
+// Minimal subset of the Apache Arrow Flight protocol (Flight.proto).
+//
+// Only the messages and RPCs this example uses are declared: GetFlightInfo
+// (to plan the query) and DoGet (to stream the Arrow result). The full
+// protocol lives at https://github.com/apache/arrow/blob/main/format/Flight.proto
+syntax = "proto3";
+
+package arrow.flight.protocol;
+
+service FlightService {
+  rpc Handshake(stream HandshakeRequest) returns (stream HandshakeResponse) {}
+  rpc GetFlightInfo(FlightDescriptor) returns (FlightInfo) {}
+  rpc GetSchema(FlightDescriptor) returns (SchemaResult) {}
+  rpc DoGet(Ticket) returns (stream FlightData) {}
+}
+
+message HandshakeRequest {
+  uint64 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message HandshakeResponse {
+  uint64 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message SchemaResult {
+  bytes schema = 1;
+}
+
+message FlightDescriptor {
+  enum DescriptorType {
+    UNKNOWN = 0;
+    PATH = 1;
+    CMD = 2;
+  }
+  DescriptorType type = 1;
+  bytes cmd = 2;
+  repeated string path = 3;
+}
+
+message Ticket {
+  bytes ticket = 1;
+}
+
+message Location {
+  string uri = 1;
+}
+
+message FlightEndpoint {
+  Ticket ticket = 1;
+  repeated Location location = 2;
+}
+
+message FlightInfo {
+  bytes schema = 1;
+  FlightDescriptor flight_descriptor = 2;
+  repeated FlightEndpoint endpoint = 3;
+  int64 total_records = 4;
+  int64 total_bytes = 5;
+  bool ordered = 6;
+  bytes app_metadata = 7;
+}
+
+message FlightData {
+  FlightDescriptor flight_descriptor = 1;
+  bytes data_header = 2;
+  bytes app_metadata = 3;
+  bytes data_body = 1000;
+}
