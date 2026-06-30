@@ -438,6 +438,22 @@ object Main extends IOApp with LazyLogging:
           )
         )
       else None
+    // Data-plane SQL-token flow (/api/auth/sql-token): an auth-code login against the EDGE OIDC
+    // provider (not the management one) that hands a JDBC client a bearer to paste into DBeaver's
+    // `token` property. None when no edge OIDC provider is enabled; handlers gate on `.enabled`.
+    val sqlTokenPublicBaseUrl = () =>
+      val base = mgrCfg.auth.management.publicBaseUrl
+      if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
+    val sqlTokenSvc =
+      if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
+        Some(
+          new ai.starlake.quack.edge.auth.SqlTokenOidcService(
+            authCfg,
+            sqlTokenPublicBaseUrl,
+            mgrCfg.auth.management.sessionJwtSecret
+          )
+        )
+      else None
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
@@ -448,7 +464,8 @@ object Main extends IOApp with LazyLogging:
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
-      oidc = oidcSso
+      oidc = oidcSso,
+      sqlToken = sqlTokenSvc
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

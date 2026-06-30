@@ -11,7 +11,8 @@ import ai.starlake.quack.edge.auth.{
   OidcEndpoints,
   OidcScope,
   OidcSsoService,
-  OidcStateCodec
+  OidcStateCodec,
+  SqlTokenOidcService
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -428,3 +429,67 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     cookie.maxAge shouldBe Some(0L)
     tokens.revokedJtiCount shouldBe (before + 1)
   }
+
+  // ---- SQL-token flow (/api/auth/sql-token) ----
+
+  private val sqlTokenConfig =
+    emptyConfig.copy(keycloak =
+      emptyConfig.keycloak.copy(
+        enabled = true,
+        baseUrl = "https://idp.example.com/auth",
+        realm = "qod",
+        clientId = "qod-flightsql",
+        clientSecret = "s3cret"
+      )
+    )
+
+  private def sqlTokenHandlers(svc: Option[SqlTokenOidcService]): AuthHandlers =
+    new AuthHandlers(
+      authService = dummyAuthService,
+      tokens = new SessionTokenStore,
+      identitySource = ManagementIdentitySource.Oidc,
+      grantsForIdentity = (_, _) => Nil,
+      authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
+      sqlToken = svc
+    )
+
+  private def sqlTokenSvc(
+      exchange: (String, String) => Either[String, String]
+  ): SqlTokenOidcService =
+    new SqlTokenOidcService(
+      sqlTokenConfig,
+      () => "https://gw.example",
+      "state-secret-aaaaaaaaaaaaaaaaaaaaaaaa",
+      httpExchange = exchange
+    )
+
+  "sqlTokenStart" should "302 to the IdP and set the state cookie when a provider is enabled" in:
+    val (status, location, cookie) =
+      sqlTokenHandlers(Some(sqlTokenSvc((_, _) => Right("{}")))).sqlTokenStart(None).unsafeRunSync()
+    status shouldBe StatusCode.Found
+    location should startWith(
+      "https://idp.example.com/auth/realms/qod/protocol/openid-connect/auth?"
+    )
+    cookie.value should not be empty
+
+  it should "302 to an error redirect when no provider is configured" in:
+    val (status, location, _) = sqlTokenHandlers(None).sqlTokenStart(None).unsafeRunSync()
+    status shouldBe StatusCode.Found
+    location should include("error=oauth_not_configured")
+
+  "sqlTokenCallback" should "render the token on a successful exchange" in:
+    val svc        = sqlTokenSvc((_, _) => Right("""{"access_token":"the-token"}"""))
+    val (_, state) = svc.startUrl().toOption.get
+    val (html, _)  =
+      sqlTokenHandlers(Some(svc))
+        .sqlTokenCallback(Some("code"), Some(state), None, Some(state), None)
+        .unsafeRunSync()
+    html should include("the-token")
+    html should include("token=the-token")
+
+  it should "render an error page when the IdP returns an error param" in:
+    val (html, _) = sqlTokenHandlers(None)
+      .sqlTokenCallback(None, None, Some("access_denied"), None, None)
+      .unsafeRunSync()
+    html should include("Login failed")
+    html should include("access_denied")
