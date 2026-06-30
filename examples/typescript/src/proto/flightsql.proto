@@ -1,0 +1,21 @@
+// Minimal subset of the Flight SQL protocol (FlightSql.proto).
+//
+// A SQL query is sent to the edge as a FlightDescriptor whose `cmd` is a
+// google.protobuf.Any wrapping a CommandStatementQuery. `Any` is declared
+// here as a plain message because its wire format (a string type_url and a
+// bytes value) is identical to google.protobuf.Any, so no well-known-type
+// import is needed. Full protocol:
+// https://github.com/apache/arrow/blob/main/format/FlightSql.proto
+syntax = "proto3";
+
+package arrow.flight.protocol.sql;
+
+message CommandStatementQuery {
+  string query = 1;
+  bytes transaction_id = 2;
+}
+
+message Any {
+  string type_url = 1;
+  bytes value = 2;
+}
