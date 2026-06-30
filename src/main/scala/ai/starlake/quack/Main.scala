@@ -20,8 +20,7 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig,
   GoogleAuthConfig,
   JwtAuthConfig,
-  KeycloakAuthConfig,
-  OAuthConfig
+  KeycloakAuthConfig
 }
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.model.Names
@@ -93,7 +92,6 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AzureAuthConfig]           = ProductHint[AzureAuthConfig](camelMapping)
   given ProductHint[AwsAuthConfig]             = ProductHint[AwsAuthConfig](camelMapping)
   given ProductHint[JwtAuthConfig]             = ProductHint[JwtAuthConfig](camelMapping)
-  given ProductHint[OAuthConfig]               = ProductHint[OAuthConfig](camelMapping)
   given ProductHint[AuthenticationConfig]      = ProductHint[AuthenticationConfig](camelMapping)
 
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
@@ -111,7 +109,6 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AzureAuthConfig]        = deriveReader[AzureAuthConfig]
   given ConfigReader[AwsAuthConfig]          = deriveReader[AwsAuthConfig]
   given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
-  given ConfigReader[OAuthConfig]            = deriveReader[OAuthConfig]
   given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 

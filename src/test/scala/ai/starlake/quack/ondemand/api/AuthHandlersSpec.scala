@@ -8,8 +8,7 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig,
   GoogleAuthConfig,
   JwtAuthConfig,
-  KeycloakAuthConfig,
-  OAuthConfig
+  KeycloakAuthConfig
 }
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
@@ -73,14 +72,6 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       publicKeyPath = "",
       issuer = "",
       audience = ""
-    ),
-    oauth = OAuthConfig(
-      enabled = false,
-      port = 0,
-      baseUrl = "",
-      scopes = "",
-      sessionTimeoutSeconds = 0,
-      disableTls = true
     )
   )
 
