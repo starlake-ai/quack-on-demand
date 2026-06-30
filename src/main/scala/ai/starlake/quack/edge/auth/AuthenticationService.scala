@@ -28,19 +28,6 @@ class AuthenticationService(
       tenantOidcRegistry.fold("")(_ => " (per-tenant OIDC registry enabled)")
   )
 
-  // Start OAuth HTTP server if enabled and an OIDC provider is configured
-  val oauthServer: Option[OAuthHttpServer] =
-    if config.oauth.enabled &&
-      (config.keycloak.enabled || config.google.enabled || config.azure.enabled)
-    then
-      val server = new OAuthHttpServer(config.oauth, config, jwtSecretKey)
-      server.start()
-      Some(server)
-    else None
-
-  /** The OAuth base URL for __discover__ responses, if OAuth is enabled. */
-  val oauthBaseUrl: Option[String] = oauthServer.map(_.baseUrl)
-
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
   /** Authenticate `(scope, username, password)` against the basic chain.
@@ -132,10 +119,6 @@ class AuthenticationService(
             if hadMatch then swapped else perTenant :: swapped
 
   override def close(): Unit =
-    oauthServer.foreach { s =>
-      try s.close()
-      catch case e: Exception => logger.warn(s"Error closing OAuth server: ${e.getMessage}")
-    }
     basicProviders.foreach { p =>
       try p.close()
       catch case e: Exception => logger.warn(s"Error closing ${p.name}: ${e.getMessage}")

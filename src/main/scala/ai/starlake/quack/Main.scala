@@ -20,8 +20,7 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig,
   GoogleAuthConfig,
   JwtAuthConfig,
-  KeycloakAuthConfig,
-  OAuthConfig
+  KeycloakAuthConfig
 }
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.model.Names
@@ -93,7 +92,6 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AzureAuthConfig]           = ProductHint[AzureAuthConfig](camelMapping)
   given ProductHint[AwsAuthConfig]             = ProductHint[AwsAuthConfig](camelMapping)
   given ProductHint[JwtAuthConfig]             = ProductHint[JwtAuthConfig](camelMapping)
-  given ProductHint[OAuthConfig]               = ProductHint[OAuthConfig](camelMapping)
   given ProductHint[AuthenticationConfig]      = ProductHint[AuthenticationConfig](camelMapping)
 
   given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
@@ -111,7 +109,6 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AzureAuthConfig]        = deriveReader[AzureAuthConfig]
   given ConfigReader[AwsAuthConfig]          = deriveReader[AwsAuthConfig]
   given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
-  given ConfigReader[OAuthConfig]            = deriveReader[OAuthConfig]
   given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 
@@ -438,6 +435,44 @@ object Main extends IOApp with LazyLogging:
           )
         )
       else None
+    // Data-plane SQL-token flow (/api/auth/sql-token): an auth-code login against the EDGE OIDC
+    // provider (not the management one) that hands a JDBC client a bearer to paste into DBeaver's
+    // `token` property. None when no edge OIDC provider is enabled; handlers gate on `.enabled`.
+    val sqlTokenPublicBaseUrl = () =>
+      val base = mgrCfg.auth.management.publicBaseUrl
+      if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
+    val sqlTokenSvc =
+      if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
+        // Discovery is fetched server-side from the in-cluster issuer, but yields the provider's
+        // browser-facing authorization_endpoint (so the 302 the user follows is reachable) and the
+        // back-channel token_endpoint (for the server-side code exchange).
+        val sqlTokenHttp = java.net.http.HttpClient
+          .newBuilder()
+          .connectTimeout(java.time.Duration.ofSeconds(10))
+          .build()
+        val sqlTokenDiscovery = new ai.starlake.quack.edge.auth.OidcDiscovery(httpGet =
+          url =>
+            try
+              val req = java.net.http.HttpRequest
+                .newBuilder()
+                .uri(java.net.URI.create(url))
+                .GET()
+                .timeout(java.time.Duration.ofSeconds(15))
+                .build()
+              val resp = sqlTokenHttp.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+              if resp.statusCode() == 200 then Right(resp.body())
+              else Left(s"discovery HTTP ${resp.statusCode()}")
+            catch case e: Exception => Left(e.getMessage)
+        )
+        Some(
+          new ai.starlake.quack.edge.auth.SqlTokenOidcService(
+            authCfg,
+            sqlTokenPublicBaseUrl,
+            mgrCfg.auth.management.sessionJwtSecret,
+            sqlTokenDiscovery
+          )
+        )
+      else None
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
@@ -448,7 +483,8 @@ object Main extends IOApp with LazyLogging:
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
-      oidc = oidcSso
+      oidc = oidcSso,
+      sqlToken = sqlTokenSvc
     )
     val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)

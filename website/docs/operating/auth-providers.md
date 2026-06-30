@@ -84,7 +84,7 @@ The JWKS URL is derived automatically as `{baseUrl}/realms/{realm}/protocol/open
 
 ## Google
 
-Validates OIDC Bearer tokens issued by Google (`https://accounts.google.com`). Google does not support the ROPC grant; users must supply a Bearer token obtained via browser-based OAuth or a service account flow. Optionally, a Google Workspace service account with domain-wide delegation can enrich group membership from the Directory API.
+Validates OIDC Bearer tokens issued by Google (`https://accounts.google.com`). Google does not support the ROPC grant; users must supply a Bearer token obtained via the [browser token page](#browser-token-page-authorization-code-flow) or a service account flow. Optionally, a Google Workspace service account with domain-wide delegation can enrich group membership from the Directory API.
 
 ```bash
 QOD_AUTH_GOOGLE_ENABLED=true
@@ -146,20 +146,19 @@ The JWKS URL is derived as `https://cognito-idp.{region}.amazonaws.com/{userPool
 
 ---
 
-## Browser OAuth (authorization-code flow)
+## Browser token page (authorization-code flow)
 
-A lightweight HTTP server that handles the OAuth 2.0 authorization-code grant for interactive clients such as the Quack-on-Demand UI or local CLI tools. Off by default. It reuses the first enabled OIDC provider (Keycloak, Google, or Azure AD, in that order) to resolve the authorization and token endpoints.
+A JDBC client (DBeaver, Spark) can't run an interactive OAuth flow in the Arrow Flight SQL driver, so the manager serves a browser login page that returns a bearer to paste into the driver's `token` property. It runs on the **manager port** (no separate port or server) and reuses the first enabled OIDC provider (Keycloak, Google, or Azure AD, in that order) to resolve the authorization and token endpoints.
+
+- A user opens `https://<gateway>:20900/api/auth/sql-token/start`, logs in at the IdP, and the callback page renders the access token (and the ready-to-paste `token=` form).
+- The IdP must allow `<publicBaseUrl>/api/auth/sql-token/callback` as a redirect URI (`publicBaseUrl` = `auth.management.publicBaseUrl`).
+- The only knob is the requested scopes:
 
 ```bash
-QOD_AUTH_OAUTH_ENABLED=true
-QOD_AUTH_OAUTH_PORT=8888                          # default 8888
-QOD_AUTH_OAUTH_BASE_URL=https://quack.example.com # public redirect base; defaults to http://localhost:{port}
 QOD_AUTH_OAUTH_SCOPES="openid profile email"      # default "openid profile email"
-QOD_AUTH_OAUTH_SESSION_TIMEOUT_SEC=3600           # pending session TTL; default 3600 s
-QOD_AUTH_OAUTH_DISABLE_TLS=false                  # default false
 ```
 
-At least one OIDC provider (Keycloak, Google, or Azure AD) must be enabled alongside this provider, or the server will fail to start. AWS Cognito is not supported as an OAuth flow backend.
+At least one OIDC provider (Keycloak, Google, or Azure AD) must be enabled for the page to function; AWS Cognito is not supported as an interactive backend. Because the page reuses the data-plane confidential client, the token already carries the audience the edge expects (no separate client or audience mapper needed). See [Connecting clients](/connecting/clients#oauth-with-dbeaver) for the DBeaver recipe.
 
 ---
 

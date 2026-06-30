@@ -5,7 +5,8 @@ import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
   OidcScope,
-  OidcSsoService
+  OidcSsoService,
+  SqlTokenOidcService
 }
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
@@ -68,7 +69,11 @@ final class AuthHandlers(
     /** Optional OIDC SSO service. `None` when SSO is not configured; present when
       * `auth.management.oidc` is wired and `oidcStart`/`oidcCallback`/`oidcLogout` are active.
       */
-    oidc: Option[OidcSsoService] = None
+    oidc: Option[OidcSsoService] = None,
+    /** Optional data-plane SQL-token service backing the `/api/auth/sql-token` routes. `None` when
+      * no edge OIDC provider is configured; the handlers gate on `.enabled`.
+      */
+    sqlToken: Option[SqlTokenOidcService] = None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -224,6 +229,63 @@ final class AuthHandlers(
     // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
     val location = oidc.flatMap(_.endSessionUrl(OidcScope.System, None)).getOrElse("/ui/")
     (StatusCode.Found, location, clearCookie(forwardedProto))
+  }
+
+  // ---- Browser SQL-token flow (/api/auth/sql-token) ----
+
+  private val sqlTokenStatePath = "/api/auth/sql-token"
+
+  private def sqlTokenStateCookie(
+      value: String,
+      forwardedProto: Option[String],
+      maxAge: Long
+  ): CookieValueWithMeta =
+    CookieValueWithMeta.unsafeApply(
+      value = value,
+      maxAge = Some(maxAge),
+      path = Some(sqlTokenStatePath),
+      domain = None,
+      secure = deriveSecure(forwardedProto),
+      httpOnly = true,
+      sameSite = sameSiteLax,
+      expires = None,
+      otherDirectives = Map.empty
+    )
+
+  def sqlTokenStart(
+      forwardedProto: Option[String]
+  ): IO[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
+    sqlToken.filter(_.enabled).map(_.startUrl()) match
+      case Some(Right((url, state))) =>
+        (StatusCode.Found, url, sqlTokenStateCookie(state, forwardedProto, 600L))
+      case _ =>
+        (
+          StatusCode.Found,
+          "/api/auth/sql-token/callback?error=oauth_not_configured",
+          sqlTokenStateCookie("", forwardedProto, 0L)
+        )
+  }
+
+  def sqlTokenCallback(
+      code: Option[String],
+      state: Option[String],
+      error: Option[String],
+      stateCookie: Option[String],
+      forwardedProto: Option[String]
+  ): IO[(String, CookieValueWithMeta)] = IO.blocking {
+    val clear = sqlTokenStateCookie("", forwardedProto, 0L)
+    val html  =
+      if error.exists(_.nonEmpty) then SqlTokenPage.error(error.get)
+      else
+        val result = for
+          svc <- sqlToken.filter(_.enabled).toRight("OAuth is not configured")
+          c   <- code.filter(_.nonEmpty).toRight("missing authorization code")
+          s   <- state.filter(_.nonEmpty).toRight("missing state")
+          ck  <- stateCookie.filter(_.nonEmpty).toRight("missing state cookie")
+          tok <- svc.completeAuth(c, s, ck)
+        yield tok
+        result.fold(SqlTokenPage.error, SqlTokenPage.success)
+    (html, clear)
   }
 
   def login(
@@ -426,3 +488,31 @@ final class AuthHandlers(
       case Right(ManagementAuthMode.Oidc) =>
         Right(AuthModeResponse("oidc", ""))
   }
+
+/** Minimal HTML rendered by the browser SQL-token flow (`/api/auth/sql-token/callback`). The
+  * success page shows the access token (copyable) and the ready-to-paste DBeaver `token=` form.
+  */
+object SqlTokenPage:
+  private def esc(s: String): String =
+    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+  def success(token: String): String =
+    val safe = esc(token)
+    s"""<!doctype html><html><head><meta charset="utf-8"><title>Quack on Demand token</title>
+       |<style>body{font-family:system-ui,sans-serif;margin:3rem;max-width:760px}
+       |textarea{width:100%;height:7rem;font-family:monospace}
+       |button{padding:.5rem 1rem;margin-top:.5rem;cursor:pointer}</style></head><body>
+       |<h2>Your access token</h2>
+       |<p>Paste this into DBeaver's <code>token</code> driver property (Driver Properties tab),
+       |then connect. Keep it secret; it expires.</p>
+       |<textarea id="t" readonly>$safe</textarea>
+       |<button onclick="navigator.clipboard.writeText(document.getElementById('t').value)">Copy token</button>
+       |<h3>Or as a JDBC URL parameter</h3>
+       |<textarea readonly>token=$safe</textarea>
+       |</body></html>""".stripMargin
+
+  def error(message: String): String =
+    val safe = esc(message)
+    s"""<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head>
+       |<body style="font-family:system-ui,sans-serif;margin:3rem"><h2>Login failed</h2>
+       |<p>$safe</p></body></html>""".stripMargin
