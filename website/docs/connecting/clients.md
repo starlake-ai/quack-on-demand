@@ -36,6 +36,8 @@ Because the edge ships with an auto-generated self-signed certificate, the recip
 
 ## DBeaver and JDBC
 
+For the click-by-click DBeaver walkthrough (registering the driver, the connection dialog, the OAuth token property), see the dedicated [DBeaver](/connecting/dbeaver) page. This section is the generic JDBC reference any Flight SQL JDBC tool shares.
+
 Install the Apache Arrow Flight SQL JDBC driver (`org.apache.arrow:flight-sql-jdbc-driver`, on Maven Central) and set the driver class to `org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver`. The entire connection is expressed in the URL:
 
 ```
