@@ -86,6 +86,8 @@ jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVer
 
 ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart)** and **[Connecting clients](https://starlake-ai.github.io/quack-on-demand/connecting/clients)**.
 
+Runnable client examples live in [`examples/`](examples/).
+
 **Other paths:** `./scripts/run-jar.sh` for a bare-JVM run (downloads the released uber-jar, `BUILD=1` builds from this checkout). The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
 
 ---
