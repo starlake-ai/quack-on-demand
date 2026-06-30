@@ -1,0 +1,46 @@
+{
+  "name": "n8n-nodes-quack-on-demand",
+  "version": "0.1.0",
+  "description": "n8n community node to run SQL against a Quack on Demand FlightSQL edge",
+  "keywords": [
+    "n8n-community-node-package",
+    "quack-on-demand",
+    "flightsql",
+    "duckdb",
+    "arrow"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/starlake-ai/quack-on-demand",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-icons.mjs",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/QuackOnDemandApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/QuackOnDemand/QuackOnDemand.node.js"
+    ]
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.9",
+    "@grpc/proto-loader": "^0.7.13",
+    "apache-arrow": "^17.0.0",
+    "protobufjs": "^7.3.2"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "n8n-workflow": "^1.60.0",
+    "typescript": "^5.5.3"
+  }
+}
