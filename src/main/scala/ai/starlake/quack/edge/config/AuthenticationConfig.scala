@@ -218,5 +218,64 @@ case class AuthenticationConfig(
     azure: AzureAuthConfig,
     aws: AwsAuthConfig,
     jwt: JwtAuthConfig,
-    oauth: OAuthConfig
+    oauth: OAuthConfig,
+    @field @ConfigField(
+      envVar = "QOD_AUTH_OAUTH_SCOPES",
+      description = "OAuth scopes requested at authorization time for the browser SQL-token flow."
+    )
+    oauthScopes: String = "openid profile email"
 ) derives ConfigReader
+
+object AuthenticationConfig:
+  val disabled: AuthenticationConfig = AuthenticationConfig(
+    roleClaim = "",
+    database = DatabaseAuthConfig(
+      enabled = false,
+      jdbcUrl = "",
+      username = "",
+      password = "",
+      systemQuery = "",
+      tenantQuery = ""
+    ),
+    keycloak = KeycloakAuthConfig(
+      enabled = false,
+      baseUrl = "",
+      realm = "",
+      clientId = "",
+      clientSecret = ""
+    ),
+    google = GoogleAuthConfig(
+      enabled = false,
+      clientId = "",
+      clientSecret = "",
+      groupsLookup = false,
+      serviceAccountKeyPath = "",
+      groupsCacheTtlSeconds = 0L
+    ),
+    azure = AzureAuthConfig(
+      enabled = false,
+      tenantId = "",
+      clientId = "",
+      clientSecret = ""
+    ),
+    aws = AwsAuthConfig(
+      enabled = false,
+      region = "",
+      userPoolId = "",
+      clientId = ""
+    ),
+    jwt = JwtAuthConfig(
+      secretKey = "",
+      publicKeyPath = "",
+      issuer = "",
+      audience = ""
+    ),
+    oauth = OAuthConfig(
+      enabled = false,
+      port = 0,
+      baseUrl = "",
+      scopes = "",
+      sessionTimeoutSeconds = 0,
+      disableTls = true
+    )
+  )
