@@ -84,14 +84,6 @@ class OidcAuthChainSpec extends AnyFlatSpec with Matchers:
         publicKeyPath = "",
         issuer        = "",
         audience      = ""
-      ),
-      oauth     = OAuthConfig(
-        enabled               = false,
-        port                  = 0,
-        baseUrl               = "",
-        scopes                = "",
-        sessionTimeoutSeconds = 0,
-        disableTls            = true
       )
     )
 

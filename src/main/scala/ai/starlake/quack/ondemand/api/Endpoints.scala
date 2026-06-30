@@ -379,6 +379,39 @@ object Endpoints:
       .out(header[String]("Location"))
       .out(setCookie(SessionTokenStore.CookieName))
 
+  // Browser SQL-token flow on the manager port: log in via the data-plane OIDC provider and render
+  // the access token for pasting into a JDBC `token` property. start = 302 to the IdP (+ state
+  // cookie); callback = an HTML page showing the token (+ clears the state cookie). Both are
+  // guard-exempt (see ManagerServer.apiKeyGuard). The state cookie is `qod_sqltoken_state`.
+  val sqlTokenStart: PublicEndpoint[
+    Option[String],
+    Unit,
+    (sttp.model.StatusCode, String, sttp.model.headers.CookieValueWithMeta),
+    Any
+  ] =
+    endpoint.get
+      .in("api" / "auth" / "sql-token" / "start")
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(statusCode)
+      .out(header[String]("Location"))
+      .out(setCookie("qod_sqltoken_state"))
+
+  val sqlTokenCallback: PublicEndpoint[
+    (Option[String], Option[String], Option[String], Option[String], Option[String]),
+    Unit,
+    (String, sttp.model.headers.CookieValueWithMeta),
+    Any
+  ] =
+    endpoint.get
+      .in("api" / "auth" / "sql-token" / "callback")
+      .in(query[Option[String]]("code"))
+      .in(query[Option[String]]("state"))
+      .in(query[Option[String]]("error"))
+      .in(cookie[Option[String]]("qod_sqltoken_state"))
+      .in(header[Option[String]]("X-Forwarded-Proto"))
+      .out(htmlBodyUtf8)
+      .out(setCookie("qod_sqltoken_state"))
+
   // Recent statement history (newest first), bounded by `limit` (default 50).
   // Tenant-scoped: the handler clamps the response to rows whose tenant is in
   // the calling session's `manageableTenants` (superuser / static-key / open

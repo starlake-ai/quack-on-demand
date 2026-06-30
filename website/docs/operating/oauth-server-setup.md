@@ -70,7 +70,7 @@ JWKS is always derived from `baseUrl`, never from the issuer override.
 | `QOD_AUTH_GOOGLE_SVC_ACCT_KEY_PATH` | `serviceAccountKeyPath` | service-account key for the groups lookup (domain-wide delegation) |
 | `QOD_AUTH_GOOGLE_GROUPS_CACHE_TTL_SEC` | `groupsCacheTtlSeconds` | groups cache TTL |
 
-Issuer and JWKS are fixed Google endpoints (table above). Google does **not** support ROPC, so SQL clients must present a Bearer obtained through a browser-based OAuth or a service-account flow. Provider side: create an OAuth client id in Google Cloud and register the interactive client's redirect URI.
+Issuer and JWKS are fixed Google endpoints (table above). Google does **not** support ROPC, so SQL clients must present a Bearer obtained through the manager's browser token page (`/api/auth/sql-token/start`) or a service-account flow. Provider side: create an OAuth client id in Google Cloud and register the interactive client's redirect URI.
 
 ## Azure AD
 
