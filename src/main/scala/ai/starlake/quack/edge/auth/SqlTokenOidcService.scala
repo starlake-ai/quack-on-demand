@@ -81,7 +81,11 @@ class SqlTokenOidcService(
     state.split('.') match
       case Array(nonce, ts, sig) =>
         val fresh = ts.toLongOption.exists(t => nowMillis() - t <= 600000L) // 10 min
-        sign(s"$nonce.$ts") == sig && fresh
+        val sigOk = java.security.MessageDigest.isEqual(
+          sign(s"$nonce.$ts").getBytes(StandardCharsets.UTF_8),
+          sig.getBytes(StandardCharsets.UTF_8)
+        )
+        sigOk && fresh
       case _ => false
 
   def startUrl(): Either[String, (String, String)] =
@@ -108,9 +112,14 @@ class SqlTokenOidcService(
           s"&redirect_uri=${enc(redirectUri)}" +
           s"&client_id=${enc(clientId)}&client_secret=${enc(clientSecret)}"
         httpExchange(tokenEndpoint, form).flatMap { body =>
-          extractJson(body, "access_token")
-            .orElse(extractJson(body, "id_token"))
-            .toRight("no access_token or id_token in token response")
+          // Prefer id_token: the edge presents the pasted token as a Bearer, and
+          // OidcBearerAuthenticator requires aud == clientId, which the id_token
+          // carries by OIDC spec. The access_token's aud is the provider's resource
+          // (Keycloak "account", Azure Graph) or opaque (Google), so it would be
+          // rejected. The access_token is only a fallback for non-standard providers.
+          extractJson(body, "id_token")
+            .orElse(extractJson(body, "access_token"))
+            .toRight("no id_token or access_token in token response")
         }
       }
 

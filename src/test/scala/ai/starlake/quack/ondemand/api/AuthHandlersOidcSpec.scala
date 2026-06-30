@@ -469,7 +469,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     location should include("error=oauth_not_configured")
 
   "sqlTokenCallback" should "render the token on a successful exchange" in:
-    val svc        = sqlTokenSvc((_, _) => Right("""{"access_token":"the-token"}"""))
+    val svc        = sqlTokenSvc((_, _) => Right("""{"id_token":"the-token"}"""))
     val (_, state) = svc.startUrl().toOption.get
     val (html, _)  =
       sqlTokenHandlers(Some(svc))

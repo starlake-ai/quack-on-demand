@@ -39,10 +39,15 @@ class SqlTokenOidcServiceSpec extends AnyFlatSpec with Matchers:
     val s = svc((_, _) => Right("""{"access_token":"abc"}"""))
     s.completeAuth("code", "tampered", "cookie-state") shouldBe a[Left[?, ?]]
 
-  it should "return the access_token after a successful exchange" in:
-    val s = svc((_, _) => Right("""{"access_token":"the-token","id_token":"id"}"""))
+  it should "prefer the id_token over the access_token (edge validates aud == clientId)" in:
+    val s = svc((_, _) => Right("""{"access_token":"opaque","id_token":"the-jwt"}"""))
     val Right((_, state: String)) = s.startUrl(): @unchecked
-    s.completeAuth("code", state, state) shouldBe Right("the-token")
+    s.completeAuth("code", state, state) shouldBe Right("the-jwt")
+
+  it should "fall back to the access_token when no id_token is present" in:
+    val s                         = svc((_, _) => Right("""{"access_token":"only-this"}"""))
+    val Right((_, state: String)) = s.startUrl(): @unchecked
+    s.completeAuth("code", state, state) shouldBe Right("only-this")
 
   it should "surface an exchange failure" in:
     val s                         = svc((_, _) => Left("HTTP 401"))
