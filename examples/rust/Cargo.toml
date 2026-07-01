@@ -1,0 +1,29 @@
+[package]
+name = "quack-on-demand-rust-example"
+version = "1.0.0"
+edition = "2021"
+description = "FlightSQL query client for Quack-on-Demand, in Rust over arrow-flight + tonic."
+publish = false
+
+[lib]
+name = "qod"
+path = "src/lib.rs"
+
+[[bin]]
+name = "query"
+path = "src/bin/query.rs"
+
+[[bin]]
+name = "tpch"
+path = "src/bin/tpch.rs"
+
+[dependencies]
+arrow = "53"
+arrow-flight = { version = "53", features = ["flight-sql-experimental"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+futures = "0.3"
+base64 = "0.22"
