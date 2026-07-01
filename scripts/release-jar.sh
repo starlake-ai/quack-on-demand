@@ -90,25 +90,11 @@ else
   sbt_signed "publishSigned" "sonatypeBundleRelease"
 fi
 
-# ---- 4. GitHub release (idempotent) --------------------------------------
-if gh release view "v${release_version}" >/dev/null 2>&1; then
-  echo "GitHub release v${release_version} already exists; skipping."
-else
-  jar="distrib/quack-on-demand-assembly-${release_version}.jar"
-  if [[ ! -f "$jar" ]]; then
-    echo "assembly jar missing; building $jar..."
-    sbt assembly
-  fi
-  echo "creating GitHub release v${release_version}"
-  gh release create "v${release_version}" \
-    --title "v${release_version}" \
-    --generate-notes \
-    "$jar"
-fi
-
-# ---- 5. Finalize: bump to next dev snapshots + push (idempotent) ---------
-# Only bump when version.sbt still holds the (non-SNAPSHOT) release version;
-# once bumped, a re-run detects -SNAPSHOT and skips straight to the push.
+# ---- 4. Finalize: bump to next dev snapshots + push commits + tag --------
+# Push must happen BEFORE the GitHub release: `gh release create` requires the
+# tag to already exist on the remote. Bumps are idempotent (skip once the
+# version is -SNAPSHOT); the pushes are unconditional and no-op when already
+# up to date, so a resumed run still pushes an unpushed tag.
 if [[ "$(manager_version)" != *-SNAPSHOT ]]; then
   echo "bumping version.sbt -> $next_version"
   sed -i.bak -E "s|\"[^\"]+\"|\"${next_version}\"|" version.sbt
@@ -132,6 +118,22 @@ fi
 echo "pushing commits + tag to origin..."
 git push origin HEAD
 git push origin "v${release_version}"
+
+# ---- 5. GitHub release (idempotent) --------------------------------------
+if gh release view "v${release_version}" >/dev/null 2>&1; then
+  echo "GitHub release v${release_version} already exists; skipping."
+else
+  jar="distrib/quack-on-demand-assembly-${release_version}.jar"
+  if [[ ! -f "$jar" ]]; then
+    echo "assembly jar missing; building $jar..."
+    sbt assembly
+  fi
+  echo "creating GitHub release v${release_version}"
+  gh release create "v${release_version}" \
+    --title "v${release_version}" \
+    --generate-notes \
+    "$jar"
+fi
 
 echo
 echo "manager release complete."
