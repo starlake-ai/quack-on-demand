@@ -63,6 +63,23 @@ cd ~/.n8n/custom && npm link n8n-nodes-quack-on-demand
 # then restart n8n
 ```
 
+## Publishing to npm
+
+This package is set up to publish as a community node (installable on
+self-hosted n8n). It is **not eligible for n8n verification / n8n Cloud**: verified
+nodes may not declare runtime dependencies, and this node bundles `@grpc/grpc-js`,
+`@grpc/proto-loader`, `apache-arrow`, and `protobufjs`.
+
+```bash
+npm install
+npm run lint     # n8n node conventions (eslint-plugin-n8n-nodes-base)
+npm run build    # emits dist/ and copies the icon
+npm publish      # publishConfig.access is already "public"
+```
+
+`prepublishOnly` re-runs build and lint. After publishing, install it from
+**Settings → Community Nodes** using the package name `n8n-nodes-quack-on-demand`.
+
 ## Notes and limitations
 
 - **Self-hosted only in practice.** A Code node cannot `require` these npm
