@@ -10,11 +10,23 @@ and decodes the Arrow result stream with `apache-arrow`. The gRPC stack is
 bundles cleanly. The Flight protocol is inlined, so there is no `.proto` asset
 to ship.
 
-## Node
+## Operations
 
-**Quack on Demand → Execute Query.** Enter a SQL statement; the node runs it
-once per input item and emits one output item per result row. Int64 and Decimal
-columns are returned as strings so they serialize cleanly into n8n items.
+Each operation maps to a Flight SQL command the edge implements natively (no raw
+SQL workarounds). Int64 and Decimal columns are returned as strings so they
+serialize cleanly into n8n items.
+
+| Operation | Flight SQL command | Result columns |
+| --------- | ------------------ | -------------- |
+| **Execute Query** | `CommandStatementQuery` | your query's columns |
+| **List Catalogs** | `CommandGetCatalogs` | `catalog_name` |
+| **List Schemas** | `CommandGetDbSchemas` | `catalog_name`, `db_schema_name` |
+| **List Tables** | `CommandGetTables` | `catalog_name`, `db_schema_name`, `table_name`, `table_type` |
+
+- **Execute Query** runs once per input item and emits one output item per row.
+- **List Schemas** / **List Tables** accept optional LIKE filters (e.g. `tpch%`).
+- **List Tables** offers a **Schema** dropdown populated from the edge's schemas
+  (via `CommandGetDbSchemas`), so you can browse without typing SQL.
 
 ## Credentials
 
