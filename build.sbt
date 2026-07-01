@@ -76,7 +76,7 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
-val libquackwireVersion = "1.5.4-40de7badae41-2"
+val libquackwireVersion = "1.5.4-40de7badae41-3-SNAPSHOT"
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(
