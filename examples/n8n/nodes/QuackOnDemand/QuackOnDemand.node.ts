@@ -76,7 +76,7 @@ export class QuackOnDemand implements INodeType {
 				typeOptions: { loadOptionsMethod: 'getSchemas' },
 				default: '',
 				description:
-					'Schema to filter by. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Leave empty for all schemas.',
+					'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 				displayOptions: { show: { operation: ['listTables'] } },
 			},
 			{

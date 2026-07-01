@@ -1,7 +1,7 @@
 {
   "name": "n8n-nodes-quack-on-demand",
   "version": "0.1.0",
-  "description": "n8n community node to run SQL against a Quack on Demand FlightSQL edge",
+  "description": "n8n community node to run SQL and browse the catalog on a Quack on Demand FlightSQL edge",
   "keywords": [
     "n8n-community-node-package",
     "quack-on-demand",
@@ -10,16 +10,36 @@
     "arrow"
   ],
   "license": "Apache-2.0",
+  "author": {
+    "name": "Starlake",
+    "url": "https://starlake.ai"
+  },
   "homepage": "https://github.com/starlake-ai/quack-on-demand",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/starlake-ai/quack-on-demand.git",
+    "directory": "examples/n8n"
+  },
+  "bugs": {
+    "url": "https://github.com/starlake-ai/quack-on-demand/issues"
+  },
+  "engines": {
+    "node": ">=18.10"
+  },
   "main": "index.js",
   "scripts": {
     "build": "tsc && node scripts/copy-icons.mjs",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "lint": "eslint nodes credentials package.json",
+    "lintfix": "eslint nodes credentials package.json --fix",
+    "prepublishOnly": "npm run build && npm run lint"
   },
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "n8n": {
     "n8nNodesApiVersion": 1,
     "credentials": [
@@ -40,6 +60,9 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
+    "@typescript-eslint/parser": "^7.16.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-n8n-nodes-base": "^1.16.3",
     "n8n-workflow": "^1.60.0",
     "typescript": "^5.5.3"
   }
