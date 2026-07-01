@@ -14,9 +14,6 @@ import * as protobuf from 'protobufjs';
 import * as tls from 'node:tls';
 import { tableFromIPC, Table } from 'apache-arrow';
 
-const ANY_TYPE_URL =
-	'type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery';
-
 // Minimal slice of Apache Arrow Flight (Flight.proto): only the messages and
 // RPCs this client uses.
 const FLIGHT_PROTO = `
@@ -72,6 +69,24 @@ message CommandStatementQuery {
   bytes transaction_id = 2;
 }
 
+// Catalog metadata commands. The edge implements all of these (it resolves them
+// against DuckDB's information_schema server-side); the client just wraps them
+// in an Any and rides the same GetFlightInfo/DoGet path as a statement query.
+message CommandGetCatalogs {}
+
+message CommandGetDbSchemas {
+  optional string catalog = 1;
+  optional string db_schema_filter_pattern = 2;
+}
+
+message CommandGetTables {
+  optional string catalog = 1;
+  optional string db_schema_filter_pattern = 2;
+  optional string table_name_filter_pattern = 3;
+  repeated string table_types = 4;
+  bool include_schema = 5;
+}
+
 message Any {
   string type_url = 1;
   bytes value = 2;
@@ -89,6 +104,19 @@ export interface QodConfig {
 	tls: boolean;
 	tlsVerify: boolean;
 }
+
+export interface SchemaFilter {
+	catalog?: string;
+	schemaPattern?: string;
+}
+
+export interface TableFilter {
+	catalog?: string;
+	schemaPattern?: string;
+	tablePattern?: string;
+}
+
+export type Row = Record<string, unknown>;
 
 interface FlightClient extends grpc.Client {
 	GetFlightInfo(
@@ -157,8 +185,8 @@ export class QodClient {
 	private constructor(
 		private readonly client: FlightClient,
 		private readonly cfg: QodConfig,
+		private readonly root: protobuf.Root,
 		private readonly any: protobuf.Type,
-		private readonly cmd: protobuf.Type,
 	) {}
 
 	static async connect(cfg: QodConfig): Promise<QodClient> {
@@ -188,8 +216,7 @@ export class QodClient {
 		const client: FlightClient = new FlightService(`${cfg.host}:${cfg.port}`, creds, options);
 
 		const any = root.lookupType('arrow.flight.protocol.sql.Any');
-		const cmd = root.lookupType('arrow.flight.protocol.sql.CommandStatementQuery');
-		return new QodClient(client, cfg, any, cmd);
+		return new QodClient(client, cfg, root, any);
 	}
 
 	private static async credentials(cfg: QodConfig): Promise<grpc.ChannelCredentials> {
@@ -214,19 +241,25 @@ export class QodClient {
 		return md;
 	}
 
-	// Build the FlightDescriptor.cmd: an Any-wrapped CommandStatementQuery.
-	private command(sql: string): Buffer {
-		const inner = this.cmd.encode({ query: sql }).finish();
+	// Wrap a Flight SQL command message in a protobuf Any (the FlightDescriptor.cmd
+	// payload). `typeName` is the fully-qualified proto name, which is also the
+	// Any type_url suffix the edge dispatches on.
+	private pack(typeName: string, payload: Row): Buffer {
+		const messageType = this.root.lookupType(typeName);
+		const value = messageType.encode(payload).finish();
 		// protobufjs exposes proto fields as camelCase, so `type_url` is `typeUrl`.
-		const any = this.any.encode({ typeUrl: ANY_TYPE_URL, value: inner }).finish();
+		const any = this.any
+			.encode({ typeUrl: `type.googleapis.com/${typeName}`, value })
+			.finish();
 		return Buffer.from(any);
 	}
 
-	// Run one SQL statement and return the rows as plain objects.
-	async query(sql: string): Promise<Array<Record<string, unknown>>> {
+	// GetFlightInfo(cmd) then DoGet every endpoint, reassembling the Arrow IPC
+	// stream and returning the decoded rows. Shared by every command below.
+	private async runCommand(cmd: Buffer): Promise<Row[]> {
 		const info = await new Promise<any>((resolve, reject) => {
 			this.client.GetFlightInfo(
-				{ type: 'CMD', cmd: this.command(sql) },
+				{ type: 'CMD', cmd },
 				this.metadata(),
 				(err, resp) => (err ? reject(err) : resolve(resp)),
 			);
@@ -251,6 +284,39 @@ export class QodClient {
 
 		const table = tableFromIPC(Buffer.concat([...messages, EOS]));
 		return table.toArray().map((row) => rowToObject(row, table));
+	}
+
+	// Run one SQL statement (CommandStatementQuery) and return the rows.
+	async query(sql: string): Promise<Row[]> {
+		return this.runCommand(
+			this.pack('arrow.flight.protocol.sql.CommandStatementQuery', { query: sql }),
+		);
+	}
+
+	// List catalogs (CommandGetCatalogs). Columns: catalog_name.
+	async getCatalogs(): Promise<Row[]> {
+		return this.runCommand(this.pack('arrow.flight.protocol.sql.CommandGetCatalogs', {}));
+	}
+
+	// List schemas (CommandGetDbSchemas). Columns: catalog_name, db_schema_name.
+	// Filters are LIKE patterns server-side (an exact name matches itself).
+	async getSchemas(filter: SchemaFilter = {}): Promise<Row[]> {
+		const payload: Row = {};
+		if (filter.catalog) payload.catalog = filter.catalog;
+		if (filter.schemaPattern) payload.dbSchemaFilterPattern = filter.schemaPattern;
+		return this.runCommand(
+			this.pack('arrow.flight.protocol.sql.CommandGetDbSchemas', payload),
+		);
+	}
+
+	// List tables (CommandGetTables). Columns: catalog_name, db_schema_name,
+	// table_name, table_type.
+	async getTables(filter: TableFilter = {}): Promise<Row[]> {
+		const payload: Row = {};
+		if (filter.catalog) payload.catalog = filter.catalog;
+		if (filter.schemaPattern) payload.dbSchemaFilterPattern = filter.schemaPattern;
+		if (filter.tablePattern) payload.tableNameFilterPattern = filter.tablePattern;
+		return this.runCommand(this.pack('arrow.flight.protocol.sql.CommandGetTables', payload));
 	}
 
 	close(): void {
