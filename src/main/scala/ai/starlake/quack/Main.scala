@@ -385,9 +385,19 @@ object Main extends IOApp with LazyLogging:
       secret = mgrCfg.auth.management.sessionJwtSecret,
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds,
       onRevoke = (jti, exp) =>
-        if haOn then
+        // Persistence + NOTIFY are best-effort and unconditional: in single-manager
+        // mode notifyListeners is a no-op signal (no listeners) and insert keeps the
+        // denylist durable across restarts. A Postgres blip during logout must never
+        // throw out of revoke(); the local in-process denylist stays authoritative.
+        try
           store.insertRevokedJti(jti, exp)
           store.notifyListeners("qod_revocation", s"$jti|${exp.getEpochSecond}")
+        catch
+          case t: Throwable =>
+            logger.warn(
+              s"onRevoke: persisting/notifying revocation of jti=$jti failed " +
+                s"(${t.getClass.getSimpleName}: ${t.getMessage}); local denylist still authoritative"
+            )
     )
 
     // Leader elector + LISTEN dispatcher. Present only under HA. Handlers close
@@ -891,51 +901,65 @@ object Main extends IOApp with LazyLogging:
       // single-manager path is preserved exactly. The follower branch skips
       // bootstrap/init/discover/reconcile (the leader owns those) but still
       // restores its in-memory cache and seeds the revocation denylist.
+      //
+      // The leader-only duties are extracted into `leaderDuties` so they can run
+      // EITHER at boot (this branch) OR later on promotion (haRefreshFiber tick)
+      // when every replica happened to boot as a follower (a transient
+      // coordinator-connection failure). `leaderDutiesDone` guards against them
+      // ever running twice: boot's leader branch sets it; the refresh tick
+      // checks-then-sets it only on success.
+      val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
+      def leaderDuties: IO[Unit] =
+        DemoBootstrapHook.run(
+          env = sys.env.get,
+          readFile = path =>
+            if path.startsWith("classpath:") then
+              val resource = path.stripPrefix("classpath:")
+              scala.util.Try {
+                val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
+                  .getOrElse(
+                    throw new java.io.FileNotFoundException(
+                      s"classpath resource not found: $resource"
+                    )
+                  )
+                scala.util.Using.resource(stream)(s =>
+                  scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
+                )
+              }
+            else
+              scala.util.Using(
+                scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
+              )(_.getLines().mkString("\n"))
+          ,
+          store = store,
+          fedStore = manifestFedStore
+        ) *>
+          IO.delay(sup.restore()) *>
+          sup.ensureDuckLakeInitialized() *>
+          // Latent-bug fix: repopulate the K8s per-pod token cache from the
+          // qod-token-* Secrets before reconcile() adopts pods. No-op in
+          // local mode (returns empty). Runs on the leader (and always in
+          // single-manager mode, which takes this branch).
+          backend
+            .discoverExisting()
+            .flatMap(found =>
+              IO.delay(logger.info(s"discovered ${found.size} pre-existing node(s)"))
+            ) *>
+          sup.reconcile() *>
+          IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+
       IO.delay(coordinator.foreach(_.tickNow())) *>
-        (if coordinator.forall(_.isLeader) then
-           DemoBootstrapHook.run(
-             env = sys.env.get,
-             readFile = path =>
-               if path.startsWith("classpath:") then
-                 val resource = path.stripPrefix("classpath:")
-                 scala.util.Try {
-                   val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
-                     .getOrElse(
-                       throw new java.io.FileNotFoundException(
-                         s"classpath resource not found: $resource"
-                       )
-                     )
-                   scala.util.Using.resource(stream)(s =>
-                     scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
-                   )
-                 }
-               else
-                 scala.util.Using(
-                   scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
-                 )(_.getLines().mkString("\n"))
-             ,
-             store = store,
-             fedStore = manifestFedStore
-           ) *>
-             IO.delay(sup.restore()) *>
-             sup.ensureDuckLakeInitialized() *>
-             // Latent-bug fix: repopulate the K8s per-pod token cache from the
-             // qod-token-* Secrets before reconcile() adopts pods. No-op in
-             // local mode (returns empty). Runs on the leader (and always in
-             // single-manager mode, which takes this branch).
-             backend
-               .discoverExisting()
-               .flatMap(found =>
-                 IO.delay(logger.info(s"discovered ${found.size} pre-existing node(s)"))
-               ) *>
-             sup.reconcile() *>
-             IO.delay(if haOn then sessionTokens.seedRevoked(store.listRevokedJti()))
+        (if coordinator.forall(_.isLeader) then leaderDuties *> IO.delay(leaderDutiesDone.set(true))
          else
            IO.delay(
              logger.info("ha: booting as follower; leader owns bootstrap/init/reconcile")
            ) *>
              IO.delay(sup.restore()) *>
              IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))) *>
+        // Single-manager deployments never run the HA leader periodic purge, so
+        // do a one-shot purge at boot (unconditional) to keep expired denylist
+        // rows from accumulating.
+        IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
         mgr.serve.use { _ =>
           logger.info(
             s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
@@ -1050,7 +1074,22 @@ object Main extends IOApp with LazyLogging:
                 case Some(c) =>
                   val period =
                     scala.concurrent.duration.DurationInt(mgrCfg.ha.topologyRefreshSec).seconds
-                  (IO
+                  // On promotion (this replica became leader after booting a
+                  // follower), run the leader duties exactly once. Guarded by its
+                  // own handleErrorWith so a duty failure neither sets the flag
+                  // (retried next tick) nor aborts the rest of this tick's refresh.
+                  val promoteDuties: IO[Unit] =
+                    if c.isLeader && !leaderDutiesDone.get then
+                      (leaderDuties *> IO.delay(leaderDutiesDone.set(true)))
+                        .handleErrorWith(t =>
+                          IO.delay(
+                            logger.warn(
+                              s"ha promotion: leader duties failed, will retry next tick: ${t.getMessage}"
+                            )
+                          )
+                        )
+                    else IO.unit
+                  (promoteDuties *> IO
                     .blocking {
                       sup.restore()
                       sessionTokens.seedRevoked(store.listRevokedJti())

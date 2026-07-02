@@ -425,7 +425,9 @@ final class AuthHandlers(
       cookie: Option[String],
       forwardedProto: Option[String] = None
   ): Out[CookieValueWithMeta] =
-    IO.delay {
+    // revoke() now always does JDBC (persist + NOTIFY the denylist), so this runs
+    // on the blocking pool. `oidcLogout` already uses IO.blocking for the same call.
+    IO.blocking {
       apiKey.orElse(cookie).foreach(tokens.revoke)
       Right(clearCookie(forwardedProto))
     }
