@@ -69,8 +69,8 @@ When the leader pod is killed or evicted:
 - `drainTimeoutSec` (env `QOD_DRAIN_TIMEOUT_SEC`, default 60) gives in-flight
   streams a chance to finish on a graceful shutdown. `terminationGracePeriodSeconds`
   is set to `drainTimeoutSec + 15`. Tune this for your longest expected query.
-- The local backend (`QOD_BACKEND=local`) refuses to start with `QOD_HA_ENABLED`.
-  HA requires `QOD_BACKEND=kubernetes`.
+- The local backend (`QOD_RUNTIME_TYPE=local`, the default) refuses to start
+  with `QOD_HA_ENABLED`. HA requires `QOD_RUNTIME_TYPE=kubernetes`.
 
 ### Enabling HA on an existing single-replica deployment
 
