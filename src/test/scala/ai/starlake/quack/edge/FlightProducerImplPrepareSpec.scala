@@ -133,19 +133,21 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val result   = decodePrepareResult(listener.onNextValue.get())
     result.getDatasetSchema.size() should be > 0
 
-  it should "return an EMPTY dataset_schema for INSERT (clients dispatch as update)" in:
+  it should "return the single-column Count dataset_schema for INSERT (matches the DML stream)" in:
     val (producer, _, _, peer) = setupProducer()
     val listener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
     val result   = decodePrepareResult(listener.onNextValue.get())
-    // An empty Arrow schema still serializes to some IPC bytes (the framing); the test that the
-    // schema is "empty" is: no fields. We deserialize and check fields().isEmpty.
+    // DuckDB materializes a DML statement as a single-row `Count BIGINT`, and ADBC enforces
+    // FlightInfo.schema == DoGet stream schema, so the Prepare result advertises that one column
+    // (not an empty schema). See FlightProducerImpl.countSchema.
     val schemaBytes = result.getDatasetSchema.toByteArray
     val schema = org.apache.arrow.vector.ipc.message.MessageSerializer.deserializeSchema(
       new org.apache.arrow.vector.ipc.ReadChannel(
         java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(schemaBytes))
       )
     )
-    schema.getFields.size() shouldBe 0
+    schema.getFields.size() shouldBe 1
+    schema.getFields.get(0).getName shouldBe "Count"
 
   /** Deserialize a serialized IPC Arrow schema from raw bytes. */
   private def parseSchema(bytes: Array[Byte]): org.apache.arrow.vector.types.pojo.Schema =
@@ -205,7 +207,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     // ODBC driver needs.
     schemaResult.getSchema.getFields.size() should be >= 1
 
-  it should "return an empty schema for getSchemaPreparedStatement after an INSERT prepare" in:
+  it should "return the Count schema for getSchemaPreparedStatement after an INSERT prepare" in:
     val (producer, _, _, peer) = setupProducer()
     val prepListener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
     val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
@@ -217,7 +219,8 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val schemaResult = producer.getSchemaPreparedStatement(
       cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
     )
-    schemaResult.getSchema.getFields.size() shouldBe 0
+    schemaResult.getSchema.getFields.size() shouldBe 1
+    schemaResult.getSchema.getFields.get(0).getName shouldBe "Count"
 
   it should "throw INVALID_ARGUMENT for getSchemaPreparedStatement with unknown handle" in:
     val (producer, _, _, peer) = setupProducer()
@@ -277,7 +280,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     info.getSchema should not be null
     info.getSchema.getFields.size() should be >= 1
 
-  it should "populate FlightInfo.schema as empty on getFlightInfoPreparedStatement after an INSERT prepare" in:
+  it should "populate FlightInfo.schema with the Count column on getFlightInfoPreparedStatement after an INSERT prepare" in:
     val (producer, _, _, peer) = setupProducer()
     val prepListener = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
     val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
@@ -290,13 +293,14 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       cmd, fakeCallContext(peer), FlightDescriptor.command(handle.toByteArray)
     )
     info.getSchema should not be null
-    info.getSchema.getFields.size() shouldBe 0
+    info.getSchema.getFields.size() shouldBe 1
+    info.getSchema.getFields.get(0).getName shouldBe "Count"
 
-  // Same FlightInfo.schema fix for the un-prepared (one-shot) statement path.
+  // Same FlightInfo.schema contract for the un-prepared (one-shot) statement path.
   // ProbeWrap runs the LIMIT-0 probe to capture the result schema before the
-  // client's DoGet. For DML/DDL (SkipExecute) we keep the schema null on
-  // FlightInfo: ADBC would 400 on a mismatch between an "empty" advertised
-  // schema and the single-row Count the stream actually emits.
+  // client's DoGet. For DML/DDL (SkipExecute) FlightInfo advertises the single
+  // Count column that the stream emits: ADBC would 400 on a mismatch between an
+  // "empty" advertised schema and the single-row Count the stream actually emits.
 
   it should "populate FlightInfo.schema on getFlightInfoStatement for a SELECT" in:
     val (producer, _, _, peer) = setupProducer()
@@ -310,7 +314,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     info.getSchema should not be null
     info.getSchema.getFields.size() should be >= 1
 
-  it should "leave FlightInfo.schema null on getFlightInfoStatement for an INSERT" in:
+  it should "populate FlightInfo.schema with the Count column on getFlightInfoStatement for an INSERT" in:
     val (producer, _, _, peer) = setupProducer()
     val cmd                    = FlightSql.CommandStatementQuery
       .newBuilder()
@@ -319,9 +323,10 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val info = producer.getFlightInfoStatement(
       cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
     )
-    // FlightInfo coerces null on the wire to an empty Schema on the read side,
-    // so the assertion is on field count: still zero, no probe performed.
-    info.getSchema.getFields.size() shouldBe 0
+    // No probe is performed for DML; FlightInfo advertises the single-row Count
+    // column that the DML stream emits (ADBC requires schema == stream schema).
+    info.getSchema.getFields.size() shouldBe 1
+    info.getSchema.getFields.get(0).getName shouldBe "Count"
 
   it should "throw UNAUTHENTICATED for getSchemaStatement when peer has no connection context" in:
     val (producer, _, _, _) = setupProducer()
