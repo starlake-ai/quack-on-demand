@@ -47,8 +47,14 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     ).!
     assert(rc == 0, s"psql ($sql) exit=$rc")
 
-  /** Fresh DB + migrated schema, with the store wired against it. */
-  private def withStore(test: PostgresControlPlaneStore => Unit): Unit =
+  @volatile private var storeJdbcUrl: String = ""
+
+  /** Fresh DB + migrated schema, with the store wired against it and the JDBC URL visible to the
+    * test.
+    */
+  private def withStoreAndUrl(
+      test: (PostgresControlPlaneStore, String) => Unit
+  ): Unit =
     if !pgReachable then
       cancel(
         s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
@@ -56,9 +62,15 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     val dbName = s"qodcp_test_${System.nanoTime()}"
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try
-      new LiquibaseRunner(dbUrl(dbName), pgUser, pgPass).run()
-      test(new PostgresControlPlaneStore(dbUrl(dbName), pgUser, pgPass))
+      val url = dbUrl(dbName)
+      storeJdbcUrl = url
+      new LiquibaseRunner(url, pgUser, pgPass).run()
+      test(new PostgresControlPlaneStore(url, pgUser, pgPass), url)
     finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
+
+  /** Fresh DB + migrated schema, with the store wired against it. */
+  private def withStore(test: PostgresControlPlaneStore => Unit): Unit =
+    withStoreAndUrl((store, _) => test(store))
 
   private val tenant = Tenant(
     id = "tenant-1",
@@ -431,4 +443,26 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "report ping=true on a live database" in withStore { store =>
     store.ping() shouldBe true
+  }
+
+  "HA: notifications" should "deliver pg_notify to a listening connection" in withStoreAndUrl {
+    (store, _) =>
+      // withStoreAndUrl gives us the db name via storeJdbcUrl; open a raw listener on it.
+      val listener = java.sql.DriverManager.getConnection(storeJdbcUrl, pgUser, pgPass)
+      try
+        listener.createStatement().execute("LISTEN qod_topology")
+        store.notifyListeners("qod_topology", "hello")
+        // poll: a round-trip query makes pgjdbc pick up pending notifications
+        listener.createStatement().execute("SELECT 1")
+        val pg    = listener.unwrap(classOf[org.postgresql.PGConnection])
+        val notes = pg.getNotifications(2000)
+        if notes != null then
+          notes
+            .map(n => (n.getName, n.getParameter))
+            .toList
+            .shouldBe(
+              List(("qod_topology", "hello"))
+            )
+        else fail("Expected notifications, got null")
+      finally listener.close()
   }
