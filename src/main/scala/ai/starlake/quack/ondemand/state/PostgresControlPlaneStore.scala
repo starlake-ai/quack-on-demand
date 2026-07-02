@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.parser.parse
 import io.circe.syntax._
@@ -36,7 +37,8 @@ final class PostgresControlPlaneStore(
     user: String,
     password: String,
     poolSize: Int = 20
-) extends ControlPlaneStore:
+) extends ControlPlaneStore
+    with LazyLogging:
 
   Class.forName("org.postgresql.Driver")
 
@@ -1276,6 +1278,21 @@ final class PostgresControlPlaneStore(
       st.executeUpdate()
     finally st.close()
   }
+
+  override def notifyListeners(channel: String, payload: String): Unit =
+    try
+      withConn { c =>
+        val st = c.prepareStatement("SELECT pg_notify(?, ?)")
+        try
+          st.setString(1, channel)
+          st.setString(2, payload)
+          st.executeQuery()
+        finally st.close()
+      }
+    catch
+      case t: Throwable =>
+        // Best effort: peers heal via the periodic refresh fallback.
+        logger.warn(s"pg_notify($channel) failed: ${t.getMessage}")
 
   override def ping(): Boolean =
     try

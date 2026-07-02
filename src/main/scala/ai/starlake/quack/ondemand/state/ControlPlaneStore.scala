@@ -213,5 +213,8 @@ trait ControlPlaneStore:
   def listRevokedJti(): List[(String, java.time.Instant)]               = Nil
   def purgeExpiredRevokedJti(now: java.time.Instant): Unit              = ()
 
+  /** HA: broadcast a change notification to peer replicas. No-op by default. */
+  def notifyListeners(channel: String, payload: String): Unit = ()
+
   /** Cheap liveness probe for readiness checks. */
   def ping(): Boolean = true
