@@ -450,10 +450,10 @@ stack is up:
   Data:       ./pgdata + ./ducklake + ./certs (host bind mounts)
 EOM
 
-# Per-profile URL summaries. Indexed off the same _profile_set the
+# Per-profile URL summaries. Checked against the same _profiles list the
 # resolution step populated above, so what we print matches what was
 # actually activated.
-if [[ -n "${_profile_set[seaweedfs]:-}" ]]; then
+if _has_profile seaweedfs; then
   cat <<EOM
 
 seaweedfs (S3-compatible object store + UIs):
@@ -465,7 +465,7 @@ seaweedfs (S3-compatible object store + UIs):
 EOM
 fi
 
-if [[ -n "${_profile_set[observability]:-}" ]]; then
+if _has_profile observability; then
   cat <<EOM
 
 observability (Prometheus + Grafana):
@@ -477,7 +477,9 @@ fi
 # Tear-down hint. Mention the active profiles so \`docker compose down\`
 # actually removes the corresponding containers.
 profile_flags=""
-for p in "${!_profile_set[@]}"; do profile_flags="$profile_flags --profile $p"; done
+for p in "${_profiles[@]:-}"; do
+  [[ -n "$p" ]] && profile_flags="$profile_flags --profile $p"
+done
 
 cat <<EOM
 
