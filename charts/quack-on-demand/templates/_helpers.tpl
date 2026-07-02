@@ -126,6 +126,19 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 
 {{/*
+Session JWT secret name; fails when HA is on without a configured secret.
+*/}}
+{{- define "qod.sessionJwtSecretName" -}}
+{{- if .Values.existingSessionJwtSecret -}}
+{{ .Values.existingSessionJwtSecret }}
+{{- else if .Values.sessionJwtSecret -}}
+{{ include "qod.fullname" . }}-session-jwt
+{{- else -}}
+{{ fail "replicaCount > 1 requires sessionJwtSecret or existingSessionJwtSecret (openssl rand -hex 32)" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 True when the chart should wire S3 env vars - i.e. the data path is
 remote-scheme (s3://, s3a://, r2://) AND credentials are available
 (either inline or via existingSecret).
