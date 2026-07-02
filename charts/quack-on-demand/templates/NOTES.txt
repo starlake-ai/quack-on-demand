@@ -37,8 +37,9 @@ Quack on Demand has been installed.
 
 # Notes
 
-- Replicas default to 1: multi-manager active-active is not yet safe.
-  See guides/RESILIENCE.md and issue #11.
+- Replicas default to 1 (Recreate rollout). Set replicaCount > 1 to enable
+  active-active HA (QOD_HA_ENABLED); requires sessionJwtSecret or
+  existingSessionJwtSecret. See guides/RESILIENCE.md.
 - The manager calls the K8s API to create / delete pods + services in
   this namespace. RBAC scope is a Role, not a ClusterRole.
 - {{- if eq .Values.metrics.sink "prometheus" }} /metrics is exposed on the rest-ui port. {{- else }} metrics sink: {{ .Values.metrics.sink }} (the /metrics endpoint is NOT exposed in cloud-push mode). {{- end }}

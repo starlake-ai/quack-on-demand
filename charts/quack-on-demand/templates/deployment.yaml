@@ -141,7 +141,7 @@ spec:
             - name: QOD_SESSION_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "qod.sessionJwtSecretName" . }}
+                  name: {{ include "qod.sessionJwtSecretName" . | quote }}
                   key: sessionJwtSecret
             {{- end }}
           lifecycle:
