@@ -105,31 +105,39 @@ object TenantDb {
       )
     else None
 
-  /** Returns Some(error) if the value violates its per-kind contract. */
+  /** Injection-safety checks only: reject any script-interpolated value that carries a
+    * SQL-literal-breaking or identifier-breaking metacharacter, validating each field only when it
+    * is present. This is the security-critical subset of [[validate]] and is safe to run on paths
+    * where the required metastore keys are supplied later from the default metastore (e.g. config
+    * import), so it does NOT enforce key presence.
+    */
+  def validateSafety(td: TenantDb): Option[String] =
+    schemaNameError(td.metastore)
+      .orElse(dbNameError(td.metastore))
+      .orElse(connParamError(td.metastore, "pgHost"))
+      .orElse(connParamError(td.metastore, "pgUser"))
+      .orElse(connParamError(td.metastore, "pgPassword"))
+      .orElse(pgPortError(td.metastore))
+      .orElse(dataPathError(td.dataPath))
+
+  /** Returns Some(error) if the value violates its per-kind contract. Enforces required-key
+    * presence AND injection safety; use on the REST createTenantDb path where the full metastore is
+    * supplied inline.
+    */
   def validate(td: TenantDb): Option[String] = td.kind match {
     case TenantDbKind.DuckLake =>
       val missing = DuckLakeRequiredKeys -- td.metastore.keySet
       if missing.nonEmpty then
         Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
       else if td.dataPath.isEmpty then Some("kind=ducklake requires non-empty dataPath")
-      else
-        schemaNameError(td.metastore)
-          .orElse(dbNameError(td.metastore))
-          .orElse(connParamError(td.metastore, "pgHost"))
-          .orElse(connParamError(td.metastore, "pgUser"))
-          .orElse(connParamError(td.metastore, "pgPassword"))
-          .orElse(pgPortError(td.metastore))
-          .orElse(dataPathError(td.dataPath))
+      else validateSafety(td)
 
     case TenantDbKind.DuckDbFile =>
       val missing = DuckDbFileRequiredKeys -- td.metastore.keySet
       if missing.nonEmpty then
         Some(s"kind=duckdb-file requires metastore keys ${missing.mkString(", ")}")
       else if td.dataPath.isEmpty then Some("kind=duckdb-file requires non-empty dataPath")
-      else
-        schemaNameError(td.metastore)
-          .orElse(dbNameError(td.metastore))
-          .orElse(dataPathError(td.dataPath))
+      else validateSafety(td)
 
     case TenantDbKind.InMemory =>
       if td.metastore.nonEmpty then Some("kind=memory requires empty metastore")
