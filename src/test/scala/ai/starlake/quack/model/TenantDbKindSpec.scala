@@ -6,14 +6,14 @@ import org.scalatest.matchers.should.Matchers
 class TenantDbKindSpec extends AnyFlatSpec with Matchers {
 
   "TenantDbKind.fromWire" should "decode each known wire value" in {
-    TenantDbKind.fromWire("ducklake")    shouldBe Right(TenantDbKind.DuckLake)
+    TenantDbKind.fromWire("ducklake") shouldBe Right(TenantDbKind.DuckLake)
     TenantDbKind.fromWire("duckdb-file") shouldBe Right(TenantDbKind.DuckDbFile)
-    TenantDbKind.fromWire("memory")      shouldBe Right(TenantDbKind.InMemory)
+    TenantDbKind.fromWire("memory") shouldBe Right(TenantDbKind.InMemory)
   }
 
   it should "reject unknown wire values with the offending input" in {
     TenantDbKind.fromWire("postgres") shouldBe Left("unknown TenantDbKind: 'postgres'")
-    TenantDbKind.fromWire("")         shouldBe Left("unknown TenantDbKind: ''")
+    TenantDbKind.fromWire("") shouldBe Left("unknown TenantDbKind: ''")
   }
 
   "wireValue" should "round-trip every kind through fromWire" in {
@@ -28,9 +28,12 @@ class TenantDbKindSpec extends AnyFlatSpec with Matchers {
 class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
 
   private val pgMeta = Map(
-    "pgHost" -> "localhost", "pgPort" -> "5432",
-    "pgUser" -> "u", "pgPassword" -> "p",
-    "dbName" -> "tpch", "schemaName" -> "main"
+    "pgHost"     -> "localhost",
+    "pgPort"     -> "5432",
+    "pgUser"     -> "u",
+    "pgPassword" -> "p",
+    "dbName"     -> "tpch",
+    "schemaName" -> "main"
   )
 
   "TenantDb.validate" should "accept a well-formed ducklake config" in {
@@ -39,8 +42,7 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "reject ducklake missing pg keys" in {
-    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake,
-                     pgMeta - "pgHost", "/tmp/d")
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta - "pgHost", "/tmp/d")
     TenantDb.validate(td).get should include("pgHost")
   }
 
@@ -50,21 +52,102 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "accept duckdb-file with dbName, schemaName, and a path" in {
-    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckDbFile,
-                     Map("dbName" -> "tpch", "schemaName" -> "main"),
-                     "/tmp/foo.duckdb")
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "tpch", "schemaName" -> "main"),
+      "/tmp/foo.duckdb"
+    )
     TenantDb.validate(td) shouldBe None
   }
 
   it should "reject memory kind with non-empty metastore" in {
-    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.InMemory,
-                     Map("dbName" -> "tpch"), "")
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.InMemory, Map("dbName" -> "tpch"), "")
     TenantDb.validate(td).get should include("empty metastore")
   }
 
   it should "accept memory kind with empty metastore and empty dataPath" in {
-    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.InMemory,
-                     Map.empty, "")
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.InMemory, Map.empty, "")
+    TenantDb.validate(td) shouldBe None
+  }
+
+  // --- SQL-injection hardening on node-bootstrap identifiers/paths ---
+
+  it should "reject a schemaName carrying an injected statement" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("schemaName", "main; ATTACH 'x' AS y"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("schemaName")
+  }
+
+  it should "reject a schemaName containing a space" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("schemaName", "not valid"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("schemaName")
+  }
+
+  it should "reject a schemaName on a duckdb-file kind too" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "tpch", "schemaName" -> "s; DROP TABLE t"),
+      "/tmp/foo.duckdb"
+    )
+    TenantDb.validate(td).get should include("schemaName")
+  }
+
+  it should "accept a normal schemaName" in {
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "/tmp/d")
+    TenantDb.validate(td) shouldBe None
+  }
+
+  it should "reject a dataPath containing a single quote" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta,
+      "/tmp/d'); ATTACH 'evil' AS e --"
+    )
+    TenantDb.validate(td).get should include("dataPath")
+  }
+
+  it should "reject a dataPath containing a semicolon" in {
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "/tmp/d; DETACH x")
+    TenantDb.validate(td).get should include("dataPath")
+  }
+
+  it should "reject a dataPath containing a backslash or newline" in {
+    val bs = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "/tmp/d\\evil")
+    TenantDb.validate(bs).get should include("dataPath")
+    val nl = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "/tmp/d\nUSE bad")
+    TenantDb.validate(nl).get should include("dataPath")
+  }
+
+  it should "accept an absolute filesystem dataPath" in {
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "/var/lib/qod/tpch1")
+    TenantDb.validate(td) shouldBe None
+  }
+
+  it should "accept an s3 URI dataPath" in {
+    val td =
+      TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "s3://bucket/path/to-data_01")
     TenantDb.validate(td) shouldBe None
   }
 }

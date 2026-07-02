@@ -178,19 +178,19 @@ case "$kind" in
     INIT_SQL+="$STORAGE_SQL"$'\n'
     INIT_SQL+="ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);"$'\n'
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
-    INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS $dbName"$'\n'
+    INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS \"$dbName\""$'\n'
     INIT_SQL+="  (DATA_PATH '$dataPath');"$'\n'
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
     INIT_SQL+=$'DETACH qod_init_pg;\n'
-    INIT_SQL+="USE $dbName;"$'\n'
-    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS $schemaName;"$'\n'
-    INIT_SQL+="USE $dbName.$schemaName;"$'\n'
+    INIT_SQL+="USE \"$dbName\";"$'\n'
+    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS \"$schemaName\";"$'\n'
+    INIT_SQL+="USE \"$dbName\".\"$schemaName\";"$'\n'
     ;;
   duckdb-file)
-    INIT_SQL+="ATTACH '$dataPath' AS $dbName;"$'\n'
-    INIT_SQL+="USE $dbName;"$'\n'
-    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS $schemaName;"$'\n'
-    INIT_SQL+="USE $dbName.$schemaName;"$'\n'
+    INIT_SQL+="ATTACH '$dataPath' AS \"$dbName\";"$'\n'
+    INIT_SQL+="USE \"$dbName\";"$'\n'
+    INIT_SQL+="CREATE SCHEMA IF NOT EXISTS \"$schemaName\";"$'\n'
+    INIT_SQL+="USE \"$dbName\".\"$schemaName\";"$'\n'
     ;;
   memory)
     : # nothing; DuckDB's built-in 'memory' catalog is the default
