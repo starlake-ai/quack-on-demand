@@ -127,6 +127,14 @@ final class PoolSupervisor(
     invalidateEffectiveCacheLocal()
     publish.rbacChanged()
 
+  /** Broadcast both channels after a store mutation performed OUTSIDE the supervisor's own mutators
+    * (e.g. manifest YAML import writes rows via ManifestImporter). restore() itself never
+    * broadcasts, so external writers call this once after their restore().
+    */
+  def broadcastStateChanged(): Unit =
+    publish.topologyChanged()
+    publish.rbacChanged()
+
   // ---------- Bootstrap / replay ----------
 
   /** Per-tenant-db naming convention, applied ONLY to `kind=ducklake` because that's the kind where

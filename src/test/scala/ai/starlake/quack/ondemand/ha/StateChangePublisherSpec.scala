@@ -83,3 +83,12 @@ class StateChangePublisherSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     rec.rbac shouldBe 1 // restore invalidates locally, never broadcasts
   }
+
+  it should "broadcast both channels via broadcastStateChanged for external store writers" in {
+    val (sup, rec) = fresh()
+    val t0         = rec.topology
+    val r0         = rec.rbac
+    sup.broadcastStateChanged()
+    rec.topology shouldBe t0 + 1
+    rec.rbac shouldBe r0 + 1
+  }
