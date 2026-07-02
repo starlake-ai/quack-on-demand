@@ -236,8 +236,11 @@ final class PoolSupervisor(
     * by `Main`; cancellation is the normal shutdown exit. Drained pools (zero distribution) are
     * left alone -- reconcile only respawns when the persisted distribution is non-zero.
     */
-  def reconcileLoop(interval: scala.concurrent.duration.FiniteDuration): IO[Unit] =
-    (reconcile().handleErrorWith { t =>
+  def reconcileLoop(
+      interval: scala.concurrent.duration.FiniteDuration,
+      gate: () => Boolean = () => true
+  ): IO[Unit] =
+    ((if gate() then reconcile() else IO.unit).handleErrorWith { t =>
       IO.delay(logger.warn(s"reconcile loop: pass failed, continuing: ${t.getMessage}"))
     } *> IO.sleep(interval)).foreverM.void
 
