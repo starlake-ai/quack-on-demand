@@ -78,6 +78,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "qodstate_node",
           "qodstate_pool",
           "qodstate_pool_permission",
+          "qodstate_revoked_jti",
           "qodstate_role",
           "qodstate_role_column_policy",
           "qodstate_role_permission",
@@ -109,8 +110,9 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       // user_role, group_role, pool_permission) +
       // 2 federation tables (federated_source, federated_secret) +
       // 2 policy tables (role_column_policy, Liquibase 0012;
-      // role_row_policy, Liquibase 0013).
+      // role_row_policy, Liquibase 0013) +
+      // 1 session/auth table (revoked_jti, Liquibase 0014).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 16
+      rs.getInt(1) shouldBe 17
     finally c.close()
   }
