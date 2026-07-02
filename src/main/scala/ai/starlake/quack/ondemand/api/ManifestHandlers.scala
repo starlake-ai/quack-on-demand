@@ -70,6 +70,10 @@ final class ManifestHandlers(
                   // snapshot. Without this the REST/UI keeps serving the old
                   // view until the manager is restarted.
                   supervisor.restore()
+                  // Notify peer replicas. restore() is deliberately local-only,
+                  // so without this broadcast, HA peers stay stale until their
+                  // 30s periodic refresh fires.
+                  supervisor.broadcastStateChanged()
                   Right(
                     ManifestImportSummary(
                       tenants = m.tenants.size,
