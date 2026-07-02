@@ -162,6 +162,33 @@ final class PoolSupervisor(
 
   def restore(): Unit =
     val snap = store.snapshot()
+
+    // Diff-aware rehydration: restore() is also driven by peer NOTIFY handlers,
+    // so a row a peer DELETED must disappear from this replica's mirror, not just
+    // get overwritten. Compute the snapshot key sets first, propagate deletions,
+    // then upsert. Removing before putting avoids a window where a surviving
+    // entry is briefly missing.
+    val snapTenantIds   = snap.tenants.iterator.map(_.id).toSet
+    val snapTenantDbIds = snap.tenantDbs.iterator.map(_.id).toSet
+    val snapPoolIds     = snap.pools.iterator.map(_.id).toSet
+
+    // Rebuild the PoolKey set exactly as the upsert pass below derives it: a pool
+    // contributes a key only when its tenant-db and tenant both resolve in the snapshot.
+    val tdById                     = snap.tenantDbs.iterator.map(td => td.id -> td).toMap
+    val tById                      = snap.tenants.iterator.map(t => t.id -> t).toMap
+    val snapPoolKeys: Set[PoolKey] = snap.pools.iterator.flatMap { p =>
+      for
+        td <- tdById.get(p.tenantDbId)
+        t  <- tById.get(td.tenantId)
+      yield PoolKey(t.id, td.name, p.name)
+    }.toSet
+
+    tenants.keys.toList.filterNot(snapTenantIds).foreach(tenants.remove)
+    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(tenantDbs.remove)
+    poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
+    pools.keys.toList.filterNot(snapPoolKeys).foreach(pools.remove)
+    poolIdByKey.keys.toList.filterNot(snapPoolKeys).foreach(poolIdByKey.remove)
+
     snap.tenants.foreach(t => tenants.put(t.id, t))
     snap.tenantDbs.foreach(td => tenantDbs.put(td.id, td))
     snap.pools.foreach(p => poolRows.put(p.id, p))
@@ -250,6 +277,22 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlocked(key: PoolKey, state: PoolState): IO[PoolState] =
+    // Re-read the pool's persisted node rows INSIDE the advisory lock so a second
+    // lock holder acts on the first holder's committed writes, not on the pre-lock
+    // PoolState that reconcile()'s fold captured. Deferred via IO.blocking so the
+    // read runs when withLock's bracket executes this IO (i.e. after the lock is
+    // acquired), not eagerly at IO-construction time. Fall back to the passed state
+    // when the pool id or rows are missing (InMemory / no-row cases), preserving
+    // today's behavior including the empty-nodes spawn-from-distribution path.
+    IO.blocking {
+      poolId(key) match
+        case Some(pid) =>
+          val rows = store.listNodes(pid)
+          if rows.nonEmpty then state.copy(nodes = rows) else state
+        case None => state
+    }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
+
+  private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh
       // YAML bootstrap (ManifestImporter writes the pool row but does
