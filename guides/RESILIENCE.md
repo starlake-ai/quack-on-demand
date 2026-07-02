@@ -38,7 +38,8 @@ accepted by replica B.
   and propagated via `LISTEN/NOTIFY` on the `qod_revocation` channel so every
   replica enforces them immediately.
 - RBAC and topology changes propagate via `qod_rbac` / `qod_topology` channels;
-  a periodic snapshot-refresh (every `reconcileIntervalSec` seconds, default 30)
+  a periodic snapshot-refresh (every `topologyRefreshSec` seconds, env
+  `QOD_TOPOLOGY_REFRESH_SEC`, default 30)
   acts as a fallback.
 - A `PodDisruptionBudget` (`minAvailable: 1`) is created automatically.
 
