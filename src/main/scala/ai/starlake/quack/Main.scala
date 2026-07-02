@@ -321,7 +321,19 @@ object Main extends IOApp with LazyLogging:
     val nodes     = new NodeHandlers(sup, tracker)
     val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
-    val health    = new HealthHandler(sup)
+
+    val healthCache =
+      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
+    def dbHealthy(): Boolean =
+      val (ts, ok) = healthCache.get()
+      val now      = System.nanoTime()
+      if now - ts < 5_000_000_000L then ok
+      else
+        val fresh = store.ping()
+        healthCache.set((now, fresh))
+        fresh
+
+    val health = new HealthHandler(sup, dbHealthy)
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a

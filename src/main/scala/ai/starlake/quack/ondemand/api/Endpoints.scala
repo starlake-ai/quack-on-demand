@@ -115,8 +115,11 @@ object Endpoints:
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
-  val health: PublicEndpoint[Unit, Unit, HealthResponse, Any] =
-    endpoint.get.in("health").out(jsonBody[HealthResponse])
+  val health: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
+    endpoint.get
+      .in("health")
+      .errorOut(statusCode)
+      .out(jsonBody[HealthResponse])
 
   /** Static client-connection info the UI needs to build JDBC/ODBC/ADBC URLs. Uses bare `endpoint`
     * (no /api prefix, no error envelope) to match `/health`.
