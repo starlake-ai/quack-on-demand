@@ -4,6 +4,7 @@ import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RunningNode}
 import cats.effect.IO
 import io.fabric8.kubernetes.api.model._
 import io.fabric8.kubernetes.client.KubernetesClient
+import org.slf4j.LoggerFactory
 
 import java.time.Instant
 import scala.jdk.CollectionConverters._
@@ -33,6 +34,8 @@ final class KubernetesQuackBackend(
     readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
     readEnv: String => Option[String] = name => Option(System.getenv(name))
 ) extends QuackBackend:
+
+  private val logger = LoggerFactory.getLogger(getClass)
 
   private val (labelKey, labelValue) =
     podLabel.split("=", 2) match
@@ -197,36 +200,46 @@ final class KubernetesQuackBackend(
     svc.setSpec(svcSpec)
     svc
 
-  def start(spec: NodeSpec): IO[RunningNode] = IO.blocking {
-    val token = LocalQuackBackend.randomToken()
-    tokens.put(spec.nodeId, token)
+  def start(spec: NodeSpec): IO[RunningNode] =
+    val run = IO.blocking {
+      val token = LocalQuackBackend.randomToken()
+      tokens.put(spec.nodeId, token)
 
-    // Both Secrets must exist before pod create -- kubelet rejects a pod
-    // whose env.valueFrom references a missing Secret. ensureTokenSecret
-    // also makes the bearer string recoverable after manager restart.
-    ensureTokenSecret(spec.nodeId, token)
-    if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+      // Both Secrets must exist before pod create -- kubelet rejects a pod
+      // whose env.valueFrom references a missing Secret. ensureTokenSecret
+      // also makes the bearer string recoverable after manager restart.
+      ensureTokenSecret(spec.nodeId, token)
+      if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
 
-    val pod     = buildPod(spec, token)
-    val created = client.pods.inNamespace(namespace).resource(pod).create()
-    waitReady(created)
+      val pod     = buildPod(spec, token)
+      val created = client.pods.inNamespace(namespace).resource(pod).create()
+      waitReady(created)
 
-    val svc = buildService(spec)
-    client.services.inNamespace(namespace).resource(svc).create()
+      val svc = buildService(spec)
+      client.services.inNamespace(namespace).resource(svc).create()
 
-    RunningNode(
-      nodeId = spec.nodeId,
-      poolKey = spec.poolKey,
-      role = spec.role,
-      host = s"${spec.nodeId}.$namespace.svc.cluster.local",
-      port = quackPort,
-      token = token,
-      pid = None,
-      podName = Some(spec.nodeId),
-      startedAt = Instant.now(),
-      maxConcurrent = spec.maxConcurrent
-    )
-  }
+      RunningNode(
+        nodeId = spec.nodeId,
+        poolKey = spec.poolKey,
+        role = spec.role,
+        host = s"${spec.nodeId}.$namespace.svc.cluster.local",
+        port = quackPort,
+        token = token,
+        pid = None,
+        podName = Some(spec.nodeId),
+        startedAt = Instant.now(),
+        maxConcurrent = spec.maxConcurrent
+      )
+    }
+    // If anything after the first resource is created fails (waitReady
+    // timeout, API error) or the spawn is cancelled, roll back the pod,
+    // Service and per-pod token Secret this call created before the error
+    // propagates. Without this the orphaned pod keeps the deterministic
+    // nodeId, and the next reconcile respawn hits an already-exists
+    // conflict on pod create -- the pool never recovers.
+    run
+      .onError { case e => cleanupPartialStart(spec, e.toString) }
+      .onCancel(cleanupPartialStart(spec, "start cancelled"))
 
   private def waitReady(p: Pod): Unit =
     // fabric8's waitUntilCondition sits on a watch + readiness predicate
@@ -245,6 +258,44 @@ final class KubernetesQuackBackend(
     catch
       case _: io.fabric8.kubernetes.client.KubernetesClientTimeoutException =>
         sys.error(s"pod $name not ready in ${startupTimeoutSec}s")
+
+  /** Best-effort rollback of the per-node resources a failed [[start]] created for `spec`.
+    *
+    * Deletes the Service, the Pod and the per-pod token Secret by the exact names this call created
+    * (all derived from `spec.nodeId`, matching [[buildService]] / [[buildPod]] /
+    * [[tokenSecretNameFor]]), so a subsequent reconcile respawns cleanly instead of colliding with
+    * an orphaned pod on the deterministic nodeId. Every delete is swallowed and logged so cleanup
+    * can never mask the original spawn failure.
+    *
+    * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left in place: it is shared
+    * by every pod of the pool, so deleting it on one node's failure could break sibling pods that
+    * reference it. It is GC'd by [[stop]] when the pool's last pod goes away.
+    */
+  private def cleanupPartialStart(spec: NodeSpec, reason: String): IO[Unit] = IO.blocking {
+    logger.warn(
+      s"start() for pod ${spec.nodeId} failed ($reason); rolling back pod/service/token secret"
+    )
+    deleteQuietly("service", spec.nodeId) {
+      client.services.inNamespace(namespace).withName(spec.nodeId).delete()
+    }
+    deleteQuietly("pod", spec.nodeId) {
+      client.pods.inNamespace(namespace).withName(spec.nodeId).delete()
+    }
+    deleteQuietly("token secret", tokenSecretNameFor(spec.nodeId)) {
+      client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(spec.nodeId)).delete()
+    }
+    tokens.remove(spec.nodeId)
+    ()
+  }
+
+  /** Run a delete, swallowing and logging any failure so partial-start cleanup never throws. */
+  private def deleteQuietly(kind: String, name: String)(op: => Any): Unit =
+    try
+      op
+      ()
+    catch
+      case e: Throwable =>
+        logger.warn(s"partial-start cleanup: failed to delete $kind $name: ${e.getMessage}")
 
   def stop(nodeId: String): IO[Unit] = IO.blocking {
     // Capture the pod's pool labels before delete -- after the API call
