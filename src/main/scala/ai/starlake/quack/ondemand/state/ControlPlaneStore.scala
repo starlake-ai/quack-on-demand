@@ -205,3 +205,13 @@ trait ControlPlaneStore:
     * from Main's shutdown hook so JVM exit returns connections cleanly to the broker.
     */
   def close(): Unit = ()
+
+  /** HA: JWT revocation rows shared across manager replicas. Defaults are no-ops so in-memory
+    * stores and test doubles stay revocation-free.
+    */
+  def insertRevokedJti(jti: String, expiresAt: java.time.Instant): Unit = ()
+  def listRevokedJti(): List[(String, java.time.Instant)]               = Nil
+  def purgeExpiredRevokedJti(now: java.time.Instant): Unit              = ()
+
+  /** Cheap liveness probe for readiness checks. */
+  def ping(): Boolean = true

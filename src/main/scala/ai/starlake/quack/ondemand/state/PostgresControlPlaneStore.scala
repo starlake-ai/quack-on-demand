@@ -1246,6 +1246,46 @@ final class PostgresControlPlaneStore(
       predicateSql = rs.getString("predicate_sql")
     )
 
+  // ---------------- HA: revocation + liveness ----------------
+
+  override def insertRevokedJti(jti: String, expiresAt: Instant): Unit = withConn { c =>
+    val st = c.prepareStatement(
+      "INSERT INTO qodstate_revoked_jti (jti, expires_at) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING"
+    )
+    try
+      st.setString(1, jti)
+      st.setTimestamp(2, java.sql.Timestamp.from(expiresAt))
+      st.executeUpdate()
+    finally st.close()
+  }
+
+  override def listRevokedJti(): List[(String, Instant)] = withConn { c =>
+    val st = c.prepareStatement("SELECT jti, expires_at FROM qodstate_revoked_jti")
+    try
+      val rs  = st.executeQuery()
+      val buf = scala.collection.mutable.ListBuffer.empty[(String, Instant)]
+      while rs.next() do buf += ((rs.getString(1), rs.getTimestamp(2).toInstant))
+      buf.toList
+    finally st.close()
+  }
+
+  override def purgeExpiredRevokedJti(now: Instant): Unit = withConn { c =>
+    val st = c.prepareStatement("DELETE FROM qodstate_revoked_jti WHERE expires_at < ?")
+    try
+      st.setTimestamp(1, java.sql.Timestamp.from(now))
+      st.executeUpdate()
+    finally st.close()
+  }
+
+  override def ping(): Boolean =
+    try
+      withConn { c =>
+        val st = c.prepareStatement("SELECT 1")
+        try st.executeQuery().next()
+        finally st.close()
+      }
+    catch case _: Throwable => false
+
   // ---------------- Snapshot ----------------
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
