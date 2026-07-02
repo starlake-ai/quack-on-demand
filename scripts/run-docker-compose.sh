@@ -22,9 +22,13 @@
 #                       load-tpch-dbgen.sh inside the container.
 #   LOAD_TPCDS          Same shape as LOAD_TPCH for TPC-DS into
 #                       globex/globex_tpcds via load-tpcds-dbgen.sh.
-#   LOAD_TPC            Legacy shortcut: equivalent to setting both
-#                       LOAD_TPCH=N and LOAD_TPCDS=N. Explicit per-bench
-#                       vars override. Either being set enables
+#   LOAD_SSB            Same shape for the SSB star schema (lineorder,
+#                       customer, supplier, part, dwdate), derived from
+#                       TPC-H dbgen into acme/acme_tpch schema ssb1 via
+#                       load-ssb-dbgen.sh.
+#   LOAD_TPC            Legacy shortcut: equivalent to setting LOAD_TPCH=N,
+#                       LOAD_TPCDS=N, and LOAD_SSB=N. Explicit per-bench
+#                       vars override. Any being set enables
 #                       QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml in
 #                       the quack container so the JVM imports the bundled
 #                       manifest on first boot.
@@ -48,7 +52,8 @@
 #   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
 #   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H only SF=1
 #   LOAD_TPCDS=10 ./scripts/run-docker-compose.sh              # + TPC-DS only SF=10
-#   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + both SF=1 (legacy)
+#   LOAD_SSB=1 ./scripts/run-docker-compose.sh                 # + SSB star schema SF=1
+#   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + all three SF=1 (legacy)
 #   LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh  # + both, independent SFs
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
 #   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
@@ -110,10 +115,11 @@ fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
 LOAD_TPC="${LOAD_TPC:-}"
-# Per-benchmark opt-ins; explicit values win over LOAD_TPC. Either being set
+# Per-benchmark opt-ins; explicit values win over LOAD_TPC. Any being set
 # enables the bootstrap YAML import below + the matching seed step.
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
 LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
+LOAD_SSB="${LOAD_SSB:-$LOAD_TPC}"
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -289,11 +295,12 @@ for p in "${_profiles[@]:-}"; do
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
-# ---- Inject QOD_BOOTSTRAP_YAML before up when either bench is requested ----
+# ---- Inject QOD_BOOTSTRAP_YAML before up when any bench is requested ----
 # The JVM reads this at startup, so it must be in .env before `docker compose up`.
 _want_tpch=0; [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]] && _want_tpch=1
 _want_tpcds=0; [[ -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]] && _want_tpcds=1
-if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
+_want_ssb=0; [[ -n "$LOAD_SSB" && "$LOAD_SSB" != "0" && "$LOAD_SSB" != "false" ]] && _want_ssb=1
+if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; then
   if ! grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
     printf '\nQOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml  # added by run-docker-compose.sh\n' >> "$ENV_FILE"
     echo "injected QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml into $ENV_FILE"
@@ -327,13 +334,13 @@ until code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:20900/api/
 done
 echo " ok (HTTP $code)"
 
-# ---- Optional demo seed (LOAD_TPCH / LOAD_TPCDS) ----
+# ---- Optional demo seed (LOAD_TPCH / LOAD_TPCDS / LOAD_SSB) ----
 # Each var is presence-triggered with the value doubling as that bench's
 # scale factor. Positive integers only; unset / empty / 0 / false skips.
-# LOAD_TPC=N from the legacy contract pre-populates both (see top-of-file
-# resolution); explicit per-bench vars override.
-if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
-  for _var in LOAD_TPCH LOAD_TPCDS; do
+# LOAD_TPC=N from the legacy contract pre-populates all three (see
+# top-of-file resolution); explicit per-bench vars override.
+if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; then
+  for _var in LOAD_TPCH LOAD_TPCDS LOAD_SSB; do
     _val="${!_var}"
     if [[ -n "$_val" && "$_val" != "0" && "$_val" != "false" ]]; then
       if ! [[ "$_val" =~ ^[0-9]+$ ]] || [[ "$_val" -lt 1 ]]; then
@@ -363,7 +370,8 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
   # does not fail on a missing database. Idempotent: the \gexec form only
   # runs CREATE DATABASE when pg_database.datname is absent.
   demo_dbs=()
-  [[ "$_want_tpch"  == "1" ]] && demo_dbs+=( acme_tpch )
+  # SSB lands in acme_tpch too (schema ssb1), so it needs the same database.
+  [[ "$_want_tpch" == "1" || "$_want_ssb" == "1" ]] && demo_dbs+=( acme_tpch )
   [[ "$_want_tpcds" == "1" ]] && demo_dbs+=( globex_tpcds )
   for demo_db in "${demo_dbs[@]}"; do
     echo "ensuring demo database '$demo_db' exists on the postgres container..."
@@ -409,6 +417,21 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" ]]; then
       -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCDS" \
       quack /app/scripts/load-tpcds-dbgen.sh
+  fi
+
+  if [[ "$_want_ssb" == "1" ]]; then
+    echo "seeding SSB (db=acme_tpch, schema=ssb1, SF=$LOAD_SSB) via docker compose exec quack ..."
+    docker compose -f "$COMPOSE_FILE" exec \
+      -e PG_HOST=postgres \
+      -e PG_PORT=5432 \
+      -e PG_USER="$pg_user" \
+      -e PG_PASS="$pg_pass" \
+      -e DB_NAME="acme_tpch" \
+      -e SCHEMA_NAME="ssb1" \
+      -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e TEMP_DIR="/app/ducklake/.tmp" \
+      -e SF="$LOAD_SSB" \
+      quack /app/scripts/load-ssb-dbgen.sh
   fi
 fi
 

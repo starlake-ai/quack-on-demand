@@ -26,7 +26,8 @@ cd quack-on-demand
 # NUKE=1            wipe the namespace before reinstalling
 # LOAD_TPCH=1       seed TPC-H into acme/acme_tpch at SF=1
 # LOAD_TPCDS=1      seed TPC-DS into globex/globex_tpcds at SF=1
-# LOAD_TPC=1        legacy shortcut for both (LOAD_TPCH=1 LOAD_TPCDS=1)
+# LOAD_SSB=1        derive the SSB star schema into acme/acme_tpch schema ssb1 at SF=1
+# LOAD_TPC=1        legacy shortcut for all three (LOAD_TPCH=1 LOAD_TPCDS=1 LOAD_SSB=1)
 # BUILD=1           rebuild the manager + Quack-node images from the tree
 ```
 

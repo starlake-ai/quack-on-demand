@@ -126,6 +126,7 @@ COPY --from=build --chown=quack:quack /quack-on-demand.jar           /app/quack-
 COPY --chown=quack:quack --chmod=0755 scripts/spawn-quack-node.sh    /app/scripts/spawn-quack-node.sh
 COPY --chown=quack:quack --chmod=0755 scripts/load-tpch-dbgen.sh     /app/scripts/load-tpch-dbgen.sh
 COPY --chown=quack:quack --chmod=0755 scripts/load-tpcds-dbgen.sh    /app/scripts/load-tpcds-dbgen.sh
+COPY --chown=quack:quack --chmod=0755 scripts/load-ssb-dbgen.sh      /app/scripts/load-ssb-dbgen.sh
 RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 
 USER quack

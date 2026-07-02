@@ -88,7 +88,7 @@ The wrapper exposes these host ports (override in `.env`):
 NUKE=1 ./scripts/run-docker-compose.sh
 
 # Seed the demo tenants before the manager is ready.
-# Numeric value = scale factor for BOTH TPC-H and TPC-DS.
+# Numeric value = scale factor for TPC-H, TPC-DS, and the SSB star schema.
 # (SF=1 is roughly 6M lineitem rows for TPC-H.)
 LOAD_TPC=1 ./scripts/run-docker-compose.sh
 
@@ -96,7 +96,7 @@ LOAD_TPC=1 ./scripts/run-docker-compose.sh
 NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
 ```
 
-`LOAD_TPC=1` seeds two demo tenants inside the container: `acme` loaded with TPC-H (8 tables in schema `tpch1`, database `acme_tpch`) and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`, database `globex_tpcds`). The bundled manifest `bootstrap-demo.yaml` declares the tenants, pools, roles, groups, and users; `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is injected into `.env` automatically so the JVM imports it on startup.
+`LOAD_TPC=1` seeds two demo tenants inside the container: `acme` loaded with TPC-H (8 tables in schema `tpch1`, database `acme_tpch`) plus the SSB star schema derived from it (5 tables in schema `ssb1`, same database), and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`, database `globex_tpcds`). Use `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` to seed each independently. The bundled manifest `bootstrap-demo.yaml` declares the tenants, pools, roles, groups, and users; `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is injected into `.env` automatically so the JVM imports it on startup.
 
 You can also seed a running stack directly:
 

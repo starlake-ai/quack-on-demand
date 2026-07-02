@@ -154,7 +154,7 @@ The pieces, one per row of the diagram:
 | `RELEASE` | `qod` | helm release name |
 | `BUILD` | `0` | `0` reuses local `:local`-tagged images (falling back to `:latest-snapshot` from Docker Hub if absent); `1` runs `docker build` first. Same convention as `scripts/run-jar.sh`. |
 | `NUKE` | `0` | `1` deletes the namespace before reinstalling - wipes the Postgres `emptyDir`, the helm release, and every Quack node pod. Mirrors `NUKE` in `scripts/run-jar.sh`. |
-| `LOAD_TPC` | unset | Demo seed. Unset = skip; positive integer = scale factor. Seeds both acme_tpch (TPC-H, `LOAD_TPC=1` approx 6M lineitem rows) and globex_tpcds (TPC-DS, `LOAD_TPC=1` approx 2.8M store_sales rows) inside the manager pod via the bundled loader scripts. No host duckdb required. |
+| `LOAD_TPC` | unset | Demo seed. Unset = skip; positive integer = scale factor. Seeds acme_tpch (TPC-H, `LOAD_TPC=1` approx 6M lineitem rows), globex_tpcds (TPC-DS, `LOAD_TPC=1` approx 2.8M store_sales rows), and the SSB star schema (acme_tpch schema `ssb1`, derived from TPC-H dbgen) inside the manager pod via the bundled loader scripts. `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` opt in per benchmark and override it. No host duckdb required. |
 
 ```bash
 # Fresh boot from a clean Postgres + TPC demo SF=1 seeded:

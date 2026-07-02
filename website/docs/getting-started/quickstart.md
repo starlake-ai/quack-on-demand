@@ -54,9 +54,10 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `run-jar.sh` on first boot, see [Native run](/getting-started/install#path-1)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Either this or `LOAD_TPCDS` being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `run-jar.sh` on first boot, see [Native run](/getting-started/install#path-1)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Any seed flag being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
 | `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
-| `LOAD_TPC=N` | Legacy shortcut: equivalent to setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N`. Explicit per-bench vars override it. |
+| `LOAD_SSB=N` | Seeds the SSB (Star Schema Benchmark) star schema at sf=N: 5 tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) derived from TPC-H dbgen into schema `ssb1` of `acme/acme_tpch`, next to the TPC-H tables and served by the same acme pools. |
+| `LOAD_TPC=N` | Legacy shortcut: equivalent to setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N`. Explicit per-bench vars override it. |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
 | `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
@@ -67,7 +68,7 @@ For a clean, freshly seeded environment in one shot, combine them. This wipes an
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-docker-compose.sh
 ```
 
-Either flag (or the legacy `LOAD_TPC=1` shortcut) imports the bundled manifest under `src/main/resources/bootstrap-demo.yaml`, which declares the tenants, roles, groups, and users for both `acme` and `globex`; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+Any seed flag (or the legacy `LOAD_TPC=1` shortcut, which enables all three) imports the bundled manifest under `src/main/resources/bootstrap-demo.yaml`, which declares the tenants, roles, groups, and users for both `acme` and `globex`; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 Pick one benchmark to keep boot snappy:
 

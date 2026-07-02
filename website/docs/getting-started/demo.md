@@ -3,31 +3,35 @@ id: demo
 title: Demo bootstrap (LOAD_TPCH / LOAD_TPCDS)
 ---
 
-`LOAD_TPCH=N` and `LOAD_TPCDS=N` turn a fresh install into a self-contained, fully populated multi-tenant demo. One command, the tenants you ask for, real datasets, a complete RBAC graph, and a cross-tenant federated catalog, all reproducible and all live against a real Postgres + DuckDB stack.
+`LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N` turn a fresh install into a self-contained, fully populated multi-tenant demo. One command, the tenants you ask for, real datasets, a complete RBAC graph, and a cross-tenant federated catalog, all reproducible and all live against a real Postgres + DuckDB stack.
 
 ```bash
-# native, both benchmarks at SF=1
+# native, both TPC benchmarks at SF=1
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
 
 # native, TPC-H only (fast path, ~10 s)
 NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
 
+# native, TPC-H + the SSB star schema derived from it
+NUKE=1 LOAD_TPCH=1 LOAD_SSB=1 ./scripts/run-jar.sh
+
 # docker compose, TPC-DS only at SF=10
 BUILD=1 NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh
 
-# kubernetes (local stack), both at independent scale factors
+# kubernetes (local stack), both TPC benchmarks at independent scale factors
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
-Each `N` is that benchmark's TPC scale factor. SF=1 is the fast path (~10 s of TPC-H + ~30 s of TPC-DS); SF=10 is ~5-10 minutes; SF=100+ takes hours and spills to disk. The legacy `LOAD_TPC=N` env var still works as a shortcut for setting both `LOAD_TPCH=N` and `LOAD_TPCDS=N` at the same SF; explicit per-benchmark vars override it.
+Each `N` is that benchmark's scale factor. SF=1 is the fast path (~10 s of TPC-H + ~30 s of TPC-DS); SF=10 is ~5-10 minutes; SF=100+ takes hours and spills to disk. The legacy `LOAD_TPC=N` env var still works as a shortcut for setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N` at the same SF; explicit per-benchmark vars override it.
 
 ## What gets created
 
 | Component | Where it comes from |
 |---|---|
-| Bundled manifest at `src/main/resources/bootstrap-demo.yaml` | Loaded into the JVM classpath; imported on boot via `DemoBootstrapHook` when `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is set (the launcher script sets this automatically whenever `LOAD_TPCH` or `LOAD_TPCDS` is non-empty). |
+| Bundled manifest at `src/main/resources/bootstrap-demo.yaml` | Loaded into the JVM classpath; imported on boot via `DemoBootstrapHook` when `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is set (the launcher script sets this automatically whenever any seed flag is non-empty). |
 | `acme_tpch` Postgres database, seeded with TPC-H | `scripts/load-tpch-dbgen.sh` forked by the launcher; runs DuckDB's `dbgen(sf=N)` and copies the 8 TPC-H tables into the DuckLake catalog. |
 | `globex_tpcds` Postgres database, seeded with TPC-DS | `scripts/load-tpcds-dbgen.sh` forked by the launcher; runs DuckDB's `dsdgen(sf=N)` and copies the 24 TPC-DS tables. |
+| Schema `ssb1` in `acme_tpch`, seeded with the SSB star schema (`LOAD_SSB=N`) | `scripts/load-ssb-dbgen.sh` forked by the launcher; runs DuckDB's `dbgen(sf=N)` and derives the 5 SSB tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) per the SSB spec's TPC-H mapping. No extra tenant or pool: the acme pools serve it, and the demo `tenant_admin` grant (`*.*.* ALL`) covers it. |
 | Two tenants, three pools, six quack nodes, an RBAC graph, a federated catalog | The bootstrap manifest is applied to the control plane, then `PoolSupervisor.reconcile` spawns nodes from each pool's role distribution. |
 
 ## Tenants and tenant-dbs
@@ -37,7 +41,7 @@ Each `N` is that benchmark's TPC scale factor. SF=1 is the fast path (~10 s of T
 | `acme` | `acme_tpch` (DuckLake on Postgres) | `tpch1` | `bi` (1 read-only + 1 dual), `etl` (1 write-only + 1 dual) |
 | `globex` | `globex_tpcds` (DuckLake on Postgres) | `tpcds1` | `bi` (1 read-only + 1 dual) |
 
-`acme` carries the TPC-H tables (`customer`, `lineitem`, `nation`, `orders`, `part`, `partsupp`, `region`, `supplier`). `globex` carries the TPC-DS tables (`store_sales`, `web_sales`, `catalog_sales`, `customer`, `customer_demographics`, and 19 others).
+`acme` carries the TPC-H tables (`customer`, `lineitem`, `nation`, `orders`, `part`, `partsupp`, `region`, `supplier`), plus, with `LOAD_SSB`, the SSB star schema in the sibling schema `ssb1` (`lineorder`, `customer`, `supplier`, `part`, `dwdate`; query them as `ssb1.<table>` since the pools default to `tpch1`). `globex` carries the TPC-DS tables (`store_sales`, `web_sales`, `catalog_sales`, `customer`, `customer_demographics`, and 19 others).
 
 ## Roles and verb-matrix
 

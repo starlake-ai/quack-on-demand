@@ -39,8 +39,11 @@
 #                    acme_tpch.tpch1 inside the manager pod. Unset = skip.
 #   LOAD_TPCDS       TPC-DS scale factor (positive integer) seeded into
 #                    globex_tpcds.tpcds1 inside the manager pod. Unset = skip.
-#   LOAD_TPC         Legacy shortcut: equivalent to setting both
-#                    LOAD_TPCH=N and LOAD_TPCDS=N. Explicit per-bench
+#   LOAD_SSB         SSB scale factor (positive integer): star schema derived
+#                    from TPC-H dbgen into acme_tpch.ssb1 inside the manager
+#                    pod. Unset = skip.
+#   LOAD_TPC         Legacy shortcut: equivalent to setting LOAD_TPCH=N,
+#                    LOAD_TPCDS=N, and LOAD_SSB=N. Explicit per-bench
 #                    vars override.
 #
 # Requires: kind, kubectl, helm, docker.
@@ -67,6 +70,7 @@ LOAD_TPC="${LOAD_TPC:-}"
 # Per-benchmark opt-ins. Explicit per-bench vars override LOAD_TPC.
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
 LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
+LOAD_SSB="${LOAD_SSB:-$LOAD_TPC}"
 MGR_HUB_IMAGE="${MGR_HUB_IMAGE:-starlakeai/quack-on-demand:latest-snapshot}"
 NODE_HUB_IMAGE="${NODE_HUB_IMAGE:-starlakeai/quack-on-demand-node:latest-snapshot}"
 
@@ -220,7 +224,7 @@ kubectl -n "$NAMESPACE" rollout status deploy/qod-landing --timeout=60s
 # ---- 4. helm install -----------------------------------------------------
 echo "[4/5] helm install $RELEASE..."
 HELM_EXTRA_ARGS=()
-if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
+if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
   HELM_EXTRA_ARGS+=(--set loadTpc.enabled=true)
 fi
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
@@ -271,12 +275,12 @@ kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/ingress.yaml"
 # Runs inside the manager pod via the bundled loader scripts.
 # The pod has cluster DNS so it reaches `postgres` + `seaweedfs` directly;
 # no host duckdb, no port-forward orchestration.
-# LOAD_TPCH and LOAD_TPCDS opt in independently (the legacy LOAD_TPC=N
-# shortcut is resolved at top-of-file into both).
-if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
+# LOAD_TPCH, LOAD_TPCDS, and LOAD_SSB opt in independently (the legacy
+# LOAD_TPC=N shortcut is resolved at top-of-file into all three).
+if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
   # Validate each scale factor independently. Skip-don't-fail on a bad
   # value so a fat-fingered env var doesn't tear down a successful stack.
-  want_tpch=0; want_tpcds=0
+  want_tpch=0; want_tpcds=0; want_ssb=0
   if [[ -n "$LOAD_TPCH" ]]; then
     if ! [[ "$LOAD_TPCH" =~ ^[0-9]+$ ]] || [[ "$LOAD_TPCH" -lt 1 ]]; then
       echo "[5/5] WARN: LOAD_TPCH='$LOAD_TPCH' is not a positive integer; skipping TPC-H." >&2
@@ -291,8 +295,15 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
       want_tpcds=1
     fi
   fi
-  if [[ "$want_tpch" == "1" || "$want_tpcds" == "1" ]]; then
-    echo "[5/5] seeding inside the manager pod: TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}"
+  if [[ -n "$LOAD_SSB" ]]; then
+    if ! [[ "$LOAD_SSB" =~ ^[0-9]+$ ]] || [[ "$LOAD_SSB" -lt 1 ]]; then
+      echo "[5/5] WARN: LOAD_SSB='$LOAD_SSB' is not a positive integer; skipping SSB." >&2
+    else
+      want_ssb=1
+    fi
+  fi
+  if [[ "$want_tpch" == "1" || "$want_tpcds" == "1" || "$want_ssb" == "1" ]]; then
+    echo "[5/5] seeding inside the manager pod: TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}, SSB=${LOAD_SSB:-skip}"
 
     MGR_DEPLOY=$(kubectl -n "$NAMESPACE" get deploy \
       -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/name=quack-on-demand" \
@@ -309,7 +320,8 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
     # parser, NOT by the server -- passing it through `psql -c` makes the
     # `\` part of the SQL and yields a syntax error.
     dbs_to_create=()
-    [[ "$want_tpch"  == "1" ]] && dbs_to_create+=( acme_tpch )
+    # SSB lands in acme_tpch too (schema ssb1), so it needs the same database.
+    [[ "$want_tpch" == "1" || "$want_ssb" == "1" ]] && dbs_to_create+=( acme_tpch )
     [[ "$want_tpcds" == "1" ]] && dbs_to_create+=( globex_tpcds )
     echo "[5/5] pre-creating ${dbs_to_create[*]} in Postgres..."
     for db in "${dbs_to_create[@]}"; do
@@ -349,6 +361,20 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-tpcds-dbgen.sh
+    fi
+
+    if [[ "$want_ssb" == "1" ]]; then
+      echo "[5/5] running SSB loader (acme_tpch.ssb1, SF=$LOAD_SSB)..."
+      kubectl -n "$NAMESPACE" exec "deploy/$MGR_DEPLOY" -- \
+        env PG_HOST=postgres PG_PORT=5432 PG_USER=postgres PG_PASS=azizam \
+            DB_NAME=acme_tpch SCHEMA_NAME=ssb1 \
+            SF="$LOAD_SSB" \
+            TEMP_DIR=/tmp/duckdb-ssb-load \
+            DATA_PATH="s3://qod-ducklake/acme_tpch" \
+            QOD_S3_ENDPOINT="http://seaweedfs:8333" \
+            QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
+            QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
+        /app/scripts/load-ssb-dbgen.sh
     fi
   fi
 fi

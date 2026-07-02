@@ -47,16 +47,17 @@ To stop the manager:
 
 ### Seeding the demo dataset for a quick smoke test
 
-Pass `LOAD_TPCH=1` and/or `LOAD_TPCDS=1` to seed each benchmark independently before the JVM starts. The `run-jar.sh` self-install above already provisions the DuckDB CLI the loaders need - no extra steps.
+Pass `LOAD_TPCH=1`, `LOAD_TPCDS=1`, and/or `LOAD_SSB=1` to seed each benchmark independently before the JVM starts. The `run-jar.sh` self-install above already provisions the DuckDB CLI the loaders need - no extra steps.
 
 ```bash
 LOAD_TPCH=1 ./scripts/run-jar.sh                          # TPC-H only (acme, ~10 s)
 LOAD_TPCDS=1 ./scripts/run-jar.sh                         # TPC-DS only (globex, ~30 s)
-LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh             # both
-LOAD_TPC=1 ./scripts/run-jar.sh                           # legacy shortcut for both
+LOAD_SSB=1 ./scripts/run-jar.sh                           # SSB star schema only (acme, ~15 s)
+LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh             # TPC-H + TPC-DS
+LOAD_TPC=1 ./scripts/run-jar.sh                           # legacy shortcut for all three
 ```
 
-Either flag seeds the matching demo tenant: `acme` loaded with TPC-H (8 tables in schema `tpch1`) or `globex` loaded with TPC-DS (24 tables in schema `tpcds1`). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+Each flag seeds the matching demo dataset: `acme` loaded with TPC-H (8 tables in schema `tpch1`), `globex` loaded with TPC-DS (24 tables in schema `tpcds1`), and/or the SSB star schema (5 tables in schema `ssb1`, derived from TPC-H dbgen and living next to `tpch1` in the `acme_tpch` tenant-db). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
 For a completely fresh start (drops the control-plane DB and wipes local state directories before booting):
 
