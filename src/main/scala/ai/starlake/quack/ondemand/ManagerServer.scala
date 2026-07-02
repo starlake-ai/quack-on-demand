@@ -62,8 +62,8 @@ final class ManagerServer(
     *   - **`cfg.apiKey` set**: every `/api/...` request must carry an `X-API-Key` header matching
     *     either the static key OR a known admin UI session token.
     *
-    * Always-open paths: `/api/auth/login`, `/api/config/client`, `/health`, and everything outside
-    * `/api/...` (incl. `/ui/...`).
+    * Always-open paths: `/api/auth/login`, `/api/config/client`, `/health`, `/ready`, and
+    * everything outside `/api/...` (incl. `/ui/...`).
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     // Treat an empty string the same as unset. Compose / k8s configs routinely
@@ -338,6 +338,7 @@ final class ManagerServer(
         tenantDbs.deleteTenantDb(req, key)(sessions.scopeOf)
       },
       Endpoints.health.serverLogic(_ => health.health),
+      Endpoints.ready.serverLogic(_ => health.ready),
       Endpoints.clientConfig.serverLogic(_ =>
         IO.pure(
           Right(

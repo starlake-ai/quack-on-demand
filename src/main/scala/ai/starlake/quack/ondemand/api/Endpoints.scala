@@ -115,9 +115,17 @@ object Endpoints:
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
+  /** Liveness probe: always 200 while the JVM is alive. No Postgres gate. */
   val health: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
     endpoint.get
       .in("health")
+      .errorOut(statusCode)
+      .out(jsonBody[HealthResponse])
+
+  /** Readiness probe: 503 until Postgres is reachable; 200 once it is. */
+  val ready: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
+    endpoint.get
+      .in("ready")
       .errorOut(statusCode)
       .out(jsonBody[HealthResponse])
 

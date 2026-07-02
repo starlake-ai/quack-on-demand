@@ -41,12 +41,22 @@ class HealthHandlerSpec extends AnyFlatSpec with Matchers:
   private def sup(): PoolSupervisor =
     new PoolSupervisor(new StubBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
 
-  "HealthHandler" should "return ok when the database is reachable" in {
+  "HealthHandler.health (liveness)" should "return ok when the database is reachable" in {
     val h = new HealthHandler(sup(), dbHealthy = () => true)
     h.health.unsafeRunSync().isRight shouldBe true
   }
 
+  it should "return ok even when the database is unreachable" in {
+    val h = new HealthHandler(sup(), dbHealthy = () => false)
+    h.health.unsafeRunSync().isRight shouldBe true
+  }
+
+  "HealthHandler.ready (readiness)" should "return ok when the database is reachable" in {
+    val h = new HealthHandler(sup(), dbHealthy = () => true)
+    h.ready.unsafeRunSync().isRight shouldBe true
+  }
+
   it should "return 503 when the database is unreachable" in {
     val h = new HealthHandler(sup(), dbHealthy = () => false)
-    h.health.unsafeRunSync() shouldBe Left(StatusCode.ServiceUnavailable)
+    h.ready.unsafeRunSync() shouldBe Left(StatusCode.ServiceUnavailable)
   }
