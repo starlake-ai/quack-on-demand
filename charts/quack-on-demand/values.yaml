@@ -15,8 +15,10 @@ image:
 imagePullSecrets: []
 
 # --- Replicas ---------------------------------------------------------------
-# Multi-manager active-active is not yet safe (see guides/RESILIENCE.md and #11).
-# Keep replicas=1 until Postgres advisory-lock leader election lands.
+# replicaCount > 1 turns on HA mode (QOD_HA_ENABLED=true): active-active
+# replicas with Postgres advisory-lock leader election. Requires
+# sessionJwtSecret (or existingSessionJwtSecret) so sessions verify on every
+# replica. See docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
 replicaCount: 1
 
 # Optional override for the rendered names. `fullnameOverride` wins if set.
@@ -61,7 +63,10 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 priorityClassName: ""
-terminationGracePeriodSeconds: 60   # gives in-flight FlightSQL statements time to finish (see guides/RESILIENCE.md)
+# Seconds the manager waits for in-flight statements before shutting down.
+# terminationGracePeriodSeconds is derived as drainTimeoutSec + 15 so Kubernetes
+# never SIGKILLs a still-draining manager. Raise for long-running queries.
+drainTimeoutSec: 60
 
 # --- Services (REST/UI + FlightSQL) -----------------------------------------
 service:
@@ -115,7 +120,7 @@ serviceMonitor:
 # Only created when replicaCount > 1 - single-manager deploys have no peer
 # to fail over to.
 pdb:
-  enabled: false
+  enabled: true
   minAvailable: 1
 
 # --- Postgres (external) -----------------------------------------------------
@@ -222,6 +227,12 @@ apiKey:
   value: ""
   existingSecret: ""
   existingSecretKey: apiKey
+
+# Session JWT signing key shared by all replicas. REQUIRED when replicaCount > 1.
+# Generate with: openssl rand -hex 32
+sessionJwtSecret: ""
+# Name of a pre-existing Secret with key "sessionJwtSecret" (takes precedence).
+existingSessionJwtSecret: ""
 
 # --- FlightSQL edge auth / TLS ---------------------------------------------
 flightsql:

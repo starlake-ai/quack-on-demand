@@ -209,6 +209,24 @@ final case class DefaultMetastoreConfig(
     "dataPath"   -> dataPath
   )
 
+final case class HaConfig(
+    @field @ConfigField(
+      envVar = "QOD_HA_ENABLED",
+      description = "Enable active-active multi-replica manager mode (Kubernetes runtime only)."
+    )
+    enabled: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_LEADER_RETRY_SEC",
+      description = "Seconds between leader-lock acquisition attempts and LISTEN polls."
+    )
+    leaderRetrySec: Int = 3,
+    @field @ConfigField(
+      envVar = "QOD_TOPOLOGY_REFRESH_SEC",
+      description = "Seconds between snapshot-refresh fallback passes in HA mode."
+    )
+    topologyRefreshSec: Int = 30
+)
+
 final case class ManagerConfig(
     @field @ConfigField(
       envVar = "QOD_ON_DEMAND_HOST",
@@ -280,6 +298,7 @@ final case class ManagerConfig(
           "periodic loop (reconcile still runs once at boot)."
     )
     reconcileIntervalSec: Int,
+    ha: HaConfig = HaConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =

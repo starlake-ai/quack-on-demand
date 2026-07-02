@@ -6,9 +6,17 @@ metadata:
   labels:
     {{- include "qod.labels" . | nindent 4 }}
 spec:
-  # Default replicas=1 - multi-manager active-active is not yet safe.
-  # See guides/RESILIENCE.md and issue #11.
   replicas: {{ .Values.replicaCount }}
+  {{- if gt (.Values.replicaCount | int) 1 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  {{- else }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "qod.selectorLabels" . | nindent 6 }}
@@ -37,7 +45,7 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ add (.Values.drainTimeoutSec | int) 15 }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
@@ -125,6 +133,21 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+            - name: QOD_DRAIN_TIMEOUT_SEC
+              value: {{ .Values.drainTimeoutSec | quote }}
+            {{- if gt (.Values.replicaCount | int) 1 }}
+            - name: QOD_HA_ENABLED
+              value: "true"
+            - name: QOD_SESSION_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "qod.sessionJwtSecretName" . | quote }}
+                  key: sessionJwtSecret
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
           livenessProbe:
             httpGet:
               path: /health
@@ -135,7 +158,7 @@ spec:
             failureThreshold:    {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: rest-ui
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds:       {{ .Values.probes.readiness.periodSeconds }}

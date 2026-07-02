@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import io.circe.parser.parse
 import io.circe.syntax._
@@ -36,7 +37,8 @@ final class PostgresControlPlaneStore(
     user: String,
     password: String,
     poolSize: Int = 20
-) extends ControlPlaneStore:
+) extends ControlPlaneStore
+    with LazyLogging:
 
   Class.forName("org.postgresql.Driver")
 
@@ -1245,6 +1247,61 @@ final class PostgresControlPlaneStore(
       tableName = rs.getString("table_name"),
       predicateSql = rs.getString("predicate_sql")
     )
+
+  // ---------------- HA: revocation + liveness ----------------
+
+  override def insertRevokedJti(jti: String, expiresAt: Instant): Unit = withConn { c =>
+    val st = c.prepareStatement(
+      "INSERT INTO qodstate_revoked_jti (jti, expires_at) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING"
+    )
+    try
+      st.setString(1, jti)
+      st.setTimestamp(2, java.sql.Timestamp.from(expiresAt))
+      st.executeUpdate()
+    finally st.close()
+  }
+
+  override def listRevokedJti(): List[(String, Instant)] = withConn { c =>
+    val st = c.prepareStatement("SELECT jti, expires_at FROM qodstate_revoked_jti")
+    try
+      val rs  = st.executeQuery()
+      val buf = scala.collection.mutable.ListBuffer.empty[(String, Instant)]
+      while rs.next() do buf += ((rs.getString(1), rs.getTimestamp(2).toInstant))
+      buf.toList
+    finally st.close()
+  }
+
+  override def purgeExpiredRevokedJti(now: Instant): Unit = withConn { c =>
+    val st = c.prepareStatement("DELETE FROM qodstate_revoked_jti WHERE expires_at < ?")
+    try
+      st.setTimestamp(1, java.sql.Timestamp.from(now))
+      st.executeUpdate()
+    finally st.close()
+  }
+
+  override def notifyListeners(channel: String, payload: String): Unit =
+    try
+      withConn { c =>
+        val st = c.prepareStatement("SELECT pg_notify(?, ?)")
+        try
+          st.setString(1, channel)
+          st.setString(2, payload)
+          st.executeQuery()
+        finally st.close()
+      }
+    catch
+      case t: Throwable =>
+        // Best effort: peers heal via the periodic refresh fallback.
+        logger.warn(s"pg_notify($channel) failed: ${t.getMessage}")
+
+  override def ping(): Boolean =
+    try
+      withConn { c =>
+        val st = c.prepareStatement("SELECT 1")
+        try st.executeQuery().next()
+        finally st.close()
+      }
+    catch case _: Throwable => false
 
   // ---------------- Snapshot ----------------
 

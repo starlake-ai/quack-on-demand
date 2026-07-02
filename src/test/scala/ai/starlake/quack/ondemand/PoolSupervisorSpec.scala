@@ -536,3 +536,40 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // Without cache invalidation we would still see Nil; with it the new policy is visible.
     sup.effectiveSetForUser(user.id).map(_.columnPolicies.map(_.columnName)) shouldBe
       Some(List("c_email"))
+
+  // ---------- restore() propagates deletions (HA peer-delete convergence) ----------
+
+  "restore()" should "drop a pool whose rows a peer deleted directly in the store" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val poolKey = PoolKey("acme", "acme_default", "sales")
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.get(poolKey).isDefined shouldBe true
+
+    // Simulate a peer's delete: remove the pool's node rows then the pool row
+    // straight through the store (FK RESTRICT requires nodes first).
+    val pid = sup.poolId(poolKey).get
+    store.listNodes(pid).foreach(n => store.deleteNode(n.nodeId))
+    store.deletePool(pid)
+
+    sup.restore()
+    sup.get(poolKey) shouldBe None
+    sup.list().map(_.key) should not contain poolKey
+
+  it should "drop a tenant a peer deleted directly in the store" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenant(Tenant("ghost")).unsafeRunSync()
+    sup.getTenantById("ghost").isDefined shouldBe true
+
+    // Peer deletes the childless tenant directly in the store.
+    store.deleteTenant("ghost")
+
+    sup.restore()
+    sup.getTenantById("ghost") shouldBe None
+    sup.listTenants().map(_.id) should not contain "ghost"
