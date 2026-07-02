@@ -158,7 +158,7 @@ spec:
             failureThreshold:    {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: rest-ui
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds:       {{ .Values.probes.readiness.periodSeconds }}

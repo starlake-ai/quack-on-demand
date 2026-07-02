@@ -72,6 +72,27 @@ When the leader pod is killed or evicted:
 - The local backend (`QOD_BACKEND=local`) refuses to start with `QOD_HA_ENABLED`.
   HA requires `QOD_BACKEND=kubernetes`.
 
+### Enabling HA on an existing single-replica deployment
+
+Upgrade the manager image first at `replicaCount: 1` (the default `Recreate`
+strategy means no pod overlap), then scale to 2 or more in a separate
+`helm upgrade`. Bumping the image and `replicaCount` in a single upgrade
+briefly overlaps an old binary (without HA advisory-lock guards) with the new
+HA pod, which is the exact double-fire hazard the per-pool locks are designed
+to prevent.
+
+### FlightSQL load balancing and reconnect behavior
+
+The FlightSQL Service must remain connection-level (L4) load balancing; nothing
+may split a single client connection across replicas (no per-RPC L7 gRPC
+balancing) because open transactions and pinned quack-node routing state live
+for the lifetime of the connection.
+
+If a client reconnects mid-transaction (for example after a failover), the
+pinned quack node's open transaction is rolled back the same way as after a
+single-manager restart (node-side session cleanup); the client must retry the
+entire transactional flow from scratch.
+
 ### Spec reference
 
 Full design rationale and edge-case analysis:

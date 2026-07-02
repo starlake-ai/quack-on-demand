@@ -76,7 +76,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 |---|---|---|
 | `image.repository` | `starlakeai/quack-on-demand` | |
 | `image.tag` | `""` (uses `Chart.AppVersion`) | |
-| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`); requires `sessionJwtSecret` or `existingSessionJwtSecret`. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
+| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`); requires `sessionJwtSecret` or `existingSessionJwtSecret` (the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
 | `admin.existingSecret` | `""` | Recommended for prod. Inline `admin.password` is dev-only. |
@@ -123,10 +123,10 @@ Without one of those two, leave it off.
 
 ## Operational notes
 
-- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Requires `sessionJwtSecret` or `existingSessionJwtSecret`. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md).
+- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Requires `sessionJwtSecret` or `existingSessionJwtSecret`; when using `existingSessionJwtSecret`, the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md).
 - **K8s API scope** - manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
 - **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
-- **Probes** - both liveness and readiness target `/health`. Readiness gates traffic until `PoolSupervisor.restore() + reconcile()` finish, so a rolling restart doesn't briefly 503.
+- **Probes** - liveness targets `/health` (always 200 while the JVM is alive); readiness targets `/ready` (503 until Postgres is reachable). Readiness gates traffic until Postgres connectivity is confirmed, so a rolling restart doesn't briefly serve requests against an unavailable control plane.
 - **drainTimeoutSec** (`QOD_DRAIN_TIMEOUT_SEC`) - default 60 s. Gives in-flight FlightSQL streams a chance to finish before the JVM is killed. `terminationGracePeriodSeconds` is derived as `drainTimeoutSec + 15` (default 75 s).
 
 ## Uninstall
