@@ -36,6 +36,7 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
+import ai.starlake.quack.ondemand.ha.HaPreconditions
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
   ManagementAuthMode,
@@ -84,6 +85,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
+  given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -101,6 +103,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
+  given ConfigReader[HaConfig]               = deriveReader[HaConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -111,6 +114,8 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
   given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
+
+  private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
 
   def run(args: List[String]): IO[ExitCode] =
     args match
@@ -136,6 +141,16 @@ object Main extends IOApp with LazyLogging:
     val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+
+    HaPreconditions
+      .validate(
+        mgrCfg.ha.enabled,
+        mgrCfg.runtimeType,
+        mgrCfg.auth.management.sessionJwtSecret,
+        DevSessionJwtSecret
+      )
+      .left
+      .foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
@@ -324,7 +339,6 @@ object Main extends IOApp with LazyLogging:
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(new CatalogHandlers(reader, kindOf))
 
-    val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
       logger.warn(
         "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
