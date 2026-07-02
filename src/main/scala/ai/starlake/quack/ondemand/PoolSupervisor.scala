@@ -55,7 +55,16 @@ final class PoolSupervisor(
       * [[ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader]] cache so the per-tenant-db
       * Hikari pool releases its connections + heap on delete.
       */
-    onTenantDbDeleted: (String, String) => Unit = (_, _) => ()
+    onTenantDbDeleted: (String, String) => Unit = (_, _) => (),
+    /** Cross-replica per-pool lock. In non-HA mode the
+      * [[ai.starlake.quack.ondemand.ha.PoolLocker.noop]] default makes every wrap a pass-through,
+      * so single-manager behavior is unchanged. Under HA a
+      * [[ai.starlake.quack.ondemand.ha.PgPoolLocker]] serializes a pool's mutations against the
+      * leader's reconcile pass so neither ever observes half-written node rows.
+      */
+    locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop,
+    publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
+      ai.starlake.quack.ondemand.ha.StateChangePublisher.noop
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -105,10 +114,26 @@ final class PoolSupervisor(
       .maximumSize(10_000L)
       .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
 
-  /** Drop every cached `EffectiveSet`. Called from every RBAC mutator so a freshly-granted role or
-    * pool permission takes effect on the next handshake, not after a TTL window.
+  /** Drop every cached `EffectiveSet` without broadcasting. Used by [[restore]] and by peer
+    * notification handlers: broadcasting from those paths would echo forever across replicas.
     */
-  private def invalidateEffectiveCache(): Unit = effectiveCache.invalidateAll()
+  private def invalidateEffectiveCacheLocal(): Unit = effectiveCache.invalidateAll()
+
+  /** Drop every cached `EffectiveSet` and notify peer replicas. Called from every RBAC mutator so a
+    * freshly-granted role or pool permission takes effect on the next handshake, not after a TTL
+    * window.
+    */
+  private def invalidateEffectiveCache(): Unit =
+    invalidateEffectiveCacheLocal()
+    publish.rbacChanged()
+
+  /** Broadcast both channels after a store mutation performed OUTSIDE the supervisor's own mutators
+    * (e.g. manifest YAML import writes rows via ManifestImporter). restore() itself never
+    * broadcasts, so external writers call this once after their restore().
+    */
+  def broadcastStateChanged(): Unit =
+    publish.topologyChanged()
+    publish.rbacChanged()
 
   // ---------- Bootstrap / replay ----------
 
@@ -137,6 +162,33 @@ final class PoolSupervisor(
 
   def restore(): Unit =
     val snap = store.snapshot()
+
+    // Diff-aware rehydration: restore() is also driven by peer NOTIFY handlers,
+    // so a row a peer DELETED must disappear from this replica's mirror, not just
+    // get overwritten. Compute the snapshot key sets first, propagate deletions,
+    // then upsert. Removing before putting avoids a window where a surviving
+    // entry is briefly missing.
+    val snapTenantIds   = snap.tenants.iterator.map(_.id).toSet
+    val snapTenantDbIds = snap.tenantDbs.iterator.map(_.id).toSet
+    val snapPoolIds     = snap.pools.iterator.map(_.id).toSet
+
+    // Rebuild the PoolKey set exactly as the upsert pass below derives it: a pool
+    // contributes a key only when its tenant-db and tenant both resolve in the snapshot.
+    val tdById                     = snap.tenantDbs.iterator.map(td => td.id -> td).toMap
+    val tById                      = snap.tenants.iterator.map(t => t.id -> t).toMap
+    val snapPoolKeys: Set[PoolKey] = snap.pools.iterator.flatMap { p =>
+      for
+        td <- tdById.get(p.tenantDbId)
+        t  <- tById.get(td.tenantId)
+      yield PoolKey(t.id, td.name, p.name)
+    }.toSet
+
+    tenants.keys.toList.filterNot(snapTenantIds).foreach(tenants.remove)
+    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(tenantDbs.remove)
+    poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
+    pools.keys.toList.filterNot(snapPoolKeys).foreach(pools.remove)
+    poolIdByKey.keys.toList.filterNot(snapPoolKeys).foreach(poolIdByKey.remove)
+
     snap.tenants.foreach(t => tenants.put(t.id, t))
     snap.tenantDbs.foreach(td => tenantDbs.put(td.id, td))
     snap.pools.foreach(p => poolRows.put(p.id, p))
@@ -168,7 +220,9 @@ final class PoolSupervisor(
     // Hand the RBAC graph to the resolver in one shot. Subsequent
     // mutations are mirrored incrementally by the methods below.
     rbacResolver.replace(snap)
-    invalidateEffectiveCache()
+    // Local-only: restore() is called by peer-notification handlers; broadcasting here
+    // would cause infinite echo across replicas.
+    invalidateEffectiveCacheLocal()
 
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db. Runs in a single
     * controlled session per tenant-db so concurrent node ATTACHes do not race on the
@@ -209,12 +263,36 @@ final class PoolSupervisor(
     * by `Main`; cancellation is the normal shutdown exit. Drained pools (zero distribution) are
     * left alone -- reconcile only respawns when the persisted distribution is non-zero.
     */
-  def reconcileLoop(interval: scala.concurrent.duration.FiniteDuration): IO[Unit] =
-    (reconcile().handleErrorWith { t =>
+  def reconcileLoop(
+      interval: scala.concurrent.duration.FiniteDuration,
+      gate: () => Boolean = () => true
+  ): IO[Unit] =
+    ((if gate() then reconcile() else IO.unit).handleErrorWith { t =>
       IO.delay(logger.warn(s"reconcile loop: pass failed, continuing: ${t.getMessage}"))
     } *> IO.sleep(interval)).foreverM.void
 
   private def reconcilePool(key: PoolKey, state: PoolState): IO[PoolState] =
+    locks.withLock(key) {
+      reconcilePoolUnlocked(key, state)
+    }
+
+  private def reconcilePoolUnlocked(key: PoolKey, state: PoolState): IO[PoolState] =
+    // Re-read the pool's persisted node rows INSIDE the advisory lock so a second
+    // lock holder acts on the first holder's committed writes, not on the pre-lock
+    // PoolState that reconcile()'s fold captured. Deferred via IO.blocking so the
+    // read runs when withLock's bracket executes this IO (i.e. after the lock is
+    // acquired), not eagerly at IO-construction time. Fall back to the passed state
+    // when the pool id or rows are missing (InMemory / no-row cases), preserving
+    // today's behavior including the empty-nodes spawn-from-distribution path.
+    IO.blocking {
+      poolId(key) match
+        case Some(pid) =>
+          val rows = store.listNodes(pid)
+          if rows.nonEmpty then state.copy(nodes = rows) else state
+        case None => state
+    }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
+
+  private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh
       // YAML bootstrap (ManifestImporter writes the pool row but does
@@ -263,7 +341,7 @@ final class PoolSupervisor(
         .flatMap { newNodes =>
           if newNodes.zip(state.nodes).exists((a, b) => a ne b) then
             val updated = state.copy(nodes = newNodes)
-            IO.delay(pools.put(key, updated)).as(updated)
+            IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
           else IO.pure(state)
         }
 
@@ -307,9 +385,9 @@ final class PoolSupervisor(
           case Some(pid) =>
             running
               .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, pid)))
-              .as(updated)
+              .map { _ => publish.topologyChanged(); updated }
           case None =>
-            IO.pure(updated)
+            IO.delay { publish.topologyChanged(); updated }
       }
 
   /** Find the cohort placement that owns the node at 1-based `index` in the pool's deterministic
@@ -492,6 +570,7 @@ final class PoolSupervisor(
           tenants.put(withId.id, withId)
           rbacResolver.putRole(adminRole)
           rbacResolver.putRolePermission(adminPerm)
+          publish.topologyChanged()
           Right(withId)
   }
 
@@ -502,6 +581,7 @@ final class PoolSupervisor(
         val updated = t.copy(disabled = disabled)
         store.upsertTenant(updated)
         tenants.put(updated.id, updated)
+        publish.topologyChanged()
         Right(updated)
   }
 
@@ -524,6 +604,7 @@ final class PoolSupervisor(
           val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
           store.upsertTenant(updated)
           tenants.put(updated.id, updated)
+          publish.topologyChanged()
           Right(updated)
   }
 
@@ -549,6 +630,7 @@ final class PoolSupervisor(
           }
           store.deleteTenant(t.id)
           tenants.remove(t.id)
+          publish.topologyChanged()
           Right(())
   }
 
@@ -618,10 +700,12 @@ final class PoolSupervisor(
                             )
                         store.upsertTenantDb(td)
                         tenantDbs.put(td.id, td)
+                        publish.topologyChanged()
                         Right(td)
                   case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                     store.upsertTenantDb(td)
                     tenantDbs.put(td.id, td)
+                    publish.topologyChanged()
                     Right(td)
   }
 
@@ -651,6 +735,7 @@ final class PoolSupervisor(
                       s"deleteTenantDb: control-plane row removed but " +
                         s"DROP DATABASE \"${td.name}\" failed: $err"
                     )
+                publish.topologyChanged()
                 Right(())
     }
 
@@ -676,7 +761,7 @@ final class PoolSupervisor(
       // matters at node-init time: initSql runs FIRST so PRAGMAs are in
       // effect before any federation source's ATTACH.
       initSql: String = ""
-  ): IO[List[RunningNode]] = IO.defer {
+  ): IO[List[RunningNode]] = locks.withLock(key)(IO.defer {
     val size = dist.total
     require(
       dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
@@ -807,11 +892,12 @@ final class PoolSupervisor(
                   .foldLeft(IO.unit)((acc, n) =>
                     acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
                   )
+                  .map(_ => publish.topologyChanged())
                   .as(running)
               }
           }
         }
-  }
+  })
 
   def setPoolDisabled(key: PoolKey, disabled: Boolean): IO[Either[String, Pool]] = IO.blocking {
     pools.get(key) match
@@ -824,6 +910,7 @@ final class PoolSupervisor(
             store.upsertPool(updated)
             poolRows.put(updated.id, updated)
             pools.put(key, state.copy(disabled = disabled))
+            publish.topologyChanged()
             Right(updated)
   }
 
@@ -836,8 +923,9 @@ final class PoolSupervisor(
         val newNodes = state.nodes.map(x => if x.nodeId == nodeId then u else x)
         pools.put(key, state.copy(nodes = newNodes))
         poolIdByKey.get(key) match
-          case Some(pid) => IO.blocking(store.upsertNode(u, pid)).as(Some(u))
-          case None      => IO.pure(Some(u))
+          case Some(pid) =>
+            IO.blocking(store.upsertNode(u, pid)).map { _ => publish.topologyChanged(); Some(u) }
+          case None => IO.delay { publish.topologyChanged(); Some(u) }
 
   def scale(
       key: PoolKey,
@@ -846,6 +934,16 @@ final class PoolSupervisor(
       force: Boolean
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
+    locks.withLock(key) {
+      scaleUnlocked(key, targetSize, newDist, force)
+    }
+
+  private def scaleUnlocked(
+      key: PoolKey,
+      targetSize: Int,
+      newDist: RoleDistribution,
+      force: Boolean
+  ): IO[List[RunningNode]] =
     pools.get(key) match
       case None        => IO.raiseError(new NoSuchElementException(s"pool not found: $key"))
       case Some(state) =>
@@ -925,7 +1023,7 @@ final class PoolSupervisor(
                 (if poolId.nonEmpty then
                    added
                      .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolId)))
-                 else IO.unit).as(combined)
+                 else IO.unit).map { _ => publish.topologyChanged(); combined }
               }
 
   /** Stop every node of the pool but KEEP the pool itself registered. The pool row survives in the
@@ -945,6 +1043,11 @@ final class PoolSupervisor(
     * merely scales it to 0.
     */
   def deletePool(key: PoolKey, force: Boolean): IO[Unit] =
+    locks.withLock(key) {
+      deletePoolUnlocked(key, force)
+    }
+
+  private def deletePoolUnlocked(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match
       case None        => IO.unit
       case Some(state) =>
@@ -967,6 +1070,7 @@ final class PoolSupervisor(
             }
             pools.remove(key)
             poolIdByKey.remove(key)
+            publish.topologyChanged()
           }
 
   private def drainAndStop(n: RunningNode): IO[Unit] = backend.stop(n.nodeId)

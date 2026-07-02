@@ -36,6 +36,14 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
+import ai.starlake.quack.ondemand.ha.{
+  HaCoordinator,
+  HaPreconditions,
+  PgPoolLocker,
+  PgStateChangePublisher,
+  PoolLocker,
+  StateChangePublisher
+}
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
   ManagementAuthMode,
@@ -84,6 +92,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
+  given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -101,6 +110,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
+  given ConfigReader[HaConfig]               = deriveReader[HaConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -111,6 +121,8 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
   given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
+
+  private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
 
   def run(args: List[String]): IO[ExitCode] =
     args match
@@ -136,6 +148,16 @@ object Main extends IOApp with LazyLogging:
     val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+
+    HaPreconditions
+      .validate(
+        mgrCfg.ha.enabled,
+        mgrCfg.runtimeType,
+        mgrCfg.auth.management.sessionJwtSecret,
+        DevSessionJwtSecret
+      )
+      .left
+      .foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
@@ -232,6 +254,12 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // Control-plane JDBC coordinates, derived once from the same keys
+    // `fromDefaultMetastore` uses. HA leader election and cross-replica
+    // NOTIFY (topology / RBAC / revocation) run against this database.
+    val meta      = mgrCfg.defaultMetastore.asMap
+    val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
+    val haOn      = mgrCfg.ha.enabled
     // Per-tenant-db Postgres provisioning. The admin connection opens
     // against the `postgres` system DB and issues CREATE/DROP DATABASE
     // for each `qodstate_tenant_db` row the supervisor manages.
@@ -276,6 +304,15 @@ object Main extends IOApp with LazyLogging:
         try removed.close()
         catch case _: Throwable => ()
 
+    // HA collaborators are wired only when ha.enabled=true. With HA off they
+    // stay at their process-local no-op defaults: no advisory locks are taken
+    // and no NOTIFY is emitted, so single-manager mode opens no extra
+    // connection and behaves exactly as before.
+    val poolLocks =
+      if haOn then new PgPoolLocker(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
+      else PoolLocker.noop
+    val publisher =
+      if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
     val sup = new PoolSupervisor(
       backend,
       tracker,
@@ -283,7 +320,9 @@ object Main extends IOApp with LazyLogging:
       mgrCfg.defaultMetastore.asMap,
       dbAdmin,
       federationBlobOf,
-      onTenantDbDeleted = evictCatalogReader
+      onTenantDbDeleted = evictCatalogReader,
+      locks = poolLocks,
+      publish = publisher
     )
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
@@ -306,7 +345,19 @@ object Main extends IOApp with LazyLogging:
     val nodes     = new NodeHandlers(sup, tracker)
     val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
-    val health    = new HealthHandler(sup)
+
+    val healthCache =
+      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
+    def dbHealthy(): Boolean =
+      val (ts, ok) = healthCache.get()
+      val now      = System.nanoTime()
+      if now - ts < 5_000_000_000L then ok
+      else
+        val fresh = store.ping()
+        healthCache.set((now, fresh))
+        fresh
+
+    val health = new HealthHandler(sup, dbHealthy)
 
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
@@ -324,7 +375,6 @@ object Main extends IOApp with LazyLogging:
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(new CatalogHandlers(reader, kindOf))
 
-    val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
       logger.warn(
         "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
@@ -333,8 +383,49 @@ object Main extends IOApp with LazyLogging:
       )
     val sessionTokens = new SessionTokenStore(
       secret = mgrCfg.auth.management.sessionJwtSecret,
-      maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds
+      maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds,
+      onRevoke = (jti, exp) =>
+        // Persistence + NOTIFY are best-effort and unconditional: in single-manager
+        // mode notifyListeners is a no-op signal (no listeners) and insert keeps the
+        // denylist durable across restarts. A Postgres blip during logout must never
+        // throw out of revoke(); the local in-process denylist stays authoritative.
+        try
+          store.insertRevokedJti(jti, exp)
+          store.notifyListeners("qod_revocation", s"$jti|${exp.getEpochSecond}")
+        catch
+          case t: Throwable =>
+            logger.warn(
+              s"onRevoke: persisting/notifying revocation of jti=$jti failed " +
+                s"(${t.getClass.getSimpleName}: ${t.getMessage}); local denylist still authoritative"
+            )
     )
+
+    // Leader elector + LISTEN dispatcher. Present only under HA. Handlers close
+    // over `sup` and `sessionTokens`: topology/RBAC NOTIFYs re-restore the
+    // supervisor cache and reseed the revocation denylist; a revocation NOTIFY
+    // adds the single jti directly (falling back to a full refresh on a
+    // malformed payload).
+    val coordinator = Option.when(haOn) {
+      def refreshFromStore(): Unit =
+        sup.restore()
+        sessionTokens.seedRevoked(store.listRevokedJti())
+      new HaCoordinator(
+        cpJdbcUrl,
+        meta("pgUser"),
+        meta("pgPassword"),
+        scala.concurrent.duration.DurationInt(mgrCfg.ha.leaderRetrySec).seconds,
+        handlers = Map(
+          "qod_topology"   -> (_ => refreshFromStore()),
+          "qod_rbac"       -> (_ => refreshFromStore()),
+          "qod_revocation" -> { payload =>
+            payload.split('|') match
+              case Array(jti, epoch) =>
+                sessionTokens.addRevoked(jti, java.time.Instant.ofEpochSecond(epoch.toLong))
+              case _ => refreshFromStore()
+          }
+        )
+      )
+    }
     val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
     // System scope (bare /ui/) login mode mirrors identitySource; per-tenant logins resolve their
     // mode from the tenant's authProvider via the resolver below.
@@ -805,33 +896,70 @@ object Main extends IOApp with LazyLogging:
       // in-memory cache reflects the imported state; reconcile() then sees
       // those pools and can spawn nodes. Inverting the order leaves the
       // REST/UI reading from an empty cache after a fresh boot.
-      DemoBootstrapHook.run(
-        env = sys.env.get,
-        readFile = path =>
-          if path.startsWith("classpath:") then
-            val resource = path.stripPrefix("classpath:")
-            scala.util.Try {
-              val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
-                .getOrElse(
-                  throw new java.io.FileNotFoundException(
-                    s"classpath resource not found: $resource"
+      // Decide initial leadership synchronously before the boot sequence.
+      // `coordinator.forall(_.isLeader)` is true when HA is off (None), so the
+      // single-manager path is preserved exactly. The follower branch skips
+      // bootstrap/init/discover/reconcile (the leader owns those) but still
+      // restores its in-memory cache and seeds the revocation denylist.
+      //
+      // The leader-only duties are extracted into `leaderDuties` so they can run
+      // EITHER at boot (this branch) OR later on promotion (haRefreshFiber tick)
+      // when every replica happened to boot as a follower (a transient
+      // coordinator-connection failure). `leaderDutiesDone` guards against them
+      // ever running twice: boot's leader branch sets it; the refresh tick
+      // checks-then-sets it only on success.
+      val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
+      def leaderDuties: IO[Unit] =
+        DemoBootstrapHook.run(
+          env = sys.env.get,
+          readFile = path =>
+            if path.startsWith("classpath:") then
+              val resource = path.stripPrefix("classpath:")
+              scala.util.Try {
+                val stream = Option(getClass.getClassLoader.getResourceAsStream(resource))
+                  .getOrElse(
+                    throw new java.io.FileNotFoundException(
+                      s"classpath resource not found: $resource"
+                    )
                   )
+                scala.util.Using.resource(stream)(s =>
+                  scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
                 )
-              scala.util.Using.resource(stream)(s =>
-                scala.io.Source.fromInputStream(s, "UTF-8").getLines().mkString("\n")
-              )
-            }
-          else
-            scala.util.Using(
-              scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
-            )(_.getLines().mkString("\n"))
-        ,
-        store = store,
-        fedStore = manifestFedStore
-      ) *>
-        IO.delay(sup.restore()) *>
-        sup.ensureDuckLakeInitialized() *>
-        sup.reconcile() *>
+              }
+            else
+              scala.util.Using(
+                scala.io.Source.fromFile(path)(using scala.io.Codec.UTF8)
+              )(_.getLines().mkString("\n"))
+          ,
+          store = store,
+          fedStore = manifestFedStore
+        ) *>
+          IO.delay(sup.restore()) *>
+          sup.ensureDuckLakeInitialized() *>
+          // Latent-bug fix: repopulate the K8s per-pod token cache from the
+          // qod-token-* Secrets before reconcile() adopts pods. No-op in
+          // local mode (returns empty). Runs on the leader (and always in
+          // single-manager mode, which takes this branch).
+          backend
+            .discoverExisting()
+            .flatMap(found =>
+              IO.delay(logger.info(s"discovered ${found.size} pre-existing node(s)"))
+            ) *>
+          sup.reconcile() *>
+          IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+
+      IO.delay(coordinator.foreach(_.tickNow())) *>
+        (if coordinator.forall(_.isLeader) then leaderDuties *> IO.delay(leaderDutiesDone.set(true))
+         else
+           IO.delay(
+             logger.info("ha: booting as follower; leader owns bootstrap/init/reconcile")
+           ) *>
+             IO.delay(sup.restore()) *>
+             IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))) *>
+        // Single-manager deployments never run the HA leader periodic purge, so
+        // do a one-shot purge at boot (unconditional) to keep expired denylist
+        // rows from accumulating.
+        IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
         mgr.serve.use { _ =>
           logger.info(
             s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
@@ -852,6 +980,10 @@ object Main extends IOApp with LazyLogging:
                   try edge.stop()
                   catch case _: Throwable => ()
                   try backend.cleanup().unsafeRunSync()
+                  catch case _: Throwable => ()
+                    // Release the leader lock + LISTEN connection. Terminal +
+                    // idempotent; safe to run before the pools are drained.
+                  try coordinator.foreach(_.close())
                   catch case _: Throwable => ()
                     // Drain the JDBC connection pools. Both close()s are
                     // idempotent + no-op if already closed.
@@ -914,21 +1046,70 @@ object Main extends IOApp with LazyLogging:
               // Periodic reconcile: respawn nodes that die while the manager is
               // up (boot only ran reconcile once). Disabled when the interval is
               // 0, in which case the fiber is a no-op we still cancel uniformly.
-              val reconcileFiber =
+              // Under HA only the leader reconciles; the gate is `true` when HA
+              // is off (coordinator None), so single-manager mode is unchanged.
+              val reconcileGate: () => Boolean = () => coordinator.forall(_.isLeader)
+              val reconcileFiber               =
                 if mgrCfg.reconcileIntervalSec > 0 then
                   logger.info(s"periodic reconcile every ${mgrCfg.reconcileIntervalSec}s")
                   sup
                     .reconcileLoop(
-                      scala.concurrent.duration.DurationInt(mgrCfg.reconcileIntervalSec).seconds
+                      scala.concurrent.duration.DurationInt(mgrCfg.reconcileIntervalSec).seconds,
+                      reconcileGate
                     )
                     .start
                 else
                   logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
                   IO.unit.start
 
+              // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
+              val coordinatorFiber = coordinator match
+                case Some(c) => c.loop.start
+                case None    => IO.unit.start
+
+              // Follower/leader convergence loop: periodically re-restore the
+              // supervisor cache and reseed the denylist (a safety net beyond
+              // the NOTIFY handlers); the leader also purges expired jtis.
+              val haRefreshFiber = coordinator match
+                case Some(c) =>
+                  val period =
+                    scala.concurrent.duration.DurationInt(mgrCfg.ha.topologyRefreshSec).seconds
+                  // On promotion (this replica became leader after booting a
+                  // follower), run the leader duties exactly once. Guarded by its
+                  // own handleErrorWith so a duty failure neither sets the flag
+                  // (retried next tick) nor aborts the rest of this tick's refresh.
+                  val promoteDuties: IO[Unit] =
+                    if c.isLeader && !leaderDutiesDone.get then
+                      (leaderDuties *> IO.delay(leaderDutiesDone.set(true)))
+                        .handleErrorWith(t =>
+                          IO.delay(
+                            logger.warn(
+                              s"ha promotion: leader duties failed, will retry next tick: ${t.getMessage}"
+                            )
+                          )
+                        )
+                    else IO.unit
+                  (promoteDuties *> IO
+                    .blocking {
+                      sup.restore()
+                      sessionTokens.seedRevoked(store.listRevokedJti())
+                      if c.isLeader then store.purgeExpiredRevokedJti(java.time.Instant.now())
+                    }
+                    .handleErrorWith(t =>
+                      IO.delay(logger.warn(s"ha refresh: pass failed, continuing: ${t.getMessage}"))
+                    ) *> IO.sleep(period)).foreverM.void.start
+                case None => IO.unit.start
+
               healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
                 reconcileFiber.flatMap { rcFiber =>
-                  IO.never[Unit].guarantee(fiber.cancel *> rcFiber.cancel *> gracefulShutdown)
+                  coordinatorFiber.flatMap { coFiber =>
+                    haRefreshFiber.flatMap { hrFiber =>
+                      IO.never[Unit]
+                        .guarantee(
+                          fiber.cancel *> rcFiber.cancel *> coFiber.cancel *> hrFiber.cancel *> gracefulShutdown
+                        )
+                    }
+                  }
                 }
               }
             case Left(t) =>

@@ -49,6 +49,18 @@ The control plane lives in a dedicated Postgres database (`qod` by default) hold
 
 The legacy `file` mode (single JSON blob) was dropped 2026-06-12 along with the `stateStorage` and `statePath` config keys -- `PostgresControlPlaneStore` is always wired. Connections come from a HikariCP pool (size 20 on the control-plane store, 10 on `UserStore`); `close()` on the trait is called from the manager's shutdown hook.
 
+### HA mode (opt-in, Kubernetes only)
+
+`QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N active-active managers.
+All replicas serve REST + FlightSQL; one holds a Postgres session advisory lock
+(`HaCoordinator`) and runs the singleton duties (reconcile respawns, bootstrap,
+DuckLake init, revoked-jti purge). Pool mutations serialize across replicas via
+per-pool advisory locks (`PoolLocker`); caches propagate via LISTEN/NOTIFY on
+`qod_topology` / `qod_rbac` / `qod_revocation` with a periodic snapshot-refresh
+fallback. JWT revocations persist in `qodstate_revoked_jti`. HA with the local
+backend is refused at config load. See
+docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
+
 ### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 
 The auth/ACL/session config types and the DuckLake catalog resolver live under [quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/) and [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/). The pureconfig `ProductHint`s in [Main.scala](src/main/scala/ai/starlake/quack/Main.scala) override the `derives ConfigReader` defaults to use camelCase (matching `application.conf`) instead of pureconfig's kebab-case.

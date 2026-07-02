@@ -1,0 +1,10 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0014-qodstate-revoked-jti
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_revoked_jti
+            columns:
+              - column: { name: jti,        type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: expires_at, type: TIMESTAMP WITH TIME ZONE, constraints: { nullable: false } }
