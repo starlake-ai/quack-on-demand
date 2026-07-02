@@ -150,4 +150,129 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
       TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, pgMeta, "s3://bucket/path/to-data_01")
     TenantDb.validate(td) shouldBe None
   }
+
+  // --- SQL-injection hardening on pg* connection params (single-quoted literals) ---
+
+  it should "reject a pgPassword containing a single quote" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgPassword", "p'; ATTACH 'evil' AS e; --"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("pgPassword")
+  }
+
+  it should "reject a pgPassword containing a semicolon" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgPassword", "p;drop"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("pgPassword")
+  }
+
+  it should "accept a pgPassword with other symbols but no literal-breaking chars" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgPassword", "aB3$%^&*()-_=+.,<>?/|{}[]~`"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td) shouldBe None
+  }
+
+  it should "reject a pgUser containing a single quote" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgUser", "u' OR '1'='1"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("pgUser")
+  }
+
+  it should "reject a pgHost containing a semicolon" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgHost", "host'; DETACH x; --"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("pgHost")
+  }
+
+  it should "reject a non-numeric pgPort" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta.updated("pgPort", "5432; DROP"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td).get should include("pgPort")
+  }
+
+  it should "accept a numeric pgPort" in {
+    val td =
+      TenantDb(
+        "td-1",
+        "t-1",
+        "tpch1",
+        TenantDbKind.DuckLake,
+        pgMeta.updated("pgPort", "5433"),
+        "/x"
+      )
+    TenantDb.validate(td) shouldBe None
+  }
+
+  // --- duckdb-file dbName is caller-supplied and must be an identifier ---
+
+  it should "reject a duckdb-file dbName containing a double quote" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "db\"; USE bad", "schemaName" -> "main"),
+      "/tmp/foo.duckdb"
+    )
+    TenantDb.validate(td).get should include("dbName")
+  }
+
+  it should "reject a duckdb-file dbName containing a space" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "db name", "schemaName" -> "main"),
+      "/tmp/foo.duckdb"
+    )
+    TenantDb.validate(td).get should include("dbName")
+  }
+
+  it should "accept a normal duckdb-file dbName" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "tpch", "schemaName" -> "main"),
+      "/tmp/foo.duckdb"
+    )
+    TenantDb.validate(td) shouldBe None
+  }
 }

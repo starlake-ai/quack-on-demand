@@ -264,9 +264,13 @@ object ManifestImporter:
                 defaultDatabase = mtd.defaultDatabase,
                 defaultSchema = mtd.defaultSchema
               )
-              store.upsertTenantDb(upserted)
-              localDbs.put(mtd.name, upserted)
-              applyFederatedSources(federatedStore, mtd, tdId, errs)
+              TenantDb.validate(upserted) match
+                case Some(err) =>
+                  errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
+                case None =>
+                  store.upsertTenantDb(upserted)
+                  localDbs.put(mtd.name, upserted)
+                  applyFederatedSources(federatedStore, mtd, tdId, errs)
         }
 
         // ---- Pools: delete-then-upsert, keyed by (tenant, pool name).
