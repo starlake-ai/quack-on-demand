@@ -55,3 +55,19 @@ class SessionTokenStoreSpec extends AnyFlatSpec, Matchers:
     store.get(t2) shouldBe None
     fired shouldBe 0
   }
+
+  // revoke() keeps the store transparent: the local denylist is updated BEFORE
+  // onRevoke fires, so even a throwing onRevoke (a Postgres blip in the Main
+  // wiring) leaves the token denied. The best-effort try/catch that swallows the
+  // throw lives in Main's onRevoke lambda, not here, so revoke() must still
+  // propagate the failure at this layer.
+  it should "deny the token even when onRevoke throws (denylist updated before the hook)" in {
+    val store = new SessionTokenStore(
+      secret = TestSecret,
+      onRevoke = (_, _) => throw new RuntimeException("simulated postgres blip")
+    )
+    val token = store.mintWithScope(profile, scope)
+    intercept[RuntimeException](store.revoke(token))
+    // Local denylist is authoritative regardless of the hook outcome.
+    store.get(token) shouldBe None
+  }
