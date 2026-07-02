@@ -47,8 +47,6 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     ).!
     assert(rc == 0, s"psql ($sql) exit=$rc")
 
-  @volatile private var storeJdbcUrl: String = ""
-
   /** Fresh DB + migrated schema, with the store wired against it and the JDBC URL visible to the
     * test.
     */
@@ -63,7 +61,6 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try
       val url = dbUrl(dbName)
-      storeJdbcUrl = url
       new LiquibaseRunner(url, pgUser, pgPass).run()
       test(new PostgresControlPlaneStore(url, pgUser, pgPass), url)
     finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
@@ -446,9 +443,9 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
   }
 
   "HA: notifications" should "deliver pg_notify to a listening connection" in withStoreAndUrl {
-    (store, _) =>
-      // withStoreAndUrl gives us the db name via storeJdbcUrl; open a raw listener on it.
-      val listener = java.sql.DriverManager.getConnection(storeJdbcUrl, pgUser, pgPass)
+    (store, url) =>
+      // withStoreAndUrl gives us the db name via url; open a raw listener on it.
+      val listener = java.sql.DriverManager.getConnection(url, pgUser, pgPass)
       try
         listener.createStatement().execute("LISTEN qod_topology")
         store.notifyListeners("qod_topology", "hello")
