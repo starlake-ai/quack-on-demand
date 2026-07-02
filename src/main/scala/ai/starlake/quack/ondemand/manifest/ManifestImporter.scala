@@ -264,7 +264,11 @@ object ManifestImporter:
                 defaultDatabase = mtd.defaultDatabase,
                 defaultSchema = mtd.defaultSchema
               )
-              TenantDb.validate(upserted) match
+              // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
+              // schemaName keys (they are merged from the default metastore at spawn time), so we
+              // must not enforce required-key presence here. We still reject any interpolation-
+              // breaking metacharacter in the values that ARE supplied.
+              TenantDb.validateSafety(upserted) match
                 case Some(err) =>
                   errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
                 case None =>
