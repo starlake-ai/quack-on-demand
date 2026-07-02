@@ -7,6 +7,14 @@ reachability. Severities below are POST-verification and state their gating
 conditions explicitly. The just-merged HA code was audited separately and is out
 of scope here.
 
+## Remediation status (updated 2026-07-02)
+
+The three default-reachable HIGH findings are **SOLVED** and merged to main
+(commits 4feea27, f2bf610, 0d9f239 for #1; 9142c5f for #2; b2e4c86 for #7).
+Every finding below carries an inline **Status:** line. Findings gated behind
+the default-off `acl.enabled` / `rls.enabled` flags (#3, #4, #5) and the
+lower-severity items (#6, #8) remain **OPEN** as a follow-up backlog.
+
 ## Load-bearing context (changes how to read everything below)
 
 - **ACL enforcement is OFF by default.** `acl.enabled=false` in application.conf;
@@ -28,6 +36,14 @@ of scope here.
 ## Findings, ranked
 
 ### 1. Authenticated SQL injection into node bootstrap (HIGH, default-reachable)
+**Status: SOLVED (4feea27, f2bf610, 0d9f239).** `TenantDb.validate` now rejects
+injection metacharacters in `schemaName`, `dbName`, `dataPath`, and the `pg*`
+connection params (`pgHost/pgUser/pgPassword` denylist, `pgPort` numeric) at the
+control-plane trust boundary, protecting both the local and Kubernetes backends;
+`spawn-quack-node.sh` also quotes SQL identifiers. Manifest import runs the
+injection-safety subset (`TenantDb.validateSafety`) so it does not wrongly demand
+keys sourced from the default metastore. Original report:
+
 `scripts/spawn-quack-node.sh:182-193` interpolates `schemaName` and `dataPath`
 (and `dbName` for `duckdb-file`/`memory` tenant-db kinds) UNQUOTED into DuckDB
 bootstrap SQL (`CREATE SCHEMA`, `USE`, `ATTACH ... AS`, `DATA_PATH '...'`).
@@ -45,6 +61,12 @@ Fix: allowlist/slug `schemaName` like `dbName`; reject quote/semicolon in
 `dataPath`; quote identifiers in the script. Affects both backends.
 
 ### 2. Cross-tenant privilege escalation via membership edges (HIGH/MEDIUM)
+**Status: SOLVED (9142c5f).** `addUserRole` / `addUserGroup` / `addGroupRole`
+now enforce that the referenced role/group shares the principal's tenant at the
+supervisor layer (so every REST caller is covered), superusers are rejected from
+acquiring tenant-scoped roles, and the false MembershipHandlers comment was
+corrected. Original report:
+
 `PoolSupervisor.membershipCheck` (PoolSupervisor.scala:1433) validates only that
 the user and role EXIST, not that they share a tenant. `MembershipHandlers`
 gates `addUserRole` on the USER's tenant and `addGroupRole` on the GROUP's
@@ -61,6 +83,7 @@ membershipCheck; correct or delete the false comment. Note: a prior memory item
 recorded "no privilege escalation on grant", this is a gap in that.
 
 ### 3. ACL parser fail-open bypasses (CRITICAL/HIGH, ACL-enabled only)
+**Status: OPEN** (gated behind default-off `acl.enabled`; highest remaining priority).
 All admitted via the empty-access-set fail-open. Confined to same-tenant except 3c.
 - 3a CTE name-shadowing (TableExtractor.scala:141): the CTE filter matches the
   UNQUALIFIED name, so `WITH lineitem AS (...) SELECT * FROM db.main.lineitem`
@@ -83,6 +106,7 @@ add the missing walker arms; fail closed on any node type the walker does not
 recognize.
 
 ### 4. EXPLAIN ANALYZE executes DML past the ACL gate (HIGH, ACL-enabled only)
+**Status: OPEN** (gated behind default-off `acl.enabled`).
 `StatementClassifier.scala:64` buckets EXPLAIN as read (read node);
 `SqlParser.scala:204` puts `ExplainStatement` in the ControlFlow admit-all arm.
 Verified against JSQLParser 5.3.218 that `EXPLAIN ANALYZE DELETE/INSERT/UPDATE`
@@ -93,6 +117,7 @@ write (no node-side write lock found). Fix: classify EXPLAIN by its inner
 statement, or deny EXPLAIN ANALYZE with a non-read body.
 
 ### 5. RLS/CLS security-filter bypasses (MEDIUM, RLS/CLS-enabled only)
+**Status: OPEN** (gated behind default-off, experimental `rls.enabled`/`cls.enabled`).
 - 5a Fail-open on parse failure (RowPolicyRewriter.scala:104,
   ColumnPolicyRewriter.scala:90): the rewriters use single-statement
   `CCJSqlParserUtil.parse` while the ACL gate uses multi-statement
@@ -108,6 +133,7 @@ Fix: rewriters should fail closed (deny) on parse failure when a policy applies;
 retry must send `finalSql`.
 
 ### 6. Prepared-statement revocation lag & handle sharing (MEDIUM/LOW)
+**Status: OPEN.**
 `FlightProducerImpl.scala:334,853` execute with the EffectiveSet captured at
 Prepare time; a grant revoked mid-session is bypassed for the handle's lifetime
 (until ClosePreparedStatement; connection-context TTL default ~1h). The handle
@@ -117,6 +143,13 @@ guessing infeasible). Fix: re-derive authorization per call from the live sessio
 or bound handle lifetime to the session TTL.
 
 ### 7. K8s orphaned pods/secrets + stuck pool on spawn failure (HIGH for K8s)
+**Status: SOLVED (b2e4c86).** `KubernetesQuackBackend.start` now deletes the pod,
+service, and per-pod token secret on failure (via `onError` + `onCancel`,
+best-effort), which prevents orphan accumulation and lets reconcile respawn the
+deterministic nodeId cleanly instead of dead-locking on a name conflict. The
+shared per-pool federation secret is intentionally left (GC'd by `stop()`).
+Original report:
+
 `KubernetesQuackBackend.start` (line 200-229) creates token/federation Secrets and
 the pod before `waitReady`, which `sys.error`s on timeout with no cleanup;
 `createPool`'s spawn fold has no bracket/rollback and `store.upsertPool` already
@@ -127,6 +160,7 @@ in a bracket that deletes pod+secrets on failure, or set an ownerReference so
 K8s GCs them; make reconcile adopt/replace conflicting pods.
 
 ### 8. Lower-severity confirmed items
+**Status: OPEN** (all items below).
 - FlightProducerImpl forwards internal exception text (SQL, node hostnames) to
   Flight clients at many sites (INTERNAL.withDescription(t.getMessage)); info leak.
 - LocalQuackBackend leaks a leased port when `pb.start()` throws (no try-finally);
@@ -162,8 +196,12 @@ Open `/api/*` when `QOD_API_KEY` unset; well-known dev `QOD_SESSION_JWT_SECRET`;
 them fail-closed (refuse to bind non-loopback with defaults) rather than warn.
 
 ## Top fix priorities
-1. spawn-script injection (#1): validate schemaName/dataPath, quote identifiers. Default-reachable by a tenant admin.
-2. membership cross-tenant edge (#2): enforce tenant equality; fix the false comment.
-3. K8s spawn-failure orphans + stuck pool (#7): bracket cleanup / owner refs.
-4. ACL fail-closed on empty access set + missing walker arms (#3, #4): the whole ACL cluster collapses to safe once the validator denies empty-set and the walker fails closed. Only matters for ACL-enabled deployments but is the right structural fix.
-5. RLS fail-closed + retry sends finalSql (#5).
+1. ~~spawn-script injection (#1)~~ **DONE** (4feea27, f2bf610, 0d9f239).
+2. ~~membership cross-tenant edge (#2)~~ **DONE** (9142c5f).
+3. ~~K8s spawn-failure orphans + stuck pool (#7)~~ **DONE** (b2e4c86).
+4. ACL fail-closed on empty access set + missing walker arms (#3, #4): **OPEN**. The whole ACL cluster collapses to safe once the validator denies empty-set and the walker fails closed. Only matters for ACL-enabled deployments but is the right structural fix. Highest remaining priority.
+5. RLS fail-closed + retry sends finalSql (#5): **OPEN** (RLS/CLS default-off, experimental).
+
+Remaining OPEN backlog: #3, #4, #5 (ACL/RLS-gated), #6 (prepared-statement
+revocation lag / handle sharing), and the #8 lower-severity items, plus the
+documented-by-design defaults. None are default-reachable HIGH.
