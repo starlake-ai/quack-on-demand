@@ -1,7 +1,12 @@
 // src/test/scala/ai/starlake/quack/security/InMemoryAuthService.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.edge.auth.{AuthenticatedProfile, AuthenticationService, AuthScope, BasicAuthProvider}
+import ai.starlake.quack.edge.auth.{
+  AuthScope,
+  AuthenticatedProfile,
+  AuthenticationService,
+  BasicAuthProvider
+}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -9,85 +14,75 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig,
   GoogleAuthConfig,
   JwtAuthConfig,
-  KeycloakAuthConfig,
-  OAuthConfig
+  KeycloakAuthConfig
 }
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import at.favre.lib.crypto.bcrypt.BCrypt
 
-/** Shared test helpers for an in-memory auth chain backed by
-  * [[InMemoryControlPlaneStore]]. Extracted from [[ManagerServerHarness]] so
-  * [[FlightEdgeHarness]] can reuse them without duplicating the implementation.
+/** Shared test helpers for an in-memory auth chain backed by [[InMemoryControlPlaneStore]].
+  * Extracted from [[ManagerServerHarness]] so [[FlightEdgeHarness]] can reuse them without
+  * duplicating the implementation.
   */
 object InMemoryAuthService:
 
-  /** An all-disabled [[AuthenticationConfig]] that prevents any external
-    * connection from being opened by the [[AuthenticationService]] base
-    * constructor. Mirrors the pattern used in AuthHandlersSpec.
+  /** An all-disabled [[AuthenticationConfig]] that prevents any external connection from being
+    * opened by the [[AuthenticationService]] base constructor. Mirrors the pattern used in
+    * AuthHandlersSpec.
     */
   val emptyAuthConfig: AuthenticationConfig = AuthenticationConfig(
     roleClaim = "role",
     database = DatabaseAuthConfig(
-      enabled     = false,
-      jdbcUrl     = "",
-      username    = "",
-      password    = "",
+      enabled = false,
+      jdbcUrl = "",
+      username = "",
+      password = "",
       systemQuery = "",
       tenantQuery = ""
     ),
     keycloak = KeycloakAuthConfig(
-      enabled      = false,
-      baseUrl      = "",
-      realm        = "",
-      clientId     = "",
+      enabled = false,
+      baseUrl = "",
+      realm = "",
+      clientId = "",
       clientSecret = ""
     ),
     google = GoogleAuthConfig(
-      enabled               = false,
-      clientId              = "",
-      clientSecret          = "",
-      groupsLookup          = false,
+      enabled = false,
+      clientId = "",
+      clientSecret = "",
+      groupsLookup = false,
       serviceAccountKeyPath = "",
       groupsCacheTtlSeconds = 0L
     ),
     azure = AzureAuthConfig(
-      enabled      = false,
-      tenantId     = "",
-      clientId     = "",
+      enabled = false,
+      tenantId = "",
+      clientId = "",
       clientSecret = ""
     ),
     aws = AwsAuthConfig(
-      enabled    = false,
-      region     = "",
+      enabled = false,
+      region = "",
       userPoolId = "",
-      clientId   = ""
+      clientId = ""
     ),
     jwt = JwtAuthConfig(
-      secretKey     = "",
+      secretKey = "",
       publicKeyPath = "",
-      issuer        = "",
-      audience      = ""
-    ),
-    oauth = OAuthConfig(
-      enabled               = false,
-      port                  = 0,
-      baseUrl               = "",
-      scopes                = "",
-      sessionTimeoutSeconds = 0,
-      disableTls            = true
+      issuer = "",
+      audience = ""
     )
   )
 
   /** [[BasicAuthProvider]] that resolves credentials directly from the
     * [[InMemoryControlPlaneStore]] -- no Postgres or network round-trip.
     */
-  final class InMemoryBasicAuthProvider(store: InMemoryControlPlaneStore)
-      extends BasicAuthProvider:
+  final class InMemoryBasicAuthProvider(store: InMemoryControlPlaneStore) extends BasicAuthProvider:
 
     val name = "in-memory"
 
     def authenticate(
-        scope:    AuthScope,
+        scope: AuthScope,
         username: String,
         password: String
     ): Either[String, AuthenticatedProfile] =
@@ -103,25 +98,25 @@ object InMemoryAuthService:
               case Some(u) =>
                 Right(
                   AuthenticatedProfile(
-                    username   = u.username,
-                    role       = u.role,
-                    groups     = Set.empty,
-                    claims     = Map.empty,
+                    username = u.username,
+                    role = u.role,
+                    groups = Set.empty,
+                    claims = Map.empty,
                     authMethod = "in-memory",
-                    tenant     = u.tenant
+                    tenant = u.tenant
                   )
                 )
           else Left("invalid credentials")
 
-  /** [[AuthenticationService]] subclass whose parent constructor opens no
-    * external connections (all providers disabled via [[emptyAuthConfig]]) and
-    * whose `authenticateBasic` is wired to the in-memory provider.
+  /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all
+    * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the
+    * in-memory provider.
     *
-    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`,
-    * driving the `auth_disabled` 503 branch in auth handlers end-to-end.
+    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`, driving the
+    * `auth_disabled` 503 branch in auth handlers end-to-end.
     */
   final class Service(
-      store:            InMemoryControlPlaneStore,
+      store: InMemoryControlPlaneStore,
       providersEnabled: Boolean
   ) extends AuthenticationService(emptyAuthConfig, "test-jwt-secret"):
 
@@ -130,7 +125,7 @@ object InMemoryAuthService:
     override val hasProviders: Boolean = providersEnabled
 
     override def authenticateBasic(
-        scope:    AuthScope,
+        scope: AuthScope,
         username: String,
         password: String
     ): Either[String, AuthenticatedProfile] =

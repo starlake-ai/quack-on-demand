@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>ai.starlake.quack</groupId>
+  <artifactId>quack-on-demand-java-example</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <description>FlightSQL query client for Quack-on-Demand, in Java over the Arrow Flight SQL JDBC driver.</description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <arrow.version>17.0.0</arrow.version>
+    <!-- The main class exec:java runs; override with -Dqod.mainClass=...Tpch -->
+    <qod.mainClass>ai.starlake.quack.example.Query</qod.mainClass>
+  </properties>
+
+  <dependencies>
+    <!-- Fat JDBC driver: bundles Arrow, gRPC and the Flight SQL client. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>flight-sql-jdbc-driver</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <!-- Quiet slf4j binding so the driver's INFO chatter stays out of the output. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.13</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.3.0</version>
+        <configuration>
+          <mainClass>${qod.mainClass}</mainClass>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

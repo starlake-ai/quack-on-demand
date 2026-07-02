@@ -51,7 +51,8 @@ final class ManagerServer(
     path == "/api/auth/login" || path == "/api/config/client" ||
       path == "/api/auth/mode" ||
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
-      path == "/api/auth/oidc/logout"
+      path == "/api/auth/oidc/logout" ||
+      path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback"
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
@@ -159,6 +160,10 @@ final class ManagerServer(
       },
       Endpoints.oidcLogout.serverLogicSuccess { case (sessionCookie, proto) =>
         auth.oidcLogout(sessionCookie, proto)
+      },
+      Endpoints.sqlTokenStart.serverLogicSuccess(proto => auth.sqlTokenStart(proto)),
+      Endpoints.sqlTokenCallback.serverLogicSuccess { case (code, state, error, cookie, proto) =>
+        auth.sqlTokenCallback(code, state, error, cookie, proto)
       }
     )
 

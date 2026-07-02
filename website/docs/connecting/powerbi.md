@@ -55,7 +55,7 @@ The OAuth endpoints and client ID are **compiled into the `.mez`** (`OAuthConfig
 
 A `.mez` is the connector packaged unsigned. It loads in Power BI Desktop after lowering the data-extensions security setting. This pre-built release supports **Username / Password** and **Key (static JWT)** authentication; for **OAuth** build from source (Option 2) so your IdP endpoints are baked in.
 
-1. Download `QoD-<version>.mez` from the [release page](https://github.com/starlake-ai/pbi-adbc-driver/releases).
+1. Download `QoD-<version>.mez` from the [release page](https://github.com/starlake-ai/qod-powerbi-connector/releases).
 2. Copy it into `%UserProfile%\Documents\Power BI Desktop\Custom Connectors\` (create the folder if missing).
 3. In Power BI Desktop, open **File -> Options and settings -> Options -> Security -> Data Extensions** and select **`(Not Recommended) Allow any extension to load without validation or warning.`** *(In a French UI: **Fichier -> Options et paramètres -> Options -> Sécurité -> Extensions du connecteur de données**, then the `(Non recommandé) Autoriser le chargement de toutes les extensions sans validation et avertissement` option.)*
 4. **Restart Power BI Desktop fully** - close every running `PBIDesktop.exe`. Connectors load at startup; the security change does not apply to an already-running session.
@@ -70,8 +70,8 @@ Build from source when you need **OAuth**, or want to change any compiled-in con
 **1. Get the source:**
 
 ```sh
-git clone https://github.com/starlake-ai/pbi-adbc-driver.git
-cd pbi-adbc-driver
+git clone https://github.com/starlake-ai/qod-powerbi-connector.git
+cd qod-powerbi-connector
 ```
 
 **2. For OAuth, edit `OAuthConfig` in `src/QoD.pq`** to point at your identity provider. Example for a Keycloak realm `qod`:
@@ -192,7 +192,7 @@ MakePQX verify QoD.pqx
 
 - **Restart** Power BI Desktop fully (or the gateway service).
 
-The same `.pqx` + thumbprint trust works on the on-premises gateway. Full publisher/admin detail is in the connector's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md).
+The same `.pqx` + thumbprint trust works on the on-premises gateway. Full publisher/admin detail is in the connector's [INSTALL.md](https://github.com/starlake-ai/qod-powerbi-connector/blob/main/INSTALL.md).
 
 ## Connect
 
@@ -243,4 +243,4 @@ The connector advertises `SupportsDirectQuery = true`, so the **Connect** vs **I
 | Auth fails with `no connection context for peer anonymous-...` | The deployed `.mez` is older than the per-call-credential fix. The credential must ride a custom call header (handled in the current `.mez`); update to the latest release. |
 | Slow refresh on Basic auth | Quack BCrypt-verifies on every RPC. For high-volume refresh prefer a JWT (Key) credential or set up OAuth - both are validated more cheaply (signature only, no hashing). |
 
-See also: the connector project's [INSTALL.md](https://github.com/starlake-ai/pbi-adbc-driver/blob/main/INSTALL.md) for build and gateway-deployment details.
+See also: the connector project's [INSTALL.md](https://github.com/starlake-ai/qod-powerbi-connector/blob/main/INSTALL.md) for build and gateway-deployment details.

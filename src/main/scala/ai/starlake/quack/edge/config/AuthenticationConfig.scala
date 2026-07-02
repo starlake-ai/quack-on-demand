@@ -173,39 +173,6 @@ case class JwtAuthConfig(
     audience: String
 ) derives ConfigReader
 
-case class OAuthConfig(
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_ENABLED",
-      description = "Enable the browser-based OAuth (auth-code grant) flow."
-    )
-    enabled: Boolean,
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_PORT",
-      description = "Local port the OAuth callback server listens on."
-    )
-    port: Int,
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_BASE_URL",
-      description = "Externally-reachable base URL for OAuth callbacks."
-    )
-    baseUrl: String,
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_SCOPES",
-      description = "OAuth scopes requested at authorization time."
-    )
-    scopes: String,
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_SESSION_TIMEOUT_SEC",
-      description = "OAuth-session timeout in seconds."
-    )
-    sessionTimeoutSeconds: Int,
-    @field @ConfigField(
-      envVar = "QOD_AUTH_OAUTH_DISABLE_TLS",
-      description = "Disable TLS on the OAuth callback server (dev only)."
-    )
-    disableTls: Boolean
-) derives ConfigReader
-
 case class AuthenticationConfig(
     @field @ConfigField(
       envVar = "QOD_AUTH_ROLE_CLAIM",
@@ -218,5 +185,55 @@ case class AuthenticationConfig(
     azure: AzureAuthConfig,
     aws: AwsAuthConfig,
     jwt: JwtAuthConfig,
-    oauth: OAuthConfig
+    @field @ConfigField(
+      envVar = "QOD_AUTH_OAUTH_SCOPES",
+      description = "OAuth scopes requested at authorization time for the browser SQL-token flow."
+    )
+    oauthScopes: String = "openid profile email"
 ) derives ConfigReader
+
+object AuthenticationConfig:
+  val disabled: AuthenticationConfig = AuthenticationConfig(
+    roleClaim = "",
+    database = DatabaseAuthConfig(
+      enabled = false,
+      jdbcUrl = "",
+      username = "",
+      password = "",
+      systemQuery = "",
+      tenantQuery = ""
+    ),
+    keycloak = KeycloakAuthConfig(
+      enabled = false,
+      baseUrl = "",
+      realm = "",
+      clientId = "",
+      clientSecret = ""
+    ),
+    google = GoogleAuthConfig(
+      enabled = false,
+      clientId = "",
+      clientSecret = "",
+      groupsLookup = false,
+      serviceAccountKeyPath = "",
+      groupsCacheTtlSeconds = 0L
+    ),
+    azure = AzureAuthConfig(
+      enabled = false,
+      tenantId = "",
+      clientId = "",
+      clientSecret = ""
+    ),
+    aws = AwsAuthConfig(
+      enabled = false,
+      region = "",
+      userPoolId = "",
+      clientId = ""
+    ),
+    jwt = JwtAuthConfig(
+      secretKey = "",
+      publicKeyPath = "",
+      issuer = "",
+      audience = ""
+    )
+  )
