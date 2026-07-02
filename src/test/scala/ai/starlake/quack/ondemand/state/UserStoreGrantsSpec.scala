@@ -4,21 +4,26 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Integration test against the `qodstate_user` table. Skipped when `QOD_PG_HOST` is not set. Uses
-  * the same default-metastore env-vars the rest of the manager runs against, so a local
-  * `docker compose up -d postgres` is enough.
+/** Integration test against the `qodstate_user` table. Cancelled (not failed) when `QOD_PG_HOST` is
+  * not set. Uses the same default-metastore env-vars the rest of the manager runs against, so a
+  * local `docker compose up -d postgres` is enough.
   */
 class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
 
   private val pgHost = sys.env.getOrElse("QOD_PG_HOST", "")
-  assume(pgHost.nonEmpty, "QOD_PG_HOST unset; skipping integration test")
 
   private val pgPort     = sys.env.getOrElse("QOD_PG_PORT", "5432")
   private val pgUser     = sys.env.getOrElse("QOD_PG_USER", "postgres")
   private val pgPassword = sys.env.getOrElse("QOD_PG_PASSWORD", "azizam")
   private val pgDb       = sys.env.getOrElse("QOD_PG_DBNAME", "qod")
 
-  private val store: UserStore = UserStore.fromDefaultMetastore(
+  // Cancel (a clean per-test skip) rather than assume-at-construction, which
+  // aborts the whole suite. `store` is lazy so the Hikari pool is built only
+  // once a test has confirmed Postgres is configured.
+  private def requirePg(): Unit =
+    if pgHost.isEmpty then cancel("QOD_PG_HOST unset; skipping integration test")
+
+  private lazy val store: UserStore = UserStore.fromDefaultMetastore(
     Map(
       "pgHost"     -> pgHost,
       "pgPort"     -> pgPort,
@@ -34,32 +39,37 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
 
   override def afterAll(): Unit =
     // Best-effort cleanup; ignore failures so reports stay readable when PG is unavailable
-    // between tests.
-    scala.util.Try {
-      val c = java.sql.DriverManager.getConnection(
-        s"jdbc:postgresql://$pgHost:$pgPort/$pgDb",
-        pgUser,
-        pgPassword
-      )
-      try
-        val ps = c.prepareStatement("DELETE FROM qodstate_user WHERE username = ?")
-        ps.setString(1, u)
-        ps.executeUpdate()
-        ps.close()
-      finally c.close()
-    }
+    // between tests. Skip entirely when PG was never configured (all tests cancelled).
+    if pgHost.isEmpty then ()
+    else
+      scala.util.Try {
+        val c = java.sql.DriverManager.getConnection(
+          s"jdbc:postgresql://$pgHost:$pgPort/$pgDb",
+          pgUser,
+          pgPassword
+        )
+        try
+          val ps = c.prepareStatement("DELETE FROM qodstate_user WHERE username = ?")
+          ps.setString(1, u)
+          ps.executeUpdate()
+          ps.close()
+        finally c.close()
+      }
 
   "grantsForIdentity" should "return an empty list when no row matches" in {
+    requirePg()
     store.grantsForIdentity(s"$u-nobody", None) shouldBe Nil
   }
 
   it should "surface a superuser grant when the user has tenant=NULL" in {
+    requirePg()
     store.upsertUser(tenant = None, username = u, plaintext = "x", role = "admin")
     val gs = store.grantsForIdentity(u, None)
     gs should contain(UserGrant(None, "admin"))
   }
 
   it should "surface tenant-scoped grants" in {
+    requirePg()
     val t = "t-grants-test"
     store.upsertUser(tenant = Some(t), username = u, plaintext = "x", role = "admin")
     val gs = store.grantsForIdentity(u, None)
@@ -67,6 +77,7 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
   }
 
   it should "fall back to email when the primary key has no match" in {
+    requirePg()
     val email = s"$u@example.com"
     store.upsertUser(
       tenant = Some("t-grants-test"),
