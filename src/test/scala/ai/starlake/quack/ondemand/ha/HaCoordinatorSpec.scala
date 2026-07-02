@@ -82,3 +82,24 @@ class HaCoordinatorSpec extends AnyFlatSpec with Matchers:
       eventuallyLeader(c)
     finally c.close()
   }
+
+  it should "never resurrect after close()" in {
+    requirePg()
+    val a = coordinator()
+    val b = coordinator()
+    try
+      a.tickNow()
+      a.isLeader shouldBe true
+      a.close()
+      // close() must be terminal: a subsequent tick is a no-op
+      a.tickNow()
+      a.isLeader shouldBe false
+      // the lock was released: a second coordinator must be able to acquire it
+      b.tickNow()
+      b.isLeader shouldBe true
+      // another tick on a must not steal the lock back
+      a.tickNow()
+      b.isLeader shouldBe true
+      a.isLeader shouldBe false
+    finally b.close()
+  }
