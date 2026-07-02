@@ -98,6 +98,13 @@ class CrossReplicaPropagationSpec extends AnyFlatSpec with Matchers:
         // restore() also replaced B's rbacResolver and invalidated its EffectiveSet cache,
         // so RBAC convergence rides the same assertion.
         supB.get(key).isDefined shouldBe true
+
+        // Deletion must also converge: A deletes the pool, one tick on B, and
+        // B's diff-aware restore() drops it (a plain put()-only restore would leave
+        // the stale entry behind).
+        supA.deletePool(key, force = true).unsafeRunSync()
+        coordB.tickNow()
+        supB.get(key) shouldBe None
       finally
         coordB.close()
         storeA.close()
