@@ -31,6 +31,7 @@ final class HaCoordinator(
   private val LockKey = "qod-manager-leader"
 
   private val leader                             = new AtomicBoolean(false)
+  private val closed                             = new AtomicBoolean(false)
   @volatile private var conn: Option[Connection] = None
 
   def isLeader: Boolean = leader.get()
@@ -39,20 +40,22 @@ final class HaCoordinator(
     * notifications. Demotes and disconnects on any error.
     */
   def tickNow(): Unit =
-    try
-      val c = conn.getOrElse(connect())
-      if !leader.get() then tryAcquire(c)
-      drainNotifications(c)
-    catch
-      case t: Throwable =>
-        if leader.getAndSet(false) then logger.warn(s"ha: demoted (${t.getMessage})")
-        else logger.debug(s"ha: tick failed (${t.getMessage})")
-        closeQuietly()
+    if !closed.get() then
+      try
+        val c = conn.getOrElse(connect())
+        if !leader.get() then tryAcquire(c)
+        drainNotifications(c)
+      catch
+        case t: Throwable =>
+          if leader.getAndSet(false) then logger.warn(s"ha: demoted (${t.getMessage})")
+          else logger.debug(s"ha: tick failed (${t.getMessage})")
+          closeQuietly()
 
   def loop: IO[Unit] =
     (IO.blocking(tickNow()) *> IO.sleep(retry)).foreverM.void
 
   def close(): Unit =
+    closed.set(true)
     leader.set(false)
     closeQuietly()
 
@@ -62,12 +65,12 @@ final class HaCoordinator(
     props.setProperty("password", password)
     props.setProperty("ApplicationName", "qod-ha-coordinator")
     val c = DriverManager.getConnection(jdbcUrl, props)
+    conn = Some(c)
     handlers.keys.foreach { ch =>
       val st = c.createStatement()
       try st.execute(s"LISTEN $ch")
       finally st.close()
     }
-    conn = Some(c)
     logger.info(s"ha: coordinator connected (channels: ${handlers.keys.mkString(", ")})")
     c
 
