@@ -55,7 +55,14 @@ final class PoolSupervisor(
       * [[ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader]] cache so the per-tenant-db
       * Hikari pool releases its connections + heap on delete.
       */
-    onTenantDbDeleted: (String, String) => Unit = (_, _) => ()
+    onTenantDbDeleted: (String, String) => Unit = (_, _) => (),
+    /** Cross-replica per-pool lock. In non-HA mode the
+      * [[ai.starlake.quack.ondemand.ha.PoolLocker.noop]] default makes every wrap a pass-through,
+      * so single-manager behavior is unchanged. Under HA a
+      * [[ai.starlake.quack.ondemand.ha.PgPoolLocker]] serializes a pool's mutations against the
+      * leader's reconcile pass so neither ever observes half-written node rows.
+      */
+    locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -215,6 +222,11 @@ final class PoolSupervisor(
     } *> IO.sleep(interval)).foreverM.void
 
   private def reconcilePool(key: PoolKey, state: PoolState): IO[PoolState] =
+    locks.withLock(key) {
+      reconcilePoolUnlocked(key, state)
+    }
+
+  private def reconcilePoolUnlocked(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh
       // YAML bootstrap (ManifestImporter writes the pool row but does
@@ -676,7 +688,7 @@ final class PoolSupervisor(
       // matters at node-init time: initSql runs FIRST so PRAGMAs are in
       // effect before any federation source's ATTACH.
       initSql: String = ""
-  ): IO[List[RunningNode]] = IO.defer {
+  ): IO[List[RunningNode]] = locks.withLock(key)(IO.defer {
     val size = dist.total
     require(
       dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
@@ -811,7 +823,7 @@ final class PoolSupervisor(
               }
           }
         }
-  }
+  })
 
   def setPoolDisabled(key: PoolKey, disabled: Boolean): IO[Either[String, Pool]] = IO.blocking {
     pools.get(key) match
@@ -846,6 +858,16 @@ final class PoolSupervisor(
       force: Boolean
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
+    locks.withLock(key) {
+      scaleUnlocked(key, targetSize, newDist, force)
+    }
+
+  private def scaleUnlocked(
+      key: PoolKey,
+      targetSize: Int,
+      newDist: RoleDistribution,
+      force: Boolean
+  ): IO[List[RunningNode]] =
     pools.get(key) match
       case None        => IO.raiseError(new NoSuchElementException(s"pool not found: $key"))
       case Some(state) =>
@@ -945,6 +967,11 @@ final class PoolSupervisor(
     * merely scales it to 0.
     */
   def deletePool(key: PoolKey, force: Boolean): IO[Unit] =
+    locks.withLock(key) {
+      deletePoolUnlocked(key, force)
+    }
+
+  private def deletePoolUnlocked(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match
       case None        => IO.unit
       case Some(state) =>
