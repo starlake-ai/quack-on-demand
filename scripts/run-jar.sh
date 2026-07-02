@@ -37,13 +37,18 @@
 #   LOAD_TPCDS=N                  Seeds the demo and loads TPC-DS into
 #                                 globex/globex_tpcds at scale factor N. Positive
 #                                 integer; unset = skip.                (default unset)
-#   LOAD_TPC=N                    Legacy shortcut: equivalent to setting both
-#                                 LOAD_TPCH=N and LOAD_TPCDS=N. Either explicit
-#                                 var wins over this one. Either of these (or
-#                                 the legacy LOAD_TPC) also sets QOD_BOOTSTRAP_YAML
-#                                 so the JVM imports the bundled demo manifest on
-#                                 first boot. Loaders run in background before
-#                                 exec java.                            (default unset)
+#   LOAD_SSB=N                    Seeds the demo and derives the SSB star schema
+#                                 (lineorder, customer, supplier, part, dwdate)
+#                                 from TPC-H dbgen at scale factor N into
+#                                 acme/acme_tpch schema ssb1. Positive integer;
+#                                 unset = skip.                         (default unset)
+#   LOAD_TPC=N                    Legacy shortcut: equivalent to setting
+#                                 LOAD_TPCH=N, LOAD_TPCDS=N, and LOAD_SSB=N.
+#                                 Any explicit var wins over this one. Any of
+#                                 these (or the legacy LOAD_TPC) also sets
+#                                 QOD_BOOTSTRAP_YAML so the JVM imports the
+#                                 bundled demo manifest on first boot. Loaders
+#                                 run in background before exec java.   (default unset)
 #
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
@@ -70,8 +75,9 @@
 #   BUILD=1 ./scripts/run-jar.sh                           # local source build
 #   LOAD_TPCH=1 ./scripts/run-jar.sh                       # + TPC-H demo seed SF=1
 #   LOAD_TPCDS=10 ./scripts/run-jar.sh                     # + TPC-DS demo seed SF=10
-#   LOAD_TPC=1 ./scripts/run-jar.sh                        # + both demos SF=1 (legacy shortcut)
-#   NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh                 # wipe + fresh boot + both SF=1
+#   LOAD_SSB=1 ./scripts/run-jar.sh                        # + SSB star schema SF=1
+#   LOAD_TPC=1 ./scripts/run-jar.sh                        # + all three demos SF=1 (legacy shortcut)
+#   NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh                 # wipe + fresh boot + all SF=1
 
 set -euo pipefail
 
@@ -211,20 +217,22 @@ ensure_duckdb() {
 }
 ensure_duckdb
 
-# Demo seed controls. LOAD_TPC=N is the legacy shortcut that seeds BOTH
-# benchmarks at the same scale factor; LOAD_TPCH / LOAD_TPCDS let you opt
-# in to one (and at independent scale factors). Any var unset = skip that
-# benchmark. Explicit per-bench vars win over LOAD_TPC.
+# Demo seed controls. LOAD_TPC=N is the legacy shortcut that seeds ALL
+# benchmarks at the same scale factor; LOAD_TPCH / LOAD_TPCDS / LOAD_SSB
+# let you opt in to one (and at independent scale factors). Any var unset
+# = skip that benchmark. Explicit per-bench vars win over LOAD_TPC.
 #
 #   LOAD_TPCH=1                       -> TPC-H only, SF=1
 #   LOAD_TPCDS=10                     -> TPC-DS only, SF=10
+#   LOAD_SSB=1                        -> SSB star schema only, SF=1
 #   LOAD_TPCH=1 LOAD_TPCDS=10         -> both, independent SFs
-#   LOAD_TPC=1                        -> shortcut for LOAD_TPCH=1 LOAD_TPCDS=1
-#   LOAD_TPC=10 LOAD_TPCDS=100        -> TPC-H from LOAD_TPC (SF=10),
+#   LOAD_TPC=1                        -> shortcut for LOAD_TPCH=1 LOAD_TPCDS=1 LOAD_SSB=1
+#   LOAD_TPC=10 LOAD_TPCDS=100        -> TPC-H + SSB from LOAD_TPC (SF=10),
 #                                        TPC-DS from LOAD_TPCDS (SF=100)
 LOAD_TPCH="${LOAD_TPCH:-${LOAD_TPC:-}}"
 LOAD_TPCDS="${LOAD_TPCDS:-${LOAD_TPC:-}}"
-for _v in LOAD_TPCH LOAD_TPCDS; do
+LOAD_SSB="${LOAD_SSB:-${LOAD_TPC:-}}"
+for _v in LOAD_TPCH LOAD_TPCDS LOAD_SSB; do
   _val="${!_v}"
   if [[ -n "$_val" ]] && { ! [[ "$_val" =~ ^[0-9]+$ ]] || [[ "$_val" -lt 1 ]]; }; then
     echo "ERROR: $_v must be a positive integer scale factor (got: '$_val')." >&2
@@ -607,18 +615,18 @@ if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$
 fi
 
 # ---- Optional: TPC demo loaders ----
-# When either LOAD_TPCH or LOAD_TPCDS is set, the JVM imports the bundled
-# demo YAML and the selected loader(s) run in background (TPC-H into
-# acme/acme_tpch and/or TPC-DS into globex/globex_tpcds, at their
-# independent scale factors).
+# When any of LOAD_TPCH / LOAD_TPCDS / LOAD_SSB is set, the JVM imports
+# the bundled demo YAML and the selected loader(s) run in background
+# (TPC-H into acme/acme_tpch, TPC-DS into globex/globex_tpcds, SSB into
+# acme/acme_tpch schema ssb1, at their independent scale factors).
 #
 # Backgrounded BEFORE `exec java` because exec replaces this shell.
 # Each loader is idempotent (CREATE TABLE IF NOT EXISTS + insert-if-empty).
-if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
+if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
   : "${QOD_BOOTSTRAP_YAML:=$REPO_DIR/src/main/resources/bootstrap-demo.yaml}"
   export QOD_BOOTSTRAP_YAML
 
-  echo "load-tpc: TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}, bootstrap=$QOD_BOOTSTRAP_YAML"
+  echo "load-tpc: TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}, SSB=${LOAD_SSB:-skip}, bootstrap=$QOD_BOOTSTRAP_YAML"
 
   if [[ -n "$LOAD_TPCH" ]]; then
     (
@@ -639,6 +647,19 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" ]]; then
       DB_NAME="globex_tpcds" SCHEMA_NAME="tpcds1" \
       DATA_PATH="$(dirname "${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/globex}")/globex_tpcds" \
         "$REPO_DIR/scripts/load-tpcds-dbgen.sh"
+    ) &
+  fi
+
+  # SSB shares the acme_tpch tenant-db (schema ssb1), so the star schema is
+  # served by the existing acme pools with no extra bootstrap entities.
+  if [[ -n "$LOAD_SSB" ]]; then
+    (
+      SF="$LOAD_SSB" \
+      PG_HOST="$pg_host" PG_PORT="$pg_port" PG_USER="$pg_user" PG_PASS="$pg_pass" \
+      PG_ADMIN_DB="$pg_admin_db" \
+      DB_NAME="acme_tpch" SCHEMA_NAME="ssb1" \
+      DATA_PATH="$(dirname "${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/acme}")/acme_tpch" \
+        "$REPO_DIR/scripts/load-ssb-dbgen.sh"
     ) &
   fi
   # No `wait`: exec java next detaches them.
