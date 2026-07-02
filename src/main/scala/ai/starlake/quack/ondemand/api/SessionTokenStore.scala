@@ -74,7 +74,8 @@ object SessionTokenStore:
 final class SessionTokenStore(
     secret: String = SessionTokenStore.randomSecret(),
     maxLifetime: FiniteDuration = SessionTokenStore.DefaultMaxLifetime,
-    clock: () => Instant = () => Instant.now()
+    clock: () => Instant = () => Instant.now(),
+    onRevoke: (String, Instant) => Unit = (_, _) => ()
 ):
 
   // Absolute max session age from mint. Exposed under the `idleTtl` field
@@ -158,7 +159,19 @@ final class SessionTokenStore(
       val exp = Option(claims.getExpirationTime).map(_.toInstant).getOrElse(clock())
       denylist.put(jti, exp)
       sweepDenylist()
+      onRevoke(jti, exp)
     }
+
+  /** Denylist a jti learned from a peer replica or the revocation table. Does NOT fire onRevoke:
+    * that hook is for locally initiated revocations only, otherwise replicas would echo
+    * notifications forever.
+    */
+  def addRevoked(jti: String, exp: Instant): Unit =
+    denylist.put(jti, exp)
+    sweepDenylist()
+
+  def seedRevoked(entries: Iterable[(String, Instant)]): Unit =
+    entries.foreach { case (jti, exp) => denylist.put(jti, exp) }
 
   /** True when the token resolves to a session whose `role = admin`. The login handler refuses to
     * mint anything but admin, so a successful lookup is sufficient; the role check stays for
