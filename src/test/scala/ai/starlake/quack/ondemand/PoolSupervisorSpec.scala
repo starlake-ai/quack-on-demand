@@ -573,3 +573,78 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     sup.getTenantById("ghost") shouldBe None
     sup.listTenants().map(_.id) should not contain "ghost"
+
+  // ---------- membership: cross-tenant edges are rejected ----------
+
+  "addUserRole" should "reject attaching a tenant-B role to a tenant-A user" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val b     = sup.createTenant(Tenant("globex")).unsafeRunSync().toOption.get
+    val roleB = sup.createRole(b.id, "analyst").unsafeRunSync().toOption.get
+    val userA = RbacUser(id = "u-a1", tenant = Some(a.id), username = "alice", role = "user")
+    store.upsertUserIdentity(userA)
+    val res = sup.addUserRole(userA.id, roleB.id).unsafeRunSync()
+    res.isLeft shouldBe true
+    res.left.toOption.get should include("cross-tenant")
+    sup.effectiveSetForUser(userA.id).map(_.permissions).getOrElse(Nil) shouldBe Nil
+
+  it should "accept a same-tenant role membership" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val roleA = sup.createRole(a.id, "analyst").unsafeRunSync().toOption.get
+    val userA = RbacUser(id = "u-a2", tenant = Some(a.id), username = "alice", role = "user")
+    store.upsertUserIdentity(userA)
+    sup.addUserRole(userA.id, roleA.id).unsafeRunSync() shouldBe Right(())
+
+  it should "reject attaching a tenant-scoped role to a superuser" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val roleA = sup.createRole(a.id, "analyst").unsafeRunSync().toOption.get
+    val root  = RbacUser(id = "u-root", tenant = None, username = "root", role = "admin")
+    store.upsertUserIdentity(root)
+    val res = sup.addUserRole(root.id, roleA.id).unsafeRunSync()
+    res.isLeft shouldBe true
+    res.left.toOption.get should include("cross-tenant")
+
+  "addUserGroup" should "reject attaching a tenant-B group to a tenant-A user" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a      = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val b      = sup.createTenant(Tenant("globex")).unsafeRunSync().toOption.get
+    val groupB = sup.createGroup(b.id, "team").unsafeRunSync().toOption.get
+    val userA  = RbacUser(id = "u-a3", tenant = Some(a.id), username = "alice", role = "user")
+    store.upsertUserIdentity(userA)
+    val res = sup.addUserGroup(userA.id, groupB.id).unsafeRunSync()
+    res.isLeft shouldBe true
+    res.left.toOption.get should include("cross-tenant")
+
+  it should "accept a same-tenant group membership" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a      = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val groupA = sup.createGroup(a.id, "team").unsafeRunSync().toOption.get
+    val userA  = RbacUser(id = "u-a4", tenant = Some(a.id), username = "alice", role = "user")
+    store.upsertUserIdentity(userA)
+    sup.addUserGroup(userA.id, groupA.id).unsafeRunSync() shouldBe Right(())
+
+  "addGroupRole" should "reject attaching a tenant-B role to a tenant-A group" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a      = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val b      = sup.createTenant(Tenant("globex")).unsafeRunSync().toOption.get
+    val groupA = sup.createGroup(a.id, "team").unsafeRunSync().toOption.get
+    val roleB  = sup.createRole(b.id, "analyst").unsafeRunSync().toOption.get
+    val res    = sup.addGroupRole(groupA.id, roleB.id).unsafeRunSync()
+    res.isLeft shouldBe true
+    res.left.toOption.get should include("cross-tenant")
+
+  it should "accept a same-tenant group-role edge" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val a      = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val groupA = sup.createGroup(a.id, "team").unsafeRunSync().toOption.get
+    val roleA  = sup.createRole(a.id, "analyst").unsafeRunSync().toOption.get
+    sup.addGroupRole(groupA.id, roleA.id).unsafeRunSync() shouldBe Right(())

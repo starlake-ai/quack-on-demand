@@ -1384,7 +1384,7 @@ final class PoolSupervisor(
   // ---------- RBAC: memberships ----------
 
   def addUserRole(userId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
-    membershipCheck(userId, roleId, rbacResolver.role(_), "role") match
+    membershipCheck(userId, roleId, rbacResolver.role(_), _.tenantId, "role") match
       case Some(err) => Left(err)
       case None      =>
         store.addUserRole(userId, roleId)
@@ -1399,7 +1399,7 @@ final class PoolSupervisor(
   }
 
   def addUserGroup(userId: String, groupId: String): IO[Either[String, Unit]] = IO.blocking {
-    membershipCheck(userId, groupId, rbacResolver.group(_), "group") match
+    membershipCheck(userId, groupId, rbacResolver.group(_), _.tenantId, "group") match
       case Some(err) => Left(err)
       case None      =>
         store.addUserGroup(userId, groupId)
@@ -1414,13 +1414,19 @@ final class PoolSupervisor(
   }
 
   def addGroupRole(groupId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
-    if rbacResolver.group(groupId).isEmpty then Left(s"group not found: $groupId")
-    else if rbacResolver.role(roleId).isEmpty then Left(s"role not found: $roleId")
-    else
-      store.addGroupRole(groupId, roleId)
-      rbacResolver.addGroupRoleEdge(groupId, roleId)
-      invalidateEffectiveCache()
-      Right(())
+    (rbacResolver.group(groupId), rbacResolver.role(roleId)) match
+      case (None, _)                                      => Left(s"group not found: $groupId")
+      case (_, None)                                      => Left(s"role not found: $roleId")
+      case (Some(g), Some(r)) if g.tenantId != r.tenantId =>
+        Left(
+          s"cross-tenant membership not allowed: group tenant ${g.tenantId} " +
+            s"!= role tenant ${r.tenantId}"
+        )
+      case (Some(_), Some(_)) =>
+        store.addGroupRole(groupId, roleId)
+        rbacResolver.addGroupRoleEdge(groupId, roleId)
+        invalidateEffectiveCache()
+        Right(())
   }
 
   def removeGroupRole(groupId: String, roleId: String): IO[Either[String, Unit]] = IO.blocking {
@@ -1430,15 +1436,38 @@ final class PoolSupervisor(
     Right(())
   }
 
+  /** Validate a user->role or user->group membership edge before it is written.
+    *
+    * Beyond the existence checks, this enforces TENANT ALIGNMENT: the edge is only allowed when the
+    * user and the referenced role/group belong to the same tenant. A role/group always carries a
+    * non-null `tenantId`; a user carries `tenant: Option[String]` where `None` marks a superuser.
+    * We require exact equality of `user.tenant` and `Some(otherTenant)`, so:
+    *   - same tenant -> allowed;
+    *   - tenant-A user + tenant-B role/group -> rejected (the escalation this closes);
+    *   - superuser (tenant=None) + any tenant-scoped role/group -> rejected. A superuser already
+    *     bypasses the pool/ACL gates via the resolver, so it must not additionally accrue a
+    *     tenant-scoped role, mirroring the same stance taken in `grantPoolPermission`.
+    */
   private def membershipCheck[A](
       userId: String,
       otherId: String,
       lookup: String => Option[A],
+      tenantOf: A => String,
       otherLabel: String
   ): Option[String] =
-    if store.getUserById(userId).isEmpty then Some(s"user not found: $userId")
-    else if lookup(otherId).isEmpty then Some(s"$otherLabel not found: $otherId")
-    else None
+    store.getUserById(userId) match
+      case None       => Some(s"user not found: $userId")
+      case Some(user) =>
+        lookup(otherId) match
+          case None        => Some(s"$otherLabel not found: $otherId")
+          case Some(other) =>
+            val otherTenant = tenantOf(other)
+            if user.tenant.contains(otherTenant) then None
+            else
+              Some(
+                s"cross-tenant membership not allowed: user tenant " +
+                  s"${user.tenant.getOrElse("(superuser)")} != $otherLabel tenant $otherTenant"
+              )
 
   // ---------- RBAC: pool permissions ----------
 
