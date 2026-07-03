@@ -330,14 +330,14 @@ final class ManagerServer(
       Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
         nodes.setMaxConcurrent(req, key)(sessions.scopeOf)
       },
-      Endpoints.quarantineNode.serverLogic { case (req, key) =>
-        nodes.quarantineNode(req, key)(sessions.scopeOf)
+      Endpoints.quarantineNode.serverLogic { case (req, key, cookie) =>
+        nodes.quarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.unquarantineNode.serverLogic { case (req, key) =>
-        nodes.unquarantineNode(req, key)(sessions.scopeOf)
+      Endpoints.unquarantineNode.serverLogic { case (req, key, cookie) =>
+        nodes.unquarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.restartNode.serverLogic { case (req, key) =>
-        nodes.restartNode(req, key)(sessions.scopeOf)
+      Endpoints.restartNode.serverLogic { case (req, key, cookie) =>
+        nodes.restartNode(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.createTenant.serverLogic { case (req, key) =>
         tenants.createTenant(req, key)(sessions.scopeOf)
@@ -386,11 +386,11 @@ final class ManagerServer(
       Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
         manifest.importYaml(body, apiKey)(sessions.scopeOf)
       },
-      Endpoints.activeStatements.serverLogic { key =>
-        activeStmts.list(key)(sessions.scopeOf)
+      Endpoints.activeStatements.serverLogic { case (key, cookie) =>
+        activeStmts.list(key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.killStatement.serverLogic { case (req, key) =>
-        activeStmts.kill(req, key)(sessions.scopeOf)
+      Endpoints.killStatement.serverLogic { case (req, key, cookie) =>
+        activeStmts.kill(req, key.orElse(cookie))(sessions.scopeOf)
       }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
