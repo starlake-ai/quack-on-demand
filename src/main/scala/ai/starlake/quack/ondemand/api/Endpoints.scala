@@ -14,12 +14,16 @@ private given Schema[NodeInfo] = Schema.derived
 // CreatePoolRequest). Anchor each one explicitly so magnolia derives
 // them once instead of expanding the chain twice through `auto._`,
 // which in Scala 3 blows up with an inline budget error.
-private given Schema[NodeTolerationDto] = Schema.derived
-private given Schema[NodePlacementDto]  = Schema.derived
-private given Schema[PoolCohortDto]     = Schema.derived
-private given Schema[PoolResponse]      = Schema.derived
-private given Schema[PoolListResponse]  = Schema.derived
-private given Schema[CreatePoolRequest] = Schema.derived
+private given Schema[NodeTolerationDto]        = Schema.derived
+private given Schema[NodePlacementDto]         = Schema.derived
+private given Schema[PoolCohortDto]            = Schema.derived
+private given Schema[PoolResponse]             = Schema.derived
+private given Schema[PoolListResponse]         = Schema.derived
+private given Schema[CreatePoolRequest]        = Schema.derived
+private given Schema[ActiveStatementInfo]      = Schema.derived
+private given Schema[ActiveStatementsResponse] = Schema.derived
+private given Schema[KillStatementRequest]     = Schema.derived
+private given Schema[KillStatementResponse]    = Schema.derived
 
 object Endpoints:
 
@@ -565,3 +569,26 @@ object Endpoints:
       .out(jsonBody[CatalogTableDetailResponse])
       .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
       .description("Get one table's columns + parquet data files.")
+
+  val activeStatements: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    ActiveStatementsResponse,
+    Any
+  ] =
+    base.get
+      .in("node" / "active-statements")
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[ActiveStatementsResponse])
+
+  val killStatement: PublicEndpoint[
+    (KillStatementRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    KillStatementResponse,
+    Any
+  ] =
+    base.post
+      .in("statement" / "kill")
+      .in(jsonBody[KillStatementRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[KillStatementResponse])

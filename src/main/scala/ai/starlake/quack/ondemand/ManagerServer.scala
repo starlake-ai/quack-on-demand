@@ -38,7 +38,8 @@ final class ManagerServer(
     manifest: ManifestHandlers,
     federatedSources: Option[FederatedSourceHandlers] = None,
     columnPolicies: RoleColumnPolicyHandlers,
-    rowPolicies: RoleRowPolicyHandlers
+    rowPolicies: RoleRowPolicyHandlers,
+    activeStmts: ActiveStatementHandlers
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -384,6 +385,12 @@ final class ManagerServer(
       Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.scopeOf)),
       Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
         manifest.importYaml(body, apiKey)(sessions.scopeOf)
+      },
+      Endpoints.activeStatements.serverLogic { key =>
+        activeStmts.list(key)(sessions.scopeOf)
+      },
+      Endpoints.killStatement.serverLogic { case (req, key) =>
+        activeStmts.kill(req, key)(sessions.scopeOf)
       }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
