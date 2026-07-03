@@ -109,7 +109,7 @@ object Endpoints:
       .in(header[Option[String]]("X-API-Key"))
 
   val quarantineNode: PublicEndpoint[
-    (NodeOpRequest, Option[String]),
+    (NodeOpRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -118,9 +118,11 @@ object Endpoints:
       .in("node" / "quarantine")
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val unquarantineNode: PublicEndpoint[
-    (NodeOpRequest, Option[String]),
+    (NodeOpRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -129,9 +131,11 @@ object Endpoints:
       .in("node" / "unquarantine")
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val restartNode: PublicEndpoint[
-    (NodeOpRequest, Option[String]),
+    (NodeOpRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -140,6 +144,8 @@ object Endpoints:
       .in("node" / "restart")
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   /** Liveness probe: always 200 while the JVM is alive. No Postgres gate. */
   val health: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
@@ -571,7 +577,7 @@ object Endpoints:
       .description("Get one table's columns + parquet data files.")
 
   val activeStatements: PublicEndpoint[
-    Option[String],
+    (Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     ActiveStatementsResponse,
     Any
@@ -579,10 +585,12 @@ object Endpoints:
     base.get
       .in("node" / "active-statements")
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[ActiveStatementsResponse])
 
   val killStatement: PublicEndpoint[
-    (KillStatementRequest, Option[String]),
+    (KillStatementRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     KillStatementResponse,
     Any
@@ -591,4 +599,6 @@ object Endpoints:
       .in("statement" / "kill")
       .in(jsonBody[KillStatementRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[KillStatementResponse])

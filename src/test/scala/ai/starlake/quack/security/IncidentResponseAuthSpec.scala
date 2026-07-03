@@ -47,6 +47,35 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
     apiKey.foreach(k => b.header("X-API-Key", k))
     client.send(b.build(), HttpResponse.BodyHandlers.ofString())
 
+  // Cookie-transport variants: send qod_session cookie instead of X-API-Key header.
+  // These prove that the session cookie is wired into scope resolution for the five
+  // incident-response endpoints (not just the apiKeyGuard admission gate).
+  private def postWithCookie(
+      client: HttpClient,
+      url: String,
+      body: String,
+      cookieToken: String
+  ): HttpResponse[String] =
+    val b = HttpRequest
+      .newBuilder(URI.create(url))
+      .header("Content-Type", "application/json")
+      .header("Cookie", s"qod_session=$cookieToken")
+      .timeout(RequestTimeout)
+      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
+
+  private def getWithCookie(
+      client: HttpClient,
+      url: String,
+      cookieToken: String
+  ): HttpResponse[String] =
+    val b = HttpRequest
+      .newBuilder(URI.create(url))
+      .header("Cookie", s"qod_session=$cookieToken")
+      .GET()
+      .timeout(RequestTimeout)
+    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
+
   private val TestNodeId = "n-test0001"
 
   // The brief uses TenantDbId as the tenantDb field, but PoolKey resolution uses
@@ -208,5 +237,104 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
       )
       resp.statusCode() shouldBe 200
       resp.body() should include("already-completed")
+    finally h.shutdown()
+  }
+
+  // Cookie-transport tests. These verify that the qod_session cookie is wired into
+  // scope resolution for the five incident-response endpoints, not just into the
+  // apiKeyGuard admission gate. On the pre-fix code the cookie is ignored by the
+  // endpoint, so apiKey=None reaches the handler and all checks are bypassed.
+
+  "node/quarantine via session cookie" should "reject a tenant admin with 403 superuser_required" in {
+    val (h, nodeId) = bootWithNode()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/node/quarantine",
+        nodeOpBody(nodeId),
+        cookieToken = token
+      )
+      withClue(s"tenant admin (cookie) -> /node/quarantine body: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+      }
+    finally h.shutdown()
+  }
+
+  "node/restart via session cookie" should "reject a tenant admin with 403" in {
+    val (h, nodeId) = bootWithNode()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      withClue("tenant admin (cookie) -> /node/restart should be 403") {
+        postWithCookie(
+          h.httpClient,
+          s"${h.baseUrl}/api/node/restart",
+          nodeOpBody(nodeId),
+          cookieToken = token
+        ).statusCode() shouldBe 403
+      }
+    finally h.shutdown()
+  }
+
+  "node/active-statements via session cookie" should "show a tenant admin only their tenant's statements" in {
+    val (h, _) = bootWithNode()
+    try
+      h.activeRegistry.register("alice", SecurityFixtures.TenantId, "bi", "n1", "SELECT 1")
+      h.activeRegistry.register("bob", GlobexTenantId, "bi", "n2", "SELECT 2")
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body =
+        getWithCookie(h.httpClient, s"${h.baseUrl}/api/node/active-statements", token).body()
+      body should include("alice")
+      body should not include "bob"
+    finally h.shutdown()
+  }
+
+  "statement/kill via session cookie" should "return 404 for a cross-tenant statement id" in {
+    val (h, _) = bootWithNode()
+    try
+      h.activeRegistry.register("bob", GlobexTenantId, "bi", "n2", "SELECT 2")
+      val crossId = h.activeRegistry.register("bob", GlobexTenantId, "bi", "n2", "SELECT 3")
+      val token   = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/statement/kill",
+        s"""{"id":"$crossId"}""",
+        cookieToken = token
+      )
+      withClue(s"cross-tenant kill via cookie body: ${resp.body()}") {
+        resp.statusCode() shouldBe 404
+      }
+    finally h.shutdown()
+  }
+
+  "node/quarantine via session cookie (superuser)" should "succeed with 200" in {
+    val (h, nodeId) = bootWithNode()
+    try
+      val root = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword, None)
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/node/quarantine",
+        nodeOpBody(nodeId),
+        cookieToken = root
+      )
+      withClue(s"superuser (cookie) -> /node/quarantine body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
     finally h.shutdown()
   }
