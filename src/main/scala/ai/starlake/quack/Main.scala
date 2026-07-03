@@ -740,7 +740,8 @@ object Main extends IOApp with LazyLogging:
         )
       val rowPolicyRewriter = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = rlsEnabled)
 
-      val fsRouter = new FlightSqlRouter(
+      val activeStatements = new ActiveStatementRegistry()
+      val fsRouter         = new FlightSqlRouter(
         sup,
         sessions,
         tracker,
@@ -750,7 +751,8 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments,
         classifier,
         columnPolicyRewriter,
-        rowPolicyRewriter
+        rowPolicyRewriter,
+        activeStatements
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
