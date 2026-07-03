@@ -138,6 +138,20 @@ final class FlightProducerImpl(
       case RouterFailure.Internal(_)     => CallStatus.INTERNAL
     status.withDescription(f.reason).toRuntimeException()
 
+  /** Build an INTERNAL Flight exception for an UNEXPECTED server-side throwable without leaking its
+    * message to the client. The raw exception text can carry SQL fragments, node hostnames, file
+    * paths and internal class names; we log the full detail server-side against a short random
+    * error id and hand the client only that id, so an operator can correlate a user's error report
+    * with the server log line. Typed, curated failures should still go through
+    * [[toFlightException]] -- this is only for the `catch { case t: Throwable }` arms.
+    */
+  private def internalError(context: String, t: Throwable): Throwable =
+    val errorId = java.util.UUID.randomUUID().toString.take(8)
+    logger.error(s"$context threw [errorId=$errorId]: ${t.getMessage}", t)
+    CallStatus.INTERNAL
+      .withDescription(s"internal error (errorId=$errorId)")
+      .toRuntimeException()
+
   override def createPreparedStatement(
       request: FlightSql.ActionCreatePreparedStatementRequest,
       context: FlightProducer.CallContext,
@@ -242,10 +256,7 @@ final class FlightProducerImpl(
               case scala.util.Success(Left(f)) =>
                 listener.onError(toFlightException(f))
               case scala.util.Failure(t) =>
-                logger.error(s"createPreparedStatement threw: ${t.getMessage}", t)
-                listener.onError(
-                  CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException()
-                )
+                listener.onError(internalError("createPreparedStatement", t))
       case _ =>
         listener.onError(
           CallStatus.UNAUTHENTICATED
@@ -341,20 +352,12 @@ final class FlightProducerImpl(
             try streamArrow(result.rows, listener)
             catch
               case t: Throwable =>
-                logger.error(s"failed streaming Arrow batches: ${t.getMessage}", t)
-                listener.error(
-                  CallStatus.INTERNAL
-                    .withDescription(s"stream failure: ${t.getMessage}")
-                    .toRuntimeException()
-                )
+                listener.error(internalError("streaming Arrow batches", t))
             finally result.close()
           case scala.util.Success(Left(f)) =>
             listener.error(toFlightException(f))
           case scala.util.Failure(t) =>
-            logger.error(s"getStreamPreparedStatement re-execute threw: ${t.getMessage}", t)
-            listener.error(
-              CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException()
-            )
+            listener.error(internalError("getStreamPreparedStatement re-execute", t))
 
   // -----------------------------------------------------------------
   //  Metadata endpoints - DBeaver / JDBC clients walk these to populate
@@ -505,12 +508,7 @@ final class FlightProducerImpl(
         )
         tablesAttempt match
           case scala.util.Failure(t) =>
-            logger.error(s"streamTablesWithSchema list failed: ${t.getMessage}", t)
-            listener.error(
-              CallStatus.INTERNAL
-                .withDescription(s"router threw: ${t.getMessage}")
-                .toRuntimeException()
-            )
+            listener.error(internalError("streamTablesWithSchema list", t))
           case scala.util.Success(Left(f)) =>
             listener.error(toFlightException(f))
           case scala.util.Success(Right(listResult)) =>
@@ -890,8 +888,7 @@ final class FlightProducerImpl(
       case scala.util.Success(Left(f)) =>
         ackStream.onError(toFlightException(f))
       case scala.util.Failure(t) =>
-        logger.error(s"$label threw: ${t.getMessage}", t)
-        ackStream.onError(CallStatus.INTERNAL.withDescription(t.getMessage).toRuntimeException())
+        ackStream.onError(internalError(label, t))
 
   /** Best-effort affected-row count from a DML result. DuckDB returns a single-row, single-column
     * "Count" (BigInt) for INSERT / UPDATE / DELETE; we read that cell. Anything else (DDL, or a
@@ -1386,10 +1383,7 @@ final class FlightProducerImpl(
             case scala.util.Success(Left(f)) =>
               throw toFlightException(f)
             case scala.util.Failure(t) =>
-              logger.error(s"probeStatementSchema threw: ${t.getMessage}", t)
-              throw CallStatus.INTERNAL
-                .withDescription(t.getMessage)
-                .toRuntimeException()
+              throw internalError("probeStatementSchema", t)
         }
       case _ =>
         throw CallStatus.UNAUTHENTICATED
@@ -1439,22 +1433,12 @@ final class FlightProducerImpl(
           scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
         outcome match
           case scala.util.Failure(t) =>
-            logger.error(s"router.execute threw: ${t.getMessage}", t)
-            listener.error(
-              CallStatus.INTERNAL
-                .withDescription(s"router threw: ${t.getMessage}")
-                .toRuntimeException()
-            )
+            listener.error(internalError("router.execute", t))
           case scala.util.Success(Right(result)) =>
             try streamArrow(result.rows, listener)
             catch
               case t: Throwable =>
-                logger.error(s"failed streaming Arrow batches: ${t.getMessage}", t)
-                listener.error(
-                  CallStatus.INTERNAL
-                    .withDescription(s"stream failure: ${t.getMessage}")
-                    .toRuntimeException()
-                )
+                listener.error(internalError("streaming Arrow batches", t))
             finally result.close()
           case scala.util.Success(Left(f)) =>
             logger.warn(s"router.execute Left: $f")
