@@ -116,6 +116,8 @@ export default function Nodes() {
   const [active, setActive] = useState<ActiveStatementInfo[]>([]);
   const [activeFetchedAt, setActiveFetchedAt] = useState(0);
   const [activeExpanded, setActiveExpanded] = useState<number | null>(null);
+  // Transient notice shown when a kill reports already-completed. Cleared after ~3s.
+  const [killNote, setKillNote] = useState<string | null>(null);
   // 1s ticker so the live elapsed counter updates without waiting for the 2s pool poll.
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -234,7 +236,11 @@ export default function Nodes() {
       `Best-effort: the manager closes the client stream, but the node may still ` +
       `finish executing internally. Restart the node to guarantee termination.`)) return;
     try {
-      await api.killStatement({ id: a.id });
+      const resp = await api.killStatement({ id: a.id });
+      if (resp.status === 'already-completed') {
+        setKillNote('Statement had already completed before the kill reached it.');
+        window.setTimeout(() => setKillNote(n => n === 'Statement had already completed before the kill reached it.' ? null : n), 3000);
+      }
       await refresh();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e));
@@ -419,7 +425,12 @@ export default function Nodes() {
       </p>
 
       <div className="card" style={{ marginTop: '1rem' }}>
-        <div className="card-title">Running statements ({active.length})</div>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '1rem' }}>
+          <div className="card-title">Running statements ({active.length})</div>
+          {killNote && (
+            <span className="subtle" style={{ fontSize: '.85rem' }}>{killNote}</span>
+          )}
+        </div>
         {active.length === 0 ? (
           <p style={{ color: '#888' }}>Nothing running right now.</p>
         ) : (

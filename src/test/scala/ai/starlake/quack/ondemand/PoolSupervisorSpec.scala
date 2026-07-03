@@ -693,3 +693,32 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val groupA = sup.createGroup(a.id, "team").unsafeRunSync().toOption.get
     val roleA  = sup.createRole(a.id, "analyst").unsafeRunSync().toOption.get
     sup.addGroupRole(groupA.id, roleA.id).unsafeRunSync() shouldBe Right(())
+
+  // ---------- reconcile: quarantine flag must survive respawn ----------
+
+  "PoolSupervisor.reconcileLoop" should "preserve operator quarantine when a quarantined node is respawned" in {
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val backend = new CapturingBackend
+    val sup     = new PoolSupervisor(backend, tracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId       = sup.get(key).get.nodes.head.nodeId
+    val beforeRespawn = backend.specs.size
+
+    // Quarantine in both store and tracker, mirroring what the operator endpoint does.
+    store.setNodeQuarantined(nodeId, true)
+    tracker.setQuarantined(nodeId, true)
+
+    // Let reconcile run; the node's socket is unreachable so it will be respawned.
+    val fiber    = sup.reconcileLoop(20.millis).start.unsafeRunSync()
+    val deadline = System.currentTimeMillis() + 3000L
+    while (backend.specs.size < beforeRespawn + 1 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+    fiber.cancel.unsafeRunSync()
+
+    backend.specs.size should be >= beforeRespawn + 1
+    // After reconcile respawn the quarantine flag must still be set in the tracker
+    // so the respawned node remains excluded from routing.
+    tracker.snapshot(nodeId).quarantined shouldBe true
+  }

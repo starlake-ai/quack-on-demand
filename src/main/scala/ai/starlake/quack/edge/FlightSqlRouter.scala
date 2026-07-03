@@ -312,6 +312,7 @@ final class FlightSqlRouter(
                         // policy should have filtered. See security-audit-2026-07-02 #5b.
                         retryOnce(
                           connectionId,
+                          user,
                           poolKey,
                           kind,
                           finalSql,
@@ -359,6 +360,7 @@ final class FlightSqlRouter(
 
   private def retryOnce(
       connectionId: String,
+      user: String,
       poolKey: PoolKey,
       kind: StatementKind,
       sql: String,
@@ -376,13 +378,28 @@ final class FlightSqlRouter(
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
                 adapter.send(n, wrapped, None, recordLoad = recordLoad).map {
                   case QuackResponse.Ok(reader, latency, close) =>
+                    // Mirror the primary path: register the statement so it appears in
+                    // the active-statement view and is killable. Registration is gated on
+                    // the same recordLoad flag used by the primary path.
+                    val stmtId =
+                      if recordLoad then
+                        Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
+                      else None
+                    val closedOnce            = new java.util.concurrent.atomic.AtomicBoolean(false)
+                    val closeOnce: () => Unit =
+                      () => if closedOnce.compareAndSet(false, true) then close()
+                    stmtId.foreach(registry.attachCancel(_, closeOnce))
+                    val closeAndDeregister: () => Unit = () => {
+                      stmtId.foreach(registry.deregister)
+                      closeOnce()
+                    }
                     // Pin the session on the retry node so a follow-up
                     // COMMIT/ROLLBACK lands on the same Quack instance.
                     // Without this, a BEGIN that retried onto node B
                     // would have its COMMIT routed by load and likely
                     // hit node A - breaking transaction consistency.
                     sessions.onStatement(connectionId, kind, nodeId)
-                    Right(QueryResult(reader, close, nodeId, latency))
+                    Right(QueryResult(reader, closeAndDeregister, nodeId, latency))
                   case QuackResponse.Failed(QuackError.Transient(m), _) =>
                     Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                   case QuackResponse.Failed(QuackError.Permanent(m), _) =>
