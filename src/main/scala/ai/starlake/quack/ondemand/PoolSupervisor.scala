@@ -220,6 +220,12 @@ final class PoolSupervisor(
     // Hand the RBAC graph to the resolver in one shot. Subsequent
     // mutations are mirrored incrementally by the methods below.
     rbacResolver.replace(snap)
+    // Seed operator quarantine flags so a restarted manager or an HA replica woken
+    // by a qod_topology NOTIFY keeps refusing to route to quarantined nodes.
+    val quarantinedIds = store.listQuarantinedNodeIds()
+    pools.values.flatMap(_.nodes).foreach { n =>
+      tracker.setQuarantined(n.nodeId, quarantinedIds.contains(n.nodeId))
+    }
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
     invalidateEffectiveCacheLocal()
