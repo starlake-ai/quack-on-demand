@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 
 /** DuckDB / standard SQL keywords surfaced in the Recent-statements
   * card. Kept deliberately small: the goal is "operator glances at it
@@ -96,6 +97,7 @@ const POLL_MS = 2000;
   * from the backend's rolling-window per-node histogram; QPS is derived
   * client-side from the delta in totalServed between polls. */
 export default function Nodes() {
+  const { superuser } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr]   = useState<string | null>(null);
@@ -176,6 +178,42 @@ export default function Nodes() {
     const id = setInterval(refresh, POLL_MS);
     return () => clearInterval(id);
   }, []);
+
+  async function toggleQuarantine(n: Row) {
+    if (!n.quarantined) {
+      const peers = rows.filter(r =>
+        r.tenant === n.tenant && r.tenantDb === n.tenantDb && r.pool === n.pool &&
+        r.nodeId !== n.nodeId && r.healthy && !r.draining && !r.quarantined);
+      const lastWarning = peers.length === 0
+        ? '\n\nWARNING: this is the pool\'s last routable node. The pool will refuse new statements until it is un-quarantined.'
+        : '';
+      if (!window.confirm(
+        `Quarantine node "${n.nodeId}"?\n\n` +
+        `New statements stop routing to it; running statements finish normally. ` +
+        `Only an explicit un-quarantine restores it.${lastWarning}`)) return;
+    }
+    try {
+      const req = { tenant: n.tenant, tenantDb: n.tenantDb, pool: n.pool, nodeId: n.nodeId };
+      if (n.quarantined) await api.unquarantineNode(req);
+      else await api.quarantineNode(req);
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function restartNode(n: Row) {
+    if (!window.confirm(
+      `Restart node "${n.nodeId}"?\n\n` +
+      `All statements currently running on it will fail. ` +
+      `The node respawns with the same id and comes back un-quarantined.`)) return;
+    try {
+      await api.restartNode({ tenant: n.tenant, tenantDb: n.tenantDb, pool: n.pool, nodeId: n.nodeId });
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
 
   const visible = rows
     .filter(r => !filter || r.tenant === filter)
@@ -280,11 +318,12 @@ export default function Nodes() {
               <th style={{ textAlign: 'right' }}>Mem</th>
               <th style={{ textAlign: 'right' }}>Spill</th>
               <th style={{ textAlign: 'right' }}>Max conc.</th>
+              {superuser && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
             {visible.length === 0 ? (
-              <tr><td colSpan={15} className="empty">No nodes running.</td></tr>
+              <tr><td colSpan={superuser ? 16 : 15} className="empty">No nodes running.</td></tr>
             ) : visible.map(n => (
               <tr key={`${n.tenant}/${n.tenantDb}/${n.pool}/${n.nodeId}`}>
                 <td>
@@ -303,7 +342,7 @@ export default function Nodes() {
                   <Link to={`/pool/${encodeURIComponent(n.tenant)}/${encodeURIComponent(n.tenantDb)}/${encodeURIComponent(n.pool)}`}>{n.pool}</Link>
                 </td>
                 <td><RoleBadge role={n.role} /></td>
-                <td><HealthBadge healthy={n.healthy} draining={n.draining} /></td>
+                <td><HealthBadge healthy={n.healthy} draining={n.draining} quarantined={n.quarantined} /></td>
                 <td><code>{n.host}:{n.port}</code></td>
                 <td style={{ textAlign: 'right' }}>{n.inFlight}</td>
                 <td style={{ textAlign: 'right' }}>{n.qps.toFixed(1)}</td>
@@ -334,6 +373,16 @@ export default function Nodes() {
                   )}
                 </td>
                 <td style={{ textAlign: 'right' }}>{n.maxConcurrent === 0 ? '∞' : n.maxConcurrent}</td>
+                {superuser && (
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button type="button" className="copy-btn" onClick={() => void toggleQuarantine(n)}>
+                      {n.quarantined ? 'Unquarantine' : 'Quarantine'}
+                    </button>{' '}
+                    <button type="button" className="copy-btn" onClick={() => void restartNode(n)}>
+                      Restart
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -462,7 +511,8 @@ function RoleBadge({ role }: { role: string }) {
   return <span className={cls}>{role}</span>;
 }
 
-function HealthBadge({ healthy, draining }: { healthy: boolean; draining: boolean }) {
+function HealthBadge({ healthy, draining, quarantined }: { healthy: boolean; draining: boolean; quarantined: boolean }) {
+  if (quarantined) return <span className="badge warn">quarantined</span>;
   if (draining) return <span className="badge warn">draining</span>;
   if (!healthy) return <span className="badge bad">unhealthy</span>;
   return <span className="badge good">healthy</span>;
