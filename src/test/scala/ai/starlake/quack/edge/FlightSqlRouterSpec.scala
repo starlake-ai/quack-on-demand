@@ -1,8 +1,22 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext, ValidationResult}
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
+import ai.starlake.quack.edge.sql.{
+  Allowed,
+  Denied,
+  StatementValidator,
+  ValidationContext,
+  ValidationResult
+}
+import ai.starlake.quack.model.{
+  NodeSpec,
+  PoolKey,
+  Role,
+  RoleDistribution,
+  RunningNode,
+  Tenant,
+  TenantDbKind
+}
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -24,30 +38,41 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private val mmReg = new SimpleMeterRegistry
   private val si    = new StatementInstruments(mmReg)
 
-  /** Builds a fresh stub response each call so tests don't share ArrowReader
-    * instances (each reader is single-use). */
+  /** Builds a fresh stub response each call so tests don't share ArrowReader instances (each reader
+    * is single-use).
+    */
   private def defaultStub: () => QuackResponse = () => TestArrow.okResponse()
 
   private def setup(stub: () => QuackResponse = defaultStub) =
     val backend = new QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
-        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
-                            21000 + n.size, "tok", Some(1L), None, Instant.EPOCH,
-                            maxConcurrent = s.maxConcurrent)
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          21000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String) = IO { n.remove(id); () }
+      def stop(id: String)    = IO { n.remove(id); () }
       def isAlive(id: String) = n.contains(id)
-      def discoverExisting() = IO.pure(n.values.toList)
-      def cleanup() = IO { n.clear() }
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
 
     val tracker = new NodeLoadTracker
-    val sup = new PoolSupervisor(backend, tracker,
-                                 new InMemoryControlPlaneStore())
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     // Pre-register the tenant so createPool succeeds under the new contract.
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
-    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
 
@@ -56,7 +81,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // because ArrowReader is single-use.
     val client = new QuackHttpClient(
       TestArrow.sharedAllocator,
-      nativeClient   = true,
+      nativeClient = true,
       nodeDisableSsl = true
     ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
@@ -64,22 +89,22 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
 
     val sessions = new SessionRegistry
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter,
-                                     stmtInstruments = si)
+    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
     (router, sessions, node)
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
-    val beforeCount = mmReg.counter("statements_total",
-        "tenant", "acme", "pool", "sales", "status", "ok").count()
+    val beforeCount =
+      mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok").count()
     val (router, _, node) = setup()
-    val out = router.execute("c-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out shouldBe a [Right[_, _]]
-    mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok")
+    val out               = router.execute("c-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+    mmReg
+      .counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok")
       .count() shouldBe (beforeCount + 1.0)
 
   it should "expose the chosen nodeId on the QueryResult so callers can soft-pin follow-ups" in:
     val (router, _, node) = setup()
-    val out = router.execute("c-1b", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    val out               = router.execute("c-1b", "alice", poolKey, "SELECT 1").unsafeRunSync()
     out match
       case Right(qr) =>
         qr.nodeId shouldBe node.nodeId
@@ -105,10 +130,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "return Left when no compatible node available (quarantined)" in:
     val (router, _, _) = setup()
-    val nodeId = router.supervisor.list().head.nodes.head.nodeId
+    val nodeId         = router.supervisor.list().head.nodes.head.nodeId
     router.tracker.setHealthy(nodeId, false)
     val out = router.execute("c-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out shouldBe a [Left[_, _]]
+    out shouldBe a[Left[_, _]]
 
   // R12: distinct Flight SQL status codes. Each failure shape carries its
   // own RouterFailure variant so the Flight producer can map to UNAUTHORIZED
@@ -116,21 +141,24 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // folding every error to INTERNAL.
   it should "tag a quarantined-pool failure as RouterFailure.Unavailable" in:
     val (router, _, _) = setup()
-    val nodeId = router.supervisor.list().head.nodes.head.nodeId
+    val nodeId         = router.supervisor.list().head.nodes.head.nodeId
     router.tracker.setHealthy(nodeId, false)
     val out = router.execute("c-2-kind", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a [RouterFailure.Unavailable]
+    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
 
   it should "return Left when pool does not exist" in:
     val (router, _, _) = setup()
-    val out = router.execute("c-3", "alice", PoolKey("ghost", "ghost_default", "missing"), "SELECT 1").unsafeRunSync()
-    out shouldBe a [Left[_, _]]
+    val out            = router
+      .execute("c-3", "alice", PoolKey("ghost", "ghost_default", "missing"), "SELECT 1")
+      .unsafeRunSync()
+    out shouldBe a[Left[_, _]]
 
   it should "tag an unknown pool as RouterFailure.NotFound" in:
     val (router, _, _) = setup()
-    val out = router.execute("c-3-kind", "alice",
-      PoolKey("ghost", "ghost_default", "missing"), "SELECT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a [RouterFailure.NotFound]
+    val out            = router
+      .execute("c-3-kind", "alice", PoolKey("ghost", "ghost_default", "missing"), "SELECT 1")
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.NotFound]
 
   it should "tag a StatementValidator deny as RouterFailure.AccessDenied" in:
     val denying = new StatementValidator:
@@ -139,18 +167,22 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // router with the denying validator. We pull the existing router's
     // collaborators rather than re-stand-up the whole stack.
     val (base, _, _) = setup()
-    val router = new FlightSqlRouter(
-      base.supervisor, base.sessions, base.tracker, base.adapter,
-      validator = denying, stmtInstruments = si
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      validator = denying,
+      stmtInstruments = si
     )
     val out = router.execute("c-deny", "alice", poolKey, "SELECT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a [RouterFailure.AccessDenied]
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
 
   it should "tag a permanent backend error as RouterFailure.BadRequest" in:
     val perm = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L)
     val (router, _, _) = setup(stub = perm)
-    val out = router.execute("c-bad", "alice", poolKey, "SELECTT 1").unsafeRunSync()
-    out.swap.toOption.get shouldBe a [RouterFailure.BadRequest]
+    val out            = router.execute("c-bad", "alice", poolKey, "SELECTT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.BadRequest]
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
@@ -175,131 +207,164 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.supervisor.stopPool(poolKey, force = true).unsafeRunSync()
 
     val out = router.execute("c-5", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
-    out shouldBe a [Left[_, _]]
+    out shouldBe a[Left[_, _]]
     sessions.get("c-5").flatMap(_.pinnedNodeId) shouldBe None
 
   // ---- defaultDatabase / defaultSchema precedence tests ----
 
   /** Validator that captures the last ValidationContext it receives. */
   private final class CapturingValidator extends StatementValidator:
-    @volatile var lastCtx: ValidationContext = null
+    @volatile var lastCtx: ValidationContext               = null
     def validate(ctx: ValidationContext): ValidationResult =
       lastCtx = ctx
       Allowed
 
   private def freshSupervisorAndBackend(): PoolSupervisor =
     val backend = new QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
-        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
-                            22000 + n.size, "tok", Some(2L), None, Instant.EPOCH,
-                            maxConcurrent = s.maxConcurrent)
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          22000 + n.size,
+          "tok",
+          Some(2L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String)          = IO { n.remove(id); () }
-      def isAlive(id: String)       = n.contains(id)
-      def discoverExisting()        = IO.pure(n.values.toList)
-      def cleanup()                 = IO { n.clear() }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
     val tracker = new NodeLoadTracker
     new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
 
   it should "use tenantDb.defaultDatabase + defaultSchema when set" in:
-    val sup  = freshSupervisorAndBackend()
-    val key  = PoolKey("beta", "beta_mem", "p1")
+    val sup = freshSupervisorAndBackend()
+    val key = PoolKey("beta", "beta_mem", "p1")
     sup.createTenant(Tenant("beta")).unsafeRunSync()
-    sup.createTenantDb(
-      tenantName      = "beta",
-      suffix          = "mem",
-      kind            = TenantDbKind.InMemory,
-      metastore       = Map.empty,
-      dataPath        = "",
-      defaultDatabase = Some("fedpg"),
-      defaultSchema   = Some("public")
-    ).unsafeRunSync()
+    sup
+      .createTenantDb(
+        tenantName = "beta",
+        suffix = "mem",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = "",
+        defaultDatabase = Some("fedpg"),
+        defaultSchema = Some("public")
+      )
+      .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val capturer = new CapturingValidator
-    val client = new QuackHttpClient(
+    val client   = new QuackHttpClient(
       TestArrow.sharedAllocator,
-      nativeClient   = true,
-      nodeDisableSsl = true
-    ):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
-        IO.pure(TestArrow.okResponse())
-    val adapter  = new QuackHttpAdapter(client, new NodeLoadTracker)
-    val router   = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                       validator = capturer)
-    router.execute("d-1", "alice", key, "SELECT 1").unsafeRunSync()
-    capturer.lastCtx.defaultDatabase shouldBe Some("fedpg")
-    capturer.lastCtx.defaultSchema   shouldBe Some("public")
-
-  it should "fall back to memory/main for InMemory kind when no override" in:
-    val sup  = freshSupervisorAndBackend()
-    val key  = PoolKey("gamma", "gamma_mem", "p2")
-    sup.createTenant(Tenant("gamma")).unsafeRunSync()
-    sup.createTenantDb(
-      tenantName = "gamma",
-      suffix     = "mem",
-      kind       = TenantDbKind.InMemory,
-      metastore  = Map.empty,
-      dataPath   = ""
-    ).unsafeRunSync()
-    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    val capturer = new CapturingValidator
-    val client = new QuackHttpClient(
-      TestArrow.sharedAllocator,
-      nativeClient   = true,
+      nativeClient = true,
       nodeDisableSsl = true
     ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-    val router  = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                      validator = capturer)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      new NodeLoadTracker,
+      adapter,
+      validator = capturer
+    )
+    router.execute("d-1", "alice", key, "SELECT 1").unsafeRunSync()
+    capturer.lastCtx.defaultDatabase shouldBe Some("fedpg")
+    capturer.lastCtx.defaultSchema shouldBe Some("public")
+
+  it should "fall back to memory/main for InMemory kind when no override" in:
+    val sup = freshSupervisorAndBackend()
+    val key = PoolKey("gamma", "gamma_mem", "p2")
+    sup.createTenant(Tenant("gamma")).unsafeRunSync()
+    sup
+      .createTenantDb(
+        tenantName = "gamma",
+        suffix = "mem",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val capturer = new CapturingValidator
+    val client   = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      new NodeLoadTracker,
+      adapter,
+      validator = capturer
+    )
     router.execute("d-2", "alice", key, "SELECT 1").unsafeRunSync()
     capturer.lastCtx.defaultDatabase shouldBe Some("memory")
-    capturer.lastCtx.defaultSchema   shouldBe Some("main")
+    capturer.lastCtx.defaultSchema shouldBe Some("main")
 
   // ---- preferredNode (soft pin) tests ----
 
   /** Spin up a pool with N dual-role nodes so we have routing choices to make. */
   private def setupMultiNode(replicas: Int) =
     val backend = new QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
-        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
-                            23000 + n.size, "tok", Some(3L), None, Instant.EPOCH,
-                            maxConcurrent = s.maxConcurrent)
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          23000 + n.size,
+          "tok",
+          Some(3L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String) = IO { n.remove(id); () }
+      def stop(id: String)    = IO { n.remove(id); () }
       def isAlive(id: String) = n.contains(id)
-      def discoverExisting() = IO.pure(n.values.toList)
-      def cleanup() = IO { n.clear() }
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
 
     val tracker = new NodeLoadTracker
-    val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
-    val key = PoolKey("acme", "acme_default", "sales")
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    val key     = PoolKey("acme", "acme_default", "sales")
     sup.createTenant(Tenant(key.tenant)).unsafeRunSync()
-    sup.createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+    sup
+      .createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "")
       .unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, replicas)).unsafeRunSync()
     val client = new QuackHttpClient(
       TestArrow.sharedAllocator,
-      nativeClient   = true,
+      nativeClient = true,
       nodeDisableSsl = true
     ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
     (router, sessions, sup.get(key).get.nodes, key)
 
   it should "honor preferredNode when no transaction pin overrides" in:
     val (router, _, nodes, key) = setupMultiNode(3)
     nodes.size shouldBe 3
     val target = nodes(1).nodeId
-    val out = router
+    val out    = router
       .execute("p-1", "alice", key, "SELECT 1", preferredNode = Some(target))
       .unsafeRunSync()
     out match
@@ -310,18 +375,18 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "fall back to load-based pick when preferredNode is not in the snapshot" in:
     val (router, _, nodes, key) = setupMultiNode(2)
-    val out = router
+    val out                     = router
       .execute("p-2", "alice", key, "SELECT 1", preferredNode = Some("nonexistent-node-id"))
       .unsafeRunSync()
     out match
       case Right(qr) =>
-        nodes.map(_.nodeId) should contain (qr.nodeId)
+        nodes.map(_.nodeId) should contain(qr.nodeId)
         qr.close()
       case Left(msg) => fail(s"expected Right, got Left($msg)")
 
   it should "skip history recording when recordExecution=false (Prepare-time probe)" in:
     val (router, _, _, key) = setupMultiNode(1)
-    val historyBefore = router.history.size
+    val historyBefore       = router.history.size
     router
       .execute("rec-1", "alice", key, "SELECT 1", recordExecution = false)
       .unsafeRunSync()
@@ -342,7 +407,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.execute("p-3", "alice", key, "BEGIN").unsafeRunSync()
     val pinned = sessions.get("p-3").flatMap(_.pinnedNodeId).getOrElse(fail("no pin after BEGIN"))
     val different = nodes.map(_.nodeId).find(_ != pinned).getOrElse(fail("need >1 node"))
-    val out = router
+    val out       = router
       .execute("p-3", "alice", key, "INSERT INTO t VALUES (1)", preferredNode = Some(different))
       .unsafeRunSync()
     out match
@@ -352,19 +417,25 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Left(msg) => fail(s"expected Right, got Left($msg)")
 
   it should "fall back to metastore.dbName / schemaName for DuckLake kind" in:
-    val sup  = freshSupervisorAndBackend()
-    val key  = PoolKey("delta", "delta_lake", "p3")
+    val sup = freshSupervisorAndBackend()
+    val key = PoolKey("delta", "delta_lake", "p3")
     sup.createTenant(Tenant("delta")).unsafeRunSync()
     // For DuckLake, createTenantDb injects dbName=<full-name>; we supply schemaName explicitly.
-    sup.createTenantDb(
-      tenantName = "delta",
-      suffix     = "lake",
-      kind       = TenantDbKind.DuckLake,
-      metastore  = Map("pgHost" -> "localhost", "pgPort" -> "5432",
-                       "pgUser" -> "postgres", "pgPassword" -> "azizam",
-                       "schemaName" -> "myschema"),
-      dataPath   = "/tmp/delta_lake"
-    ).unsafeRunSync()
+    sup
+      .createTenantDb(
+        tenantName = "delta",
+        suffix = "lake",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map(
+          "pgHost"     -> "localhost",
+          "pgPort"     -> "5432",
+          "pgUser"     -> "postgres",
+          "pgPassword" -> "azizam",
+          "schemaName" -> "myschema"
+        ),
+        dataPath = "/tmp/delta_lake"
+      )
+      .unsafeRunSync()
     // DuckLake createTenantDb attempts a Postgres connect; since we have no
     // Postgres in this unit test the result will be Left, so guard on that.
     // We only proceed if the tenant-db was created successfully.
@@ -375,24 +446,37 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Some(_) =>
         sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
         val capturer = new CapturingValidator
-        val client = new QuackHttpClient(
+        val client   = new QuackHttpClient(
           TestArrow.sharedAllocator,
-          nativeClient   = true,
+          nativeClient = true,
           nodeDisableSsl = true
         ):
-          override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+          override def query(
+              endpoint: String,
+              token: String,
+              sql: String,
+              session: Option[String]
+          ) =
             IO.pure(TestArrow.okResponse())
         val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-        val router  = new FlightSqlRouter(sup, new SessionRegistry, new NodeLoadTracker, adapter,
-                                          validator = capturer)
+        val router  = new FlightSqlRouter(
+          sup,
+          new SessionRegistry,
+          new NodeLoadTracker,
+          adapter,
+          validator = capturer
+        )
         router.execute("d-3", "alice", key, "SELECT 1").unsafeRunSync()
         capturer.lastCtx.defaultDatabase shouldBe Some("delta_lake")
-        capturer.lastCtx.defaultSchema   shouldBe Some("myschema")
+        capturer.lastCtx.defaultSchema shouldBe Some("myschema")
 
   // ---- ColumnPolicyRewriter integration tests ----
 
   private val tenantUser = ai.starlake.quack.ondemand.state.RbacUser(
-    "u-1", Some("acme"), "alice", "user"
+    "u-1",
+    Some("acme"),
+    "alice",
+    "user"
   )
 
   private def effWithPolicies(
@@ -400,37 +484,51 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   ): ai.starlake.quack.ondemand.rbac.EffectiveSet =
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
 
-  /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter.
-    * Returns (router, lastSqlSentToBackend ref, node). */
+  /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter. Returns
+    * (router, lastSqlSentToBackend ref, node).
+    */
   private def setupWithRewriter(
       rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
-        val r = RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1",
-                            24000 + n.size, "tok", Some(4L), None, java.time.Instant.EPOCH,
-                            maxConcurrent = s.maxConcurrent)
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          24000 + n.size,
+          "tok",
+          Some(4L),
+          None,
+          java.time.Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String)   = IO { n.remove(id); () }
+      def stop(id: String)    = IO { n.remove(id); () }
       def isAlive(id: String) = n.contains(id)
-      def discoverExisting() = IO.pure(n.values.toList)
-      def cleanup()          = IO { n.clear() }
-    val tracker   = new NodeLoadTracker
-    val sup       = new ai.starlake.quack.ondemand.PoolSupervisor(
-      backend, tracker, new ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore()
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+    val tracker = new NodeLoadTracker
+    val sup     = new ai.starlake.quack.ondemand.PoolSupervisor(
+      backend,
+      tracker,
+      new ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore()
     )
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
-    sup.createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
 
     // Mutable cell that the override captures.
     var capturedSql: String = ""
-    val client = new QuackHttpClient(
+    val client              = new QuackHttpClient(
       TestArrow.sharedAllocator,
-      nativeClient   = true,
+      nativeClient = true,
       nodeDisableSsl = true
     ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
@@ -440,15 +538,27 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
-      sup, sessions, tracker, adapter,
+      sup,
+      sessions,
+      tracker,
+      adapter,
       columnPolicyRewriter = rewriter
     )
     (router, () => capturedSql, node)
 
   it should "rewrite a SELECT c_email projection through to the backend masked" in:
-    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-      "cp-1", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'")
-    ))
+    val policies = List(
+      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+        "cp-1",
+        "r-1",
+        "*",
+        "main",
+        "customer",
+        "c_email",
+        "mask",
+        Some("'***'")
+      )
+    )
     val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
       new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
         Map(("memory", "main", "customer") -> List("c_id", "c_email"))
@@ -456,18 +566,31 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       enabled = true
     )
     val (router, capturedSql, _) = setupWithRewriter(rewriter)
-    val out = router.execute(
-      "cls-1", "alice", poolKey,
-      "SELECT c_email FROM main.customer",
-      effectiveSet = Some(effWithPolicies(policies))
-    ).unsafeRunSync()
+    val out                      = router
+      .execute(
+        "cls-1",
+        "alice",
+        poolKey,
+        "SELECT c_email FROM main.customer",
+        effectiveSet = Some(effWithPolicies(policies))
+      )
+      .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("'***'")
 
   it should "expand SELECT * via the catalog and mask covered columns" in:
-    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-      "cp-2", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'")
-    ))
+    val policies = List(
+      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+        "cp-2",
+        "r-1",
+        "*",
+        "main",
+        "customer",
+        "c_email",
+        "mask",
+        Some("'***'")
+      )
+    )
     val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
       new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
         Map(("memory", "main", "customer") -> List("c_id", "c_email"))
@@ -475,20 +598,33 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       enabled = true
     )
     val (router, capturedSql, _) = setupWithRewriter(rewriter)
-    val out = router.execute(
-      "cls-2", "alice", poolKey,
-      "SELECT * FROM main.customer",
-      effectiveSet = Some(effWithPolicies(policies))
-    ).unsafeRunSync()
+    val out                      = router
+      .execute(
+        "cls-2",
+        "alice",
+        poolKey,
+        "SELECT * FROM main.customer",
+        effectiveSet = Some(effWithPolicies(policies))
+      )
+      .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     // The star was expanded; the masked column carries the literal, not the column name.
     capturedSql() should include("c_id")
     capturedSql() should include("'***'")
 
   it should "deny a SELECT c_ssn when a deny policy matches" in:
-    val policies = List(ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-      "cp-3", "r-1", "*", "main", "customer", "c_ssn", "deny", None
-    ))
+    val policies = List(
+      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+        "cp-3",
+        "r-1",
+        "*",
+        "main",
+        "customer",
+        "c_ssn",
+        "deny",
+        None
+      )
+    )
     val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
       new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
         Map(("memory", "main", "customer") -> List("c_id", "c_ssn"))
@@ -496,12 +632,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       enabled = true
     )
     val (router, _, _) = setupWithRewriter(rewriter)
-    val out = router.execute(
-      "cls-3", "alice", poolKey,
-      "SELECT c_ssn FROM main.customer",
-      effectiveSet = Some(effWithPolicies(policies))
-    ).unsafeRunSync()
+    val out            = router
+      .execute(
+        "cls-3",
+        "alice",
+        poolKey,
+        "SELECT c_ssn FROM main.customer",
+        effectiveSet = Some(effWithPolicies(policies))
+      )
+      .unsafeRunSync()
     out shouldBe a[Left[?, ?]]
     val failure = out.left.get
     failure shouldBe a[RouterFailure.AccessDenied]
     failure.reason should include("access denied")
+
+  // ---- ActiveStatementRegistry integration tests ----
+
+  it should "track the statement in the registry until the caller closes the stream" in:
+    val registry     = new ActiveStatementRegistry()
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      registry = registry
+    )
+    val result = router.execute("reg-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    val qr     = result.toOption.get
+    registry.list().map(_.user) shouldBe List("alice") // still open: entry present
+    qr.close()
+    registry.list() shouldBe Nil // closed: entry gone
+
+  it should "deregister on a permanent failure" in:
+    val registry     = new ActiveStatementRegistry()
+    val perm         = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L)
+    val (base, _, _) = setup(stub = perm)
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      registry = registry
+    )
+    router.execute("reg-2", "alice", poolKey, "SELECT boom").unsafeRunSync().isLeft shouldBe true
+    registry.list() shouldBe Nil
