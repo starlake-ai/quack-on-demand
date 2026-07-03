@@ -14,7 +14,12 @@ final case class TenantDb(
     objectStore: Map[String, String] = Map.empty,
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    // Operator-authored per-database SQL prepended to every node's boot SQL for
+    // pools of this database, BEFORE the pool's own initSql and the federation
+    // blob. Engine defaults live here: SET temp_directory, SET memory_limit,
+    // INSTALL/LOAD. Edits take effect on the next node spawn.
+    initSql: String = ""
 )
 
 object TenantDb {

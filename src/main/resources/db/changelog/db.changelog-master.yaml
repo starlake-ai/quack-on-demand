@@ -35,3 +35,5 @@ databaseChangeLog:
       file: db/changelog/0014-revoked-jti.yaml
   - include:
       file: db/changelog/0015-node-quarantined.yaml
+  - include:
+      file: db/changelog/0016-tenant-db-init-sql.yaml

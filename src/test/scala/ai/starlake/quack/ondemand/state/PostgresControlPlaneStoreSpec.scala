@@ -155,6 +155,24 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     read.metastore("dbName") shouldBe "mydata"
   }
 
+  it should "round-trip tenant-db initSql" in withStore { store =>
+    store.upsertTenant(tenant)
+    val td = TenantDb(
+      id = "td-initsql",
+      tenantId = tenant.id,
+      name = "acme_init",
+      kind = TenantDbKind.InMemory,
+      metastore = Map.empty,
+      dataPath = "",
+      initSql = "SET memory_limit = '4GB';"
+    )
+    store.upsertTenantDb(td)
+    store.listTenantDbs(tenant.id).find(_.id == "td-initsql").map(_.initSql) shouldBe
+      Some("SET memory_limit = '4GB';")
+    store.upsertTenantDb(td.copy(initSql = ""))
+    store.listTenantDbs(tenant.id).find(_.id == "td-initsql").map(_.initSql) shouldBe Some("")
+  }
+
   it should "round-trip a pool" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

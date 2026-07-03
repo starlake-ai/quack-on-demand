@@ -174,8 +174,8 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_db
         |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |   kind, default_database, default_schema)
-        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?)
+        |   kind, default_database, default_schema, init_sql)
+        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id            = EXCLUDED.tenant_id,
         |  name                 = EXCLUDED.name,
@@ -185,7 +185,8 @@ final class PostgresControlPlaneStore(
         |  disabled             = EXCLUDED.disabled,
         |  kind                 = EXCLUDED.kind,
         |  default_database     = EXCLUDED.default_database,
-        |  default_schema       = EXCLUDED.default_schema""".stripMargin
+        |  default_schema       = EXCLUDED.default_schema,
+        |  init_sql             = EXCLUDED.init_sql""".stripMargin
     )
     try
       ps.setString(1, t.id)
@@ -198,6 +199,7 @@ final class PostgresControlPlaneStore(
       ps.setString(8, t.kind.wireValue)
       ps.setString(9, t.defaultDatabase.orNull)
       ps.setString(10, t.defaultSchema.orNull)
+      ps.setString(11, t.initSql)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -205,7 +207,7 @@ final class PostgresControlPlaneStore(
   def listTenantDbs(tenantId: String): List[TenantDb] = withConn { c =>
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |       kind, default_database, default_schema
+        |       kind, default_database, default_schema, init_sql
         |FROM qodstate_tenant_db WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -235,7 +237,8 @@ final class PostgresControlPlaneStore(
       objectStore = jsonToMap(rs.getString("object_store_params")),
       defaultDatabase = Option(rs.getString("default_database")),
       defaultSchema = Option(rs.getString("default_schema")),
-      disabled = rs.getBoolean("disabled")
+      disabled = rs.getBoolean("disabled"),
+      initSql = rs.getString("init_sql")
     )
 
   // ---------------- Pool ----------------
@@ -1336,7 +1339,7 @@ final class PostgresControlPlaneStore(
       ),
       tenantDbs = selectAll(
         c,
-        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema FROM qodstate_tenant_db ORDER BY name",
+        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql FROM qodstate_tenant_db ORDER BY name",
         readTenantDb
       ),
       pools = selectAll(
