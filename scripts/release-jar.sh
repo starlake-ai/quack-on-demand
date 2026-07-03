@@ -21,7 +21,9 @@
 #
 # Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE.
 # Optional env: RELEASE_VERSION (pin the release; default = strip -SNAPSHOT),
-#               NEXT_VERSION    (pin the next snapshot; default = bump patch).
+#               NEXT_VERSION    (pin the next snapshot; default = bump patch),
+#               QOD_DISCORD_WEBHOOK_URL (announce on Discord #news; also read
+#               from the untracked .env - see announce-release-discord.sh).
 #
 # Usage:
 #   ./scripts/release-jar.sh
@@ -133,6 +135,13 @@ else
     --title "v${release_version}" \
     --generate-notes \
     "$jar"
+
+  # ---- 5b. Discord #news announcement (best-effort) ----------------------
+  # Inside the create branch on purpose: a resumed run that found the GH
+  # release already present must not re-announce. If the announce itself
+  # fails (or the webhook is unset), retry manually with the printed command.
+  "$REPO_DIR/scripts/announce-release-discord.sh" "$release_version" \
+    || echo "WARNING: Discord announce failed; retry with ./scripts/announce-release-discord.sh ${release_version}"
 fi
 
 echo
