@@ -78,3 +78,14 @@ final class NodeHandlers(
   def unquarantineNode(req: NodeOpRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] = setQuarantine(req, apiKey, quarantined = false)(scopeOf)
+
+  def restartNode(req: NodeOpRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).map {
+          case Right(()) => Right(())
+          case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        }
