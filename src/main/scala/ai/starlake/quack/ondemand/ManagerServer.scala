@@ -41,6 +41,16 @@ final class ManagerServer(
     rowPolicies: RoleRowPolicyHandlers
 ) extends LazyLogging:
 
+  /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
+    * does not short-circuit on the first differing byte, closing the timing side-channel that
+    * `String.equals` (via `Option.contains`) opens. Length is not treated as secret.
+    */
+  private def constantTimeEq(a: String, b: String): Boolean =
+    java.security.MessageDigest.isEqual(
+      a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+      b.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    )
+
   /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
   private def issuerHost(issuerUrl: String): String =
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
@@ -88,10 +98,15 @@ final class ManagerServer(
         // it doesn't leak cross-origin); the header is the CLI / static-key
         // path. A request can present either; the static key only ever
         // matches via the header.
-        val headerToken  = req.headers.get(CIString("X-API-Key")).map(_.head.value)
-        val cookieToken  = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
-        val provided     = headerToken.orElse(cookieToken)
-        val staticMatch  = staticConfigured.exists(expected => headerToken.contains(expected))
+        val headerToken = req.headers.get(CIString("X-API-Key")).map(_.head.value)
+        val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
+        val provided    = headerToken.orElse(cookieToken)
+        // Constant-time compare so a caller can't recover the static key byte by
+        // byte from response timing. `Option.contains` uses String.equals, which
+        // short-circuits on the first mismatched char.
+        val staticMatch = (staticConfigured, headerToken) match
+          case (Some(expected), Some(actual)) => constantTimeEq(actual, expected)
+          case _                              => false
         val sessionAdmin = provided.exists(sessions.isAdmin)
         val openMode     = staticConfigured.isEmpty
 
