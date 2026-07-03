@@ -96,6 +96,25 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
     finally h.shutdown()
   }
 
+  "node/restart" should "reject a tenant admin with 403" in {
+    val (h, nodeId) = bootWithNode()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      withClue(s"tenant admin -> /node/restart should be 403") {
+        post(
+          h.httpClient,
+          s"${h.baseUrl}/api/node/restart",
+          nodeOpBody(nodeId),
+          apiKey = Some(token)
+        ).statusCode() shouldBe 403
+      }
+    finally h.shutdown()
+  }
+
   it should "let a superuser quarantine and unquarantine, reflected in pool/list" in {
     val (h, nodeId) = bootWithNode()
     try
