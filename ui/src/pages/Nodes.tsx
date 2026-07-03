@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
-import type { PoolResponse, NodeInfo, StatementHistoryEntry } from '../api/types';
+import type { PoolResponse, NodeInfo, StatementHistoryEntry, ActiveStatementInfo } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 
 /** DuckDB / standard SQL keywords surfaced in the Recent-statements
@@ -112,6 +112,16 @@ export default function Nodes() {
   // Row index whose Copy button was just clicked, for the brief "Copied"
   // feedback. Cleared on a timeout.
   const [copied, setCopied] = useState<number | null>(null);
+  // Running statements
+  const [active, setActive] = useState<ActiveStatementInfo[]>([]);
+  const [activeFetchedAt, setActiveFetchedAt] = useState(0);
+  const [activeExpanded, setActiveExpanded] = useState<number | null>(null);
+  // 1s ticker so the live elapsed counter updates without waiting for the 2s pool poll.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
   const prev = useRef<Record<string, Sample>>({});
 
   async function copySql(sql: string, idx: number) {
@@ -146,6 +156,9 @@ export default function Nodes() {
     api.statementHistory(50)
       .then(r => setHistory(r.statements))
       .catch(() => { /* best effort - pools still useful even if history fails */ });
+    api.activeStatements()
+      .then(r => { setActive(r.statements); setActiveFetchedAt(Date.now()); })
+      .catch(() => {});
     api.listPools()
       .then((r: { pools: PoolResponse[] }) => {
         const now = Date.now();
@@ -209,6 +222,19 @@ export default function Nodes() {
       `The node respawns with the same id and comes back un-quarantined.`)) return;
     try {
       await api.restartNode({ tenant: n.tenant, tenantDb: n.tenantDb, pool: n.pool, nodeId: n.nodeId });
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function killStatement(a: ActiveStatementInfo) {
+    if (!window.confirm(
+      `Kill statement by "${a.user}" on ${a.nodeId}?\n\n` +
+      `Best-effort: the manager closes the client stream, but the node may still ` +
+      `finish executing internally. Restart the node to guarantee termination.`)) return;
+    try {
+      await api.killStatement({ id: a.id });
       await refresh();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e));
@@ -392,6 +418,50 @@ export default function Nodes() {
         Refreshing every {POLL_MS / 1000}s · QPS computed from delta; percentiles over a rolling 256-sample window per node.
       </p>
 
+      <div className="card" style={{ marginTop: '1rem' }}>
+        <div className="card-title">Running statements ({active.length})</div>
+        {active.length === 0 ? (
+          <p style={{ color: '#888' }}>Nothing running right now.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>User</th><th>Tenant / Pool</th><th>Node</th>
+                <th style={{ textAlign: 'right' }}>Elapsed</th><th>SQL</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {active.map((a, i) => {
+                const isOpen = activeExpanded === i;
+                const liveElapsed = a.elapsedMs + (activeFetchedAt ? Date.now() - activeFetchedAt : 0);
+                return (
+                  <tr key={a.id} onClick={() => setActiveExpanded(isOpen ? null : i)} style={{ cursor: 'pointer' }}>
+                    <td>{a.user}</td>
+                    <td>{a.tenant} / {a.pool}</td>
+                    <td><code>{a.nodeId}</code></td>
+                    <td style={{ textAlign: 'right' }}>{fmtElapsed(liveElapsed)}</td>
+                    <td style={isOpen
+                      ? { whiteSpace: 'pre-wrap' }
+                      : { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 480 }}>
+                      <SqlHighlight sql={a.sql.trim()} />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="copy-btn"
+                        onClick={e => { e.stopPropagation(); void killStatement(a); }}
+                      >
+                        Kill
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
       <h2 style={{ marginTop: '2rem' }}>Recent statements</h2>
       <div className="card" style={{ padding: 0 }}>
         <table>
@@ -479,6 +549,14 @@ export default function Nodes() {
   );
 }
 
+/** Human-readable elapsed time for the running-statements card. */
+function fmtElapsed(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 /** Human-readable byte count (binary units, one decimal). Undefined/null means
   * the node's engine stats have not been scraped yet - render as a dash. */
 function fmtBytes(n: number | null | undefined): string {
@@ -502,6 +580,7 @@ function StatusBadge({ status }: { status: string }) {
   const cls = status === 'ok' ? 'good'
             : status === 'denied' ? 'warn'
             : status === 'transient' ? 'warn'
+            : status === 'killed' ? 'warn'
             : 'bad';
   return <span className={`badge ${cls}`}>{status}</span>;
 }
