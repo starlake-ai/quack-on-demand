@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.3.6 (unreleased)
+
+### High availability (opt-in, Kubernetes only)
+
+- **Active-active manager replicas with zero-downtime rollout.** `QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N managers, all serving REST + FlightSQL. One replica holds a Postgres session advisory lock (`HaCoordinator`) and runs the singleton duties (reconcile respawns, bootstrap, DuckLake init, revoked-jti purge); leader duties re-run on promotion. Pool mutations serialize across replicas via per-pool advisory locks (`PoolLocker`); caches propagate via LISTEN/NOTIFY on `qod_topology` / `qod_rbac` / `qod_revocation` (published from every `PoolSupervisor` mutator and manifest import) with a periodic snapshot-refresh fallback and a deletion-aware `restore()`. JWT revocations persist in the new `qodstate_revoked_jti` table (Liquibase changelog `0014`) so a session revoked on one replica is denied on all. `/health` stays liveness-only (503 when Postgres is unreachable); new `/ready` gates readiness on Postgres. Helm wires the env flag, requires a pinned session JWT secret, sets `RollingUpdate maxUnavailable: 0`, adds a PodDisruptionBudget, and couples termination grace to `drainTimeoutSec`. HA off (default) preserves single-manager behavior; HA with the local backend is refused at config load. Documented in the RESILIENCE guide with a kind failover check.
+
+### Security - whole-codebase audit 2026-07-02
+
+The full report lives at `docs/security-audit-2026-07-02.md`; the findings below are fixed.
+
+- **Node-bootstrap SQL injection closed.** `TenantDb.validate` rejects injection metacharacters in `schemaName`, `dbName`, `dataPath`, and the `pg*` connection params (denylist on `pgHost`/`pgUser`/`pgPassword`, numeric `pgPort`) at the control-plane trust boundary, covering both the local and Kubernetes backends; `spawn-quack-node.sh` also quotes SQL identifiers. Manifest import runs the injection-safety subset (`validateSafety`) so DuckLake tenant-dbs that legitimately omit keys merged from the default metastore still import.
+- **ACL fails closed on parser blind spots.** `TableExtractor` now reports constructs it cannot map to a grantable table (table functions like `read_parquet`, string-literal file refs, unrecognized FROM-item / statement node types) as `unsupported` markers instead of silently dropping them, and `PostgresAclValidator` denies whenever any are present (unless the principal holds `*.*.*` ALL). Missing walker arms added (parenthesized joins, UPDATE SET-value subqueries, MERGE action subqueries, Json/Signed/Extract wrappers); CTE shadowing only suppresses unqualified names; `EXPLAIN ANALYZE <stmt>` is authorized as the inner statement it executes; `ControlFlow` is now an explicit allowlist so unknown statement types fall through to `ParseError`.
+- **RLS/CLS parse failures deny.** `FlightSqlRouter` denies when `RowPolicyRewriter` / `ColumnPolicyRewriter` cannot parse a statement that has policies attached (a parse failure means filtering cannot be verified), and the transient-failure retry resends the fully rewritten (RLS-wrapped) SQL instead of the CLS-only intermediate.
+- **Prepared statements peer-bound and re-authorized live.** A prepared-statement handle only executes for the peer that created it (a leaked handle replayed from another connection gets UNAUTHORIZED), and both Execute paths re-read the `EffectiveSet` from the live session at call time instead of replaying the Prepare-time snapshot - a grant revoked mid-session now takes effect on prepared statements exactly as it does on one-shot statements, and a handle whose session has expired resolves to a deny.
+- **Cross-tenant RBAC privilege escalation closed.** `addUserRole` / `addUserGroup` / `addGroupRole` enforce that the referenced role/group shares the principal's tenant.
+- **Constant-time API-key compare.** `apiKeyGuard` compared `X-API-Key` with `String.equals`, leaking the key length-by-length via response timing; replaced with `MessageDigest.isEqual`.
+- **Internal exception text no longer reaches Flight clients.** Every catch-all INTERNAL arm in `FlightProducerImpl` now logs the full detail server-side against a short random errorId and returns only `internal error (errorId=...)`; raw messages could carry SQL fragments, hostnames, and file paths. Curated `RouterFailure` messages still flow through unchanged.
+- **K8s spawn-failure orphans cleaned up.** `start()` deletes the pod, service, and per-pod token Secret when a spawn fails partway, preventing orphan accumulation and a deterministic-nodeId respawn deadlock.
+
+### Demo, scripts, and release
+
+- **SSB star schema seeded via `LOAD_SSB=N`** (bundled into the `LOAD_TPC` shortcut next to TPC-H and TPC-DS). DuckDB has no ssb extension, so `scripts/load-ssb-dbgen.sh` generates TPC-H in-memory and derives the 5 SSB tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) per the O'Neil spec mapping; the date dimension is named `dwdate` so the 13 canonical queries run unquoted. Lands in schema `ssb1` of the existing `acme_tpch` tenant-db, wired into all three install paths.
+- **kind local stack unbroken + loaders no longer OOM at SF >= 10.** The helm step died with `HELM_EXTRA_ARGS[@]: unbound variable` on bash 3.2 when no TPC seed was requested; the TPC loaders were OOM-killed at SF >= 10 because DuckDB's default memory budget ignores the cgroup limit - a cgroup-aware `memory_limit` (default 40% of the cgroup cap, `MEMORY_LIMIT`-overridable) makes it spill to disk instead.
+- **Compose summary crash fixed.** The end-of-script summary still read the removed `_profile_set` array, so under `set -u` every `run-docker-compose.sh` run died after the stack was already up, losing the URL summary and the zero exit code.
+- **Release: tag pushed before `gh release create`** (which requires the tag on the remote).
+
+## 0.3.5
+
+### Connectivity and auth
+
+- **Browser OAuth token page for JDBC / DBeaver.** New guard-exempt `/api/auth/sql-token` start + callback flow on the manager port: the browser is redirected to the edge OIDC provider (endpoints resolved via OIDC discovery, so split-horizon deployments work), logs in, and the callback renders the id token (aud = the edge client id) for pasting into DBeaver's token property. Retires the dormant standalone `:8888` OAuth broker - `OAuthHttpServer`, the `auth.oauth{}` config block, and the `QOD_AUTH_OAUTH_*` env vars are gone; a single `auth.oauthScopes` key remains. State token uses a constant-time HMAC compare. The kind rig's Keycloak realm enables the auth-code flow and derives the token's tenant claim from a per-user attribute instead of hardcoding one.
+- **Multi-FETCH Arrow streams no longer corrupt.** `ChainedQuackArrowReader` swapped to a fresh child root on every FETCH round while the Flight stream kept flushing the first (closed) root, so any result spanning more than one PREPARE/FETCH round-trip surfaced client-side as `mismatch number of rows in column: got=0, want=N`. The reader now owns one stable `VectorSchemaRoot` and copies each child batch into it, restoring the ArrowReader contract.
+
+### Pools and supervision
+
+- **Drain / force stop scales the pool to 0 instead of deleting it.** The pool row survives and stays drained across manager restarts. Deletion is now a dedicated path: `POST /api/pool/delete` plus a Delete button in the UI.
+- **Periodic reconcile.** `reconcile()` runs on a background fiber every `reconcileIntervalSec` (default 30s, env `QOD_RECONCILE_INTERVAL_SEC`, `0` restores boot-only), so a node that dies while the manager is up is respawned on the next tick. Also fixes a node stuck in "draining" after drain + rescale: the stale `NodeLoadTracker` entry is reset before respawn and removed on drain/delete.
+
+### Examples and docs
+
+- **FlightSQL client examples in four languages** under `examples/`: TypeScript (raw gRPC + apache-arrow, since Node has no first-party driver), Python (ADBC), Java (Flight SQL JDBC), and Rust (arrow-flight over tonic). Each runs single queries and the 22 standard TPC-H queries against a live edge, sharing the `QOD_*` env-var contract. An n8n community node (catalog operations via FlightSQL) was added and then moved to its own repo, as was the Power BI connector.
+- **Administration docs section**: onboarding golden paths, access-control, day-2 operations, lifecycle and config playbooks, an overview + task map, and a "Manage by manifest" page with YAML fragments aligned to each playbook. Corrections along the way: state lives in `qodstate_*` tables, the removed `/api/acl/grant` API replaced with real RBAC calls, required `tenantDb` added to pool curls.
+- **Connecting guides** for DBeaver and Tableau; README repositioned around the DuckLake serving layer with an honest comparison table and a data-residency diagram; `.env.example` clarifies public vs internal ports.
+
+### Build and release
+
+- **`release.sh` split into resumable per-artifact phases**: a shared `release-lib.sh` plus `release-libquackwire.sh` (native jars to Maven Central), `release-jar.sh` (manager jar, tag, GitHub release), and `release-docker.sh` (multi-arch image), each idempotent so a mid-release failure is resumed by re-running the failed phase.
+- **libquackwire CI publishes on manual `workflow_dispatch`** from main, enabling a snapshot re-publish without a code push.
+- `run-jar.sh` keeps sbt/JLine from leaving the WSL pty in raw mode; the UI pool Delete button shows only the icon.
+
+## 0.3.4
+
+- **DuckDB upgraded 1.5.3 -> 1.5.4** across every pinned layer: the libquackwire native shim rebuilt against libduckdb 1.5.4 (`1.5.4-40de7badae41-1`, duckdb-quack submodule at the v1.5-variegata tip), the DuckDB JDBC driver (`1.5.4.0`), and the runtime libduckdb / DuckDB CLI fetched by the Dockerfiles and `run-jar.sh`.
+
 ## 0.3.3
 
 ### Security
