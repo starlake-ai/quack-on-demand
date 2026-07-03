@@ -149,3 +149,31 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val snap = tracker.snapshot("prep2")
     snap.healthy shouldBe true
     snap.totalServed shouldBe 0L
+
+  "engineStats" should "decode the scrape result without touching tracker counters" in:
+    val client = new FakeClient(
+      Map("quack:127.0.0.1:0" -> (() => {
+        val reader = TestArrow.readerFor(EngineStats.sql)
+        QuackResponse.Ok(reader, 3L, () => ())
+      }))
+    )
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val stats   = adapter.engineStats(node("es1")).unsafeRunSync()
+    stats should not be empty
+    stats.get.memoryUsedBytes should be >= 0L
+    val snap = tracker.snapshot("es1")
+    snap.totalServed shouldBe 0L
+    snap.ewmaMs shouldBe 0.0
+
+  it should "return None on failure without flipping the healthy flag" in:
+    val client = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" ->
+          (() => QuackResponse.Failed(QuackError.Transient("connection refused"), 1))
+      )
+    )
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    adapter.engineStats(node("es2")).unsafeRunSync() shouldBe None
+    tracker.snapshot("es2").healthy shouldBe true

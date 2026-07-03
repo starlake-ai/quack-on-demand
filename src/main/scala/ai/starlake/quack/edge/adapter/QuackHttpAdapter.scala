@@ -53,3 +53,17 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
       case QuackResponse.Ok(_, _, close) => close(); true
       case _                             => false
     }
+
+  /** Scrape the node's DuckDB engine internals (buffer-manager memory, temp storage, spill files)
+    * in one round-trip via [[EngineStats.sql]]. Same policy as [[probe]]: skips ALL tracker
+    * bookkeeping so the background scrape is invisible to the load/latency stats. None when the
+    * node fails or the result has an unexpected shape - never throws.
+    */
+  def engineStats(node: RunningNode): IO[Option[EngineStats]] =
+    val endpoint = s"quack:${node.host}:${node.port}"
+    client.query(endpoint, node.token, EngineStats.sql, None).map {
+      case QuackResponse.Ok(rows, _, close) =>
+        try EngineStats.fromReader(rows)
+        finally close()
+      case _ => None
+    }

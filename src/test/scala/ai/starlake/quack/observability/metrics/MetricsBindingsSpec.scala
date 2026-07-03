@@ -1,7 +1,7 @@
 package ai.starlake.quack.observability.metrics
 
 import ai.starlake.quack.edge.SessionRegistry
-import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.adapter.{EngineStats, EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{PoolKey, Role, RoleDistribution, RunningNode, StatementKind}
 import ai.starlake.quack.ondemand.PoolState
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -11,12 +11,12 @@ import java.time.Instant
 
 class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
 
-  private val poolKey = PoolKey("acme", "acme_default", "sales")
+  private val poolKey                                   = PoolKey("acme", "acme_default", "sales")
   private def node(id: String, role: Role): RunningNode =
     RunningNode(id, poolKey, role, "127.0.0.1", 21900, "tok", Some(1L), None, Instant.EPOCH)
 
-  /** Minimal PoolState snapshot factory -- the binder only reads the fields it
-    * needs (nodes list). */
+  /** Minimal PoolState snapshot factory -- the binder only reads the fields it needs (nodes list).
+    */
   private def fakePool(nodes: List[RunningNode]): PoolState =
     PoolState(poolKey, nodes, RoleDistribution(0, 0, 0), Map.empty, Map.empty)
 
@@ -36,9 +36,9 @@ class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
     val mb      = new MetricsBindings(reg, tracker, fakeSessions(0, 0), pools)
     tracker.onStart("n1"); tracker.setHealthy("n1", true); tracker.setDraining("n1", false)
     mb.refresh()
-    reg.find("node_healthy").tag("node_id", "n1").gauge.value()     shouldBe 1.0
-    reg.find("node_draining").tag("node_id", "n1").gauge.value()    shouldBe 0.0
-    reg.find("node_in_flight").tag("node_id", "n1").gauge.value()   shouldBe 1.0
+    reg.find("node_healthy").tag("node_id", "n1").gauge.value() shouldBe 1.0
+    reg.find("node_draining").tag("node_id", "n1").gauge.value() shouldBe 0.0
+    reg.find("node_in_flight").tag("node_id", "n1").gauge.value() shouldBe 1.0
 
   it should "reflect tracker changes between refreshes" in:
     val reg     = new SimpleMeterRegistry()
@@ -57,8 +57,8 @@ class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
     val mb      = new MetricsBindings(reg, tracker, fakeSessions(0, 0), () => current)
     tracker.onStart("n1"); tracker.onStart("n2")
     mb.refresh()
-    reg.find("node_in_flight").tag("node_id", "n1").gauge should not be (null)
-    reg.find("node_in_flight").tag("node_id", "n2").gauge should not be (null)
+    reg.find("node_in_flight").tag("node_id", "n1").gauge should not be null
+    reg.find("node_in_flight").tag("node_id", "n2").gauge should not be null
     current = List(fakePool(List(node("n1", Role.ReadOnly))))
     mb.refresh()
     reg.find("node_in_flight").tag("node_id", "n2").gauge shouldBe null
@@ -66,15 +66,46 @@ class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
   it should "expose pool_nodes by (tenant,pool,role)" in:
     val reg     = new SimpleMeterRegistry()
     val tracker = new NodeLoadTracker
-    val pools   = () => List(fakePool(List(node("n1", Role.ReadOnly), node("n2", Role.ReadOnly), node("n3", Role.Dual))))
-    val mb      = new MetricsBindings(reg, tracker, fakeSessions(0, 0), pools)
+    val pools   = () =>
+      List(
+        fakePool(List(node("n1", Role.ReadOnly), node("n2", Role.ReadOnly), node("n3", Role.Dual)))
+      )
+    val mb = new MetricsBindings(reg, tracker, fakeSessions(0, 0), pools)
     mb.refresh()
     reg.find("pool_nodes").tag("role", "ReadOnly").gauge.value() shouldBe 2.0
-    reg.find("pool_nodes").tag("role", "Dual").gauge.value()     shouldBe 1.0
+    reg.find("pool_nodes").tag("role", "Dual").gauge.value() shouldBe 1.0
 
   it should "expose flightsql_sessions_active + flightsql_sessions_in_transaction" in:
     val reg = new SimpleMeterRegistry()
     val mb  = new MetricsBindings(reg, new NodeLoadTracker, fakeSessions(3, 1), () => Nil)
     mb.refresh()
-    reg.find("flightsql_sessions_active").gauge.value()        shouldBe 3.0
+    reg.find("flightsql_sessions_active").gauge.value() shouldBe 3.0
     reg.find("flightsql_sessions_in_transaction").gauge.value() shouldBe 1.0
+
+  it should "expose node_duckdb_* gauges only for nodes with a scraped sample" in:
+    val reg     = new SimpleMeterRegistry()
+    val tracker = new NodeLoadTracker
+    val engine  = new EngineStatsTracker
+    val pools   = () => List(fakePool(List(node("n1", Role.ReadOnly), node("n2", Role.Dual))))
+    val mb      = new MetricsBindings(reg, tracker, fakeSessions(0, 0), pools, engine)
+    engine.update("n1", EngineStats(1024L, 2048L, 3L, 4096L))
+    mb.refresh()
+    reg.find("node_duckdb_memory_used_bytes").tag("node_id", "n1").gauge.value() shouldBe 1024.0
+    reg.find("node_duckdb_temp_storage_bytes").tag("node_id", "n1").gauge.value() shouldBe 2048.0
+    reg.find("node_duckdb_spill_files").tag("node_id", "n1").gauge.value() shouldBe 3.0
+    reg.find("node_duckdb_spill_bytes").tag("node_id", "n1").gauge.value() shouldBe 4096.0
+    // n2 never scraped -> no row at all (not a zero).
+    reg.find("node_duckdb_memory_used_bytes").tag("node_id", "n2").gauge shouldBe null
+
+  it should "refresh node_duckdb_* rows with the latest sample" in:
+    val reg    = new SimpleMeterRegistry()
+    val engine = new EngineStatsTracker
+    val pools  = () => List(fakePool(List(node("n1", Role.ReadOnly))))
+    val mb     = new MetricsBindings(reg, new NodeLoadTracker, fakeSessions(0, 0), pools, engine)
+    engine.update("n1", EngineStats(10L, 0L, 0L, 0L))
+    mb.refresh()
+    reg.find("node_duckdb_memory_used_bytes").tag("node_id", "n1").gauge.value() shouldBe 10.0
+    engine.update("n1", EngineStats(999L, 1L, 2L, 3L))
+    mb.refresh()
+    reg.find("node_duckdb_memory_used_bytes").tag("node_id", "n1").gauge.value() shouldBe 999.0
+    reg.find("node_duckdb_spill_bytes").tag("node_id", "n1").gauge.value() shouldBe 3.0
