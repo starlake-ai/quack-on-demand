@@ -358,7 +358,7 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/unquaran
   -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
 
-# Restart a node: kills everything running on it, respawns with the same id. Superuser only.
+# Restart a node: kills everything running on it, respawns with the same id, and clears any quarantine. Superuser only.
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/restart \
   -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
@@ -368,6 +368,7 @@ curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/node/active-statement
 
 # Best-effort kill by statement id from the list above. "accepted" is not a guarantee:
 # the manager closes the stream; a node that ignores disconnect keeps executing.
+# Response is "accepted" (stream closed, best-effort) or "already-completed" (statement finished before the kill arrived).
 # Escalate with node/restart when the statement must die.
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/statement/kill \
   -H 'Content-Type: application/json' \
