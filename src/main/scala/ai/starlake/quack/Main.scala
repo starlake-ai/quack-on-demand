@@ -250,7 +250,8 @@ object Main extends IOApp with LazyLogging:
       s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}"
     )
 
-    val tracker = new NodeLoadTracker
+    val tracker            = new NodeLoadTracker
+    val engineStatsTracker = new EngineStatsTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: ControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
@@ -656,7 +657,11 @@ object Main extends IOApp with LazyLogging:
           ok
         }
       },
-      scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds
+      scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
+      // Piggyback the DuckDB engine-stats scrape (memory, temp storage, spill) on every
+      // successful health tick. Fail-soft: a failed scrape keeps the previous sample.
+      onHealthy = n =>
+        adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st)))
     )
 
     def runWithMetrics(
@@ -1123,7 +1128,13 @@ object Main extends IOApp with LazyLogging:
         .resource(metricsCfg)
         .use { metricsReg =>
           val bindings =
-            new MetricsBindings(metricsReg.composite, tracker, sessions, () => sup.list())
+            new MetricsBindings(
+              metricsReg.composite,
+              tracker,
+              sessions,
+              () => sup.list(),
+              engineStatsTracker
+            )
           val metricsEndpoint = new MetricsEndpoint(metricsReg.prometheus, () => bindings.refresh())
           val stmtInstruments = new StatementInstruments(metricsReg.composite)
           IO.delay(bindings.refresh()) *> runWithMetrics(

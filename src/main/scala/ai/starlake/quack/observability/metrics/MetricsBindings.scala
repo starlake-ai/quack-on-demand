@@ -1,7 +1,7 @@
 package ai.starlake.quack.observability.metrics
 
 import ai.starlake.quack.edge.SessionRegistry
-import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.ondemand.PoolState
 import io.micrometer.core.instrument.{MeterRegistry, MultiGauge, Tags}
 
@@ -16,7 +16,8 @@ final class MetricsBindings(
     registry: MeterRegistry,
     tracker: NodeLoadTracker,
     sessions: SessionRegistry,
-    listPools: () => List[PoolState]
+    listPools: () => List[PoolState],
+    engineStats: EngineStatsTracker = new EngineStatsTracker
 ):
 
   // Per-node MultiGauges. Each row carries (tenant, pool, node_id, role) tags.
@@ -25,6 +26,16 @@ final class MetricsBindings(
   private val nodeInFlight = MultiGauge.builder("node_in_flight").register(registry)
   private val nodeEwma     = MultiGauge.builder("node_ewma_latency_seconds").register(registry)
   private val poolNodes    = MultiGauge.builder("pool_nodes").register(registry)
+
+  // DuckDB engine internals per node, scraped by the HealthProbe (EngineStats). Nodes without a
+  // successful sample yet publish no row at all rather than a misleading zero.
+  private val nodeDuckMem  = MultiGauge.builder("node_duckdb_memory_used_bytes").register(registry)
+  private val nodeDuckTemp =
+    MultiGauge.builder("node_duckdb_temp_storage_bytes").register(registry)
+  private val nodeDuckSpillFiles =
+    MultiGauge.builder("node_duckdb_spill_files").register(registry)
+  private val nodeDuckSpillBytes =
+    MultiGauge.builder("node_duckdb_spill_bytes").register(registry)
 
   // Free JVM metrics -- operators expect these and Micrometer ships them.
   new io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics().bindTo(registry)
@@ -91,9 +102,25 @@ final class MetricsBindings(
       }
     }
 
+    // Engine-internal rows exist only for nodes with a scraped sample.
+    val sampled = nodes.flatMap { case (t, p, n) =>
+      engineStats.snapshot(n.nodeId).map { s =>
+        (Tags.of("tenant", t, "pool", p, "node_id", n.nodeId, "role", n.role.toString), s)
+      }
+    }
+    val duckMemRows  = sampled.map((tags, s) => MultiGauge.Row.of(tags, s.memoryUsedBytes.toDouble))
+    val duckTempRows =
+      sampled.map((tags, s) => MultiGauge.Row.of(tags, s.tempStorageBytes.toDouble))
+    val spillFileRows = sampled.map((tags, s) => MultiGauge.Row.of(tags, s.spillFiles.toDouble))
+    val spillByteRows = sampled.map((tags, s) => MultiGauge.Row.of(tags, s.spillBytes.toDouble))
+
     // `overwrite=true` replaces the row set wholesale -- old nodes vanish.
     nodeHealthy.register(healthyRows.asJava, true)
     nodeDraining.register(drainingRows.asJava, true)
     nodeInFlight.register(inFlightRows.asJava, true)
     nodeEwma.register(ewmaRows.asJava, true)
     poolNodes.register(poolRoleCounts.asJava, true)
+    nodeDuckMem.register(duckMemRows.asJava, true)
+    nodeDuckTemp.register(duckTempRows.asJava, true)
+    nodeDuckSpillFiles.register(spillFileRows.asJava, true)
+    nodeDuckSpillBytes.register(spillByteRows.asJava, true)

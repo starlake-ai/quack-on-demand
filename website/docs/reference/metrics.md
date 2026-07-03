@@ -18,6 +18,17 @@ The manager registers these series through Micrometer. They are emitted to which
 | `node_in_flight` | gauge | `tenant`, `pool`, `node_id`, `role` | Statements currently executing on the node. |
 | `node_ewma_latency_seconds` | gauge | `tenant`, `pool`, `node_id`, `role` | EWMA of completed-statement latency, the signal the router uses to pick the least-loaded node. |
 
+## DuckDB engine metrics
+
+Scraped from each node's DuckDB engine (`duckdb_memory()`, `duckdb_temporary_files()`) by the background health probe, one extra round-trip per node per `QOD_HEALTH_CHECK_INTERVAL_SEC` tick. A node that has never been scraped successfully publishes no row (rather than a misleading zero); a failed scrape keeps the previous sample until the next tick.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `node_duckdb_memory_used_bytes` | gauge | `tenant`, `pool`, `node_id`, `role` | Buffer-manager memory in use, summed across all consumers (base tables, hash tables, parquet readers, ...). Compare against the node's `memory_limit` to spot memory pressure before latency degrades. |
+| `node_duckdb_temp_storage_bytes` | gauge | `tenant`, `pool`, `node_id`, `role` | Bytes the buffer manager has moved to temporary storage. |
+| `node_duckdb_spill_files` | gauge | `tenant`, `pool`, `node_id`, `role` | Live spill-to-disk files. Non-zero means queries are exceeding the memory budget and spilling. |
+| `node_duckdb_spill_bytes` | gauge | `tenant`, `pool`, `node_id`, `role` | Total size of live spill files. |
+
 ## JVM and process metrics
 
 Registered by the Micrometer JVM and process binders:
