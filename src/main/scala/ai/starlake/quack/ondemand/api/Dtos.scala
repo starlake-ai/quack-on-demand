@@ -753,6 +753,10 @@ object Dtos:
         p99Ms         <- c.getOrElse[Double]("p99Ms")(0.0)
         healthy       <- c.getOrElse[Boolean]("healthy")(true)
         draining      <- c.getOrElse[Boolean]("draining")(false)
+        duckMem       <- c.getOrElse[Option[Long]]("duckdbMemoryBytes")(None)
+        duckTemp      <- c.getOrElse[Option[Long]]("duckdbTempStorageBytes")(None)
+        duckSpillN    <- c.getOrElse[Option[Long]]("duckdbSpillFiles")(None)
+        duckSpillB    <- c.getOrElse[Option[Long]]("duckdbSpillBytes")(None)
       yield NodeInfo(
         nodeId,
         role,
@@ -766,25 +770,33 @@ object Dtos:
         p95Ms,
         p99Ms,
         healthy,
-        draining
+        draining,
+        duckMem,
+        duckTemp,
+        duckSpillN,
+        duckSpillB
       )
     },
     Encoder.instance { n =>
       Json.fromJsonObject(
         JsonObject(
-          "nodeId"        -> n.nodeId.asJson,
-          "role"          -> n.role.asJson,
-          "host"          -> n.host.asJson,
-          "port"          -> n.port.asJson,
-          "maxConcurrent" -> n.maxConcurrent.asJson,
-          "inFlight"      -> n.inFlight.asJson,
-          "totalServed"   -> n.totalServed.asJson,
-          "avgDurationMs" -> n.avgDurationMs.asJson,
-          "p50Ms"         -> n.p50Ms.asJson,
-          "p95Ms"         -> n.p95Ms.asJson,
-          "p99Ms"         -> n.p99Ms.asJson,
-          "healthy"       -> n.healthy.asJson,
-          "draining"      -> n.draining.asJson
+          "nodeId"                 -> n.nodeId.asJson,
+          "role"                   -> n.role.asJson,
+          "host"                   -> n.host.asJson,
+          "port"                   -> n.port.asJson,
+          "maxConcurrent"          -> n.maxConcurrent.asJson,
+          "inFlight"               -> n.inFlight.asJson,
+          "totalServed"            -> n.totalServed.asJson,
+          "avgDurationMs"          -> n.avgDurationMs.asJson,
+          "p50Ms"                  -> n.p50Ms.asJson,
+          "p95Ms"                  -> n.p95Ms.asJson,
+          "p99Ms"                  -> n.p99Ms.asJson,
+          "healthy"                -> n.healthy.asJson,
+          "draining"               -> n.draining.asJson,
+          "duckdbMemoryBytes"      -> n.duckdbMemoryBytes.asJson,
+          "duckdbTempStorageBytes" -> n.duckdbTempStorageBytes.asJson,
+          "duckdbSpillFiles"       -> n.duckdbSpillFiles.asJson,
+          "duckdbSpillBytes"       -> n.duckdbSpillBytes.asJson
         )
       )
     }

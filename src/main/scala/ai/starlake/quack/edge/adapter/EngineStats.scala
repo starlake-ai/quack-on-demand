@@ -31,12 +31,15 @@ object EngineStats:
       |  CAST((SELECT COUNT(*) FROM duckdb_temporary_files()) AS BIGINT),
       |  CAST(COALESCE((SELECT SUM(size) FROM duckdb_temporary_files()), 0) AS BIGINT)""".stripMargin
 
-  /** Decode the single-row, 4-column result of [[sql]]. None on an empty result or an unexpected
-    * shape (fail-soft: a scrape must never take a node down).
+  /** Decode the single-row, 4-column result of [[sql]]. Batches are advanced until one carries a
+    * row - the quack wire protocol can emit a schema-only (zero-row) first batch that a JDBC-backed
+    * reader never produces. None on an empty result or an unexpected shape (fail-soft: a scrape
+    * must never take a node down).
     */
   def fromReader(reader: ArrowReader): Option[EngineStats] =
-    try
-      if reader.loadNextBatch() then
+    def firstRow(): Option[EngineStats] =
+      if !reader.loadNextBatch() then None
+      else
         val root = reader.getVectorSchemaRoot
         if root.getRowCount >= 1 && root.getFieldVectors.size >= 4 then
           def cell(i: Int): Option[Long] =
@@ -49,8 +52,9 @@ object EngineStats:
             files <- cell(2)
             bytes <- cell(3)
           yield EngineStats(mem, tmp, files, bytes)
+        else if root.getRowCount == 0 then firstRow()
         else None
-      else None
+    try firstRow()
     catch case _: Throwable => None
 
 /** Latest [[EngineStats]] sample per node, written by the HealthProbe's scrape and read by
