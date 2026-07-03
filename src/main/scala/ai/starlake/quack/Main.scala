@@ -343,7 +343,7 @@ object Main extends IOApp with LazyLogging:
     )
 
     val pools     = new PoolHandlers(sup, tracker, engineStatsTracker)
-    val nodes     = new NodeHandlers(sup, tracker)
+    val nodes     = new NodeHandlers(sup, tracker, store, publisher)
     val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
 
@@ -401,6 +401,15 @@ object Main extends IOApp with LazyLogging:
             )
     )
 
+    val stmtHistory        = new ai.starlake.quack.edge.StatementHistoryStore()
+    val activeStatements   = new ActiveStatementRegistry()
+    val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
+      activeStatements,
+      stmtHistory,
+      store,
+      haEnabled = haOn
+    )
+
     // Leader elector + LISTEN dispatcher. Present only under HA. Handlers close
     // over `sup` and `sessionTokens`: topology/RBAC NOTIFYs re-restore the
     // supervisor cache and reseed the revocation denylist; a revocation NOTIFY
@@ -423,7 +432,10 @@ object Main extends IOApp with LazyLogging:
               case Array(jti, epoch) =>
                 sessionTokens.addRevoked(jti, java.time.Instant.ofEpochSecond(epoch.toLong))
               case _ => refreshFromStore()
-          }
+          },
+          ai.starlake.quack.ondemand.api.KillBroadcast.Channel -> (payload =>
+            activeStmtHandlers.onKillBroadcast(payload)
+          )
         )
       )
     }
@@ -578,7 +590,6 @@ object Main extends IOApp with LazyLogging:
       oidc = oidcSso,
       sqlToken = sqlTokenSvc
     )
-    val stmtHistory     = new ai.starlake.quack.edge.StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
     val sessions        = new SessionRegistry
     val arrowAllocator  = new org.apache.arrow.memory.RootAllocator()
@@ -750,7 +761,8 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments,
         classifier,
         columnPolicyRewriter,
-        rowPolicyRewriter
+        rowPolicyRewriter,
+        activeStatements
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
@@ -889,7 +901,8 @@ object Main extends IOApp with LazyLogging:
         manifestHandlers,
         federatedSourceHandlers,
         columnPolicyHandlers,
-        rowPolicyHandlers
+        rowPolicyHandlers,
+        activeStmtHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

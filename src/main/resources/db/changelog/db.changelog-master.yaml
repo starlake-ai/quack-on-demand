@@ -33,3 +33,5 @@ databaseChangeLog:
       file: db/changelog/0013-role-row-policy.yaml
   - include:
       file: db/changelog/0014-revoked-jti.yaml
+  - include:
+      file: db/changelog/0015-node-quarantined.yaml

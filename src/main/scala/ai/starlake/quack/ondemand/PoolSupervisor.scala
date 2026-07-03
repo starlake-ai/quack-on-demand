@@ -220,6 +220,12 @@ final class PoolSupervisor(
     // Hand the RBAC graph to the resolver in one shot. Subsequent
     // mutations are mirrored incrementally by the methods below.
     rbacResolver.replace(snap)
+    // Seed operator quarantine flags so a restarted manager or an HA replica woken
+    // by a qod_topology NOTIFY keeps refusing to route to quarantined nodes.
+    val quarantinedIds = store.listQuarantinedNodeIds()
+    pools.values.flatMap(_.nodes).foreach { n =>
+      tracker.setQuarantined(n.nodeId, quarantinedIds.contains(n.nodeId))
+    }
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
     invalidateEffectiveCacheLocal()
@@ -292,6 +298,19 @@ final class PoolSupervisor(
         case None => state
     }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
 
+  private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =
+    NodeSpec(
+      poolKey = key,
+      nodeId = n.nodeId,
+      role = n.role,
+      metastore = state.metastore,
+      s3 = state.s3,
+      maxConcurrent = n.maxConcurrent,
+      kindWire = state.kindWire,
+      extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
+      placement = placementForNodeId(key, n.nodeId)
+    )
+
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh
@@ -310,31 +329,22 @@ final class PoolSupervisor(
                 s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
                   "is dead; respawning"
               )
+              val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
               IO.delay(tracker.remove(n.nodeId)) *>
                 backend
-                  .start(
-                    NodeSpec(
-                      poolKey = key,
-                      nodeId = n.nodeId,
-                      role = n.role,
-                      metastore = state.metastore,
-                      s3 = state.s3,
-                      maxConcurrent = n.maxConcurrent,
-                      kindWire = state.kindWire,
-                      // initSql + federation blob concatenated fresh.
-                      extraSetupSql =
-                        PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
-                      // Recover the original cohort placement from the node's
-                      // 1-based suffix index. Falls back to no placement when
-                      // the pool was created without explicit cohorts or when
-                      // the id is in an unexpected shape.
-                      placement = placementForNodeId(key, n.nodeId)
-                    )
-                  )
+                  .start(respawnSpec(key, state, n))
                   .flatMap { fresh =>
+                    // Re-apply the pre-remove quarantine flag so an operator quarantine
+                    // survives a node crash. restartNode intentionally clears it; only
+                    // automatic reconcile respawn must preserve it.
+                    val restore: IO[Unit] =
+                      if wasQuarantined then IO.delay(tracker.setQuarantined(fresh.nodeId, true))
+                      else IO.unit
                     poolIdByKey.get(key) match
-                      case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
-                      case None      => IO.pure(kept :+ fresh)
+                      case Some(pid) =>
+                        IO.blocking(store.upsertNode(fresh, pid)) *> restore.as(kept :+ fresh)
+                      case None =>
+                        restore.as(kept :+ fresh)
                   }
           }
         }
@@ -1074,6 +1084,39 @@ final class PoolSupervisor(
           }
 
   private def drainAndStop(n: RunningNode): IO[Unit] = backend.stop(n.nodeId)
+
+  /** Operator-initiated restart of a single node: stop it (all its in-flight statements fail to
+    * their clients), respawn through the same NodeSpec path reconcile uses, clear any quarantine so
+    * the fresh node is routable, and broadcast the topology change. Left(message) when pool or node
+    * is unknown.
+    */
+  def restartNode(key: PoolKey, nodeId: String): IO[Either[String, Unit]] =
+    locks.withLock(key) {
+      IO.delay(pools.get(key)).flatMap {
+        case None        => IO.pure(Left(s"pool $key not found"))
+        case Some(state) =>
+          state.nodes.find(_.nodeId == nodeId) match
+            case None    => IO.pure(Left(s"node $nodeId not found in $key"))
+            case Some(n) =>
+              for
+                _     <- backend.stop(n.nodeId)
+                _     <- IO.delay(tracker.remove(n.nodeId))
+                fresh <- backend.start(respawnSpec(key, state, n))
+                _     <- poolIdByKey.get(key) match
+                  case Some(pid) => IO.blocking(store.upsertNode(fresh, pid))
+                  case None      => IO.unit
+                _ <- IO.blocking(store.setNodeQuarantined(nodeId, false))
+                _ <- IO.delay {
+                  tracker.setQuarantined(nodeId, false)
+                  val updated = state.copy(
+                    nodes = state.nodes.map(x => if x.nodeId == nodeId then fresh else x)
+                  )
+                  pools.put(key, updated)
+                  publish.topologyChanged()
+                }
+              yield Right(())
+      }
+    }
 
   // ---------- RBAC: users ----------
 

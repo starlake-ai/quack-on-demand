@@ -343,6 +343,38 @@ Per-node fields surfaced via `/api/pool/list`:
 - `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
 - `healthy` / `draining` - tracker flags
 
+## Incident response
+
+Quarantine is durable operator state, separate from node health. Check the quarantined flag in `pool/list` before debugging a node that shows unhealthy-like symptoms.
+
+```bash
+# Quarantine a node: stop routing new statements to it (running ones finish).
+# Durable: survives manager restarts; only unquarantine clears it. Superuser only.
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/quarantine \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/unquarantine \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+
+# Restart a node: kills everything running on it, respawns with the same id, and clears any quarantine. Superuser only.
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/restart \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+
+# In-flight statements (tenant admins see only their tenant).
+curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/node/active-statements
+
+# Best-effort kill by statement id from the list above. "accepted" is not a guarantee:
+# the manager closes the stream; a node that ignores disconnect keeps executing.
+# Response is "accepted" (stream closed, best-effort) or "already-completed" (statement finished before the kill arrived).
+# Escalate with node/restart when the statement must die.
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/statement/kill \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"<statement-id>"}'
+```
+
 ## Ad-hoc queries
 
 `scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees - handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.

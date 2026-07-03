@@ -59,7 +59,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     * metastore that PoolSupervisor passes through. */
   private final class CapturingBackend extends QuackBackend:
     private val nodes = TrieMap.empty[String, RunningNode]
-    val specs = scala.collection.mutable.ListBuffer.empty[NodeSpec]
+    val specs   = scala.collection.mutable.ListBuffer.empty[NodeSpec]
+    val stopped = scala.collection.mutable.Set.empty[String]
     def start(spec: NodeSpec): IO[RunningNode] = IO {
       specs += spec
       val n = RunningNode(spec.nodeId, spec.poolKey, spec.role,
@@ -67,7 +68,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
         Some(1L), None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
       nodes.put(spec.nodeId, n); n
     }
-    def stop(id: String): IO[Unit] = IO { nodes.remove(id); () }
+    def stop(id: String): IO[Unit] = IO { stopped += id; nodes.remove(id); () }
     def isAlive(id: String): Boolean = nodes.contains(id)
     def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
     def cleanup(): IO[Unit] = IO { nodes.clear() }
@@ -211,6 +212,32 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.deletePool(key, force = true).unsafeRunSync()
     sup.get(key) shouldBe None
+
+  // ---------- restartNode ----------
+
+  "PoolSupervisor.restartNode" should "stop and respawn the node with the same id and clear quarantine" in {
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val backend = new CapturingBackend
+    val sup     = new PoolSupervisor(backend, tracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    store.setNodeQuarantined(nodeId, true)
+    tracker.setQuarantined(nodeId, true)
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+    backend.stopped should contain(nodeId)
+    sup.get(key).get.nodes.map(_.nodeId) should contain(nodeId)
+    tracker.snapshot(nodeId).quarantined shouldBe false
+    store.listQuarantinedNodeIds() should not contain nodeId
+  }
+
+  it should "return Left for an unknown node" in {
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.restartNode(key, "no-such-node").unsafeRunSync().isLeft shouldBe true
+  }
 
   // ---------- reconcileLoop ----------
 
@@ -574,6 +601,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.getTenantById("ghost") shouldBe None
     sup.listTenants().map(_.id) should not contain "ghost"
 
+  "restore" should "seed operator quarantine flags into the load tracker" in:
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(fakeBackend(), tracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val poolKey = PoolKey("acme", "acme_default", "sales")
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId = sup.get(poolKey).get.nodes.head.nodeId
+    store.setNodeQuarantined(nodeId, true)
+    sup.restore()
+    tracker.snapshot(nodeId).quarantined shouldBe true
+    store.setNodeQuarantined(nodeId, false)
+    sup.restore()
+    tracker.snapshot(nodeId).quarantined shouldBe false
+
   // ---------- membership: cross-tenant edges are rejected ----------
 
   "addUserRole" should "reject attaching a tenant-B role to a tenant-A user" in:
@@ -648,3 +693,32 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val groupA = sup.createGroup(a.id, "team").unsafeRunSync().toOption.get
     val roleA  = sup.createRole(a.id, "analyst").unsafeRunSync().toOption.get
     sup.addGroupRole(groupA.id, roleA.id).unsafeRunSync() shouldBe Right(())
+
+  // ---------- reconcile: quarantine flag must survive respawn ----------
+
+  "PoolSupervisor.reconcileLoop" should "preserve operator quarantine when a quarantined node is respawned" in {
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val backend = new CapturingBackend
+    val sup     = new PoolSupervisor(backend, tracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId       = sup.get(key).get.nodes.head.nodeId
+    val beforeRespawn = backend.specs.size
+
+    // Quarantine in both store and tracker, mirroring what the operator endpoint does.
+    store.setNodeQuarantined(nodeId, true)
+    tracker.setQuarantined(nodeId, true)
+
+    // Let reconcile run; the node's socket is unreachable so it will be respawned.
+    val fiber    = sup.reconcileLoop(20.millis).start.unsafeRunSync()
+    val deadline = System.currentTimeMillis() + 3000L
+    while (backend.specs.size < beforeRespawn + 1 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+    fiber.cancel.unsafeRunSync()
+
+    backend.specs.size should be >= beforeRespawn + 1
+    // After reconcile respawn the quarantine flag must still be set in the tracker
+    // so the respawned node remains excluded from routing.
+    tracker.snapshot(nodeId).quarantined shouldBe true
+  }

@@ -49,6 +49,7 @@ final class PoolHandlers(
             p99Ms = p99,
             healthy = load.healthy,
             draining = load.draining,
+            quarantined = load.quarantined,
             duckdbMemoryBytes = engine.map(_.memoryUsedBytes),
             duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
             duckdbSpillFiles = engine.map(_.spillFiles),
