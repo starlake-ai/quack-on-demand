@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0016-qodstate-tenant-db-init-sql
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name:         init_sql
+                  type:         TEXT
+                  defaultValue: ""
+                  constraints:
+                    nullable: false
