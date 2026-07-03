@@ -2,8 +2,9 @@ package ai.starlake.quack.edge.adapter
 
 import ai.starlake.quack.model.RunningNode
 import cats.effect.IO
+import com.typesafe.scalalogging.LazyLogging
 
-final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
+final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) extends LazyLogging:
 
   /** Send `sql` to `node`. Records load, EWMA, and health side-effects on the tracker. Returns the
     * raw response - the caller is responsible for closing any streaming reader inside
@@ -63,7 +64,12 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker):
     val endpoint = s"quack:${node.host}:${node.port}"
     client.query(endpoint, node.token, EngineStats.sql, None).map {
       case QuackResponse.Ok(rows, _, close) =>
-        try EngineStats.fromReader(rows)
-        finally close()
-      case _ => None
+        val out =
+          try EngineStats.fromReader(rows)
+          finally close()
+        if out.isEmpty then logger.debug(s"engineStats ${node.nodeId}: result decoded to no sample")
+        out
+      case QuackResponse.Failed(err, _) =>
+        logger.debug(s"engineStats ${node.nodeId}: scrape failed: $err")
+        None
     }
