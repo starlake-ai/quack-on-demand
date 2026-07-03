@@ -574,6 +574,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.getTenantById("ghost") shouldBe None
     sup.listTenants().map(_.id) should not contain "ghost"
 
+  "restore" should "seed operator quarantine flags into the load tracker" in:
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(fakeBackend(), tracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val poolKey = PoolKey("acme", "acme_default", "sales")
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val nodeId = sup.get(poolKey).get.nodes.head.nodeId
+    store.setNodeQuarantined(nodeId, true)
+    sup.restore()
+    tracker.snapshot(nodeId).quarantined shouldBe true
+    store.setNodeQuarantined(nodeId, false)
+    sup.restore()
+    tracker.snapshot(nodeId).quarantined shouldBe false
+
   // ---------- membership: cross-tenant edges are rejected ----------
 
   "addUserRole" should "reject attaching a tenant-B role to a tenant-A user" in:

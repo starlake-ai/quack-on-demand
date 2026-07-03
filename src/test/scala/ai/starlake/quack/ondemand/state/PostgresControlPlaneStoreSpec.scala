@@ -191,6 +191,18 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listNodes("pool-1") shouldBe List(withFields)
   }
 
+  it should "persist and list node quarantine flags" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    store.upsertNode(node, "pool-1")
+    val nodeId = node.nodeId
+    store.setNodeQuarantined(nodeId, true)
+    store.listQuarantinedNodeIds() should contain(nodeId)
+    store.setNodeQuarantined(nodeId, false)
+    store.listQuarantinedNodeIds() should not contain nodeId
+  }
+
   it should "reject delete of a tenant that still has tenant-dbs (FK RESTRICT)" in withStore {
     store =>
       store.upsertTenant(tenant)

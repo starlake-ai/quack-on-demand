@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0015-qodstate-node-quarantined
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_node
+            columns:
+              - column:
+                  name:                quarantined
+                  type:                BOOLEAN
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
