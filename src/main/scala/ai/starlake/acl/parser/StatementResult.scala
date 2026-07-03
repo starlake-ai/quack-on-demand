@@ -25,21 +25,27 @@ final case class TableAccess(table: TableRef, verb: Verb)
 enum StatementResult:
   /** Statement was parsed AND we extracted its table access set. `qualificationErrors` carries any
     * DenyReasons accumulated while resolving unqualified refs against the dialect-default
-    * catalog/schema.
+    * catalog/schema. `unsupported` carries a marker for every construct the walker could not map to
+    * a grantable table (table functions, file refs, unrecognized node types); a non-empty list
+    * means `accesses` is INCOMPLETE and the validator must fail closed.
     */
   case Extracted(
       index: Int,
       sqlSnippet: String,
       accesses: Set[TableAccess],
-      qualificationErrors: List[DenyReason] = Nil
+      qualificationErrors: List[DenyReason] = Nil,
+      unsupported: List[String] = Nil
   )
 
-  /** Statement failed to parse or JSQLParser flagged it Unsupported. */
+  /** Statement failed to parse, JSQLParser flagged it Unsupported, or its type is not on the
+    * explicit control-flow allowlist (fail-closed default for unrecognized statement types).
+    */
   case ParseError(index: Int, sqlSnippet: String, message: String)
 
-  /** Statement parsed but carries no table references the validator cares about: COMMIT, ROLLBACK,
-    * BEGIN, SET, USE, SHOW, EXPLAIN (without an inner DML), etc. The validator admits these
-    * unconditionally.
+  /** Statement parsed to a type on the explicit no-table-refs allowlist: COMMIT, ROLLBACK,
+    * SAVEPOINT, SET, RESET, USE, SHOW, DESCRIBE. The validator admits these unconditionally.
+    * Statement types NOT on the allowlist are reported as [[ParseError]] instead, so the validator
+    * fails closed on anything the parser does not positively recognize as table-free.
     */
   case ControlFlow(index: Int, sqlSnippet: String, statementType: String)
 
@@ -51,7 +57,7 @@ final case class ExtractionResult(
 object ExtractionResult:
   def fromStatements(results: List[StatementResult]): ExtractionResult =
     val tables = results
-      .collect { case StatementResult.Extracted(_, _, accesses, _) => accesses.map(_.table) }
+      .collect { case StatementResult.Extracted(_, _, accesses, _, _) => accesses.map(_.table) }
       .foldLeft(Set.empty[TableRef])(_ ++ _)
     ExtractionResult(results, tables)
 

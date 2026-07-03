@@ -5,7 +5,23 @@ import net.sf.jsqlparser.JSQLParserException
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.parser.feature.{Feature, FeatureConfiguration}
 import net.sf.jsqlparser.schema.Table
-import net.sf.jsqlparser.statement.{Statement, Statements, UnsupportedStatement}
+import net.sf.jsqlparser.statement.{
+  Commit,
+  DescribeStatement,
+  ExplainStatement,
+  ResetStatement,
+  RollbackStatement,
+  SavepointStatement,
+  SessionStatement,
+  SetStatement,
+  ShowColumnsStatement,
+  ShowStatement,
+  Statement,
+  Statements,
+  UnsupportedStatement,
+  UseStatement
+}
+import net.sf.jsqlparser.statement.show.ShowTablesStatement
 import net.sf.jsqlparser.statement.alter.Alter
 import net.sf.jsqlparser.statement.create.table.CreateTable
 import net.sf.jsqlparser.statement.create.view.CreateView
@@ -104,76 +120,95 @@ object SqlParser:
     val snippet = truncateSnippet(stmt.toString)
     stmt match
       case select: Select =>
-        val rawTables                 = TableExtractor.extract(select)
-        val (qualifiedTables, errors) = TableQualifier.qualify(rawTables, config)
+        val extraction                = TableExtractor.extract(select)
+        val (qualifiedTables, errors) = TableQualifier.qualify(extraction.tables, config)
         val accesses                  = qualifiedTables.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, errors)
+        StatementResult.Extracted(index, snippet, accesses, errors, extraction.unsupported)
 
       // parser-3: INSERT
       case ins: Insert =>
-        val target     = ins.getTable
-        val srcRaw     = Option(ins.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target      = ins.getTable
+        val srcExtract  = Option(ins.getSelect).map(TableExtractor.extract)
+        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
+        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
+        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
 
       // parser-4: UPDATE
       case upd: Update =>
-        val target     = upd.getTable
-        val readTables = UpdateReadExtractor.extract(upd)
-        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target      = upd.getTable
+        val readExtract = UpdateReadExtractor.extract(upd)
+        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
 
       // parser-5: DELETE
       case del: Delete =>
-        val target     = del.getTable
-        val readTables = DeleteReadExtractor.extract(del)
-        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val target      = del.getTable
+        val readExtract = DeleteReadExtractor.extract(del)
+        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
 
       // parser-6: MERGE
       case mrg: Merge =>
-        val target                  = mrg.getTable
-        val readTables: List[Table] = Option(mrg.getFromItem) match
-          case Some(t: Table)     => List(t)
-          case Some(fi: FromItem) =>
-            val v = new TableExtractorVisitor()
-            v.visitFromItem(fi)
-            v.tables.toList
-          case None => Nil
-        val (qSrc, e1) = TableQualifier.qualify(readTables, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
+        val v = new TableExtractorVisitor()
+        Option(mrg.getFromItem).foreach(v.visitFromItem)
+        // WHEN MATCHED THEN UPDATE SET c = (SELECT ...) and WHEN NOT MATCHED
+        // INSERT ... VALUES (SELECT ...) can smuggle read sources past the gate.
+        Option(mrg.getOperations).foreach(_.asScala.foreach {
+          case mu: net.sf.jsqlparser.statement.merge.MergeUpdate =>
+            Option(mu.getUpdateSets).foreach(_.asScala.foreach { us =>
+              Option(us.getValues).foreach(v.visitExpression)
+            })
+            Option(mu.getWhereCondition).foreach(v.visitExpression)
+            Option(mu.getAndPredicate).foreach(v.visitExpression)
+            Option(mu.getDeleteWhereCondition).foreach(v.visitExpression)
+          case mi: net.sf.jsqlparser.statement.merge.MergeInsert =>
+            Option(mi.getValues).foreach(v.visitExpression)
+            Option(mi.getWhereCondition).foreach(v.visitExpression)
+            Option(mi.getAndPredicate).foreach(v.visitExpression)
+          case _ => ()
+        })
+        Option(mrg.getOnCondition).foreach(v.visitExpression)
+        val target      = mrg.getTable
+        val readExtract = v.result
+        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
 
       // parser-7: CREATE TABLE
       case ct: CreateTable =>
-        val target     = ct.getTable
-        val srcRaw     = Option(ct.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
+        val target      = ct.getTable
+        val srcExtract  = Option(ct.getSelect).map(TableExtractor.extract)
+        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
+        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
+        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
 
       // parser-7: CREATE VIEW
       case cv: CreateView =>
-        val target     = cv.getView
-        val srcRaw     = Option(cv.getSelect).map(s => TableExtractor.extract(s)).getOrElse(Nil)
-        val (qSrc, e1) = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2) = TableQualifier.qualify(List(target), config)
-        val accesses   = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
+        val target      = cv.getView
+        val srcExtract  = Option(cv.getSelect).map(TableExtractor.extract)
+        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
+        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
+        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
+        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
+        val accesses    = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
           qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2)
+        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
 
       // parser-8: DROP
       case dr: Drop =>
@@ -198,11 +233,43 @@ object SqlParser:
         val accesses = qTgt.map(t => TableAccess(t, Verb.Write)).toSet
         StatementResult.Extracted(index, snippet, accesses, errs)
 
+      // parser-9: EXPLAIN. `EXPLAIN <stmt>` is read-only, but DuckDB's
+      // `EXPLAIN ANALYZE <dml>` EXECUTES the inner statement. Classify by the
+      // inner statement so an EXPLAIN ANALYZE DELETE is authorized as the DELETE
+      // it really runs, not admitted as a table-free control-flow verb.
+      case ex: ExplainStatement =>
+        Option(ex.getStatement) match
+          case Some(inner) =>
+            processStatement(inner, index, config) match
+              case StatementResult.Extracted(_, _, accesses, errs, unsup) =>
+                StatementResult.Extracted(index, snippet, accesses, errs, unsup)
+              case StatementResult.ParseError(_, _, msg) =>
+                StatementResult.ParseError(index, snippet, msg)
+              case StatementResult.ControlFlow(_, _, t) =>
+                StatementResult.ControlFlow(index, snippet, s"EXPLAIN $t")
+          case None =>
+            // Bare EXPLAIN with no inner statement carries no table refs.
+            StatementResult.ControlFlow(index, snippet, "ExplainStatement")
+
       case _: UnsupportedStatement =>
         StatementResult.ParseError(index, snippet, s"Unsupported or unparseable statement")
 
+      // Explicit allowlist of statement types that provably carry no grantable
+      // table reference. Admitted unconditionally as ControlFlow. Anything NOT
+      // on this list falls through to the fail-closed ParseError arm below, so a
+      // new/unknown statement type can never be silently admitted with an empty
+      // access set.
+      case _: Commit | _: RollbackStatement | _: SavepointStatement | _: SetStatement |
+          _: ResetStatement | _: UseStatement | _: ShowStatement | _: ShowColumnsStatement |
+          _: ShowTablesStatement | _: DescribeStatement | _: SessionStatement =>
+        StatementResult.ControlFlow(index, snippet, stmt.getClass.getSimpleName)
+
       case other =>
-        // Fallthrough for statement types not yet handled (COMMIT, ROLLBACK,
-        // BEGIN, SET, USE, SHOW, EXPLAIN, etc.). The validator admits these
-        // unconditionally.
-        StatementResult.ControlFlow(index, snippet, other.getClass.getSimpleName)
+        // Fail closed: a statement type we do not positively recognize as
+        // table-free is treated as a parse error, so the validator denies it
+        // unless the principal holds an unrestricted ALL grant.
+        StatementResult.ParseError(
+          index,
+          snippet,
+          s"unrecognized statement type ${other.getClass.getSimpleName}; denied (fail-closed)"
+        )

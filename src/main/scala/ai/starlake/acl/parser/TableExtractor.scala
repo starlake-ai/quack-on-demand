@@ -8,11 +8,20 @@ import net.sf.jsqlparser.expression.operators.relational.*
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
+/** Result of a table-reference walk. `tables` carries every base-table reference found;
+  * `unsupported` carries a human-readable marker for every construct the walker cannot map to a
+  * grantable table (table functions like `read_parquet`, string-literal file refs, FROM item or
+  * SELECT node types it does not recognize). A non-empty `unsupported` means the access set is
+  * INCOMPLETE and the validator must fail closed instead of admitting on what was extracted.
+  */
+final case class TableExtraction(tables: List[Table], unsupported: List[String])
+
 /** Extracts all table references from a JSqlParser Select AST.
   *
   * Walks the AST comprehensively: FROM clauses, JOINs, subqueries in WHERE/SELECT/HAVING, set
-  * operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Filters out CTE self-references and
-  * string-literal file references (e.g., DuckDB 'file.parquet').
+  * operations (UNION/INTERSECT/EXCEPT), and CTE bodies. Filters out CTE self-references; table
+  * functions, string-literal file references (e.g., DuckDB 'file.parquet') and unrecognized node
+  * types are reported as `unsupported` so the ACL validator can deny rather than silently admit.
   */
 object TableExtractor:
 
@@ -21,16 +30,20 @@ object TableExtractor:
     * @param select
     *   the JSqlParser Select AST node
     * @return
-    *   list of Table objects (may contain duplicates; caller deduplicates after qualification)
+    *   tables (may contain duplicates; caller deduplicates after qualification) plus any
+    *   unsupported-construct markers encountered during the walk
     */
-  def extract(select: Select): List[Table] =
+  def extract(select: Select): TableExtraction =
     val visitor = new TableExtractorVisitor()
     visitor.process(select)
-    visitor.tables.toList
+    visitor.result
 
 private[parser] class TableExtractorVisitor:
-  val tables: mutable.ListBuffer[Table]     = mutable.ListBuffer.empty
-  private val cteNames: mutable.Set[String] = mutable.Set.empty
+  val tables: mutable.ListBuffer[Table]       = mutable.ListBuffer.empty
+  val unsupported: mutable.ListBuffer[String] = mutable.ListBuffer.empty
+  private val cteNames: mutable.Set[String]   = mutable.Set.empty
+
+  def result: TableExtraction = TableExtraction(tables.toList, unsupported.toList)
 
   def process(select: Select): Unit =
     // Collect CTE names first (from WITH clause)
@@ -72,7 +85,10 @@ private[parser] class TableExtractorVisitor:
             val onExpressions = j.getOnExpressions
             if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
           }
-      case _ => () // Other select types, no-op
+      case other =>
+        // Fail closed: a Select subtype this walker does not recognize may
+        // carry table refs we would otherwise silently drop.
+        unsupported += s"unrecognized select type ${other.getClass.getSimpleName}"
 
   private def visitPlainSelect(ps: PlainSelect): Unit =
     // FROM clause
@@ -135,19 +151,46 @@ private[parser] class TableExtractorVisitor:
   private[parser] def visitFromItem(fromItem: FromItem): Unit =
     fromItem match
       case table: Table =>
-        // Skip CTE self-references and string-literal file references
         val name = table.getUnquotedName
         if name != null then
-          val isCteName = cteNames.contains(name.toLowerCase)
+          // Skip CTE self-references, but ONLY when the reference is unqualified:
+          // `WITH lineitem AS (...) SELECT * FROM db.main.lineitem` still names
+          // the REAL table (CTEs shadow only bare names), so a qualified ref must
+          // be extracted or the shadowing CTE would launder the access away.
+          val isQualified = table.getSchemaName != null ||
+            (table.getDatabase != null && table.getDatabase.getDatabaseName != null)
+          val isCteName = !isQualified && cteNames.contains(name.toLowerCase)
           val isFileRef = table.getName != null && table.getName.startsWith("'")
-          if !isCteName && !isFileRef then tables += table
+          if isFileRef then
+            // DuckDB `FROM 'file.parquet'` reads straight from storage, escaping
+            // the tenant-catalog boundary; there is no table to grant on.
+            unsupported += s"file reference ${table.getName}"
+          else if !isCteName then tables += table
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
-      case _: TableFunction      => () // Silently ignore table functions
-      case _: Values             => () // Silently ignore VALUES
+      case tf: TableFunction     =>
+        // Table functions (read_parquet, read_csv, ...) can read files directly,
+        // escaping the tenant-catalog boundary; no grantable table ref exists.
+        val fnName = Option(tf.getFunction).map(_.getName).getOrElse("?")
+        unsupported += s"table function $fnName"
+      case pfi: ParenthesedFromItem =>
+        // `FROM (a JOIN b ON ...)`: recurse into the wrapped item and its joins.
+        val inner = pfi.getFromItem
+        if inner != null then visitFromItem(inner)
+        val joins = pfi.getJoins
+        if joins != null then
+          joins.asScala.foreach { j =>
+            val ri = j.getRightItem
+            if ri != null then visitFromItem(ri)
+            val onExpressions = j.getOnExpressions
+            if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
+          }
+      case _: Values             => () // VALUES carries no table refs
       case sol: SetOperationList => visitSetOperationList(sol)
       case plain: PlainSelect    => visitPlainSelect(plain)
-      case _                     => () // Other FROM item types, no-op
+      case other                 =>
+        // Fail closed on FROM item types this walker does not recognize.
+        unsupported += s"unrecognized FROM item ${other.getClass.getSimpleName}"
 
   private[parser] def visitExpression(expr: Expression): Unit =
     expr match
@@ -208,4 +251,14 @@ private[parser] class TableExtractorVisitor:
       case isNull: IsNullExpression =>
         val left = isNull.getLeftExpression
         if left != null then visitExpression(left)
+      case json: JsonExpression =>
+        // `(SELECT ...)->>'k'` wraps an arbitrary expression; recurse.
+        val inner = json.getExpression
+        if inner != null then visitExpression(inner)
+      case signed: SignedExpression =>
+        val inner = signed.getExpression
+        if inner != null then visitExpression(inner)
+      case ext: ExtractExpression =>
+        val inner = ext.getExpression
+        if inner != null then visitExpression(inner)
       case _ => () // Leaf expressions (Column, LongValue, StringValue, etc.) -- no-op

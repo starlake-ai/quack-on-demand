@@ -1,16 +1,20 @@
 package ai.starlake.acl.parser
 
-import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.update.Update
 
 import scala.jdk.CollectionConverters.*
 
-/** Walks an UPDATE statement's WHERE clause, FROM/JOIN list for read-side table references. Reuses
-  * `TableExtractorVisitor` so the same CTE-skipping and sub-query handling applies.
+/** Walks an UPDATE statement's SET-clause value subqueries, WHERE clause, and FROM/JOIN list for
+  * read-side table references. Reuses `TableExtractorVisitor` so the same CTE-skipping and
+  * sub-query handling applies.
   */
 object UpdateReadExtractor:
-  def extract(upd: Update): List[Table] =
+  def extract(upd: Update): TableExtraction =
     val v = new TableExtractorVisitor()
+    // SET-clause value subqueries: UPDATE t SET c = (SELECT ... FROM secret)
+    Option(upd.getUpdateSets).foreach(_.asScala.foreach { us =>
+      Option(us.getValues).foreach(v.visitExpression)
+    })
     // WHERE clause sub-queries
     val where = upd.getWhere
     if where != null then v.visitExpression(where)
@@ -28,4 +32,4 @@ object UpdateReadExtractor:
     })
     // FROM item (UPDATE ... FROM other WHERE ...)
     Option(upd.getFromItem).foreach(v.visitFromItem)
-    v.tables.toList
+    v.result
