@@ -85,7 +85,13 @@ final case class NodeInfo(
     p95Ms: Double = 0.0,
     p99Ms: Double = 0.0,
     healthy: Boolean = true,
-    draining: Boolean = false
+    draining: Boolean = false,
+    // DuckDB engine internals scraped by the HealthProbe (EngineStats): buffer-manager
+    // memory, temp storage, and live spill files. None until the first successful scrape.
+    duckdbMemoryBytes: Option[Long] = None,
+    duckdbTempStorageBytes: Option[Long] = None,
+    duckdbSpillFiles: Option[Long] = None,
+    duckdbSpillBytes: Option[Long] = None
 )
 
 final case class PoolResponse(

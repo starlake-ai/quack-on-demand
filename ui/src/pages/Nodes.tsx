@@ -190,6 +190,10 @@ export default function Nodes() {
   // operators want to see the worst, not the average of percentiles).
   const clusterP95 = visible.reduce((m, n) => Math.max(m, n.p95Ms), 0);
   const healthyCount = visible.filter(n => n.healthy && !n.draining).length;
+  // DuckDB engine totals across scraped nodes only (unscraped nodes report null).
+  const sumEngineMem = visible.reduce((s, n) => s + (n.duckdbMemoryBytes ?? 0), 0);
+  const sumSpill     = visible.reduce((s, n) => s + (n.duckdbSpillBytes ?? 0), 0);
+  const anyEngine    = visible.some(n => n.duckdbMemoryBytes != null);
 
   return (
     <>
@@ -247,6 +251,14 @@ export default function Nodes() {
           <div className="label">Worst p95</div>
           <div className="value">{clusterP95.toFixed(0)}<span className="unit">ms</span></div>
         </div>
+        <div className="metric">
+          <div className="label">DuckDB mem</div>
+          <div className="value">{anyEngine ? fmtBytes(sumEngineMem) : '-'}</div>
+        </div>
+        <div className="metric">
+          <div className="label">Spill</div>
+          <div className="value">{anyEngine ? fmtBytes(sumSpill) : '-'}</div>
+        </div>
       </div>
 
       <div className="card" style={{ padding: 0 }}>
@@ -265,12 +277,14 @@ export default function Nodes() {
               <th style={{ textAlign: 'right' }}>p50</th>
               <th style={{ textAlign: 'right' }}>p95</th>
               <th style={{ textAlign: 'right' }}>p99</th>
+              <th style={{ textAlign: 'right' }}>Mem</th>
+              <th style={{ textAlign: 'right' }}>Spill</th>
               <th style={{ textAlign: 'right' }}>Max conc.</th>
             </tr>
           </thead>
           <tbody>
             {visible.length === 0 ? (
-              <tr><td colSpan={13} className="empty">No nodes running.</td></tr>
+              <tr><td colSpan={15} className="empty">No nodes running.</td></tr>
             ) : visible.map(n => (
               <tr key={`${n.tenant}/${n.tenantDb}/${n.pool}/${n.nodeId}`}>
                 <td>
@@ -298,6 +312,27 @@ export default function Nodes() {
                 <td style={{ textAlign: 'right' }}>{n.p50Ms.toFixed(0)} ms</td>
                 <td style={{ textAlign: 'right' }}>{n.p95Ms.toFixed(0)} ms</td>
                 <td style={{ textAlign: 'right' }}>{n.p99Ms.toFixed(0)} ms</td>
+                <td
+                  style={{ textAlign: 'right' }}
+                  title="DuckDB buffer-manager memory in use (health-probe scrape)"
+                >
+                  {fmtBytes(n.duckdbMemoryBytes)}
+                </td>
+                <td
+                  style={{ textAlign: 'right' }}
+                  title={
+                    n.duckdbSpillFiles != null
+                      ? `${n.duckdbSpillFiles} live spill file${n.duckdbSpillFiles === 1 ? '' : 's'}`
+                      : 'Engine stats not scraped yet'
+                  }
+                >
+                  {fmtBytes(n.duckdbSpillBytes)}
+                  {(n.duckdbSpillFiles ?? 0) > 0 && (
+                    <div style={{ fontSize: '.78em', opacity: 0.6 }}>
+                      {n.duckdbSpillFiles} file{n.duckdbSpillFiles === 1 ? '' : 's'}
+                    </div>
+                  )}
+                </td>
                 <td style={{ textAlign: 'right' }}>{n.maxConcurrent === 0 ? '∞' : n.maxConcurrent}</td>
               </tr>
             ))}
@@ -393,6 +428,18 @@ export default function Nodes() {
       </p>
     </>
   );
+}
+
+/** Human-readable byte count (binary units, one decimal). Undefined/null means
+  * the node's engine stats have not been scraped yet - render as a dash. */
+function fmtBytes(n: number | null | undefined): string {
+  if (n == null) return '-';
+  if (n < 1024) return `${n} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let u = -1;
+  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
+  return `${v.toFixed(1)} ${units[u]}`;
 }
 
 /** Human-readable time-of-day for the table; full ISO on hover via title would

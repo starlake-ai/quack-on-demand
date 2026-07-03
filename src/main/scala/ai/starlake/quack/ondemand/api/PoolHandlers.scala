@@ -1,13 +1,17 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
 import sttp.model.StatusCode
 
-final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
+final class PoolHandlers(
+    sup: PoolSupervisor,
+    tracker: NodeLoadTracker,
+    engineStats: EngineStatsTracker = new EngineStatsTracker
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -30,6 +34,7 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
         nodes = p.nodes.map { n =>
           val load            = tracker.snapshot(n.nodeId)
           val (p50, p95, p99) = tracker.latencyPercentiles(n.nodeId)
+          val engine          = engineStats.snapshot(n.nodeId)
           NodeInfo(
             nodeId = n.nodeId,
             role = n.role.toString,
@@ -43,7 +48,11 @@ final class PoolHandlers(sup: PoolSupervisor, tracker: NodeLoadTracker):
             p95Ms = p95,
             p99Ms = p99,
             healthy = load.healthy,
-            draining = load.draining
+            draining = load.draining,
+            duckdbMemoryBytes = engine.map(_.memoryUsedBytes),
+            duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
+            duckdbSpillFiles = engine.map(_.spillFiles),
+            duckdbSpillBytes = engine.map(_.spillBytes)
           )
         },
         status = if p.disabled then "disabled" else "ready",
