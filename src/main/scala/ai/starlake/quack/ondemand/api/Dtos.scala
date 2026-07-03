@@ -86,6 +86,8 @@ final case class NodeInfo(
     p99Ms: Double = 0.0,
     healthy: Boolean = true,
     draining: Boolean = false,
+    // Operator quarantine, mirrored from NodeLoad for the UI badge and action toggle.
+    quarantined: Boolean = false,
     // DuckDB engine internals scraped by the HealthProbe (EngineStats): buffer-manager
     // memory, temp storage, and live spill files. None until the first successful scrape.
     duckdbMemoryBytes: Option[Long] = None,
@@ -753,6 +755,7 @@ object Dtos:
         p99Ms         <- c.getOrElse[Double]("p99Ms")(0.0)
         healthy       <- c.getOrElse[Boolean]("healthy")(true)
         draining      <- c.getOrElse[Boolean]("draining")(false)
+        quarantined   <- c.getOrElse[Boolean]("quarantined")(false)
         duckMem       <- c.getOrElse[Option[Long]]("duckdbMemoryBytes")(None)
         duckTemp      <- c.getOrElse[Option[Long]]("duckdbTempStorageBytes")(None)
         duckSpillN    <- c.getOrElse[Option[Long]]("duckdbSpillFiles")(None)
@@ -771,6 +774,7 @@ object Dtos:
         p99Ms,
         healthy,
         draining,
+        quarantined,
         duckMem,
         duckTemp,
         duckSpillN,
@@ -793,6 +797,7 @@ object Dtos:
           "p99Ms"                  -> n.p99Ms.asJson,
           "healthy"                -> n.healthy.asJson,
           "draining"               -> n.draining.asJson,
+          "quarantined"            -> n.quarantined.asJson,
           "duckdbMemoryBytes"      -> n.duckdbMemoryBytes.asJson,
           "duckdbTempStorageBytes" -> n.duckdbTempStorageBytes.asJson,
           "duckdbSpillFiles"       -> n.duckdbSpillFiles.asJson,

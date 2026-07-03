@@ -332,6 +332,9 @@ final class ManagerServer(
       Endpoints.quarantineNode.serverLogic { case (req, key) =>
         nodes.quarantineNode(req, key)(sessions.scopeOf)
       },
+      Endpoints.unquarantineNode.serverLogic { case (req, key) =>
+        nodes.unquarantineNode(req, key)(sessions.scopeOf)
+      },
       Endpoints.createTenant.serverLogic { case (req, key) =>
         tenants.createTenant(req, key)(sessions.scopeOf)
       },

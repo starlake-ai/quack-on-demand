@@ -115,6 +115,17 @@ object Endpoints:
       .in(jsonBody[NodeOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
+  val unquarantineNode: PublicEndpoint[
+    (NodeOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("node" / "unquarantine")
+      .in(jsonBody[NodeOpRequest])
+      .in(header[Option[String]]("X-API-Key"))
+
   /** Liveness probe: always 200 while the JVM is alive. No Postgres gate. */
   val health: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
     endpoint.get
