@@ -271,8 +271,9 @@ object ManagerServerHarness:
     val statementStore  = new StatementHistoryStore()
     val historyHandlers = new StatementHistoryHandlers(statementStore, sup)
 
-    val pools     = new PoolHandlers(sup, tracker)
-    val nodes     = new NodeHandlers(sup, tracker)
+    val pools = new PoolHandlers(sup, tracker)
+    val nodes =
+      new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     val tenants   = new TenantHandlers(sup)
     val tenantDbs = new TenantDbHandlers(sup, federatedStore = None)
     val health    = new HealthHandler(sup)
