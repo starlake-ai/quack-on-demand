@@ -19,6 +19,10 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **Internal exception text no longer reaches Flight clients.** Every catch-all INTERNAL arm in `FlightProducerImpl` now logs the full detail server-side against a short random errorId and returns only `internal error (errorId=...)`; raw messages could carry SQL fragments, hostnames, and file paths. Curated `RouterFailure` messages still flow through unchanged.
 - **K8s spawn-failure orphans cleaned up.** `start()` deletes the pod, service, and per-pod token Secret when a spawn fails partway, preventing orphan accumulation and a deterministic-nodeId respawn deadlock.
 
+### Incident response
+
+- **Incident response for administrators:** durable node quarantine/unquarantine (survives restarts, HA-propagated, probe-proof), superuser node restart via the reconcile respawn path, live in-flight statement view on the Nodes page, and best-effort statement kill (stream disconnect locally, qod_kill NOTIFY fan-out across HA replicas). New endpoints: POST /api/node/unquarantine, POST /api/node/restart, GET /api/node/active-statements, POST /api/statement/kill.
+
 ### Demo, scripts, and release
 
 - **SSB star schema seeded via `LOAD_SSB=N`** (bundled into the `LOAD_TPC` shortcut next to TPC-H and TPC-DS). DuckDB has no ssb extension, so `scripts/load-ssb-dbgen.sh` generates TPC-H in-memory and derives the 5 SSB tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) per the O'Neil spec mapping; the date dimension is named `dwdate` so the 13 canonical queries run unquoted. Lands in schema `ssb1` of the existing `acme_tpch` tenant-db, wired into all three install paths.
