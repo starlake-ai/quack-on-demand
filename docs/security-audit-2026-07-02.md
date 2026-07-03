@@ -11,10 +11,12 @@ of scope here.
 
 The three default-reachable HIGH findings are **SOLVED** and merged to main
 (commits 4feea27, f2bf610, 0d9f239 for #1; 9142c5f for #2; b2e4c86 for #7).
-The ACL-parser fail-open cluster (#3), the EXPLAIN-ANALYZE bypass (#4), and the
-RLS/CLS fail-open + retry bug (#5) are now **SOLVED** on the working tree
-(2026-07-03). Every finding below carries an inline **Status:** line. The
-lower-severity items (#6, #8) remain **OPEN** as a follow-up backlog.
+The ACL-parser fail-open cluster (#3), the EXPLAIN-ANALYZE bypass (#4), the
+RLS/CLS fail-open + retry bug (#5), and the prepared-statement revocation lag /
+handle sharing (#6) are now **SOLVED** on the working tree (2026-07-03). Every
+finding below carries an inline **Status:** line. The remaining lower-severity
+items in #8 (info leaks other than the exception-text one, resource-leak
+counters, infra hardening) are a partially-burned-down follow-up backlog.
 
 ## Load-bearing context (changes how to read everything below)
 
@@ -160,7 +162,17 @@ Fix: rewriters should fail closed (deny) on parse failure when a policy applies;
 retry must send `finalSql`.
 
 ### 6. Prepared-statement revocation lag & handle sharing (MEDIUM/LOW)
-**Status: OPEN.**
+**Status: SOLVED (2026-07-03).** `PreparedExec` no longer stores the Prepare-time
+EffectiveSet. Both Execute paths (`getStreamPreparedStatement`,
+`acceptPutPreparedStatementUpdate`) now go through `resolvePreparedCall`, which
+(a) rejects a caller whose `peerIdentity` differs from the handle's creating peer
+with UNAUTHORIZED, so a leaked 128-bit handle cannot be replayed under the owner's
+grants, and (b) re-reads the EffectiveSet LIVE from `ConnectionContext` keyed on
+the owner peer -- so a grant revoked mid-session takes effect within the session
+TTL exactly as it does for a non-prepared statement, and a handle whose session
+has expired/unbound resolves to a deny (UNAUTHENTICATED) instead of running.
+Covered by four new cases in `FlightProducerImplPrepareSpec` (cross-peer query,
+cross-peer update, expired-session, owner still works). Original report:
 `FlightProducerImpl.scala:334,853` execute with the EffectiveSet captured at
 Prepare time; a grant revoked mid-session is bypassed for the handle's lifetime
 (until ClosePreparedStatement; connection-context TTL default ~1h). The handle
@@ -187,9 +199,16 @@ in a bracket that deletes pod+secrets on failure, or set an ownerReference so
 K8s GCs them; make reconcile adopt/replace conflicting pods.
 
 ### 8. Lower-severity confirmed items
-**Status: OPEN** (all items below).
-- FlightProducerImpl forwards internal exception text (SQL, node hostnames) to
-  Flight clients at many sites (INTERNAL.withDescription(t.getMessage)); info leak.
+**Status: PARTIALLY SOLVED** (two items fixed 2026-07-03, rest OPEN).
+- **SOLVED (2026-07-03).** FlightProducerImpl forwarded internal exception text
+  (SQL, node hostnames) to Flight clients at many sites
+  (INTERNAL.withDescription(t.getMessage)). Now every `catch { case t: Throwable }`
+  INTERNAL arm goes through `internalError(context, t)`, which logs the full detail
+  server-side against a random errorId and returns the client only
+  "internal error (errorId=...)".
+- **SOLVED (2026-07-03).** Non-constant-time X-API-Key comparison
+  (`Option.contains`) replaced with a `MessageDigest.isEqual` constant-time compare
+  in `ManagerServer.apiKeyGuard`.
 - LocalQuackBackend leaks a leased port when `pb.start()` throws (no try-finally);
   bounded, recovered on restart. (runtime/LocalQuackBackend.scala:30)
 - QuackHttpAdapter inFlight counter leaks if the query IO raises before onFinish,
@@ -202,8 +221,6 @@ K8s GCs them; make reconcile adopt/replace conflicting pods.
   500 instead of 409.
 - PortAllocator markLeased/release are unsynchronized against lease() (narrow
   double-assign window under concurrent adopt+spawn).
-- Non-constant-time X-API-Key comparison (Option.contains); MessageDigest.isEqual
-  is available and used elsewhere.
 - Flight TLS auto-cert uses an unencrypted key at default umask and docs advise
   disableCertificateVerification=true (MITM surface).
 - K8s RBAC Role grants list/watch on ALL namespace Secrets (over-broad).
@@ -228,7 +245,11 @@ them fail-closed (refuse to bind non-loopback with defaults) rather than warn.
 3. ~~K8s spawn-failure orphans + stuck pool (#7)~~ **DONE** (b2e4c86).
 4. ~~ACL fail-closed on empty access set + missing walker arms (#3, #4)~~ **DONE** (2026-07-03). The walker now surfaces `unsupported` markers and the validator denies on any of them; EXPLAIN is classified by its inner statement.
 5. ~~RLS fail-closed + retry sends finalSql (#5)~~ **DONE** (2026-07-03).
+6. ~~Prepared-statement revocation lag + handle sharing (#6)~~ **DONE** (2026-07-03). Handles are peer-bound; the EffectiveSet is re-read live per Execute.
+7. ~~Exception-text leak + constant-time API-key compare (#8, 2 of N)~~ **DONE** (2026-07-03).
 
-Remaining OPEN backlog: #6 (prepared-statement revocation lag / handle
-sharing) and the #8 lower-severity items, plus the documented-by-design
-defaults. None are default-reachable HIGH.
+Remaining OPEN backlog: the rest of the #8 lower-severity items (resource-leak
+counters, PoolPermission tenant check, ON CONFLICT, PortAllocator sync, TLS key
+perms, K8s Secret scope, OIDC ConfigMap secret, image pinning, stop-script
+pgrep, UI leaks) plus the documented-by-design defaults. None are
+default-reachable HIGH.

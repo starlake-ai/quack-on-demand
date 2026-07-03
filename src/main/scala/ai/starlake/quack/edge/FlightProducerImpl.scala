@@ -35,6 +35,14 @@ final class FlightProducerImpl(
     * through the router on every Execute. One Prepare = one extra round-trip vs. caching, but the
     * client gets correct multi-Execute semantics.
     *
+    * `ownerPeer` is the `peerIdentity` that created the handle. Execute/Update paths reject a
+    * caller whose peer differs, so a leaked 128-bit handle cannot be replayed by another session
+    * (audit finding #6, handle-sharing leg). The authorization set is NOT stored here: the Execute
+    * paths re-read the live [[EffectiveSet]] from [[ConnectionContext]] keyed on `ownerPeer`, so a
+    * grant revoked mid-session takes effect within the session TTL exactly as it does for a
+    * non-prepared statement, and a handle whose session has expired can no longer run at all (audit
+    * finding #6, revocation-lag leg).
+    *
     * `preferredNode` is the Quack node that served Prepare (when there was one). The Execute path
     * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across the
     * two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node call
@@ -46,16 +54,29 @@ final class FlightProducerImpl(
     */
   private final case class PreparedExec(
       sql: String,
+      ownerPeer: String,
       connId: String,
       user: String,
       poolKey: ai.starlake.quack.model.PoolKey,
-      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
       preferredNode: Option[String],
       prepareDurationMs: Option[Long],
       // R5 / Power BI ODBC: the SCHEMA used to answer
       // `getSchemaPreparedStatement`. Captured from the Prepare-time probe
       // so the Execute path doesn't pay a second probe.
       datasetSchema: Schema
+  )
+
+  /** Live per-call plan resolved for a prepared Execute/Update: the captured statement identity
+    * plus the FRESH [[EffectiveSet]] read from [[ConnectionContext]] at call time.
+    */
+  private final case class PreparedCall(
+      sql: String,
+      connId: String,
+      user: String,
+      poolKey: ai.starlake.quack.model.PoolKey,
+      effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
+      preferredNode: Option[String],
+      prepareDurationMs: Option[Long]
   )
 
   /** Cached empty Arrow schema. Returned for DML/DDL Prepare results (zero-field schema = "this is
@@ -152,6 +173,63 @@ final class FlightProducerImpl(
       .withDescription(s"internal error (errorId=$errorId)")
       .toRuntimeException()
 
+  /** Resolve a prepared-statement handle into an executable plan, enforcing the two authorization
+    * invariants from audit finding #6:
+    *   1. The calling peer MUST be the one that created the handle. A different peer (a client that
+    *      somehow obtained the 128-bit handle) is rejected with UNAUTHORIZED, so a leaked handle
+    *      cannot be replayed under the owner's grants.
+    *   2. The [[EffectiveSet]] is read LIVE from [[ConnectionContext]] rather than replayed from
+    *      the Prepare-time snapshot, so a mid-session revocation takes effect within the session
+    *      TTL and a handle whose session has expired resolves to `Left` (deny) instead of running.
+    *
+    * Returns `Left(flightException)` to fail the call, or `Right(plan)` to execute.
+    */
+  private def resolvePreparedCall(
+      handle: String,
+      context: FlightProducer.CallContext
+  ): Either[Throwable, PreparedCall] =
+    val callerPeer = Option(context.peerIdentity()).getOrElse("anonymous")
+    preparedStatements.get(handle) match
+      case None =>
+        Left(
+          CallStatus.INVALID_ARGUMENT
+            .withDescription(s"no such prepared statement: $handle")
+            .toRuntimeException()
+        )
+      case Some(p) if p.ownerPeer != callerPeer =>
+        logger.warn(
+          s"prepared handle $handle owned by ${p.ownerPeer} but executed by $callerPeer; denying"
+        )
+        Left(
+          CallStatus.UNAUTHORIZED
+            .withDescription("prepared statement handle does not belong to this session")
+            .toRuntimeException()
+        )
+      case Some(p) =>
+        ConnectionContext.entry(callerPeer) match
+          case Some(e) if e.user == p.user =>
+            Right(
+              PreparedCall(
+                sql = p.sql,
+                connId = p.connId,
+                user = p.user,
+                poolKey = p.poolKey,
+                effectiveSet = e.effectiveSet,
+                preferredNode = p.preferredNode,
+                prepareDurationMs = p.prepareDurationMs
+              )
+            )
+          case _ =>
+            // Session gone (expired / unbound) or rebound to a different user: the handle
+            // outlived the authorization that created it. Force a re-prepare.
+            Left(
+              CallStatus.UNAUTHENTICATED
+                .withDescription(
+                  "session expired or no longer bound; re-authenticate and re-prepare"
+                )
+                .toRuntimeException()
+            )
+
   override def createPreparedStatement(
       request: FlightSql.ActionCreatePreparedStatementRequest,
       context: FlightProducer.CallContext,
@@ -189,10 +267,10 @@ final class FlightProducerImpl(
               handle,
               PreparedExec(
                 sql,
+                ownerPeer = peer,
                 connId,
                 user,
                 poolKey,
-                eff,
                 preferredNode = None,
                 prepareDurationMs = None,
                 datasetSchema = countSchema
@@ -234,10 +312,10 @@ final class FlightProducerImpl(
                   handle,
                   PreparedExec(
                     sql,
+                    ownerPeer = peer,
                     connId,
                     user,
                     poolKey,
-                    eff,
                     preferredNode = Some(result.nodeId),
                     prepareDurationMs = Some(result.durationMs),
                     datasetSchema = schema
@@ -323,18 +401,12 @@ final class FlightProducerImpl(
     val handle = command.getPreparedStatementHandle.toStringUtf8
     // Re-execute on every Execute so the handle stays valid until the client
     // sends ClosePreparedStatement -- the spec contract Arrow JDBC / DBeaver /
-    // ADBC rely on. We re-use the (connId, user, poolKey, EffectiveSet)
-    // captured at Prepare time so an ACL change mid-session does not let a
-    // stale handle bypass the new policy; it still binds to the pool the
-    // client was authorized for at Prepare.
-    preparedStatements.get(handle) match
-      case None =>
-        listener.error(
-          CallStatus.INVALID_ARGUMENT
-            .withDescription(s"no such prepared statement: $handle")
-            .toRuntimeException()
-        )
-      case Some(p) =>
+    // ADBC rely on. `resolvePreparedCall` re-reads the LIVE EffectiveSet from
+    // ConnectionContext and rejects a caller that isn't the handle's owner, so
+    // a mid-session revocation is honored and a leaked handle can't be replayed.
+    resolvePreparedCall(handle, context) match
+      case Left(err) => listener.error(err)
+      case Right(p)  =>
         scala.util.Try(
           router
             .execute(
@@ -831,14 +903,9 @@ final class FlightProducerImpl(
     new Runnable:
       def run(): Unit =
         drainPutStream(flightStream)
-        preparedStatements.get(handle) match
-          case None =>
-            ackStream.onError(
-              CallStatus.INVALID_ARGUMENT
-                .withDescription(s"no such prepared statement: $handle")
-                .toRuntimeException()
-            )
-          case Some(p) =>
+        resolvePreparedCall(handle, context) match
+          case Left(err) => ackStream.onError(err)
+          case Right(p)  =>
             logger.debug(s"acceptPutPreparedStatementUpdate pool=${p.poolKey} sql='${p.sql}'")
             ackUpdateResult(
               scala.util.Try(

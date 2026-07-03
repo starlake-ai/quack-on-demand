@@ -470,3 +470,84 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(peer), null, ack).run()
     ack.completed shouldBe false
     ack.onErrorRef.get() should not be null
+
+  // ---- audit #6: prepared handles are peer-bound + re-check the live session ----
+
+  /** ServerStreamListener that records the terminal error (if any). */
+  private final class RecordingStreamListener
+      extends org.apache.arrow.flight.FlightProducer.ServerStreamListener:
+    val onErrorRef                            = new AtomicReference[Throwable](null)
+    def isCancelled(): Boolean                = false
+    def isReady(): Boolean                    = true
+    def setOnCancelHandler(h: Runnable): Unit = ()
+    def start(
+        root: org.apache.arrow.vector.VectorSchemaRoot,
+        provider: org.apache.arrow.vector.dictionary.DictionaryProvider,
+        options: org.apache.arrow.vector.ipc.message.IpcOption
+    ): Unit                                                       = ()
+    def putNext(): Unit                                           = ()
+    def putNext(metadata: org.apache.arrow.memory.ArrowBuf): Unit = ()
+    def putMetadata(metadata: org.apache.arrow.memory.ArrowBuf): Unit = ()
+    def error(throwable: Throwable): Unit                        = onErrorRef.set(throwable)
+    def completed(): Unit                                        = ()
+
+  private def prepareQueryHandle(
+      producer: FlightProducerImpl,
+      peer: String,
+      sql: String
+  ): FlightSql.CommandPreparedStatementQuery =
+    val prep   = runPrepare(producer, peer, sql)
+    val handle = decodePrepareResult(prep.onNextValue.get()).getPreparedStatementHandle
+    FlightSql.CommandPreparedStatementQuery.newBuilder().setPreparedStatementHandle(handle).build()
+
+  "A prepared-statement handle" should
+    "reject execution by a peer that did not create it (leaked handle)" in:
+      val (producer, _, _, peer) = setupProducer()
+      val command                = prepareQueryHandle(producer, peer, "SELECT a FROM t")
+      // A second, unrelated session presents the same handle.
+      val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
+      ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+      val listener = new RecordingStreamListener
+      producer.getStreamPreparedStatement(command, fakeCallContext(otherPeer), listener)
+      val err = listener.onErrorRef.get()
+      err should not be null
+      err.asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code() shouldBe
+        org.apache.arrow.flight.FlightStatusCode.UNAUTHORIZED
+
+  it should "reject execution once the owning session has been unbound (expired)" in:
+    val (producer, _, _, peer) = setupProducer()
+    val command                = prepareQueryHandle(producer, peer, "SELECT a FROM t")
+    // Session ends (TTL expiry / logout) before the client executes.
+    ConnectionContext.unbind(peer)
+    val listener = new RecordingStreamListener
+    producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    val err = listener.onErrorRef.get()
+    err should not be null
+    err.asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code() shouldBe
+      org.apache.arrow.flight.FlightStatusCode.UNAUTHENTICATED
+
+  it should "reject a prepared UPDATE replayed by a different peer" in:
+    val (producer, _, _, peer) = setupProducer()
+    val prep   = runPrepare(producer, peer, "INSERT INTO t VALUES (1)")
+    val handle = decodePrepareResult(prep.onNextValue.get()).getPreparedStatementHandle
+    val cmd = FlightSql.CommandPreparedStatementUpdate
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
+    ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+    val ack = new RecordingPutListener
+    producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(otherPeer), null, ack).run()
+    ack.completed shouldBe false
+    ack.onErrorRef.get() should not be null
+    ack.onErrorRef.get().asInstanceOf[org.apache.arrow.flight.FlightRuntimeException]
+      .status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAUTHORIZED
+
+  it should "still let the owning session execute the handle normally" in:
+    val (producer, sent, _, peer) = setupProducer()
+    val command                   = prepareQueryHandle(producer, peer, "SELECT a FROM t")
+    val listener                  = new RecordingStreamListener
+    producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    listener.onErrorRef.get() shouldBe null
+    // The query actually reached a node.
+    sent.exists(_._2.contains("SELECT a FROM t")) shouldBe true
