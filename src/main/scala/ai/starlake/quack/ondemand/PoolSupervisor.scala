@@ -329,13 +329,22 @@ final class PoolSupervisor(
                 s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
                   "is dead; respawning"
               )
+              val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
               IO.delay(tracker.remove(n.nodeId)) *>
                 backend
                   .start(respawnSpec(key, state, n))
                   .flatMap { fresh =>
+                    // Re-apply the pre-remove quarantine flag so an operator quarantine
+                    // survives a node crash. restartNode intentionally clears it; only
+                    // automatic reconcile respawn must preserve it.
+                    val restore: IO[Unit] =
+                      if wasQuarantined then IO.delay(tracker.setQuarantined(fresh.nodeId, true))
+                      else IO.unit
                     poolIdByKey.get(key) match
-                      case Some(pid) => IO.blocking(store.upsertNode(fresh, pid)).as(kept :+ fresh)
-                      case None      => IO.pure(kept :+ fresh)
+                      case Some(pid) =>
+                        IO.blocking(store.upsertNode(fresh, pid)) *> restore.as(kept :+ fresh)
+                      case None =>
+                        restore.as(kept :+ fresh)
                   }
           }
         }

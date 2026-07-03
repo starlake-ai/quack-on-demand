@@ -679,3 +679,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     router.execute("reg-2", "alice", poolKey, "SELECT boom").unsafeRunSync().isLeft shouldBe true
     registry.list() shouldBe Nil
+
+  it should "register the retried statement in the registry and deregister on close" in:
+    // Arrange: first adapter call returns a transient failure; the second (retry on the
+    // fallback node) succeeds. We need two nodes so retryOnce has a fallback.
+    val callCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    val stub: () => QuackResponse = () =>
+      if callCount.getAndIncrement() == 0 then
+        QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
+      else
+        TestArrow.okResponse()
+
+    val bknd = new QuackBackend:
+      private val n = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId, s.poolKey, s.role, "127.0.0.1", 26000 + n.size, "tok",
+          Some(1L), None, Instant.EPOCH, maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tkr  = new NodeLoadTracker
+    val sup2 = new PoolSupervisor(bknd, tkr, new InMemoryControlPlaneStore())
+    val pk2  = PoolKey("acme", "acme_default", "sales")
+    sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
+    sup2.createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
+
+    val client2 = new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(stub())
+    val adapter2  = new QuackHttpAdapter(client2, tkr)
+    val sessions2 = new SessionRegistry
+    val registry2 = new ActiveStatementRegistry()
+    val router2   = new FlightSqlRouter(sup2, sessions2, tkr, adapter2, registry = registry2)
+
+    val result = router2.execute("retry-reg-1", "alice", pk2, "SELECT 1").unsafeRunSync()
+    result shouldBe a[Right[?, ?]]
+    // Statement must be visible while the stream is open.
+    registry2.list().map(_.user) shouldBe List("alice")
+    result.toOption.get.close()
+    // After close the entry must be gone.
+    registry2.list() shouldBe Nil
