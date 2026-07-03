@@ -40,6 +40,7 @@ export interface NodeInfo {
   p99Ms: number;
   healthy: boolean;
   draining: boolean;
+  quarantined: boolean;
   // DuckDB engine internals scraped by the manager's health probe.
   // Absent until the first successful scrape of the node.
   duckdbMemoryBytes?: number | null;
@@ -117,6 +118,13 @@ export interface SetMaxConcurrentRequest {
   pool: string;
   nodeId: string;
   max: number;
+}
+
+export interface NodeOpRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  nodeId: string;
 }
 
 export interface HealthResponse {
@@ -546,3 +554,20 @@ export interface FederationImportSummary {
   sources: number;
   secrets: number;
 }
+
+// ----- Active statements + kill -----
+export interface ActiveStatementInfo {
+  id: string;
+  user: string;
+  tenant: string;
+  pool: string;
+  nodeId: string;
+  sql: string;
+  startedAt: string; // ISO-8601 UTC
+  elapsedMs: number;
+}
+export interface ActiveStatementsResponse {
+  statements: ActiveStatementInfo[];
+}
+export interface KillStatementRequest { id: string; }
+export interface KillStatementResponse { status: string; } // accepted | already-completed

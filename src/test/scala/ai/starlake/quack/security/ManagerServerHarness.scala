@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack._
-import ai.starlake.quack.edge.StatementHistoryStore
+import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.model.{NodeSpec, RunningNode}
@@ -180,6 +180,7 @@ object ManagerServerHarness:
       tokens: SessionTokenStore,
       httpClient: HttpClient,
       stmtHistory: ai.starlake.quack.edge.StatementHistoryStore,
+      activeRegistry: ActiveStatementRegistry,
       shutdown: () => Unit
   ):
 
@@ -268,11 +269,19 @@ object ManagerServerHarness:
       )
     )
 
-    val statementStore  = new StatementHistoryStore()
-    val historyHandlers = new StatementHistoryHandlers(statementStore, sup)
+    val statementStore     = new StatementHistoryStore()
+    val historyHandlers    = new StatementHistoryHandlers(statementStore, sup)
+    val activeRegistry     = new ActiveStatementRegistry()
+    val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
+      activeRegistry,
+      statementStore,
+      store,
+      haEnabled = false
+    )
 
-    val pools     = new PoolHandlers(sup, tracker)
-    val nodes     = new NodeHandlers(sup, tracker)
+    val pools = new PoolHandlers(sup, tracker)
+    val nodes =
+      new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     val tenants   = new TenantHandlers(sup)
     val tenantDbs = new TenantDbHandlers(sup, federatedStore = None)
     val health    = new HealthHandler(sup)
@@ -313,7 +322,8 @@ object ManagerServerHarness:
       manifestHandlers,
       federatedSources = None,
       columnPolicies = columnPolicyHandlers,
-      rowPolicies = rowPolicyHandlers
+      rowPolicies = rowPolicyHandlers,
+      activeStmts = activeStmtHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port
@@ -355,6 +365,7 @@ object ManagerServerHarness:
       tokens = sessions,
       httpClient = httpClient,
       stmtHistory = statementStore,
+      activeRegistry = activeRegistry,
       shutdown = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which

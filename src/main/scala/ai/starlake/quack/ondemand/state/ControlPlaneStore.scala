@@ -43,6 +43,16 @@ trait ControlPlaneStore:
   def listNodes(poolId: String): List[RunningNode]
   def deleteNode(nodeId: String): Unit
 
+  /** Operator-initiated quarantine on a single node. Distinct from the probe-managed healthy flag:
+    * the probe never writes this, only quarantine/unquarantine do.
+    */
+  def setNodeQuarantined(nodeId: String, quarantined: Boolean): Unit = ()
+
+  /** Node ids currently operator-quarantined. Seeded into the NodeLoadTracker on restore so
+    * quarantine survives manager restarts and reaches HA peers.
+    */
+  def listQuarantinedNodeIds(): Set[String] = Set.empty
+
   // ---------------- RBAC: users ------------------------------------------
   // Password upserts still go through [[UserStore]] (bcrypt + ON CONFLICT
   // against the partial unique indexes). The methods here only manipulate

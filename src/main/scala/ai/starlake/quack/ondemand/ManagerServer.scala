@@ -38,7 +38,8 @@ final class ManagerServer(
     manifest: ManifestHandlers,
     federatedSources: Option[FederatedSourceHandlers] = None,
     columnPolicies: RoleColumnPolicyHandlers,
-    rowPolicies: RoleRowPolicyHandlers
+    rowPolicies: RoleRowPolicyHandlers,
+    activeStmts: ActiveStatementHandlers
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -329,8 +330,14 @@ final class ManagerServer(
       Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
         nodes.setMaxConcurrent(req, key)(sessions.scopeOf)
       },
-      Endpoints.quarantineNode.serverLogic { case (req, key) =>
-        nodes.quarantineNode(req, key)(sessions.scopeOf)
+      Endpoints.quarantineNode.serverLogic { case (req, key, cookie) =>
+        nodes.quarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
+      },
+      Endpoints.unquarantineNode.serverLogic { case (req, key, cookie) =>
+        nodes.unquarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
+      },
+      Endpoints.restartNode.serverLogic { case (req, key, cookie) =>
+        nodes.restartNode(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.createTenant.serverLogic { case (req, key) =>
         tenants.createTenant(req, key)(sessions.scopeOf)
@@ -378,6 +385,12 @@ final class ManagerServer(
       Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.scopeOf)),
       Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
         manifest.importYaml(body, apiKey)(sessions.scopeOf)
+      },
+      Endpoints.activeStatements.serverLogic { case (key, cookie) =>
+        activeStmts.list(key.orElse(cookie))(sessions.scopeOf)
+      },
+      Endpoints.killStatement.serverLogic { case (req, key, cookie) =>
+        activeStmts.kill(req, key.orElse(cookie))(sessions.scopeOf)
       }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 

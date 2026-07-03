@@ -4,12 +4,16 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.ha.StateChangePublisher
+import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import cats.effect.IO
 import sttp.model.StatusCode
 
 final class NodeHandlers(
     sup: PoolSupervisor,
-    tracker: NodeLoadTracker
+    tracker: NodeLoadTracker,
+    store: ControlPlaneStore,
+    publish: StateChangePublisher
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -53,12 +57,35 @@ final class NodeHandlers(
                 )
             }
 
-  def quarantineNode(req: NodeOpRequest, apiKey: Option[String])(
+  private def setQuarantine(req: NodeOpRequest, apiKey: Option[String], quarantined: Boolean)(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+    SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
       case None      =>
         withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
-          IO.delay(tracker.setHealthy(req.nodeId, false))
+          IO.blocking(store.setNodeQuarantined(req.nodeId, quarantined)) *>
+            IO.delay {
+              tracker.setQuarantined(req.nodeId, quarantined)
+              publish.topologyChanged()
+            }
+        }
+
+  def quarantineNode(req: NodeOpRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] = setQuarantine(req, apiKey, quarantined = true)(scopeOf)
+
+  def unquarantineNode(req: NodeOpRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] = setQuarantine(req, apiKey, quarantined = false)(scopeOf)
+
+  def restartNode(req: NodeOpRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).map {
+          case Right(()) => Right(())
+          case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         }
