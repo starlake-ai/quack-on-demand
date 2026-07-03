@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api/client';
-import type { ClientConfigResponse, PoolResponse } from '../api/types';
+import { api, ApiError } from '../api/client';
+import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import Tabs from './Tabs';
 
@@ -32,6 +32,7 @@ export default function PoolDetailBody({
   const [data, setData] = useState<PoolResponse | null>(null);
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
 
   useEffect(() => {
     api.clientConfig().then(setCfg).catch(e => setError(String(e)));
@@ -62,14 +63,57 @@ export default function PoolDetailBody({
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (!data)  return <p>Loading…</p>;
 
+  async function toggleQuarantine(n: NodeInfo) {
+    if (!data) return;
+    if (!n.quarantined) {
+      const peers = data.nodes.filter(r =>
+        r.nodeId !== n.nodeId && r.healthy && !r.draining && !r.quarantined);
+      const lastWarning = peers.length === 0
+        ? '\n\nWARNING: this is the pool\'s last routable node. The pool will refuse new statements until it is un-quarantined.'
+        : '';
+      if (!window.confirm(
+        `Quarantine node "${n.nodeId}"?\n\n` +
+        `New statements stop routing to it; running statements finish normally. ` +
+        `Only an explicit un-quarantine restores it.${lastWarning}`)) return;
+    }
+    try {
+      const req = { tenant, tenantDb, pool, nodeId: n.nodeId };
+      if (n.quarantined) await api.unquarantineNode(req);
+      else await api.quarantineNode(req);
+      setActionErr(null);
+    } catch (e) {
+      setActionErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function restartNode(n: NodeInfo) {
+    if (!window.confirm(
+      `Restart node "${n.nodeId}"?\n\n` +
+      `All statements currently running on it will fail. ` +
+      `The node respawns with the same id and comes back un-quarantined.`)) return;
+    try {
+      await api.restartNode({ tenant, tenantDb, pool, nodeId: n.nodeId });
+      setActionErr(null);
+    } catch (e) {
+      setActionErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
   const nodesTab = (
     <div className="card">
       <div className="card-title">Nodes</div>
+      {actionErr && <div className="login-err">{actionErr}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
-          <tr><th align="left">Node</th><th align="left">Role</th>
-              <th align="left">Host</th><th align="left">Port</th>
-              <th align="left">Max concurrent</th></tr>
+          <tr>
+            <th align="left">Node</th>
+            <th align="left">Role</th>
+            <th align="left">Host</th>
+            <th align="left">Port</th>
+            <th align="left">Status</th>
+            <th align="left">Max concurrent</th>
+            {isSuperuser && <th align="left">Actions</th>}
+          </tr>
         </thead>
         <tbody>
           {data.nodes.map(n => (
@@ -85,6 +129,15 @@ export default function PoolDetailBody({
               <td>{n.role}</td>
               <td>{n.host}</td>
               <td>{n.port}</td>
+              <td>
+                <span className={
+                  n.quarantined ? 'badge warn' :
+                  n.draining ? 'badge warn' :
+                  n.healthy ? 'badge good' : 'badge bad'
+                }>
+                  {n.quarantined ? 'quarantined' : n.draining ? 'draining' : n.healthy ? 'healthy' : 'unhealthy'}
+                </span>
+              </td>
               <td>
                 <input
                   type="number"
@@ -102,6 +155,16 @@ export default function PoolDetailBody({
                   {n.maxConcurrent === 0 ? '(unlimited)' : ''}
                 </span>
               </td>
+              {isSuperuser && (
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <button type="button" className="copy-btn" onClick={() => void toggleQuarantine(n)}>
+                    {n.quarantined ? 'Unquarantine' : 'Quarantine'}
+                  </button>{' '}
+                  <button type="button" className="copy-btn" onClick={() => void restartNode(n)}>
+                    Restart
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

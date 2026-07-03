@@ -4,6 +4,7 @@ import type {
   StopPoolRequest,
   DeletePoolRequest,
   SetMaxConcurrentRequest,
+  NodeOpRequest,
   SetPoolDisabledRequest,
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
@@ -167,8 +168,11 @@ export const api = {
   scalePool:   (req: ScalePoolRequest) => post<PoolResponse>('/pool/scale', req),
   stopPool:    (req: StopPoolRequest) => post<void>('/pool/stop', req),
   deletePool:  (req: DeletePoolRequest) => post<void>('/pool/delete', req),
-  setMaxConcurrent: (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
-  setPoolDisabled:  (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
+  setMaxConcurrent:  (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
+  quarantineNode:    (req: NodeOpRequest) => post<void>('/node/quarantine', req),
+  unquarantineNode:  (req: NodeOpRequest) => post<void>('/node/unquarantine', req),
+  restartNode:       (req: NodeOpRequest) => post<void>('/node/restart', req),
+  setPoolDisabled:   (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
 
   // Tenants
   listTenants:      () => get<TenantListResponse>('/tenant/list'),
