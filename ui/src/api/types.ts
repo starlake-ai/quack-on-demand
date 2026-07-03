@@ -40,6 +40,12 @@ export interface NodeInfo {
   p99Ms: number;
   healthy: boolean;
   draining: boolean;
+  // DuckDB engine internals scraped by the manager's health probe.
+  // Absent until the first successful scrape of the node.
+  duckdbMemoryBytes?: number | null;
+  duckdbTempStorageBytes?: number | null;
+  duckdbSpillFiles?: number | null;
+  duckdbSpillBytes?: number | null;
 }
 
 export interface PoolResponse {

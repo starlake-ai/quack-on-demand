@@ -156,6 +156,7 @@ export QOD_METRICS_REGION=eu-west-1
 | By Tenant | Stacked QPS per tenant, Outcomes by status |
 | Pool Occupancy | Node count bar chart by tenant / pool / role |
 | Node Health | Table: healthy, draining, in-flight, EWMA latency per node |
+| DuckDB Engine | Buffer-manager memory and spill-to-disk bytes per node (health-probe scrape) |
 | JVM | Heap used, GC pause rate, live threads, process uptime |
 
 **Expected metric names** (all registered by the manager):
@@ -166,6 +167,9 @@ export QOD_METRICS_REGION=eu-west-1
 - `node_draining` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
 - `node_in_flight` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
 - `node_ewma_latency_seconds` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
+- `node_duckdb_memory_used_bytes` - gauge, labels: `tenant`, `pool`, `node_id`, `role` (DuckDB buffer-manager usage, scraped by the health probe)
+- `node_duckdb_temp_storage_bytes` - gauge, same labels (buffer-manager temp storage)
+- `node_duckdb_spill_files` / `node_duckdb_spill_bytes` - gauges, same labels (live spill-to-disk files and their total size)
 - `pool_nodes` - gauge, labels: `tenant`, `pool`, `role`
 - `flightsql_sessions_active` - gauge
 - `jvm_memory_used_bytes` - gauge (Micrometer JVM binder)
