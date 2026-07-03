@@ -147,3 +147,66 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
+
+  // Tenant-B fixture constant, mirroring the value in RbacTenantScopeSpec.
+  private val GlobexTenantId = "t-globex01"
+
+  "node/active-statements" should "show a tenant admin only their tenant's statements" in {
+    val (h, _) = bootWithNode()
+    try
+      h.activeRegistry.register("alice", SecurityFixtures.TenantId, "bi", "n1", "SELECT 1")
+      h.activeRegistry.register("bob", GlobexTenantId, "bi", "n2", "SELECT 2")
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body =
+        get(h.httpClient, s"${h.baseUrl}/api/node/active-statements", apiKey = Some(token)).body()
+      body should include("alice")
+      body should not include "bob"
+    finally h.shutdown()
+  }
+
+  "statement/kill" should "404 on a cross-tenant statement and accept an owned one" in {
+    val (h, _) = bootWithNode()
+    try
+      val own =
+        h.activeRegistry.register("alice", SecurityFixtures.TenantId, "bi", "n1", "SELECT 1")
+      val other = h.activeRegistry.register("bob", GlobexTenantId, "bi", "n2", "SELECT 2")
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/statement/kill",
+        s"""{"id":"$other"}""",
+        apiKey = Some(token)
+      ).statusCode() shouldBe 404
+      val ok = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/statement/kill",
+        s"""{"id":"$own"}""",
+        apiKey = Some(token)
+      )
+      ok.statusCode() shouldBe 200
+      ok.body() should include("accepted")
+    finally h.shutdown()
+  }
+
+  it should "answer already-completed for an unknown id outside HA" in {
+    val (h, _) = bootWithNode()
+    try
+      val root = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword, None)
+      val resp = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/statement/kill",
+        """{"id":"nope"}""",
+        apiKey = Some(root)
+      )
+      resp.statusCode() shouldBe 200
+      resp.body() should include("already-completed")
+    finally h.shutdown()
+  }

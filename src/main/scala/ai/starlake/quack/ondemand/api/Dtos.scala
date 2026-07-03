@@ -189,6 +189,20 @@ final case class SetMaxConcurrentRequest(
 )
 final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
 
+final case class ActiveStatementInfo(
+    id: String,
+    user: String,
+    tenant: String,
+    pool: String,
+    nodeId: String,
+    sql: String,
+    startedAt: String, // ISO-8601 UTC
+    elapsedMs: Long
+)
+final case class ActiveStatementsResponse(statements: List[ActiveStatementInfo])
+final case class KillStatementRequest(id: String)
+final case class KillStatementResponse(status: String) // accepted | already-completed
+
 final case class ErrorResponse(error: String, message: String)
 
 final case class TenantRequest(
@@ -1152,3 +1166,9 @@ object Dtos:
   given Codec[FederatedSecretUpsertRequest] = deriveCodec
   given Codec[FederatedSecretResponse]      = deriveCodec
   given Codec[FederatedSecretListResponse]  = deriveCodec
+
+  // Active statement management
+  given Codec[ActiveStatementInfo]      = deriveCodec
+  given Codec[ActiveStatementsResponse] = deriveCodec
+  given Codec[KillStatementRequest]     = deriveCodec
+  given Codec[KillStatementResponse]    = deriveCodec
