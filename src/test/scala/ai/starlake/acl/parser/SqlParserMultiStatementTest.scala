@@ -97,7 +97,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     result.statements should have size 3
     result.statements.zipWithIndex.foreach { case (stmt, expectedIdx) =>
       val actualIdx = stmt match {
-        case StatementResult.Extracted(idx, _, _, _) => idx
+        case StatementResult.Extracted(idx, _, _, _, _) => idx
         case StatementResult.ParseError(idx, _, _)   => idx
         case StatementResult.ControlFlow(idx, _, _)  => idx
       }
@@ -111,7 +111,7 @@ class SqlParserMultiStatementTest extends AnyFunSuite with Matchers {
     val result = SqlParser.extract(sql, config)
     result.statements should have size 1
     val snippet = result.statements.head match {
-      case StatementResult.Extracted(_, s, _, _) => s
+      case StatementResult.Extracted(_, s, _, _, _) => s
       case StatementResult.ParseError(_, s, _)   => s
       case StatementResult.ControlFlow(_, s, _)  => s
     }

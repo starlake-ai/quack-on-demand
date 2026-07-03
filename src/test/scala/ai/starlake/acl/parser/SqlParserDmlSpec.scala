@@ -20,7 +20,7 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
   private def assertAccesses(sql: String, expected: (String, Verb)*): Unit =
     val r = SqlParser.extract(sql, config)
     r.statements.headOption match
-      case Some(StatementResult.Extracted(_, _, accesses, _)) =>
+      case Some(StatementResult.Extracted(_, _, accesses, _, _)) =>
         accesses.map(a => a.table.canonical -> a.verb) should contain theSameElementsAs expected
       case other =>
         fail(s"expected Extracted, got $other")
@@ -86,7 +86,7 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
     // ever a concern (e.g. read-side audit), extend the extractor.
     val r = SqlParser.extract("UPDATE t SET a = (SELECT max(x) FROM s)", config)
     r.statements.headOption match
-      case Some(StatementResult.Extracted(_, _, accesses, _)) =>
+      case Some(StatementResult.Extracted(_, _, accesses, _, _)) =>
         accesses.map(_.table.canonical) should contain ("testdb.public.t")
         accesses.find(_.table.canonical == "testdb.public.t").get.verb shouldBe Verb.Write
       case other => fail(s"expected Extracted, got $other")

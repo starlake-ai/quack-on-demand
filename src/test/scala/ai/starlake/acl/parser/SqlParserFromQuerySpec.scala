@@ -18,7 +18,7 @@ class SqlParserFromQuerySpec extends AnyFlatSpec with Matchers:
 
   private def heads(sql: String): Set[(String, Verb)] =
     SqlParser.extract(sql, config).statements.headOption match
-      case Some(StatementResult.Extracted(_, _, accesses, _)) =>
+      case Some(StatementResult.Extracted(_, _, accesses, _, _)) =>
         accesses.map(a => a.table.canonical -> a.verb)
       case other =>
         fail(s"expected Extracted, got $other")

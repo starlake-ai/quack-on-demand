@@ -2,12 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  PostgresAclValidator,
-  ValidationContext
-}
+import ai.starlake.quack.edge.sql.{Allowed, Denied, PostgresAclValidator, ValidationContext}
 import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -21,29 +16,27 @@ import java.time.Instant
 
 /** Statement-time ACL gate integration tests.
   *
-  * Exercises [[PostgresAclValidator]] fed with [[EffectiveSet]] values produced
-  * by [[PoolSupervisor.effectiveSetForUser]], which is the same code path that
-  * production uses after a FlightSQL handshake.  No Arrow Flight wire is opened
-  * -- the router / Flight layers are skipped per the e2e plan's scope discipline
-  * for this task.
+  * Exercises [[PostgresAclValidator]] fed with [[EffectiveSet]] values produced by
+  * [[PoolSupervisor.effectiveSetForUser]], which is the same code path that production uses after a
+  * FlightSQL handshake. No Arrow Flight wire is opened -- the router / Flight layers are skipped
+  * per the e2e plan's scope discipline for this task.
   *
-  * Each test seeds a fresh [[SecurityFixtures.Fixture]] so there is no state
-  * shared between cases.
+  * Each test seeds a fresh [[SecurityFixtures.Fixture]] so there is no state shared between cases.
   */
 class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
 
   // ---- shared validator (stateless, safe to reuse) --------------------
 
-  /** Wildcard catalog grants are now scoped to the session's tenant. The
-    * fixture's tenant `acme` (id `t-acme0001`) owns one tenant-db -- the
-    * SecurityFixtures default `acme_main`. The catalog used in the SQL
-    * snippets below is the qualified DEFAULT (`acme`), so we include both
-    * `acme` and `acme_main` here so the wildcard arm in the validator
-    * admits queries that reference either form. */
+  /** Wildcard catalog grants are now scoped to the session's tenant. The fixture's tenant `acme`
+    * (id `t-acme0001`) owns one tenant-db -- the SecurityFixtures default `acme_main`. The catalog
+    * used in the SQL snippets below is the qualified DEFAULT (`acme`), so we include both `acme`
+    * and `acme_main` here so the wildcard arm in the validator admits queries that reference either
+    * form.
+    */
   private val validator = new PostgresAclValidator(
     defaultDatabase = "acme",
-    defaultSchema   = "public",
-    tenantCatalogs  = {
+    defaultSchema = "public",
+    tenantCatalogs = {
       case SecurityFixtures.TenantId => Set("acme", SecurityFixtures.TenantDbName)
       case _                         => Set.empty
     }
@@ -73,8 +66,9 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
     def discoverExisting()  = IO.pure(Nil)
     def cleanup()           = IO.unit
 
-  /** Build a PoolSupervisor over the given store and replay all persisted state
-    * into the supervisor's in-memory caches. */
+  /** Build a PoolSupervisor over the given store and replay all persisted state into the
+    * supervisor's in-memory caches.
+    */
   private def buildSupervisor(store: InMemoryControlPlaneStore): PoolSupervisor =
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
     sup.restore()
@@ -82,26 +76,29 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
 
   /** Resolve the effective set for a user that already exists in the fixture. */
   private def effectiveSetFor(sup: PoolSupervisor, userId: String): EffectiveSet =
-    sup.effectiveSetForUser(userId).getOrElse(
-      fail(s"effectiveSetForUser($userId) returned None -- user missing from store")
-    )
+    sup
+      .effectiveSetForUser(userId)
+      .getOrElse(
+        fail(s"effectiveSetForUser($userId) returned None -- user missing from store")
+      )
 
   /** Build a ValidationContext aimed at the fixture's pool. */
   private def ctx(
-      username:  String,
-      sql:       String,
-      eff:       EffectiveSet,
-      catalog:   String = "acme",
-      schema:    String = "public"
+      username: String,
+      sql: String,
+      eff: EffectiveSet,
+      catalog: String = "acme",
+      schema: String = "public"
   ): ValidationContext =
     ValidationContext(
-      username        = username,
-      database        = s"${SecurityFixtures.TenantName}/${SecurityFixtures.TenantDbName}/${SecurityFixtures.PoolName}",
-      statement       = sql,
-      peer            = "test-peer",
+      username = username,
+      database =
+        s"${SecurityFixtures.TenantName}/${SecurityFixtures.TenantDbName}/${SecurityFixtures.PoolName}",
+      statement = sql,
+      peer = "test-peer",
       defaultDatabase = Some(catalog),
-      defaultSchema   = Some(schema),
-      effectiveSet    = Some(eff)
+      defaultSchema = Some(schema),
+      effectiveSet = Some(eff)
     )
 
   // =========================================================================
@@ -161,7 +158,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
     val result = validator.validate(
       ctx("alice", "SELECT * FROM other.public.t", eff, catalog = "other")
     )
-    result shouldBe a [Denied]
+    result shouldBe a[Denied]
   }
 
   it should "be allowed to INSERT on her tenant's table (ALL wildcard covers INSERT)" in {
@@ -189,7 +186,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
 
     // Bob's EffectiveSet has an empty permissions list.
     eff.permissions shouldBe empty
-    eff.roles       shouldBe empty
+    eff.roles shouldBe empty
 
     val result = validator.validate(
       ctx("bob", "SELECT * FROM acme.public.t", eff)
@@ -223,9 +220,10 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
   // D. Granular vs wildcard verbs
   // =========================================================================
 
-  /** Replace alice's role permission in the store with an RO-only grant on a
-    * specific table, then rebuild the supervisor so the resolver picks it up.
-    * Returns a new (store, supervisor, effectiveSet) triple. */
+  /** Replace alice's role permission in the store with an RO-only grant on a specific table, then
+    * rebuild the supervisor so the resolver picks it up. Returns a new (store, supervisor,
+    * effectiveSet) triple.
+    */
   private def aliceWithReadOnlyGrant(): (InMemoryControlPlaneStore, PoolSupervisor, EffectiveSet) =
     val fix = SecurityFixtures.freshStore()
     // Remove the existing wildcard ALL permission.
@@ -233,13 +231,13 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
     // Insert an RO-only permission on acme.public.t.
     fix.store.insertRolePermission(
       RolePermission(
-        id          = "rp-ro-only",
-        roleId      = SecurityFixtures.AdminRoleId,
+        id = "rp-ro-only",
+        roleId = SecurityFixtures.AdminRoleId,
         catalogName = "acme",
-        schemaName  = "public",
-        tableName   = "t",
-        verb        = "RO",
-        grantedAt   = Some(Instant.now())
+        schemaName = "public",
+        tableName = "t",
+        verb = "RO",
+        grantedAt = Some(Instant.now())
       )
     )
     val sup = buildSupervisor(fix.store)
@@ -273,4 +271,50 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
         msg.length should be > 0
       case Allowed =>
         fail("expected Denied for alice with RO-only grant on INSERT, got Allowed")
+  }
+
+  // =========================================================================
+  // E. Fail-closed on ACL parser bypasses (security-audit-2026-07-02 #3/#4)
+  //
+  //    Each uses alice's RO-only grant on acme.public.t so the wildcard ALL
+  //    escape hatch is out of the picture: a scoped principal must be DENIED
+  //    when the statement reaches a table she was not granted, OR uses a
+  //    construct the walker cannot resolve to a grantable table.
+  // =========================================================================
+
+  "a scoped principal" should "be denied when a read_parquet table function escapes the catalog" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
+    validator.validate(
+      ctx("alice", "SELECT * FROM read_parquet('/data/acme/secret/*.parquet')", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "be denied when a same-named CTE tries to shadow a qualified sibling table" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
+    // `t` is shadowed by a CTE, but the qualified acme.public.secret is the real
+    // read target and alice holds no grant on it.
+    validator.validate(
+      ctx("alice", "WITH t AS (SELECT 1 AS x) SELECT * FROM acme.public.secret", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "be denied when a parenthesized join reaches an ungranted table" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
+    validator.validate(
+      ctx("alice", "SELECT * FROM (acme.public.t JOIN acme.public.secret ON t.id = secret.id)", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "be denied when EXPLAIN ANALYZE hides a write she cannot perform" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
+    validator.validate(
+      ctx("alice", "EXPLAIN ANALYZE DELETE FROM acme.public.t WHERE id = 1", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "still be allowed to SELECT her granted table via plain EXPLAIN" in {
+    val (_, _, eff) = aliceWithReadOnlyGrant()
+    validator.validate(
+      ctx("alice", "EXPLAIN SELECT * FROM acme.public.t", eff)
+    ) shouldBe Allowed
   }

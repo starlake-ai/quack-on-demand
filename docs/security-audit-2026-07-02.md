@@ -7,12 +7,13 @@ reachability. Severities below are POST-verification and state their gating
 conditions explicitly. The just-merged HA code was audited separately and is out
 of scope here.
 
-## Remediation status (updated 2026-07-02)
+## Remediation status (updated 2026-07-03)
 
 The three default-reachable HIGH findings are **SOLVED** and merged to main
 (commits 4feea27, f2bf610, 0d9f239 for #1; 9142c5f for #2; b2e4c86 for #7).
-Every finding below carries an inline **Status:** line. Findings gated behind
-the default-off `acl.enabled` / `rls.enabled` flags (#3, #4, #5) and the
+The ACL-parser fail-open cluster (#3), the EXPLAIN-ANALYZE bypass (#4), and the
+RLS/CLS fail-open + retry bug (#5) are now **SOLVED** on the working tree
+(2026-07-03). Every finding below carries an inline **Status:** line. The
 lower-severity items (#6, #8) remain **OPEN** as a follow-up backlog.
 
 ## Load-bearing context (changes how to read everything below)
@@ -28,10 +29,13 @@ lower-severity items (#6, #8) remain **OPEN** as a follow-up backlog.
   A SQL reference to a sibling tenant's catalog fails with a DuckDB error. So the
   SQL-reference ACL bypasses are confined to the caller's OWN tenant, except
   file-reading table functions (`read_parquet`) which escape the catalog layer.
-- **The validator fails open on an empty access set**: a statement that parses
-  successfully but yields zero table refs is admitted unconditionally
-  (PostgresAclValidator.scala:102). Parse ERRORS fail closed. This is the
-  amplifier that turns each silent parser drop into an allow.
+- **The validator fails open on an empty access set** (HISTORICAL, now fixed):
+  a statement that parses successfully but yields zero table refs was admitted
+  unconditionally. As of 2026-07-03 the walker surfaces every construct it
+  cannot map to a grantable table as an `unsupported` marker, and the validator
+  fails CLOSED whenever that list is non-empty; unknown statement types are
+  reported as parse errors (also fail-closed). An empty access set now means the
+  statement genuinely touches no table (COMMIT/SET/`SELECT 1`) and stays admitted.
 
 ## Findings, ranked
 
@@ -83,7 +87,18 @@ membershipCheck; correct or delete the false comment. Note: a prior memory item
 recorded "no privilege escalation on grant", this is a gap in that.
 
 ### 3. ACL parser fail-open bypasses (CRITICAL/HIGH, ACL-enabled only)
-**Status: OPEN** (gated behind default-off `acl.enabled`; highest remaining priority).
+**Status: SOLVED (2026-07-03).** The walker now returns a `TableExtraction`
+carrying both the extracted tables AND an `unsupported` marker list; the
+validator fails CLOSED (deny, unless the principal holds an unrestricted `*.*.*
+ALL`) whenever a statement yields any marker. Specifically: 3a CTE shadowing is
+fixed by only suppressing UNQUALIFIED names (a qualified `db.main.lineitem` is
+always extracted); 3b parenthesized joins get a `ParenthesedFromItem` walk arm;
+3c table functions and string-literal file refs are flagged `unsupported`
+(deny); 3d UPDATE SET-clause value subqueries are walked; 3e MERGE
+WHEN-MATCHED/NOT-MATCHED action subqueries are walked; 3f/3g unrecognized
+FROM-item, Select, and statement node types are flagged `unsupported` /
+ParseError instead of silently admitted. Covered by `SqlParserAclBypassSpec`
+and the fail-closed cases in `StatementAclSecuritySpec`. Original report:
 All admitted via the empty-access-set fail-open. Confined to same-tenant except 3c.
 - 3a CTE name-shadowing (TableExtractor.scala:141): the CTE filter matches the
   UNQUALIFIED name, so `WITH lineitem AS (...) SELECT * FROM db.main.lineitem`
@@ -106,7 +121,14 @@ add the missing walker arms; fail closed on any node type the walker does not
 recognize.
 
 ### 4. EXPLAIN ANALYZE executes DML past the ACL gate (HIGH, ACL-enabled only)
-**Status: OPEN** (gated behind default-off `acl.enabled`).
+**Status: SOLVED (2026-07-03).** `SqlParser.processStatement` now has an
+`ExplainStatement` arm that recurses into the inner statement and re-labels the
+result, so `EXPLAIN ANALYZE DELETE FROM t` is authorized as the Write on `t` it
+actually executes, not admitted as a table-free control-flow verb. Bare
+`EXPLAIN` with no body stays ControlFlow. Covered by `SqlParserAclBypassSpec`
+and `StatementAclSecuritySpec`. (The coarse routing-layer `StatementClassifier`
+still buckets EXPLAIN as read for node selection; that only picks a node role
+and is independent of the per-table authorization above.) Original report:
 `StatementClassifier.scala:64` buckets EXPLAIN as read (read node);
 `SqlParser.scala:204` puts `ExplainStatement` in the ControlFlow admit-all arm.
 Verified against JSQLParser 5.3.218 that `EXPLAIN ANALYZE DELETE/INSERT/UPDATE`
@@ -117,7 +139,12 @@ write (no node-side write lock found). Fix: classify EXPLAIN by its inner
 statement, or deny EXPLAIN ANALYZE with a non-read body.
 
 ### 5. RLS/CLS security-filter bypasses (MEDIUM, RLS/CLS-enabled only)
-**Status: OPEN** (gated behind default-off, experimental `rls.enabled`/`cls.enabled`).
+**Status: SOLVED (2026-07-03).** 5a: both rewriters only reach a parse attempt
+after confirming the principal has policies, so `FlightSqlRouter` now treats a
+`PassthroughParseFailed` from either rewriter as a DENY (fail-closed) instead of
+forwarding the original SQL. 5b: the transient-failure retry now sends `finalSql`
+(RLS-wrapped, CLS-applied) instead of `rewrittenSql` (CLS-only, pre-RLS), so a
+retried query keeps its row filter. Original report:
 - 5a Fail-open on parse failure (RowPolicyRewriter.scala:104,
   ColumnPolicyRewriter.scala:90): the rewriters use single-statement
   `CCJSqlParserUtil.parse` while the ACL gate uses multi-statement
@@ -199,9 +226,9 @@ them fail-closed (refuse to bind non-loopback with defaults) rather than warn.
 1. ~~spawn-script injection (#1)~~ **DONE** (4feea27, f2bf610, 0d9f239).
 2. ~~membership cross-tenant edge (#2)~~ **DONE** (9142c5f).
 3. ~~K8s spawn-failure orphans + stuck pool (#7)~~ **DONE** (b2e4c86).
-4. ACL fail-closed on empty access set + missing walker arms (#3, #4): **OPEN**. The whole ACL cluster collapses to safe once the validator denies empty-set and the walker fails closed. Only matters for ACL-enabled deployments but is the right structural fix. Highest remaining priority.
-5. RLS fail-closed + retry sends finalSql (#5): **OPEN** (RLS/CLS default-off, experimental).
+4. ~~ACL fail-closed on empty access set + missing walker arms (#3, #4)~~ **DONE** (2026-07-03). The walker now surfaces `unsupported` markers and the validator denies on any of them; EXPLAIN is classified by its inner statement.
+5. ~~RLS fail-closed + retry sends finalSql (#5)~~ **DONE** (2026-07-03).
 
-Remaining OPEN backlog: #3, #4, #5 (ACL/RLS-gated), #6 (prepared-statement
-revocation lag / handle sharing), and the #8 lower-severity items, plus the
-documented-by-design defaults. None are default-reachable HIGH.
+Remaining OPEN backlog: #6 (prepared-statement revocation lag / handle
+sharing) and the #8 lower-severity items, plus the documented-by-design
+defaults. None are default-reachable HIGH.

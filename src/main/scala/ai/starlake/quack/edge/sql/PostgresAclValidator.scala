@@ -86,11 +86,31 @@ final class PostgresAclValidator(
         logger.warn(s"ACL DENIED: user=${context.username}: $msg")
         return Denied(msg)
 
+    // Fail closed on any construct the walker could not resolve to a grantable
+    // table (table functions like read_parquet, string-literal file refs,
+    // unrecognized FROM-item / node types). These escape the tenant-catalog
+    // boundary or would otherwise be silently dropped, turning the empty-access
+    // fail-open into an allow. An unrestricted ALL grant still covers them.
+    val unsupported = extraction.statements.collect {
+      case StatementResult.Extracted(_, _, _, _, u) if u.nonEmpty => u
+    }.flatten
+    if unsupported.nonEmpty then
+      if hasWildcardAll(eff) then
+        logger.info(
+          s"ACL: wildcard ALL covers unsupported constructs (${unsupported.mkString(", ")}) " +
+            s"for user=${context.username}"
+        )
+        return Allowed
+      else
+        val msg = s"unsupported constructs (deny, fail-closed): ${unsupported.mkString(", ")}"
+        logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+        return Denied(msg)
+
     // Collect all (table, verb) tuples from every Extracted statement.
     // ControlFlow statements (COMMIT, ROLLBACK, SET, ...) carry no accesses
     // and contribute nothing.
     val accesses: Set[TableAccess] = extraction.statements
-      .collect { case StatementResult.Extracted(_, _, a, _) =>
+      .collect { case StatementResult.Extracted(_, _, a, _, _) =>
         a
       }
       .flatten

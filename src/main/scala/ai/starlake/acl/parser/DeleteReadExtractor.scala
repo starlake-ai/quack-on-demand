@@ -1,6 +1,5 @@
 package ai.starlake.acl.parser
 
-import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.delete.Delete
 
 import scala.jdk.CollectionConverters.*
@@ -10,7 +9,7 @@ import scala.jdk.CollectionConverters.*
   * applies.
   */
 object DeleteReadExtractor:
-  def extract(del: Delete): List[Table] =
+  def extract(del: Delete): TableExtraction =
     val v = new TableExtractorVisitor()
     // WHERE clause sub-queries
     val where = del.getWhere
@@ -23,4 +22,4 @@ object DeleteReadExtractor:
       if ri != null then v.visitFromItem(ri)
       Option(j.getOnExpressions).foreach(_.asScala.foreach(v.visitExpression))
     })
-    v.tables.toList
+    v.result

@@ -173,11 +173,14 @@ final class FlightSqlRouter(
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
             sql
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
-            // Inner rewriter couldn't parse - emit a distinct tag so dashboards can split
-            // "rewriter blind" from "no policy applied", then route the original SQL like
-            // a regular Passthrough.
+            // Fail closed: the rewriter only reaches a parse attempt once the principal has
+            // column policies, so a parse failure means we cannot prove the masked columns are
+            // absent. Forwarding the original SQL would leak them. Deny instead of passthrough.
+            // See security-audit-2026-07-02 #5a. (CLS is experimental / default-off.)
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
-            sql
+            val reason = "column policy rewrite could not parse statement; denied (fail-closed)"
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+            return IO.pure(Left(RouterFailure.AccessDenied(s"access denied: $reason")))
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             s
@@ -197,8 +200,8 @@ final class FlightSqlRouter(
     // Row-level security: filter rows AFTER column masking is decided, but injected at the BASE
     // table so the predicate runs on the true (unmasked) values. Operates on the CLS output so the
     // two rewriters compose (RLS innermost, CLS outermost).
-    val finalSql: String = effectiveSet match
-      case None      => rewrittenSql
+    val finalSqlEither: Either[RouterFailure, String] = effectiveSet match
+      case None      => Right(rewrittenSql)
       case Some(eff) =>
         val r0         = System.nanoTime()
         val schemaCtxR = ai.starlake.quack.edge.rls.SchemaContext(
@@ -211,13 +214,27 @@ final class FlightSqlRouter(
         outcome match
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.Passthrough =>
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
-            rewrittenSql
+            Right(rewrittenSql)
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.PassthroughParseFailed =>
+            // Fail closed: the rewriter only reaches a parse attempt once the principal has row
+            // policies, so a parse failure means we cannot prove the filtered rows are excluded.
+            // Forwarding the original SQL would return unfiltered rows. Deny instead of passthrough.
+            // See security-audit-2026-07-02 #5a. (RLS is experimental / default-off.)
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
-            rewrittenSql
+            Left(
+              RouterFailure.AccessDenied(
+                "access denied: row policy rewrite could not parse statement; denied (fail-closed)"
+              )
+            )
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
-            s
+            Right(s)
+
+    val finalSql: String = finalSqlEither match
+      case Right(s) => s
+      case Left(f)  =>
+        maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(f.reason))
+        return IO.pure(Left(f))
 
     supervisor.snapshot(poolKey) match
       case None =>
@@ -267,11 +284,14 @@ final class FlightSqlRouter(
                           )
                         )
                       else
+                        // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT rewrittenSql
+                        // (CLS only, pre-RLS) -- otherwise a retried query returns rows the row
+                        // policy should have filtered. See security-audit-2026-07-02 #5b.
                         retryOnce(
                           connectionId,
                           poolKey,
                           kind,
-                          rewrittenSql,
+                          finalSql,
                           exclude = nodeId,
                           recordLoad = recordExecution
                         )
