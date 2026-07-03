@@ -72,6 +72,10 @@ import type {
   FederatedSecretUpsertRequest,
   FederatedSecretResponse,
   FederatedSecretListResponse,
+  // Active statements + kill
+  ActiveStatementsResponse,
+  KillStatementRequest,
+  KillStatementResponse,
 } from './types';
 
 const BASE = '/api';
@@ -318,6 +322,10 @@ export const api = {
   // Recent statement history (newest first)
   statementHistory: (limit = 50) =>
     get<StatementHistoryResponse>(`/node/statements?limit=${limit}`),
+
+  // Active statements + kill
+  activeStatements: () => get<ActiveStatementsResponse>('/node/active-statements'),
+  killStatement:    (req: KillStatementRequest) => post<KillStatementResponse>('/statement/kill', req),
 
   // Catalog browser
   listCatalogSchemas: (tenant: string, tenantDb: string) =>

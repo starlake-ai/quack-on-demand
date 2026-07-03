@@ -554,3 +554,20 @@ export interface FederationImportSummary {
   sources: number;
   secrets: number;
 }
+
+// ----- Active statements + kill -----
+export interface ActiveStatementInfo {
+  id: string;
+  user: string;
+  tenant: string;
+  pool: string;
+  nodeId: string;
+  sql: string;
+  startedAt: string; // ISO-8601 UTC
+  elapsedMs: number;
+}
+export interface ActiveStatementsResponse {
+  statements: ActiveStatementInfo[];
+}
+export interface KillStatementRequest { id: string; }
+export interface KillStatementResponse { status: string; } // accepted | already-completed
