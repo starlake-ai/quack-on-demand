@@ -92,10 +92,20 @@ final class KubernetesQuackBackend(
     kindEnv.setName("kind")
     kindEnv.setValue(spec.kindWire)
     envs.add(kindEnv)
+    // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy
+    // settings and before `INSTALL quack; LOAD quack;`. Inlined like `kind`
+    // (not Secret-backed): it carries engine defaults (SET memory_limit,
+    // temp_directory, extension INSTALLs), not credentials - those belong
+    // in the federation blob, which stays Secret-backed below.
+    if spec.dbInitSql.nonEmpty then
+      val dbInitEnv = new EnvVar()
+      dbInitEnv.setName("dbInitSql")
+      dbInitEnv.setValue(spec.dbInitSql)
+      envs.add(dbInitEnv)
     // Federation: when the pool has any extraSetupSql, point the pod's
     // `extraSetupSql` env var at the per-pool Secret instead of inlining
     // the value. Same env var name as LocalQuackBackend's
-    // env.put("extraSetupSql", ...) so spawn-quack-node.sh:200 reads it
+    // env.put("extraSetupSql", ...) so spawn-quack-node.sh reads it
     // identically. Putting it in a Secret keeps the (potentially long,
     // potentially credential-bearing) SQL out of `kubectl describe pod`
     // output and out of the pod object's etcd record. The Secret itself
