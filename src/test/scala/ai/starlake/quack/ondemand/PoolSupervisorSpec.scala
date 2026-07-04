@@ -722,3 +722,46 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     // so the respawned node remains excluded from routing.
     tracker.snapshot(nodeId).quarantined shouldBe true
   }
+
+  // ---------- per-database boot SQL (NodeSpec.dbInitSql) ----------
+  //
+  // The tenant-db initSql executes BEFORE the quack extension loads (and after
+  // the proxy http settings), so it must NOT be folded into extraSetupSql,
+  // which spawn-quack-node.sh runs after LOAD quack + the catalog ATTACH. It
+  // rides its own NodeSpec.dbInitSql field / dbInitSql env var instead.
+
+  "joinInitAndBlob" should "join pool initSql and federation blob, skipping blanks" in {
+    PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\nATTACH x;"
+    PoolSupervisor.joinInitAndBlob("SET b=2;", "") shouldBe "SET b=2;"
+    PoolSupervisor.joinInitAndBlob("", "ATTACH x;") shouldBe "ATTACH x;"
+    PoolSupervisor.joinInitAndBlob("  ", "") shouldBe ""
+  }
+
+  "createPool" should "ship the tenant-db initSql on NodeSpec.dbInitSql, not in extraSetupSql" in {
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName = "acme", suffix = "mem1", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = "", initSql = "SET memory_limit = '2GB';"
+    ).unsafeRunSync()
+    val poolKey2 = PoolKey("acme", "acme_mem1", "bi")
+    sup.createPool(poolKey2, RoleDistribution(0, 0, 1), initSql = "SET threads = 2;").unsafeRunSync()
+    val spec = b.specs.head
+    spec.dbInitSql shouldBe "SET memory_limit = '2GB';"
+    spec.extraSetupSql should include("SET threads = 2;")
+    spec.extraSetupSql should not include "memory_limit"
+  }
+
+  "restore" should "carry the tenant-db initSql into PoolState.dbInitSql" in {
+    val store2 = new InMemoryControlPlaneStore()
+    val sup2   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store2)
+    sup2.createTenant(Tenant("acme")).unsafeRunSync()
+    sup2.createTenantDb(
+      tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = "", initSql = "SET x=1;"
+    ).unsafeRunSync()
+    sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup2.restore()
+    sup2.get(key).get.dbInitSql shouldBe "SET x=1;"
+  }

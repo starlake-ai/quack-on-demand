@@ -212,6 +212,7 @@ final class PoolSupervisor(
             s3 = td.objectStore,
             maxConcurrentPerNode = p.maxConcurrentPerNode,
             disabled = p.disabled,
+            dbInitSql = td.initSql,
             initSql = p.initSql
           )
         )
@@ -308,6 +309,7 @@ final class PoolSupervisor(
       maxConcurrent = n.maxConcurrent,
       kindWire = state.kindWire,
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
+      dbInitSql = state.dbInitSql,
       placement = placementForNodeId(key, n.nodeId)
     )
 
@@ -378,6 +380,7 @@ final class PoolSupervisor(
         maxConcurrent = state.maxConcurrentPerNode,
         kindWire = state.kindWire,
         extraSetupSql = nodeExtra,
+        dbInitSql = state.dbInitSql,
         placement = placement
       )
     }
@@ -654,7 +657,8 @@ final class PoolSupervisor(
       dataPath: String,
       objectStore: Map[String, String] = Map.empty,
       defaultDatabase: Option[String] = None,
-      defaultSchema: Option[String] = None
+      defaultSchema: Option[String] = None,
+      initSql: String = ""
   ): IO[Either[String, TenantDb]] = IO.blocking {
     Names.normalizeTenantDbName(tenantName, suffix) match
       case Left(err)   => Left(err)
@@ -684,7 +688,8 @@ final class PoolSupervisor(
               dataPath = dataPath,
               objectStore = objectStore,
               defaultDatabase = defaultDatabase,
-              defaultSchema = defaultSchema
+              defaultSchema = defaultSchema,
+              initSql = initSql
             )
 
             TenantDb.validate(td) match
@@ -872,6 +877,7 @@ final class PoolSupervisor(
                 maxConcurrent = maxConcurrentPerNode,
                 kindWire = kindWire,
                 extraSetupSql = nodeExtra,
+                dbInitSql = td.initSql,
                 placement = placement
               )
             }
@@ -893,6 +899,7 @@ final class PoolSupervisor(
                   kindWire = kindWire,
                   // Federation blob only; respawn concatenates with initSql fresh.
                   extraSetupSql = fedBlob,
+                  dbInitSql = td.initSql,
                   initSql = initSql,
                   defaultDatabase = td.defaultDatabase,
                   defaultSchema = td.defaultSchema
@@ -995,7 +1002,8 @@ final class PoolSupervisor(
               state.s3,
               maxConcurrent = state.maxConcurrentPerNode,
               kindWire = state.kindWire,
-              extraSetupSql = nodeExtra
+              extraSetupSql = nodeExtra,
+              dbInitSql = state.dbInitSql
             )
           }
           val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))
@@ -1774,6 +1782,10 @@ object PoolSupervisor:
     * pipe, and DuckDB needs the statement terminator to parse them as separate statements. Empty
     * fragments are dropped so the resulting string contains no leading / trailing blank lines
     * (cleaner UI display + simpler tests).
+    *
+    * The tenant-db initSql is NOT part of this join: it must run BEFORE the quack extension is
+    * installed/loaded (and after the proxy settings), so it rides
+    * [[ai.starlake.quack.model.NodeSpec.dbInitSql]] and its own `dbInitSql` env var instead.
     */
   def joinInitAndBlob(initSql: String, federationBlob: String): String =
     val a = Option(initSql).getOrElse("").trim

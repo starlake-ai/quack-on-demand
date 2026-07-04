@@ -169,6 +169,14 @@ fi
 # kind=duckdb-file skip DuckLake-specific setup entirely.
 INIT_SQL=""
 INIT_SQL+="$PROXY_SQL"$'\n'
+# Per-database init SQL (tenant-db initSql, `dbInitSql` env var). Runs BEFORE
+# the quack extension is installed/loaded and before the catalog ATTACH, right
+# after the proxy settings, so engine-level defaults (SET memory_limit,
+# SET temp_directory, extension INSTALLs) are already in effect when quack
+# starts. Pool initSql + federation SQL ride $extraSetupSql further down.
+if [[ -n "${dbInitSql:-}" ]]; then
+  INIT_SQL+="$dbInitSql"$'\n'
+fi
 INIT_SQL+=$'INSTALL quack;    LOAD quack;\n'
 
 case "$kind" in

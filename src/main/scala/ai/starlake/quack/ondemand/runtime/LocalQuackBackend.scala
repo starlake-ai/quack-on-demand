@@ -39,6 +39,10 @@ final class LocalQuackBackend(
     spec.metastore.foreach { case (k, v) => env.put(k, v) }
     env.put("kind", spec.kindWire)
     if spec.extraSetupSql.nonEmpty then env.put("extraSetupSql", spec.extraSetupSql)
+    // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy settings
+    // and before `INSTALL quack; LOAD quack;`, unlike extraSetupSql which runs
+    // after the catalog ATTACH.
+    if spec.dbInitSql.nonEmpty then env.put("dbInitSql", spec.dbInitSql)
     val proc = pb.start()
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)
