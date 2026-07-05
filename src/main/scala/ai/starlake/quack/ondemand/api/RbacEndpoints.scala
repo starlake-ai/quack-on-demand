@@ -75,7 +75,7 @@ object RbacEndpoints:
     base.get
       .in("user" / "list")
       .in(query[Option[String]]("tenant"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[UserListResponse])
 
   val effectivePermissions: PublicEndpoint[
@@ -403,5 +403,5 @@ object RbacEndpoints:
       .in(query[Option[String]]("tenant"))
       .in(query[Option[String]]("userId"))
       .in(query[Option[String]]("groupId"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[PoolPermissionListResponse])
