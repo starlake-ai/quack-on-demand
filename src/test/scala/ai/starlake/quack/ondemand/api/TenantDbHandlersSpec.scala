@@ -3,12 +3,14 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, RoleDistribution, RunningNode, Tenant}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import sttp.model.StatusCode
 
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
@@ -184,3 +186,40 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val td = out.toOption.get
     td.defaultDatabase shouldBe Some("fedpg")
     td.defaultSchema   shouldBe Some("public")
+
+  "TenantDbHandlers.createTenantDb (initSql)" should "round-trip initSql on the response" in:
+    val h = freshHandlers()
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "mem3", kind = "memory", initSql = "SET threads = 4;"),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.toOption.get.initSql shouldBe "SET threads = 4;"
+
+  "TenantDbHandlers.setInitSql" should "update and clear initSql on an existing tenant-db" in:
+    val h = freshHandlers()
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem4", kind = "memory"), None)(
+      (_: String) => None
+    ).unsafeRunSync()
+    val set = h.setInitSql(
+      SetTenantDbInitSqlRequest("acme", "acme_mem4", "SET memory_limit = '1GB';"),
+      None
+    )((_: String) => None).unsafeRunSync()
+    set.toOption.get.initSql shouldBe "SET memory_limit = '1GB';"
+    val cleared = h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_mem4", ""), None)(
+      (_: String) => None
+    ).unsafeRunSync()
+    cleared.toOption.get.initSql shouldBe ""
+
+  it should "404 on an unknown tenant-db and 403 for a foreign tenant session" in:
+    val h = freshHandlers()
+    h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_nope", "SET a=1;"), None)(
+      (_: String) => None
+    ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.NotFound
+    val foreignScope: String => Option[SessionScope] =
+      _ => Some(SessionScope(superuser = false, manageableTenants = Set("globex")))
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem5", kind = "memory"), None)(
+      (_: String) => None
+    ).unsafeRunSync()
+    h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_mem5", "SET a=1;"), Some("tok"))(
+      foreignScope
+    ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.Forbidden
