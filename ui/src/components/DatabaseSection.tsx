@@ -51,7 +51,11 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       .then(r => setDbs(r.tenantDbs))
       .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
 
-  useEffect(() => { void reload(); }, [tenant]);
+  useEffect(() => {
+    setEditingDb(null);
+    setEditSql('');
+    void reload();
+  }, [tenant]);
 
   function resetForm() {
     setName(prefix);
