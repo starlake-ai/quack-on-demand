@@ -11,6 +11,9 @@ import CohortEditor, {
   PlacementUnsupportedWarning,
 } from './CohortEditor';
 
+const CPU_RE = /^\d+(\.\d+)?m?$/;
+const MEM_RE = /^\d+(\.\d+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$/;
+
 /** Pools card for the TenantDetail page. Mirrors DatabaseSection's
   * shape: list pools, plus an inline "+ New pool" form that opens
   * below the table instead of navigating to a dedicated route. */
@@ -48,6 +51,9 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   // Operator-authored per-pool init SQL prepended to the federation blob
   // at node spawn (PRAGMAs / SET / INSTALL / LOAD). Empty by default.
   const [initSql, setInitSql] = useState('');
+  // Kubernetes pod resource limits. Optional; empty string = no limit.
+  const [cpu, setCpu]       = useState('');
+  const [memory, setMemory] = useState('');
 
   // Placement plan. Always available; on non-K8s backends the cohorts
   // are persisted so a YAML export still survives, but the runtime
@@ -59,6 +65,9 @@ export default function PoolSection({ tenant }: { tenant: string }) {
 
   const effective = useCohorts ? cohortsTotal(cohorts) : { wo, ro, dual };
   const size = effective.wo + effective.ro + effective.dual;
+
+  const cpuError = cpu.trim() !== '' && !CPU_RE.test(cpu.trim()) ? 'e.g. 500m or 2' : null;
+  const memError = memory.trim() !== '' && !MEM_RE.test(memory.trim()) ? 'e.g. 2Gi or 512Mi' : null;
 
   function reloadPools() {
     return api.listPools()
@@ -157,6 +166,8 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     setCohorts([emptyCohort()]);
     setCreateDisabled(false);
     setInitSql('');
+    setCpu('');
+    setMemory('');
     setError(null);
     if (tenantDbs.length > 0) setTenantDb(tenantDbs[0].name);
   }
@@ -207,6 +218,8 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         ...(wireCohorts ? { cohorts: wireCohorts } : {}),
         ...(createDisabled ? { disabled: true } : {}),
         ...(initSql.trim() ? { initSql: initSql.trim() } : {}),
+        ...(cpu.trim() ? { cpu: cpu.trim() } : {}),
+        ...(memory.trim() ? { memory: memory.trim() } : {}),
       });
       const justCreated = { tenantDb, pool: poolName };
       setAdding(false);
@@ -417,6 +430,28 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               {maxConcurrent === 0 && (
                 <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>(0 = unlimited)</p>
               )}
+              <div className="row" style={{ gap: 12, alignItems: 'flex-start', marginTop: '.5rem' }}>
+                <label style={{ flex: 1 }}>
+                  CPU limit (optional)
+                  <input
+                    type="text"
+                    value={cpu}
+                    onChange={ev => setCpu(ev.target.value)}
+                    placeholder="e.g. 500m or 2"
+                  />
+                  {cpuError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{cpuError}</div>}
+                </label>
+                <label style={{ flex: 1 }}>
+                  Memory limit (optional)
+                  <input
+                    type="text"
+                    value={memory}
+                    onChange={ev => setMemory(ev.target.value)}
+                    placeholder="e.g. 2Gi or 512Mi"
+                  />
+                  {memError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{memError}</div>}
+                </label>
+              </div>
               <label style={{ display: 'block', marginTop: '.5rem' }}>
                 <input
                   type="checkbox"
@@ -427,7 +462,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               </label>
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={cancelForm}>Cancel</button>
-                <button type="submit" style={{ minWidth: '7rem' }} disabled={size === 0 || !tenantDb || !poolName}>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={size === 0 || !tenantDb || !poolName || !!cpuError || !!memError}>
                   Create
                 </button>
               </div>
