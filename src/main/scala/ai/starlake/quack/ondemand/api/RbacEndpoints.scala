@@ -27,7 +27,7 @@ object RbacEndpoints:
 
   // ----- RBAC: users -----
   val createUser: PublicEndpoint[
-    (UserCreateRequest, Option[String]),
+    (UserCreateRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UserResponse,
     Any
@@ -36,6 +36,7 @@ object RbacEndpoints:
       .in("user" / "create")
       .in(jsonBody[UserCreateRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[UserResponse])
 
   val updateUser: PublicEndpoint[
@@ -88,7 +89,7 @@ object RbacEndpoints:
 
   // ----- RBAC: roles -----
   val createRole: PublicEndpoint[
-    (RoleCreateRequest, Option[String]),
+    (RoleCreateRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RoleResponse,
     Any
@@ -97,6 +98,7 @@ object RbacEndpoints:
       .in("role" / "create")
       .in(jsonBody[RoleCreateRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[RoleResponse])
 
   val deleteRole: PublicEndpoint[
@@ -252,7 +254,7 @@ object RbacEndpoints:
 
   // ----- RBAC: groups -----
   val createGroup: PublicEndpoint[
-    (GroupCreateRequest, Option[String]),
+    (GroupCreateRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     GroupResponse,
     Any
@@ -261,6 +263,7 @@ object RbacEndpoints:
       .in("group" / "create")
       .in(jsonBody[GroupCreateRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[GroupResponse])
 
   val deleteGroup: PublicEndpoint[
@@ -361,7 +364,7 @@ object RbacEndpoints:
 
   // ----- RBAC: pool permissions -----
   val grantPoolPermission: PublicEndpoint[
-    (PoolPermissionGrantRequest, Option[String]),
+    (PoolPermissionGrantRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolPermissionResponse,
     Any
@@ -370,6 +373,7 @@ object RbacEndpoints:
       .in("pool" / "permission" / "grant")
       .in(jsonBody[PoolPermissionGrantRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolPermissionResponse])
 
   val revokePoolPermission: PublicEndpoint[

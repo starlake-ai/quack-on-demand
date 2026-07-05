@@ -655,3 +655,74 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       expectForbidden(resp, "tenant-A admin (cookie) -> /api/database/update on tenant-B")
     finally h.shutdown()
   }
+
+  // ---- cookie-transport tests for RBAC create/grant endpoints ----
+  // Each case proves that a tenant-A admin session carried via the qod_session cookie
+  // (no X-API-Key header) gets 403 tenant_forbidden when creating a resource in tenant-B.
+  // Pre-fix: the cookie is not bound to the endpoint, apiKey=None reaches the handler,
+  // and TenantScopeCheck admits. Post-fix: key.orElse(cookie) propagates the session.
+
+  "user/create via session cookie" should "reject a tenant-A admin creating a tenant-B user" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body =
+        s"""{"tenant":"$GlobexTenantId","username":"mallory","password":"pw","role":"user"}"""
+      val resp =
+        postWithCookie(h.httpClient, s"${h.baseUrl}/api/user/create", body, cookieToken = token)
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/user/create in tenant-B")
+    finally h.shutdown()
+  }
+
+  "role/create via session cookie" should "reject a tenant-A admin creating a tenant-B role" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body = s"""{"tenant":"$GlobexTenantId","name":"testrole"}"""
+      val resp =
+        postWithCookie(h.httpClient, s"${h.baseUrl}/api/role/create", body, cookieToken = token)
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/role/create in tenant-B")
+    finally h.shutdown()
+  }
+
+  "group/create via session cookie" should "reject a tenant-A admin creating a tenant-B group" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body = s"""{"tenant":"$GlobexTenantId","name":"testgroup"}"""
+      val resp =
+        postWithCookie(h.httpClient, s"${h.baseUrl}/api/group/create", body, cookieToken = token)
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/group/create in tenant-B")
+    finally h.shutdown()
+  }
+
+  "pool/permission/grant via session cookie" should "reject a tenant-A admin granting in tenant-B" in {
+    val (h, _, carolId) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body = s"""{"tenant":"$GlobexTenantId","userId":"$carolId"}"""
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/pool/permission/grant",
+        body,
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/pool/permission/grant in tenant-B")
+    finally h.shutdown()
+  }
