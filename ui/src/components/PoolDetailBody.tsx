@@ -5,6 +5,9 @@ import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types'
 import { useAuth } from '../auth/AuthContext';
 import Tabs from './Tabs';
 
+const CPU_RE = /^\d+(\.\d+)?m?$/;
+const MEM_RE = /^\d+(\.\d+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$/;
+
 /** Header (title + Back / Scale / Delete pool actions) + the four-tab
   * body for one pool. No breadcrumb -- callers compose that themselves.
   * The `onStopped` callback lets the standalone page navigate elsewhere
@@ -34,6 +37,12 @@ export default function PoolDetailBody({
   const [error, setError] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
+  // Pool resource edit state (Nodes tab).
+  const [resCpu, setResCpu]         = useState('');
+  const [resMem, setResMem]         = useState('');
+  const [resSaving, setResSaving]   = useState(false);
+  const [resInitialized, setResInitialized] = useState(false);
+
   useEffect(() => {
     api.clientConfig().then(setCfg).catch(e => setError(String(e)));
   }, []);
@@ -49,6 +58,28 @@ export default function PoolDetailBody({
     const id = setInterval(fetchOnce, 2000);
     return () => { cancelled = true; clearInterval(id); };
   }, [tenant, tenantDb, pool]);
+
+  // Populate resource inputs from the first successful poll; ignore
+  // subsequent polls so in-progress edits are not overwritten.
+  useEffect(() => {
+    if (data && !resInitialized) {
+      setResCpu(data.cpu || '');
+      setResMem(data.memory || '');
+      setResInitialized(true);
+    }
+  }, [data, resInitialized]);
+
+  async function saveResources() {
+    setResSaving(true);
+    setActionErr(null);
+    try {
+      await api.setPoolResources({ tenant, tenantDb, pool, cpu: resCpu.trim(), memory: resMem.trim() });
+    } catch (e) {
+      setActionErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setResSaving(false);
+    }
+  }
 
   /** Build the host the user's clients should target. Substitutes the
     * browser hostname when the server-advertised host is a bind-address
@@ -99,9 +130,54 @@ export default function PoolDetailBody({
     }
   }
 
+  const cpuResError = resCpu.trim() !== '' && !CPU_RE.test(resCpu.trim()) ? 'e.g. 500m or 2' : null;
+  const memResError = resMem.trim() !== '' && !MEM_RE.test(resMem.trim()) ? 'e.g. 2Gi or 512Mi' : null;
+
   const nodesTab = (
     <div className="card">
       <div className="card-title">Nodes</div>
+      <div style={{ marginBottom: '0.75rem' }}>
+        <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div>
+            <div className="subtle" style={{ fontSize: '0.85em', marginBottom: 2 }}>
+              CPU limit (current: <code>{data.cpu || '-'}</code>)
+            </div>
+            <input
+              type="text"
+              value={resCpu}
+              onChange={e => setResCpu(e.target.value)}
+              placeholder="e.g. 500m or 2"
+              style={{ width: 120 }}
+            />
+            {cpuResError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{cpuResError}</div>}
+          </div>
+          <div>
+            <div className="subtle" style={{ fontSize: '0.85em', marginBottom: 2 }}>
+              Memory limit (current: <code>{data.memory || '-'}</code>)
+            </div>
+            <input
+              type="text"
+              value={resMem}
+              onChange={e => setResMem(e.target.value)}
+              placeholder="e.g. 2Gi or 512Mi"
+              style={{ width: 120 }}
+            />
+            {memResError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{memResError}</div>}
+          </div>
+          <div>
+            <button
+              type="button"
+              disabled={resSaving || !!cpuResError || !!memResError}
+              onClick={() => void saveResources()}
+            >
+              {resSaving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+        <p className="subtle" style={{ fontSize: '0.85em', marginTop: '0.4rem', marginBottom: 0 }}>
+          Restart nodes to apply resource changes (Kubernetes only).
+        </p>
+      </div>
       {actionErr && <div className="login-err">{actionErr}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>

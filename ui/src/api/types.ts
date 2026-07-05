@@ -64,6 +64,10 @@ export interface PoolResponse {
   // placement constraint - all nodes scheduled wherever the runtime puts
   // them. Only meaningful on the Kubernetes backend.
   cohorts?: PoolCohort[];
+  // Kubernetes pod resource limits (CPU and memory). Empty string means
+  // no explicit limit is set for that dimension.
+  cpu: string;
+  memory: string;
 }
 
 export interface SetPoolDisabledRequest {
@@ -87,6 +91,10 @@ export interface CreatePoolRequest {
   // When true the pool is persisted disabled; the FlightSQL edge rejects
   // fresh handshakes until it's enabled. Nodes still spawn.
   disabled?: boolean;
+  // Kubernetes pod resource limits. Empty string or omitted = no limit.
+  cpu?: string;
+  memory?: string;
+  podTemplateYaml?: string;
 }
 
 export interface ScalePoolRequest {
@@ -110,6 +118,14 @@ export interface DeletePoolRequest {
   tenantDb: string;
   pool: string;
   force?: boolean;
+}
+
+export interface SetPoolResourcesRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  cpu: string;
+  memory: string;
 }
 
 export interface SetMaxConcurrentRequest {
