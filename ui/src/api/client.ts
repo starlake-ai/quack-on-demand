@@ -18,6 +18,7 @@ import type {
   TenantDbResponse,
   TenantDbListResponse,
   TenantDbOpRequest,
+  SetTenantDbInitSqlRequest,
   ClientConfigResponse,
   ConfigListResponse,
   ManifestImportSummary,
@@ -188,8 +189,9 @@ export const api = {
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>
     get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
-  createTenantDb: (req: TenantDbRequest) => post<TenantDbResponse>('/database/create', req),
-  deleteTenantDb: (req: TenantDbOpRequest) => post<void>('/database/delete', req),
+  createTenantDb:    (req: TenantDbRequest)            => post<TenantDbResponse>('/database/create', req),
+  deleteTenantDb:    (req: TenantDbOpRequest)          => post<void>('/database/delete', req),
+  setTenantDbInitSql:(req: SetTenantDbInitSqlRequest)  => post<TenantDbResponse>('/database/setInitSql', req),
 
   // ----- Federation -----
   listFederatedSources: (tenant: string, tenantDb: string) =>
