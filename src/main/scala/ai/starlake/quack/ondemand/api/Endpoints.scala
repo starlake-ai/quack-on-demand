@@ -271,7 +271,7 @@ object Endpoints:
       .out(jsonBody[PoolResponse])
 
   val setPoolResources: PublicEndpoint[
-    (SetPoolResourcesRequest, Option[String]),
+    (SetPoolResourcesRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -280,10 +280,12 @@ object Endpoints:
       .in("pool" / "setResources")
       .in(jsonBody[SetPoolResourcesRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   val setPoolTemplate: PublicEndpoint[
-    (SetPoolTemplateRequest, Option[String]),
+    (SetPoolTemplateRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -292,6 +294,8 @@ object Endpoints:
       .in("pool" / "setPodTemplate")
       .in(jsonBody[SetPoolTemplateRequest])
       .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   // ----- Tenant databases -----
