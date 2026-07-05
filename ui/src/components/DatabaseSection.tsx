@@ -288,6 +288,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             <p className="subtle" style={{ marginBottom: 4 }}>
               Runs at node boot before the pool's own init SQL. Takes effect on the next
               node spawn; restart the database's nodes to apply now. Empty clears it.
+              Engine defaults only, never credentials: secrets belong in federation sources, not here.
             </p>
             <textarea
               value={editSql}
@@ -424,6 +425,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               pool's own init SQL: <code>SET temp_directory = '...'</code>,{' '}
               <code>SET memory_limit = '8GB'</code>, <code>INSTALL httpfs; LOAD httpfs;</code>.
               Edits take effect on the next node spawn (scale, crash respawn, or restart).
+              Engine defaults only, never credentials: secrets belong in federation sources, not here.
             </p>
             <textarea
               value={initSql}
