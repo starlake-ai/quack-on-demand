@@ -801,8 +801,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   it should "replace an edited map but preserve pgPassword when the incoming map lacks it" in {
     val (sup, _, dbName) = updateTenantDbFixture()
+    // Send the full required-key set (dbName + schemaName); pgPassword is omitted so it is preserved.
     val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
-      metastore = Some(Map("schemaName" -> "s2", "applicationName" -> "qod"))
+      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2", "applicationName" -> "qod"))
     )).unsafeRunSync().toOption.get
     out.td.metastore.get("schemaName") shouldBe Some("s2")
     out.td.metastore.get("pgPassword") shouldBe Some("secret1") // preserved
@@ -812,8 +813,9 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "remove pgPassword when explicitly sent empty, and restart all nodes of the db" in {
     val (sup, backend, dbName) = updateTenantDbFixture()
     val before = backend.stopped.size
+    // Send the full required-key set; pgPassword empty removes it explicitly.
     val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
-      metastore = Some(Map("schemaName" -> "s2", "pgPassword" -> ""))
+      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2", "pgPassword" -> ""))
     )).unsafeRunSync().toOption.get
     out.td.metastore.contains("pgPassword") shouldBe false
     out.restartedNodes.size shouldBe 2            // both nodes of the db's pool restarted
@@ -824,4 +826,33 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "Left on unknown tenant-db" in {
     val (sup, _, _) = updateTenantDbFixture()
     sup.updateTenantDb("acme", "acme_nope", TenantDbPatch()).unsafeRunSync().isLeft shouldBe true
+  }
+
+  it should "reject a patch that drops a required metastore key" in {
+    // DuckDbFile requires dbName and schemaName; sending only pgPassword loses both.
+    val (sup, _, dbName) = updateTenantDbFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("pgPassword" -> "x"))
+    )).unsafeRunSync()
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("drops required")
+  }
+
+  it should "succeed when a patch drops only a non-required custom key" in {
+    // A DuckDbFile db with an extra custom key; dropping it must not be rejected.
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName = "acme", suffix = "custom", kind = TenantDbKind.DuckDbFile,
+      metastore  = Map("dbName" -> "acme_custom", "schemaName" -> "main", "appName" -> "qod"),
+      dataPath   = "/tmp/custom"
+    ).unsafeRunSync()
+    // Send the full required set; omit the non-required "appName" key.
+    val out = sup.updateTenantDb("acme", "acme_custom", TenantDbPatch(
+      metastore = Some(Map("dbName" -> "acme_custom", "schemaName" -> "s2"))
+    )).unsafeRunSync()
+    out.isRight shouldBe true
+    out.toOption.get.td.metastore.get("appName") shouldBe None
+    out.toOption.get.td.metastore("schemaName")  shouldBe "s2"
   }

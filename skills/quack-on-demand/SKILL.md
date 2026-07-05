@@ -246,8 +246,9 @@ curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TO
   -d '{"tenant":"acme","name":"acme_tpch","initSql":"SET memory_limit = '\''8GB'\'';"}'
 
 # Rotate the metastore password (restarts the db's nodes):
+# Send the FULL metastore map when editing it (minus pgPassword to keep it): the map is replaced, and dropping a required key is rejected.
 curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"acme_tpch","metastore":{"schemaName":"main","pgPassword":"newpass"}}'
+  -d '{"tenant":"acme","name":"acme_tpch","metastore":{"dbName":"acme_tpch","pgHost":"localhost","pgPort":"5432","pgUser":"postgres","schemaName":"main","pgPassword":"newpass"}}'
 ```
 
 ### Register a federated source

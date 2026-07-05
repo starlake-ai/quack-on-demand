@@ -125,20 +125,29 @@ object TenantDb {
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
 
+  /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
+    * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)
+    * so both share one source of truth.
+    */
+  def requiredMetastoreKeys(kind: TenantDbKind): Set[String] = kind match
+    case TenantDbKind.DuckLake   => DuckLakeRequiredKeys
+    case TenantDbKind.DuckDbFile => DuckDbFileRequiredKeys
+    case TenantDbKind.InMemory   => Set.empty
+
   /** Returns Some(error) if the value violates its per-kind contract. Enforces required-key
     * presence AND injection safety; use on the REST createTenantDb path where the full metastore is
     * supplied inline.
     */
   def validate(td: TenantDb): Option[String] = td.kind match {
     case TenantDbKind.DuckLake =>
-      val missing = DuckLakeRequiredKeys -- td.metastore.keySet
+      val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet
       if missing.nonEmpty then
         Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
       else if td.dataPath.isEmpty then Some("kind=ducklake requires non-empty dataPath")
       else validateSafety(td)
 
     case TenantDbKind.DuckDbFile =>
-      val missing = DuckDbFileRequiredKeys -- td.metastore.keySet
+      val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet
       if missing.nonEmpty then
         Some(s"kind=duckdb-file requires metastore keys ${missing.mkString(", ")}")
       else if td.dataPath.isEmpty then Some("kind=duckdb-file requires non-empty dataPath")

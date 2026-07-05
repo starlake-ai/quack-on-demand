@@ -187,4 +187,7 @@ object DuckLakeCatalogReader:
     cfg.setPassword(meta("pgPassword"))
     cfg.setMaximumPoolSize(2)
     cfg.setPoolName(s"ducklake-cat-${meta("dbName")}")
+    // catalog Postgres may be down; tableCount/browse degrade instead of stalling list calls for the 30s default
+    cfg.setConnectionTimeout(5000)
+    cfg.setInitializationFailTimeout(-1)
     new DuckLakeCatalogReader(new HikariDataSource(cfg))
