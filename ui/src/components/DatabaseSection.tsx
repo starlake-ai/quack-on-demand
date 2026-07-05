@@ -359,7 +359,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 onChange={ev => { setEditObjectStore(ev.target.value); setObjectStoreDirty(true); }} />
             </label>
             <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
-              <button type="button" className="icon-btn danger"
+              <button type="button" className="danger"
                 onClick={() => { const n = editingDb.name; setEditingDb(null); void handleDelete(n); }}>
                 Delete database
               </button>
