@@ -35,6 +35,19 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **Compose summary crash fixed.** The end-of-script summary still read the removed `_profile_set` array, so under `set -u` every `run-docker-compose.sh` run died after the stack was already up, losing the URL summary and the zero exit code.
 - **Release: tag pushed before `gh release create`** (which requires the tag on the remote).
 
+### Kubernetes node pods
+
+- **Kubernetes node-pod sizing and templates.** Pools carry `cpu` and `memory`
+  (each applied as request and limit on the quack container, Guaranteed QoS
+  when both set) via `POST /api/pool/setResources` and sliders on the pool
+  create form and pool detail page (CPU 0.5-16 cores, memory 1-64 Gi).
+  Behind `QOD_POD_TEMPLATE_ENABLED` (default off, superuser only), a pool may
+  carry a full Pod-manifest template through `POST /api/pool/setPodTemplate`
+  (API-only); the manager overlays the pod identity labels, the quack
+  container's env contract, and resources onto it, so sidecars/volumes/affinity
+  are expressible while adoption and routing keep working. Applies on next node
+  spawn. The local backend ignores these (Kubernetes-only).
+
 ### Database configuration
 
 - **Per-database init SQL.** Tenant-dbs carry an `initSql` executed at node boot

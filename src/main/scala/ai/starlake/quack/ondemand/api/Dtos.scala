@@ -64,7 +64,10 @@ final case class CreatePoolRequest(
       * federation sources. Empty by default. Editing on a running pool takes effect on the NEXT
       * node spawn (scale-up, crash-recovery, manual restart); running nodes keep their old setup.
       */
-    initSql: Option[String] = None
+    initSql: Option[String] = None,
+    cpu: String = "",
+    memory: String = "",
+    podTemplateYaml: String = ""
 )
 
 final case class NodeInfo(
@@ -107,7 +110,24 @@ final case class PoolResponse(
     disabled: Boolean = false, // when true, the edge rejects fresh handshakes targeting this pool
     id: String = "", // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
     cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
-    initSql: String = ""                // operator-authored init SQL; empty when none was supplied
+    initSql: String = "",               // operator-authored init SQL; empty when none was supplied
+    cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
+    memory: String = ""                 // Kubernetes memory request=limit; empty when unset
+)
+
+final case class SetPoolResourcesRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    cpu: String,
+    memory: String
+)
+
+final case class SetPoolTemplateRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    podTemplateYaml: String
 )
 
 final case class ScalePoolRequest(
@@ -683,6 +703,9 @@ object Dtos:
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
         cohorts              <- c.getOrElse[List[PoolCohortDto]]("cohorts")(Nil)
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
+        cpu                  <- c.getOrElse[String]("cpu")("")
+        memory               <- c.getOrElse[String]("memory")("")
+        podTemplateYaml      <- c.getOrElse[String]("podTemplateYaml")("")
       yield CreatePoolRequest(
         tenant,
         tenantDb,
@@ -692,7 +715,11 @@ object Dtos:
         idleTimeoutSec,
         maxConcurrentPerNode,
         cohorts,
-        disabled
+        disabled,
+        None,
+        cpu,
+        memory,
+        podTemplateYaml
       )
     },
     Encoder.instance { r =>
@@ -706,7 +733,10 @@ object Dtos:
           "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
           "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
           "cohorts"              -> r.cohorts.asJson,
-          "disabled"             -> r.disabled.asJson
+          "disabled"             -> r.disabled.asJson,
+          "cpu"                  -> r.cpu.asJson,
+          "memory"               -> r.memory.asJson,
+          "podTemplateYaml"      -> r.podTemplateYaml.asJson
         )
       )
     }
@@ -845,6 +875,8 @@ object Dtos:
     }
   )
   given Codec[PoolResponse]            = deriveCodec
+  given Codec[SetPoolResourcesRequest] = deriveCodec
+  given Codec[SetPoolTemplateRequest]  = deriveCodec
   given Codec[PoolListResponse]        = deriveCodec
   given Codec[HealthResponse]          = deriveCodec
   given Codec[SetMaxConcurrentRequest] = deriveCodec

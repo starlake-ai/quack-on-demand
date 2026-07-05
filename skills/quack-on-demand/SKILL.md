@@ -106,7 +106,24 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
 # Delete a tenant (must have no pools first)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \
   -H 'Content-Type: application/json' -d '{"name":"acme"}'
+
+# Size a pool's k8s node pods: cpu and memory are each applied as request AND
+# limit on the quack container (Guaranteed QoS when both set). Applies on the
+# next node spawn; restart the pool's nodes to apply now. Empty clears.
+# Set DuckDB memory (database/pool init SQL, SET memory_limit) to ~80% of pod
+# memory so the engine spills before the kernel OOM-kills the pod.
+curl -sS -X POST "http://localhost:20900/api/pool/setResources" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","cpu":"2","memory":"8Gi"}'
+
+# Supply a full Pod-manifest template (superuser only; requires
+# QOD_POD_TEMPLATE_ENABLED=true). The manager overlays the pod name, its
+# identity labels, and the quack container's env contract and resources; a
+# container named 'quack' is required. Use for sidecars, volumes, affinity.
+curl -sS -X POST "http://localhost:20900/api/pool/setPodTemplate" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","podTemplateYaml":"apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: placeholder\n    - name: log-shipper\n      image: busybox"}'
 ```
+
+The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `setResources` for node-pod sizing.
 
 ## RBAC grants
 

@@ -6,6 +6,7 @@ import type {
   SetMaxConcurrentRequest,
   NodeOpRequest,
   SetPoolDisabledRequest,
+  SetPoolResourcesRequest,
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
   PoolResponse,
@@ -179,6 +180,7 @@ export const api = {
   unquarantineNode:  (req: NodeOpRequest) => post<void>('/node/unquarantine', req),
   restartNode:       (req: NodeOpRequest) => post<void>('/node/restart', req),
   setPoolDisabled:   (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
+  setPoolResources:  (req: SetPoolResourcesRequest) => post<PoolResponse>('/pool/setResources', req),
 
   // Tenants
   listTenants:      () => get<TenantListResponse>('/tenant/list'),

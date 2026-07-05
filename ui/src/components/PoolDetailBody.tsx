@@ -5,6 +5,7 @@ import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types'
 import { useAuth } from '../auth/AuthContext';
 import Tabs from './Tabs';
 
+
 /** Header (title + Back / Scale / Delete pool actions) + the four-tab
   * body for one pool. No breadcrumb -- callers compose that themselves.
   * The `onStopped` callback lets the standalone page navigate elsewhere
@@ -34,6 +35,27 @@ export default function PoolDetailBody({
   const [error, setError] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
+  // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
+  const [resCpuEnabled, setResCpuEnabled] = useState(false);
+  const [resCpuSlider, setResCpuSlider]   = useState(2);
+  const [resMemEnabled, setResMemEnabled] = useState(false);
+  const [resMemSlider, setResMemSlider]   = useState(8);
+  const [resSaving, setResSaving]         = useState(false);
+  const [resInitialized, setResInitialized] = useState(false);
+  // Round-trip flags: true when the stored API value can be represented exactly
+  // by the slider (so slider state is canonical for that dimension).
+  const [cpuRoundTrips, setCpuRoundTrips] = useState(false);
+  const [memRoundTrips, setMemRoundTrips] = useState(false);
+  // Touch flags: set true when the user actively interacts with a dimension.
+  // An untouched dimension whose stored value does NOT round-trip is preserved
+  // verbatim on Save so an operator-set millicore / MiB value isn't silently
+  // clamped by the slider.
+  const [cpuTouched, setCpuTouched] = useState(false);
+  const [memTouched, setMemTouched] = useState(false);
+  // Raw stored values kept for verbatim preservation on untouched dimensions.
+  const [rawCpu, setRawCpu]       = useState('');
+  const [rawMemory, setRawMemory] = useState('');
+
   useEffect(() => {
     api.clientConfig().then(setCfg).catch(e => setError(String(e)));
   }, []);
@@ -49,6 +71,66 @@ export default function PoolDetailBody({
     const id = setInterval(fetchOnce, 2000);
     return () => { cancelled = true; clearInterval(id); };
   }, [tenant, tenantDb, pool]);
+
+  // Populate slider state from the first successful poll; ignore
+  // subsequent polls so in-progress edits are not overwritten.
+  useEffect(() => {
+    if (data && !resInitialized) {
+      const storedCpu = data.cpu || '';
+      const storedMem = data.memory || '';
+      setRawCpu(storedCpu);
+      setRawMemory(storedMem);
+
+      if (storedCpu) {
+        const parsed = parseFloat(storedCpu);
+        // A CPU value round-trips through the slider only when it is a plain
+        // decimal number (no suffix) in the slider range [0.5, 16].
+        const rt = /^\d+(\.\d+)?$/.test(storedCpu) && !isNaN(parsed) && parsed >= 0.5 && parsed <= 16;
+        setCpuRoundTrips(rt);
+        if (rt) {
+          setResCpuEnabled(true);
+          setResCpuSlider(parsed);
+        }
+      }
+
+      if (storedMem) {
+        const parsed = parseInt(storedMem.replace(/Gi$/, ''), 10);
+        // A memory value round-trips only when it is an integer Gi value in
+        // the slider range [1, 64].
+        const rt = /^\d+Gi$/.test(storedMem) && !isNaN(parsed) && parsed >= 1 && parsed <= 64;
+        setMemRoundTrips(rt);
+        if (rt) {
+          setResMemEnabled(true);
+          setResMemSlider(parsed);
+        }
+      }
+
+      setResInitialized(true);
+    }
+  }, [data, resInitialized]);
+
+  async function saveResources() {
+    setResSaving(true);
+    setActionErr(null);
+    try {
+      // For each dimension: if the user touched it (or the stored value round-
+      // trips cleanly through the slider) we send the slider-derived value.
+      // Otherwise we preserve the raw API-set value verbatim so an operator
+      // who set cpu="500m" via the API and then opens this page and clicks
+      // Save without touching the slider doesn't lose their setting.
+      const cpu = (cpuTouched || cpuRoundTrips)
+        ? (resCpuEnabled ? String(resCpuSlider) : '')
+        : rawCpu;
+      const memory = (memTouched || memRoundTrips)
+        ? (resMemEnabled ? `${resMemSlider}Gi` : '')
+        : rawMemory;
+      await api.setPoolResources({ tenant, tenantDb, pool, cpu, memory });
+    } catch (e) {
+      setActionErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setResSaving(false);
+    }
+  }
 
   /** Build the host the user's clients should target. Substitutes the
     * browser hostname when the server-advertised host is a bind-address
@@ -102,6 +184,108 @@ export default function PoolDetailBody({
   const nodesTab = (
     <div className="card">
       <div className="card-title">Nodes</div>
+      <div style={{ marginBottom: '0.75rem' }}>
+        <div className="row" style={{ gap: 20, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div>
+            {rawCpu && !cpuRoundTrips && !cpuTouched ? (
+              <div style={{ marginBottom: 4 }}>
+                <span className="subtle">CPU: {rawCpu} (set via API)</span>
+                {' '}
+                <button
+                  type="button"
+                  className="copy-btn"
+                  onClick={() => {
+                    const parsed = parseFloat(rawCpu);
+                    setResCpuSlider(isNaN(parsed) ? 2 : Math.min(16, Math.max(0.5, parsed)));
+                    setResCpuEnabled(true);
+                    setCpuTouched(true);
+                  }}
+                >Adjust with slider</button>
+              </div>
+            ) : (
+              <>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={resCpuEnabled}
+                    onChange={e => { setResCpuEnabled(e.target.checked); setCpuTouched(true); }}
+                  />
+                  CPU limit
+                </label>
+                {resCpuEnabled && (
+                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={16}
+                      step={0.5}
+                      value={resCpuSlider}
+                      onChange={e => { setResCpuSlider(Number(e.target.value)); setCpuTouched(true); }}
+                      style={{ width: 140 }}
+                    />
+                    <span className="subtle">{resCpuSlider} cores</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <div>
+            {rawMemory && !memRoundTrips && !memTouched ? (
+              <div style={{ marginBottom: 4 }}>
+                <span className="subtle">Memory: {rawMemory} (set via API)</span>
+                {' '}
+                <button
+                  type="button"
+                  className="copy-btn"
+                  onClick={() => {
+                    const parsed = parseInt(rawMemory.replace(/Gi$/, ''), 10);
+                    setResMemSlider(isNaN(parsed) ? 8 : Math.min(64, Math.max(1, parsed)));
+                    setResMemEnabled(true);
+                    setMemTouched(true);
+                  }}
+                >Adjust with slider</button>
+              </div>
+            ) : (
+              <>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={resMemEnabled}
+                    onChange={e => { setResMemEnabled(e.target.checked); setMemTouched(true); }}
+                  />
+                  Memory limit
+                </label>
+                {resMemEnabled && (
+                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    <input
+                      type="range"
+                      min={1}
+                      max={64}
+                      step={1}
+                      value={resMemSlider}
+                      onChange={e => { setResMemSlider(Number(e.target.value)); setMemTouched(true); }}
+                      style={{ width: 140 }}
+                    />
+                    <span className="subtle">{resMemSlider} Gi</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <div>
+            <button
+              type="button"
+              disabled={resSaving}
+              onClick={() => void saveResources()}
+            >
+              {resSaving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+        <p className="subtle" style={{ fontSize: '0.85em', marginTop: '0.4rem', marginBottom: 0 }}>
+          Restart nodes to apply resource changes (Kubernetes only).
+        </p>
+      </div>
       {actionErr && <div className="login-err">{actionErr}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>

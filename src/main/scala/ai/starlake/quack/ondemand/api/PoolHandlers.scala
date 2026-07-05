@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
-import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
@@ -10,7 +10,8 @@ import sttp.model.StatusCode
 final class PoolHandlers(
     sup: PoolSupervisor,
     tracker: NodeLoadTracker,
-    engineStats: EngineStatsTracker = new EngineStatsTracker
+    engineStats: EngineStatsTracker = new EngineStatsTracker,
+    podTemplateEnabled: Boolean = false
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -61,7 +62,9 @@ final class PoolHandlers(
         disabled = p.disabled,
         id = sup.poolId(key).getOrElse(""),
         cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
-        initSql = p.initSql
+        initSql = p.initSql,
+        cpu = p.cpu,
+        memory = p.memory
       )
     }
 
@@ -70,10 +73,52 @@ final class PoolHandlers(
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None      => createPoolInner(req)
+      case None      =>
+        if req.podTemplateYaml.nonEmpty then
+          SuperuserCheck.reject(apiKey)(scopeOf) match
+            case Some(err) => IO.pure(Left(err))
+            case None      =>
+              if !podTemplateEnabled then
+                IO.pure(
+                  Left(
+                    (
+                      StatusCode.BadRequest,
+                      ErrorResponse(
+                        "feature_disabled",
+                        "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
+                      )
+                    )
+                  )
+                )
+              else
+                QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+                  case Left(msg) =>
+                    IO.pure(
+                      Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
+                    )
+                  case Right(()) => createPoolInner(req)
+        else createPoolInner(req)
 
   private def createPoolInner(req: CreatePoolRequest): Out[PoolResponse] =
-    if !req.roleDistribution.isValidFor(req.size) then
+    if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if !req.roleDistribution.isValidFor(req.size) then
       IO.pure(
         Left(
           (
@@ -121,7 +166,10 @@ final class PoolHandlers(
                   req.maxConcurrentPerNode,
                   cohorts,
                   req.disabled,
-                  req.initSql.getOrElse("")
+                  req.initSql.getOrElse(""),
+                  req.cpu,
+                  req.memory,
+                  req.podTemplateYaml
                 )
                 .map(_ =>
                   Right(
@@ -244,3 +292,88 @@ final class PoolHandlers(
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
             else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
         }
+
+  def setResources(req: SetPoolResourcesRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid", s"invalid cpu quantity: '${req.cpu}'")
+              )
+            )
+          )
+        else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid", s"invalid memory quantity: '${req.memory}'")
+              )
+            )
+          )
+        else
+          val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+          sup.setPoolResources(key, req.cpu, req.memory).map {
+            case Left(msg) =>
+              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            case Right(_) =>
+              respond(key) match
+                case Some(r) => Right(r)
+                case None    =>
+                  Left(
+                    (
+                      StatusCode.NotFound,
+                      ErrorResponse("not_found", s"pool $key disappeared after update")
+                    )
+                  )
+          }
+
+  def setPodTemplate(req: SetPoolTemplateRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        if !podTemplateEnabled then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse(
+                  "feature_disabled",
+                  "pod template support is not enabled on this manager"
+                )
+              )
+            )
+          )
+        else
+          val validationResult =
+            if req.podTemplateYaml.isEmpty then Right(())
+            else QuantitySyntax.validPodTemplate(req.podTemplateYaml)
+          validationResult match
+            case Left(msg) =>
+              IO.pure(
+                Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
+              )
+            case Right(()) =>
+              val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+              sup.setPoolTemplate(key, req.podTemplateYaml).map {
+                case Left(msg) =>
+                  Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+                case Right(_) =>
+                  respond(key) match
+                    case Some(r) => Right(r)
+                    case None    =>
+                      Left(
+                        (
+                          StatusCode.NotFound,
+                          ErrorResponse("not_found", s"pool $key disappeared after update")
+                        )
+                      )
+              }

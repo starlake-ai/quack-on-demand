@@ -208,7 +208,8 @@ object Main extends IOApp with LazyLogging:
           mgrCfg.k8s.quackPort,
           mgrCfg.k8s.podLabel,
           mgrCfg.k8s.startupTimeoutSec,
-          mgrCfg.defaultMetastore.asMap
+          mgrCfg.defaultMetastore.asMap,
+          podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled
         )
       case other => sys.error(s"unknown runtime: $other")
 
@@ -359,9 +360,9 @@ object Main extends IOApp with LazyLogging:
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(new CatalogHandlers(reader, kindOf))
 
-    val pools     = new PoolHandlers(sup, tracker, engineStatsTracker)
-    val nodes     = new NodeHandlers(sup, tracker, store, publisher)
-    val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
+    val pools   = new PoolHandlers(sup, tracker, engineStatsTracker, mgrCfg.k8s.podTemplateEnabled)
+    val nodes   = new NodeHandlers(sup, tracker, store, publisher)
+    val tenants = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
     val tenantDbs = new TenantDbHandlers(sup, manifestFedStore, catalog = catalogHandlers)
 
     val healthCache =

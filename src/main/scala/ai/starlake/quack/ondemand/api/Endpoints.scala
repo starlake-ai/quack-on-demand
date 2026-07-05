@@ -20,6 +20,8 @@ private given Schema[PoolCohortDto]            = Schema.derived
 private given Schema[PoolResponse]             = Schema.derived
 private given Schema[PoolListResponse]         = Schema.derived
 private given Schema[CreatePoolRequest]        = Schema.derived
+private given Schema[SetPoolResourcesRequest]  = Schema.derived
+private given Schema[SetPoolTemplateRequest]   = Schema.derived
 private given Schema[ActiveStatementInfo]      = Schema.derived
 private given Schema[ActiveStatementsResponse] = Schema.derived
 private given Schema[KillStatementRequest]     = Schema.derived
@@ -266,6 +268,34 @@ object Endpoints:
       .in("pool" / "setDisabled")
       .in(jsonBody[SetPoolDisabledRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[PoolResponse])
+
+  val setPoolResources: PublicEndpoint[
+    (SetPoolResourcesRequest, Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    PoolResponse,
+    Any
+  ] =
+    base.post
+      .in("pool" / "setResources")
+      .in(jsonBody[SetPoolResourcesRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .out(jsonBody[PoolResponse])
+
+  val setPoolTemplate: PublicEndpoint[
+    (SetPoolTemplateRequest, Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    PoolResponse,
+    Any
+  ] =
+    base.post
+      .in("pool" / "setPodTemplate")
+      .in(jsonBody[SetPoolTemplateRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      // SessionTokenStore.CookieName = "qod_session"
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   // ----- Tenant databases -----

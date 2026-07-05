@@ -27,7 +27,14 @@ final case class Pool(
       * one SQL stream. PRAGMAs / SET / INSTALL / LOAD live here; ATTACH aliases live on federation
       * sources. Empty by default for backward compat.
       */
-    initSql: String = ""
+    initSql: String = "",
+    // Kubernetes node-pod sizing. Each applied as BOTH request and limit on the
+    // quack container. Empty = unset. Kubernetes-only; ignored by the local backend.
+    cpu: String = "",
+    memory: String = "",
+    // Full Pod-manifest YAML used as a base template when QOD_POD_TEMPLATE_ENABLED
+    // is on; the manager overlays identity labels, the env contract, and resources.
+    podTemplateYaml: String = ""
 ):
   /** Effective scheduling plan: either the explicit cohorts, or one synthesized placement-less
     * cohort carrying the flat distribution.
