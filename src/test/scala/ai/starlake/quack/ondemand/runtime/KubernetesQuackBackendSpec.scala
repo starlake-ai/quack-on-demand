@@ -564,3 +564,47 @@ class KubernetesQuackBackendSpec
       .find(_.getName == "quack")
       .get
     quack.getResources.getLimits.get("memory").toString shouldBe "2Gi"
+
+  it should "overwrite template metadata labels with the manager identity labels" in:
+    val tmpl =
+      """apiVersion: v1
+        |kind: Pod
+        |metadata:
+        |  labels:
+        |    app: wrong
+        |spec:
+        |  containers:
+        |    - name: quack
+        |      image: placeholder""".stripMargin
+    val backendOn = makeBackend(podTemplateEnabled = true)
+    backendOn.start(baseSpec.copy(podTemplateYaml = Some(tmpl))).unsafeRunSync()
+    val pod    = server.getClient.pods.inNamespace(ns).withName(baseSpec.nodeId).get
+    val labels = pod.getMetadata.getLabels.asScala.toMap
+    labels should not contain key("app")
+    labels("quack-tenant") shouldBe "acme"
+
+  it should "replace template env on the quack container with the manager env contract" in:
+    val tmpl =
+      """apiVersion: v1
+        |kind: Pod
+        |spec:
+        |  containers:
+        |    - name: quack
+        |      image: placeholder
+        |      env:
+        |        - name: MY_SECRET
+        |          value: bad""".stripMargin
+    val backendOn = makeBackend(podTemplateEnabled = true)
+    backendOn.start(baseSpec.copy(podTemplateYaml = Some(tmpl))).unsafeRunSync()
+    val quack = server.getClient.pods
+      .inNamespace(ns)
+      .withName(baseSpec.nodeId)
+      .get
+      .getSpec
+      .getContainers
+      .asScala
+      .find(_.getName == "quack")
+      .get
+    val envNames = quack.getEnv.asScala.map(_.getName).toSet
+    envNames should not contain "MY_SECRET"
+    envNames should contain("QOD_NODE_TOKEN")
