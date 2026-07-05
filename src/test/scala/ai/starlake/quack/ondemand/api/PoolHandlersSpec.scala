@@ -135,3 +135,44 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers
     val out = h.poolStatus("acme", "acme_default", "missing").unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
+
+  "setResources" should "update cpu/memory and return the pool" in:
+    val h = freshHandlers
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    val out = h.setResources(
+      SetPoolResourcesRequest("acme", "acme_default", "sales", "500m", "2Gi"), None
+    )((_: String) => None).unsafeRunSync()
+    out shouldBe a [Right[?, ?]]
+    val Right(resp) = out: @unchecked
+    resp.cpu shouldBe "500m"
+    resp.memory shouldBe "2Gi"
+
+  it should "reject invalid cpu quantity with 400" in:
+    val h = freshHandlers
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    val out = h.setResources(
+      SetPoolResourcesRequest("acme", "acme_default", "sales", "2 gigs", "2Gi"), None
+    )((_: String) => None).unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
+
+  "setPodTemplate" should "be rejected when podTemplateEnabled is false" in:
+    val h = freshHandlers // default podTemplateEnabled=false
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    val y = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h.setPodTemplate(
+      SetPoolTemplateRequest("acme", "acme_default", "sales", y), None
+    )((_: String) => None).unsafeRunSync()
+    out.left.toOption.map(_._2.error) shouldBe Some("feature_disabled")
+
+  it should "succeed for superuser when podTemplateEnabled is true" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None).unsafeRunSync()
+    val y = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h.setPodTemplate(
+      SetPoolTemplateRequest("acme", "acme_default", "sales", y), None
+    )((_: String) => None).unsafeRunSync()
+    out shouldBe a [Right[?, ?]]

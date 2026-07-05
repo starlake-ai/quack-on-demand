@@ -107,7 +107,25 @@ final case class PoolResponse(
     disabled: Boolean = false, // when true, the edge rejects fresh handshakes targeting this pool
     id: String = "", // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
     cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
-    initSql: String = ""                // operator-authored init SQL; empty when none was supplied
+    initSql: String = "",               // operator-authored init SQL; empty when none was supplied
+    cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
+    memory: String = "",                // Kubernetes memory request=limit; empty when unset
+    podTemplateYaml: String = ""        // operator-authored Pod manifest base; empty when unset
+)
+
+final case class SetPoolResourcesRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    cpu: String,
+    memory: String
+)
+
+final case class SetPoolTemplateRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    podTemplateYaml: String
 )
 
 final case class ScalePoolRequest(
@@ -845,6 +863,8 @@ object Dtos:
     }
   )
   given Codec[PoolResponse]            = deriveCodec
+  given Codec[SetPoolResourcesRequest] = deriveCodec
+  given Codec[SetPoolTemplateRequest]  = deriveCodec
   given Codec[PoolListResponse]        = deriveCodec
   given Codec[HealthResponse]          = deriveCodec
   given Codec[SetMaxConcurrentRequest] = deriveCodec

@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
-import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.IO
@@ -10,7 +10,8 @@ import sttp.model.StatusCode
 final class PoolHandlers(
     sup: PoolSupervisor,
     tracker: NodeLoadTracker,
-    engineStats: EngineStatsTracker = new EngineStatsTracker
+    engineStats: EngineStatsTracker = new EngineStatsTracker,
+    podTemplateEnabled: Boolean = false
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -61,7 +62,10 @@ final class PoolHandlers(
         disabled = p.disabled,
         id = sup.poolId(key).getOrElse(""),
         cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
-        initSql = p.initSql
+        initSql = p.initSql,
+        cpu = p.cpu,
+        memory = p.memory,
+        podTemplateYaml = p.podTemplateYaml
       )
     }
 
@@ -244,3 +248,82 @@ final class PoolHandlers(
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
             else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
         }
+
+  def setResources(req: SetPoolResourcesRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        if req.cpu.nonEmpty && !QuantitySyntax.validQuantity(req.cpu) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid_cpu", s"invalid cpu quantity: '${req.cpu}'")
+              )
+            )
+          )
+        else if req.memory.nonEmpty && !QuantitySyntax.validQuantity(req.memory) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid_memory", s"invalid memory quantity: '${req.memory}'")
+              )
+            )
+          )
+        else
+          val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+          sup.setPoolResources(key, req.cpu, req.memory).map {
+            case Left(msg) =>
+              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            case Right(_) =>
+              respond(key) match
+                case Some(r) => Right(r)
+                case None    =>
+                  Left(
+                    (
+                      StatusCode.NotFound,
+                      ErrorResponse("not_found", s"pool $key disappeared after update")
+                    )
+                  )
+          }
+
+  def setPodTemplate(req: SetPoolTemplateRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    if !podTemplateEnabled then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("feature_disabled", "pod template support is not enabled on this manager")
+          )
+        )
+      )
+    else
+      TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+        case Some(err) => IO.pure(Left(err))
+        case None      =>
+          QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+            case Left(msg) =>
+              IO.pure(
+                Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
+              )
+            case Right(()) =>
+              val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+              sup.setPoolTemplate(key, req.podTemplateYaml).map {
+                case Left(msg) =>
+                  Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+                case Right(_) =>
+                  respond(key) match
+                    case Some(r) => Right(r)
+                    case None    =>
+                      Left(
+                        (
+                          StatusCode.NotFound,
+                          ErrorResponse("not_found", s"pool $key disappeared after update")
+                        )
+                      )
+              }

@@ -1070,6 +1070,40 @@ final class PoolSupervisor(
             Right(updated)
   }
 
+  def setPoolResources(key: PoolKey, cpu: String, memory: String): IO[Either[String, PoolState]] =
+    IO.blocking {
+      pools.get(key) match
+        case None        => Left(s"pool not found: $key")
+        case Some(state) =>
+          poolIdByKey.get(key).flatMap(poolRows.get) match
+            case None    => Left(s"pool entity missing for $key (control-plane out of sync)")
+            case Some(p) =>
+              val updated = p.copy(cpu = cpu, memory = memory)
+              store.upsertPool(updated)
+              poolRows.put(updated.id, updated)
+              val newState = state.copy(cpu = cpu, memory = memory)
+              pools.put(key, newState)
+              publish.topologyChanged()
+              Right(newState)
+    }
+
+  def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[String, PoolState]] =
+    IO.blocking {
+      pools.get(key) match
+        case None        => Left(s"pool not found: $key")
+        case Some(state) =>
+          poolIdByKey.get(key).flatMap(poolRows.get) match
+            case None    => Left(s"pool entity missing for $key (control-plane out of sync)")
+            case Some(p) =>
+              val updated = p.copy(podTemplateYaml = yaml)
+              store.upsertPool(updated)
+              poolRows.put(updated.id, updated)
+              val newState = state.copy(podTemplateYaml = yaml)
+              pools.put(key, newState)
+              publish.topologyChanged()
+              Right(newState)
+    }
+
   def setMaxConcurrent(key: PoolKey, nodeId: String, max: Int): IO[Option[RunningNode]] =
     pools.get(key).flatMap(s => s.nodes.find(_.nodeId == nodeId)) match
       case None    => IO.pure(None)

@@ -856,3 +856,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     out.toOption.get.td.metastore.get("appName") shouldBe None
     out.toOption.get.td.metastore("schemaName")  shouldBe "s2"
   }
+
+  // ---------- setPoolResources / setPoolTemplate ----------
+
+  "PoolSupervisor.setPoolResources" should "persist cpu/memory and refresh PoolState" in {
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val result = sup.setPoolResources(key, "500m", "2Gi").unsafeRunSync()
+    result.toOption.get.cpu shouldBe "500m"
+    result.toOption.get.memory shouldBe "2Gi"
+    sup.get(key).map(_.cpu) shouldBe Some("500m")
+    sup.get(key).map(_.memory) shouldBe Some("2Gi")
+  }
+
+  "PoolSupervisor.setPoolTemplate" should "persist the template" in {
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val y = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val result = sup.setPoolTemplate(key, y).unsafeRunSync()
+    result.toOption.get.podTemplateYaml shouldBe y
+    sup.get(key).map(_.podTemplateYaml) shouldBe Some(y)
+  }
