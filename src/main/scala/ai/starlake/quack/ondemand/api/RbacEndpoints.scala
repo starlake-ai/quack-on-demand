@@ -86,7 +86,7 @@ object RbacEndpoints:
   ] =
     base.get
       .in("user" / path[String]("id") / "effective")
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[EffectivePermissionsResponse])
 
   // ----- RBAC: roles -----
@@ -157,7 +157,7 @@ object RbacEndpoints:
     base.get
       .in("role" / "permission" / "list")
       .in(query[String]("roleId"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[RolePermissionListResponse])
 
   // ----- RBAC: column policies -----
@@ -205,7 +205,7 @@ object RbacEndpoints:
     base.get
       .in("role" / "column-policy" / "list")
       .in(query[String]("roleId"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[ColumnPolicyListResponse])
 
   // ----- RBAC: row policies -----
@@ -253,7 +253,7 @@ object RbacEndpoints:
     base.get
       .in("role" / "row-policy" / "list")
       .in(query[String]("roleId"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[RowPolicyListResponse])
 
   // ----- RBAC: groups -----
@@ -365,7 +365,7 @@ object RbacEndpoints:
     base.get
       .in("membership" / "group-role" / "list")
       .in(query[String]("groupId"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[RoleListResponse])
 
   // ----- RBAC: pool permissions -----

@@ -885,6 +885,53 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
     finally h.shutdown()
   }
 
+  // ---- cookie-transport tests for id-scoped RBAC read endpoints (Fix B) ----
+  // listColumnPolicies and listGroupRoleMembership gate via rejectForResource, which
+  // admits when apiKey is None. Pre-fix: cookie session reaches the handler with
+  // apiKey=None and reads another tenant's data (200). Post-fix: the endpoint uses
+  // authToken so cookie resolves to Some(token), rejectForResource sees the acme
+  // scope, and globex is not in manageableTenants -> 403 tenant_forbidden.
+
+  "role/column-policy/list via session cookie" should "reject a tenant-A admin reading a tenant-B role's policies" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/role/column-policy/list?roleId=$GlobexRoleId",
+        token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/role/column-policy/list on tenant-B role"
+      )
+    finally h.shutdown()
+  }
+
+  "membership/group-role/list via session cookie" should "reject a tenant-A admin reading a tenant-B group's roles" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/membership/group-role/list?groupId=$GlobexGroupId",
+        token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/membership/group-role/list on tenant-B group"
+      )
+    finally h.shutdown()
+  }
+
   // ---- cookie-transport tests for superuser-gated endpoints (Task 5b) ----
   // manifest/export, manifest/import, config/server are superuser-only.
   // Pre-fix: apiKey=None -> None arm admits unconditionally.
@@ -982,7 +1029,11 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
         // the globex pool (tenant field = GlobexTenantId) is filtered out.
         resp.statusCode() shouldBe 200
         resp.body() should include(SecurityFixtures.TenantId)
-        resp.body() should not include GlobexTenantId
+        // PoolResponse serializes the tenant field as its display name, not the id.
+        // GlobexTenantId ("t-globex01") never appears in the response; asserting on
+        // it is trivially true even if the cross-tenant filter regresses. Assert on
+        // the display name ("globex") that WOULD appear on a leak.
+        resp.body() should not include "globex"
       }
     finally h.shutdown()
   }
