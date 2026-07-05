@@ -726,3 +726,96 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       expectForbidden(resp, "tenant-A admin (cookie) -> /api/pool/permission/grant in tenant-B")
     finally h.shutdown()
   }
+
+  // ---- cookie-transport tests for RBAC id-only endpoints (Task 4) ----
+  // Covers four handler families: delete, revoke, membership, policy.
+  // Pre-fix: endpoint only has 2 inputs, cookie is ignored, apiKey=None reaches
+  // TenantScopeCheck which admits unconditionally. Post-fix: key.orElse(cookie)
+  // propagates the session and the scope check fires.
+
+  // (c) delete family: role/delete
+  "role/delete via session cookie" should "reject a tenant-A admin deleting a tenant-B role" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/role/delete",
+        s"""{"id":"$GlobexRoleId"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/role/delete on tenant-B role")
+    finally h.shutdown()
+  }
+
+  // (d) revoke family: role/permission/revoke
+  "role/permission/revoke via session cookie" should "reject a tenant-A admin revoking a tenant-B permission" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/role/permission/revoke",
+        s"""{"id":"$GlobexPermId"}""",
+        cookieToken = token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/role/permission/revoke on tenant-B perm"
+      )
+    finally h.shutdown()
+  }
+
+  // (a) membership family: membership/user-role/add (gated on the user's tenant)
+  "membership/user-role/add via session cookie" should "reject a tenant-A admin adding a tenant-B user to a role" in {
+    val (h, _, carolId) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/membership/user-role/add",
+        s"""{"userId":"$carolId","roleId":"$GlobexRoleId"}""",
+        cookieToken = token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/membership/user-role/add on tenant-B user"
+      )
+    finally h.shutdown()
+  }
+
+  // (b) policy family: role/column-policy/create (gated on roleId's tenant)
+  "role/column-policy/create via session cookie" should "reject a tenant-A admin creating a policy on a tenant-B role" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body =
+        s"""{"roleId":"$GlobexRoleId","catalogName":"*","schemaName":"*","tableName":"t","columnName":"c","action":"MASK"}"""
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/role/column-policy/create",
+        body,
+        cookieToken = token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/role/column-policy/create on tenant-B role"
+      )
+    finally h.shutdown()
+  }
