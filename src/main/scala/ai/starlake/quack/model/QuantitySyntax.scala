@@ -15,9 +15,14 @@ object QuantitySyntax:
   // Memory: integer or decimal with SI / binary suffix
   private val memRe = raw"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$$".r
 
-  def validQuantity(s: String): Boolean =
+  def validCpu(s: String): Boolean =
     s.nonEmpty &&
-      (cpuRe.matches(s) || memRe.matches(s)) &&
+      cpuRe.matches(s) &&
+      Try(new Quantity(s)).map(_.getAmount != null).getOrElse(false)
+
+  def validMemory(s: String): Boolean =
+    s.nonEmpty &&
+      memRe.matches(s) &&
       Try(new Quantity(s)).map(_.getAmount != null).getOrElse(false)
 
   def validPodTemplate(yaml: String): Either[String, Unit] =

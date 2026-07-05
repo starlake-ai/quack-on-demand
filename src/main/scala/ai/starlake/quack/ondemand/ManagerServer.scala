@@ -327,11 +327,11 @@ final class ManagerServer(
       Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
         pools.setPoolDisabled(req, key)(sessions.scopeOf)
       },
-      Endpoints.setPoolResources.serverLogic { case (req, key) =>
-        pools.setResources(req, key)(sessions.scopeOf)
+      Endpoints.setPoolResources.serverLogic { case (req, key, cookie) =>
+        pools.setResources(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.setPoolTemplate.serverLogic { case (req, key) =>
-        pools.setPodTemplate(req, key)(sessions.scopeOf)
+      Endpoints.setPoolTemplate.serverLogic { case (req, key, cookie) =>
+        pools.setPodTemplate(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
         nodes.setMaxConcurrent(req, key)(sessions.scopeOf)

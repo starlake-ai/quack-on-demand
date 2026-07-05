@@ -34,7 +34,7 @@ final class KubernetesQuackBackend(
     defaultMetastore: Map[String, String] = Map.empty,
     readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
     readEnv: String => Option[String] = name => Option(System.getenv(name)),
-    podTemplateEnabled: Boolean = true
+    podTemplateEnabled: Boolean = false
 ) extends QuackBackend:
 
   private val logger = LoggerFactory.getLogger(getClass)

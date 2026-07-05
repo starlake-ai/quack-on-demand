@@ -318,3 +318,75 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
+
+  // CRITICAL 1: createPool must guard podTemplateYaml
+
+  "createPool with podTemplateYaml" should "return 403 for a tenant-admin session (gate on)" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
+    val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h
+      .createPool(
+        req().copy(podTemplateYaml = y),
+        Some("tok")
+      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
+    out.left.toOption.map(_._2.error) shouldBe Some("superuser_required")
+
+  it should "return 400 feature_disabled for a superuser when gate is off" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = false)
+    val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h
+      .createPool(
+        req().copy(podTemplateYaml = y),
+        Some("tok")
+      )(_ => Some(SessionScope.Superuser))
+      .unsafeRunSync()
+    out.left.toOption.map(_._2.error) shouldBe Some("feature_disabled")
+
+  it should "succeed for a superuser when gate is on and template is valid" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h   = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
+    val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h
+      .createPool(
+        req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(podTemplateYaml = y),
+        Some("tok")
+      )(_ => Some(SessionScope.Superuser))
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+
+  it should "return 403 even when gate is off (auth check precedes feature check)" in:
+    // SuperuserCheck must fire before the feature-gate check so a non-superuser
+    // cannot infer whether the gate is on or off via differential error codes.
+    val h   = freshHandlers // podTemplateEnabled = false
+    val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    val out = h
+      .createPool(
+        req().copy(podTemplateYaml = y),
+        Some("tok")
+      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
+
+  it should "return 400 invalid for a junk cpu quantity on createPool" in:
+    val h   = freshHandlers
+    val out = h
+      .createPool(
+        req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(cpu = "not-a-cpu"),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
+    out.left.toOption.map(_._2.error) shouldBe Some("invalid")

@@ -73,10 +73,52 @@ final class PoolHandlers(
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
-      case None      => createPoolInner(req)
+      case None      =>
+        if req.podTemplateYaml.nonEmpty then
+          SuperuserCheck.reject(apiKey)(scopeOf) match
+            case Some(err) => IO.pure(Left(err))
+            case None      =>
+              if !podTemplateEnabled then
+                IO.pure(
+                  Left(
+                    (
+                      StatusCode.BadRequest,
+                      ErrorResponse(
+                        "feature_disabled",
+                        "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
+                      )
+                    )
+                  )
+                )
+              else
+                QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+                  case Left(msg) =>
+                    IO.pure(
+                      Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
+                    )
+                  case Right(()) => createPoolInner(req)
+        else createPoolInner(req)
 
   private def createPoolInner(req: CreatePoolRequest): Out[PoolResponse] =
-    if !req.roleDistribution.isValidFor(req.size) then
+    if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if !req.roleDistribution.isValidFor(req.size) then
       IO.pure(
         Left(
           (
@@ -257,7 +299,7 @@ final class PoolHandlers(
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
       case None      =>
-        if req.cpu.nonEmpty && !QuantitySyntax.validQuantity(req.cpu) then
+        if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
           IO.pure(
             Left(
               (
@@ -266,7 +308,7 @@ final class PoolHandlers(
               )
             )
           )
-        else if req.memory.nonEmpty && !QuantitySyntax.validQuantity(req.memory) then
+        else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
           IO.pure(
             Left(
               (
