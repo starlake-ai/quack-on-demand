@@ -6,6 +6,12 @@ package ai.starlake.quack.ondemand.api
   * Only the URL-path / query forms are recognized here. Body-tenant endpoints (e.g. POST
   * /api/pool/create with `{ tenant: "..." }`) are NOT covered by this helper. Those handlers
   * enforce the scope themselves via [[TenantScopeCheck.reject]].
+  *
+  * CONVENTION: a route that carries the tenant in its URL PATH MUST name the capture
+  * `path[String]("tenant")`. TenantScopeCompletenessSpec enumerates every endpoint and fails the
+  * build if a `{tenant}` path route is not covered by `extractTenant` here, or if a tenant-ish
+  * capture is named anything other than `tenant`. Query-tenant routes (`?tenant=`) are covered
+  * generically by the `queryTenant` fallback below and need no per-route arm.
   */
 object TenantScopeGuard:
 
