@@ -92,6 +92,7 @@ object ManifestExporter:
           objectStore = d.objectStore,
           defaultDatabase = d.defaultDatabase,
           defaultSchema = d.defaultSchema,
+          initSql = d.initSql,
           federatedSources = fedSources
         )
       }

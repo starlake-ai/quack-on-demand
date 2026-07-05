@@ -1,8 +1,21 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestRoundTripSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, InMemoryFederatedSourceStore, RbacRole, RolePermission}
+import ai.starlake.quack.model.{
+  FederatedSecret,
+  FederatedSource,
+  Pool,
+  RoleDistribution,
+  Tenant,
+  TenantDb,
+  TenantDbKind
+}
+import ai.starlake.quack.ondemand.state.{
+  InMemoryControlPlaneStore,
+  InMemoryFederatedSourceStore,
+  RbacRole,
+  RolePermission
+}
 import at.favre.lib.crypto.bcrypt.BCrypt
 import io.circe.syntax.*
 import io.circe.yaml.v12.Printer
@@ -23,9 +36,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   private val adminHash = BCrypt.withDefaults().hashToString(12, "admin-secret".toCharArray)
   private val aliceHash = BCrypt.withDefaults().hashToString(12, "alice-secret".toCharArray)
 
-  /** Build and populate the source store with a representative mix. Returns
-    * the store plus the user ids for admin and alice so tests can look up
-    * role edges. */
+  /** Build and populate the source store with a representative mix. Returns the store plus the user
+    * ids for admin and alice so tests can look up role edges.
+    */
   private def buildSrc(): InMemoryControlPlaneStore =
     val s = new InMemoryControlPlaneStore()
 
@@ -33,46 +46,62 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     s.upsertTenant(Tenant(id = "tpch", displayName = "tpch", authProvider = "db"))
 
     // TenantDb
-    s.upsertTenantDb(TenantDb(
-      id          = "td-1",
-      tenantId    = "tpch",
-      name        = "tpch_tpch1",
-      kind        = TenantDbKind.DuckLake,
-      metastore   = Map.empty,
-      dataPath    = "/tmp/data",
-      objectStore = Map.empty
-    ))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-1",
+        tenantId = "tpch",
+        name = "tpch_tpch1",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map.empty,
+        dataPath = "/tmp/data",
+        objectStore = Map.empty,
+        initSql = "SET memory_limit = '4GB';"
+      )
+    )
 
     // Pool
-    s.upsertPool(Pool(
-      id                   = "p-1",
-      tenantId             = "tpch",
-      tenantDbId           = "td-1",
-      name                 = "sales",
-      size                 = 3,
-      distribution         = RoleDistribution(writeonly = 1, readonly = 1, dual = 1),
-      maxConcurrentPerNode = 0,
-      disabled             = false
-    ))
+    s.upsertPool(
+      Pool(
+        id = "p-1",
+        tenantId = "tpch",
+        tenantDbId = "td-1",
+        name = "sales",
+        size = 3,
+        distribution = RoleDistribution(writeonly = 1, readonly = 1, dual = 1),
+        maxConcurrentPerNode = 0,
+        disabled = false
+      )
+    )
 
     // Role with one table permission
-    s.upsertRole(RbacRole(id = "r-1", tenantId = "tpch", name = "reader",
-                          description = Some("read-only")))
-    s.insertRolePermission(RolePermission(
-      id          = "rp-1",
-      roleId      = "r-1",
-      catalogName = "tpch_tpch1",
-      schemaName  = "tpch1",
-      tableName   = "customer",
-      verb        = "RO"
-    ))
+    s.upsertRole(
+      RbacRole(id = "r-1", tenantId = "tpch", name = "reader", description = Some("read-only"))
+    )
+    s.insertRolePermission(
+      RolePermission(
+        id = "rp-1",
+        roleId = "r-1",
+        catalogName = "tpch_tpch1",
+        schemaName = "tpch1",
+        tableName = "customer",
+        verb = "RO"
+      )
+    )
 
     // Superuser admin
-    s.upsertUserWithHash(tenant = None, username = "admin", passwordHash = adminHash, role = "admin")
+    s.upsertUserWithHash(
+      tenant = None,
+      username = "admin",
+      passwordHash = adminHash,
+      role = "admin"
+    )
 
     // Tenant-scoped alice, bound to the reader role
     val aliceId = s.upsertUserWithHash(
-      tenant = Some("tpch"), username = "alice", passwordHash = aliceHash, role = "user"
+      tenant = Some("tpch"),
+      username = "alice",
+      passwordHash = aliceHash,
+      role = "user"
     )
     s.addUserRole(aliceId, "r-1")
 
@@ -103,9 +132,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val withPasswords = parsed.copy(
       users = parsed.users.map { u =>
         val hash = (u.tenant, u.username) match
-          case (None,           "admin") => adminHash
-          case (Some("tpch"),   "alice") => aliceHash
-          case _                         => aliceHash   // safe fallback
+          case (None, "admin")         => adminHash
+          case (Some("tpch"), "alice") => aliceHash
+          case _                       => aliceHash // safe fallback
         u.copy(password = Some(hash))
       }
     )
@@ -113,6 +142,10 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Step 6: import into a fresh store
     val dst = new InMemoryControlPlaneStore()
     ManifestImporter.apply(withPasswords, dst) shouldBe Right(())
+
+    // Verify initSql is preserved after import
+    val restored = dst.listTenantDbs("tpch").head
+    restored.initSql shouldBe "SET memory_limit = '4GB';"
 
     // Step 7: second export from the imported store
     val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
@@ -145,9 +178,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val withPasswords = parsed.copy(
       users = parsed.users.map { u =>
         val hash = (u.tenant, u.username) match
-          case (None,           "admin") => adminHash
-          case (Some("tpch"),   "alice") => aliceHash
-          case _                         => aliceHash
+          case (None, "admin")         => adminHash
+          case (Some("tpch"), "alice") => aliceHash
+          case _                       => aliceHash
         u.copy(password = Some(hash))
       }
     )
@@ -185,21 +218,25 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     // Seed one federated source with one value-backed secret in the source store.
     val srcFed = new InMemoryFederatedSourceStore()
-    srcFed.upsertSource(FederatedSource(
-      id          = "fs-1",
-      tenantDbId  = "td-1",
-      alias       = "pg_ext",
-      setupSql    = "ATTACH 'dbname=prod' AS pg_ext (TYPE POSTGRES);",
-      description = Some("prod postgres"),
-      disabled    = false
-    ))
-    srcFed.upsertSecret(FederatedSecret(
-      id                = "fsec-1",
-      federatedSourceId = "fs-1",
-      name              = "PG_PASSWORD",
-      value             = Some("super-secret"),
-      externalRef       = None
-    ))
+    srcFed.upsertSource(
+      FederatedSource(
+        id = "fs-1",
+        tenantDbId = "td-1",
+        alias = "pg_ext",
+        setupSql = "ATTACH 'dbname=prod' AS pg_ext (TYPE POSTGRES);",
+        description = Some("prod postgres"),
+        disabled = false
+      )
+    )
+    srcFed.upsertSecret(
+      FederatedSecret(
+        id = "fsec-1",
+        federatedSourceId = "fs-1",
+        name = "PG_PASSWORD",
+        value = Some("super-secret"),
+        externalRef = None
+      )
+    )
 
     // Step 1: export from the populated source store.
     val manifest1 = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(srcFed))
@@ -207,8 +244,8 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     // The raw value must NOT appear in the YAML; the redaction sentinel must.
     yaml1 should not include "super-secret"
-    yaml1 should     include("***REDACTED***")
-    yaml1 should     include("pg_ext")
+    yaml1 should include("***REDACTED***")
+    yaml1 should include("pg_ext")
 
     // Verify the in-memory manifest carries the redacted value.
     val tdb = manifest1.tenants.head.tenantDbs.head
@@ -228,9 +265,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       },
       users = manifest1.users.map { u =>
         val hash = (u.tenant, u.username) match
-          case (None,           "admin") => adminHash
-          case (Some("tpch"),   "alice") => aliceHash
-          case _                         => aliceHash
+          case (None, "admin")         => adminHash
+          case (Some("tpch"), "alice") => aliceHash
+          case _                       => aliceHash
         u.copy(password = Some(hash))
       }
     )
@@ -252,9 +289,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val parsedWithPasswords = parsedRedacted.copy(
       users = parsedRedacted.users.map { u =>
         val hash = (u.tenant, u.username) match
-          case (None,           "admin") => adminHash
-          case (Some("tpch"),   "alice") => aliceHash
-          case _                         => aliceHash
+          case (None, "admin")         => adminHash
+          case (Some("tpch"), "alice") => aliceHash
+          case _                       => aliceHash
         u.copy(password = Some(hash))
       }
     )
