@@ -310,22 +310,22 @@ final class ManagerServer(
       }
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      Endpoints.createPool.serverLogic { case (req, key) =>
-        pools.createPool(req, key)(sessions.scopeOf)
+      Endpoints.createPool.serverLogic { case (req, key, cookie) =>
+        pools.createPool(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.scalePool.serverLogic { case (req, key) =>
-        pools.scalePool(req, key)(sessions.scopeOf)
+      Endpoints.scalePool.serverLogic { case (req, key, cookie) =>
+        pools.scalePool(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.stopPool.serverLogic { case (req, key) =>
-        pools.stopPool(req, key)(sessions.scopeOf)
+      Endpoints.stopPool.serverLogic { case (req, key, cookie) =>
+        pools.stopPool(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.deletePool.serverLogic { case (req, key) =>
-        pools.deletePool(req, key)(sessions.scopeOf)
+      Endpoints.deletePool.serverLogic { case (req, key, cookie) =>
+        pools.deletePool(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.scopeOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
-      Endpoints.setPoolDisabled.serverLogic { case (req, key) =>
-        pools.setPoolDisabled(req, key)(sessions.scopeOf)
+      Endpoints.setPoolDisabled.serverLogic { case (req, key, cookie) =>
+        pools.setPoolDisabled(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.setPoolResources.serverLogic { case (req, key, cookie) =>
         pools.setResources(req, key.orElse(cookie))(sessions.scopeOf)
@@ -333,8 +333,8 @@ final class ManagerServer(
       Endpoints.setPoolTemplate.serverLogic { case (req, key, cookie) =>
         pools.setPodTemplate(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.setMaxConcurrent.serverLogic { case (req, key) =>
-        nodes.setMaxConcurrent(req, key)(sessions.scopeOf)
+      Endpoints.setMaxConcurrent.serverLogic { case (req, key, cookie) =>
+        nodes.setMaxConcurrent(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.quarantineNode.serverLogic { case (req, key, cookie) =>
         nodes.quarantineNode(req, key.orElse(cookie))(sessions.scopeOf)

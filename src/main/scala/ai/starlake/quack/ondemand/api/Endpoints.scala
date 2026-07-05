@@ -34,7 +34,7 @@ object Endpoints:
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
   val createPool: PublicEndpoint[
-    (CreatePoolRequest, Option[String]),
+    (CreatePoolRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -43,10 +43,11 @@ object Endpoints:
       .in("pool" / "create")
       .in(jsonBody[CreatePoolRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   val scalePool: PublicEndpoint[
-    (ScalePoolRequest, Option[String]),
+    (ScalePoolRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -55,10 +56,11 @@ object Endpoints:
       .in("pool" / "scale")
       .in(jsonBody[ScalePoolRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   val stopPool: PublicEndpoint[
-    (StopPoolRequest, Option[String]),
+    (StopPoolRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -67,9 +69,10 @@ object Endpoints:
       .in("pool" / "stop")
       .in(jsonBody[StopPoolRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val deletePool: PublicEndpoint[
-    (DeletePoolRequest, Option[String]),
+    (DeletePoolRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -78,6 +81,7 @@ object Endpoints:
       .in("pool" / "delete")
       .in(jsonBody[DeletePoolRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listPools: PublicEndpoint[Option[
     String
@@ -100,7 +104,7 @@ object Endpoints:
       .out(jsonBody[PoolResponse])
 
   val setMaxConcurrent: PublicEndpoint[
-    (SetMaxConcurrentRequest, Option[String]),
+    (SetMaxConcurrentRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -109,6 +113,7 @@ object Endpoints:
       .in("node" / "setMaxConcurrent")
       .in(jsonBody[SetMaxConcurrentRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val quarantineNode: PublicEndpoint[
     (NodeOpRequest, Option[String], Option[String]),
@@ -259,7 +264,7 @@ object Endpoints:
       .out(jsonBody[TenantResponse])
 
   val setPoolDisabled: PublicEndpoint[
-    (SetPoolDisabledRequest, Option[String]),
+    (SetPoolDisabledRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -268,6 +273,7 @@ object Endpoints:
       .in("pool" / "setDisabled")
       .in(jsonBody[SetPoolDisabledRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolResponse])
 
   val setPoolResources: PublicEndpoint[
