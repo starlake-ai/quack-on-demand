@@ -41,6 +41,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [kind, setKind]                     = useState<TenantDbKind>('ducklake');
   const [defaultDatabase, setDefaultDatabase] = useState('');
   const [defaultSchema, setDefaultSchema]     = useState('');
+  const [initSql, setInitSql]               = useState('');
+
+  const [editingDb, setEditingDb] = useState<string | null>(null); // full db name
+  const [editSql, setEditSql]     = useState('');
 
   const reload = () =>
     api.listTenantDbs(tenant)
@@ -61,6 +65,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setKind('ducklake');
     setDefaultDatabase('');
     setDefaultSchema('');
+    setInitSql('');
     setError(null);
   }
 
@@ -117,6 +122,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       // memory: no metastore / dataPath / objectStore
       if (defaultDatabase.trim()) reqBody.defaultDatabase = defaultDatabase.trim();
       if (defaultSchema.trim())   reqBody.defaultSchema   = defaultSchema.trim();
+      if (initSql.trim())         reqBody.initSql         = initSql.trim();
       await api.createTenantDb(reqBody);
       resetForm();
       setAdding(false);
@@ -241,6 +247,14 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 </td>
                 <td>
                   <div className="row" style={{ gap: 6 }}>
+                    <button
+                      className="icon-btn"
+                      title="Edit init SQL"
+                      aria-label="Edit init SQL"
+                      onClick={() => { setEditingDb(d.name); setEditSql(d.initSql ?? ''); }}
+                    >
+                      Init SQL
+                    </button>
                     <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(d.name)}><DeleteIcon /></button>
                   </div>
                 </td>
@@ -248,6 +262,41 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             ))}
           </tbody>
         </table>
+      )}
+
+      {editingDb != null && (
+        <form
+          style={{ marginTop: '0.75rem' }}
+          onSubmit={async e => {
+            e.preventDefault();
+            setError(null);
+            try {
+              await api.setTenantDbInitSql({ tenant, name: editingDb, initSql: editSql.trim() });
+              setEditingDb(null);
+              await reload();
+            } catch (err) {
+              setError(err instanceof ApiError ? err.message : String(err));
+            }
+          }}
+        >
+          <fieldset>
+            <legend>Init SQL for <code>{editingDb}</code></legend>
+            <p className="subtle" style={{ marginBottom: 4 }}>
+              Runs at node boot before the pool's own init SQL. Takes effect on the next
+              node spawn; restart the database's nodes to apply now. Empty clears it.
+            </p>
+            <textarea
+              value={editSql}
+              onChange={ev => setEditSql(ev.target.value)}
+              rows={6}
+              placeholder={"SET memory_limit = '8GB';"}
+            />
+            <div className="row" style={{ gap: 8, marginTop: '0.5rem', justifyContent: 'flex-end' }}>
+              <button type="button" className="cancel-button" onClick={() => setEditingDb(null)}>Cancel</button>
+              <button type="submit">Save</button>
+            </div>
+          </fieldset>
+        </form>
       )}
 
       {adding && (
@@ -362,6 +411,22 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 placeholder="main"
               />
             </label>
+          </fieldset>
+
+          <fieldset style={{ marginTop: '0.5rem' }}>
+            <legend>Init SQL (optional)</legend>
+            <p className="subtle" style={{ marginBottom: 4 }}>
+              Engine defaults for every node of this database, run at boot before the
+              pool's own init SQL: <code>SET temp_directory = '...'</code>,{' '}
+              <code>SET memory_limit = '8GB'</code>, <code>INSTALL httpfs; LOAD httpfs;</code>.
+              Edits take effect on the next node spawn (scale, crash respawn, or restart).
+            </p>
+            <textarea
+              value={initSql}
+              onChange={ev => setInitSql(ev.target.value)}
+              rows={6}
+              placeholder={"SET memory_limit = '8GB';\nSET temp_directory = '/fast-disk/tmp';"}
+            />
           </fieldset>
 
           <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'flex-end' }}>

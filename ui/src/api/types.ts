@@ -228,6 +228,7 @@ export interface TenantDbRequest {
   objectStore?: Record<string, string>;
   defaultDatabase?: string;
   defaultSchema?: string;
+  initSql?: string;
 }
 
 export interface TenantDbResponse {
@@ -244,6 +245,7 @@ export interface TenantDbResponse {
   /** Number of registered federated sources on this tenant-db.
     * 0 in file-storage mode (no federation tables). */
   federatedSourceCount?: number;
+  initSql: string;
 }
 
 export interface TenantDbListResponse {
@@ -253,6 +255,12 @@ export interface TenantDbListResponse {
 export interface TenantDbOpRequest {
   tenant: string;
   name: string;
+}
+
+export interface SetTenantDbInitSqlRequest {
+  tenant: string;
+  name: string;
+  initSql: string;
 }
 
 // ----- RBAC: users -----
