@@ -64,7 +64,10 @@ final case class CreatePoolRequest(
       * federation sources. Empty by default. Editing on a running pool takes effect on the NEXT
       * node spawn (scale-up, crash-recovery, manual restart); running nodes keep their old setup.
       */
-    initSql: Option[String] = None
+    initSql: Option[String] = None,
+    cpu: String = "",
+    memory: String = "",
+    podTemplateYaml: String = ""
 )
 
 final case class NodeInfo(
@@ -109,8 +112,7 @@ final case class PoolResponse(
     cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
     initSql: String = "",               // operator-authored init SQL; empty when none was supplied
     cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
-    memory: String = "",                // Kubernetes memory request=limit; empty when unset
-    podTemplateYaml: String = ""        // operator-authored Pod manifest base; empty when unset
+    memory: String = ""                 // Kubernetes memory request=limit; empty when unset
 )
 
 final case class SetPoolResourcesRequest(
@@ -701,6 +703,9 @@ object Dtos:
         maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
         cohorts              <- c.getOrElse[List[PoolCohortDto]]("cohorts")(Nil)
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
+        cpu                  <- c.getOrElse[String]("cpu")("")
+        memory               <- c.getOrElse[String]("memory")("")
+        podTemplateYaml      <- c.getOrElse[String]("podTemplateYaml")("")
       yield CreatePoolRequest(
         tenant,
         tenantDb,
@@ -710,7 +715,11 @@ object Dtos:
         idleTimeoutSec,
         maxConcurrentPerNode,
         cohorts,
-        disabled
+        disabled,
+        None,
+        cpu,
+        memory,
+        podTemplateYaml
       )
     },
     Encoder.instance { r =>
@@ -724,7 +733,10 @@ object Dtos:
           "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
           "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
           "cohorts"              -> r.cohorts.asJson,
-          "disabled"             -> r.disabled.asJson
+          "disabled"             -> r.disabled.asJson,
+          "cpu"                  -> r.cpu.asJson,
+          "memory"               -> r.memory.asJson,
+          "podTemplateYaml"      -> r.podTemplateYaml.asJson
         )
       )
     }
