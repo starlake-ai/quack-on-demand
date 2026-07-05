@@ -770,6 +770,7 @@ final class PoolSupervisor(
         val updated = td.copy(initSql = initSql)
         store.upsertTenantDb(updated)
         tenantDbs.put(updated.id, updated)
+        // Unlocked read-modify-write: a concurrent pool mutation that captured its state before this put can clobber the refresh. Self-healing on the next restore()/NOTIFY and within the documented next-spawn semantics.
         pools.foreach { case (key, state) =>
           if key.tenant == tenantName.toLowerCase && key.tenantDb == td.name then
             pools.put(key, state.copy(dbInitSql = initSql))

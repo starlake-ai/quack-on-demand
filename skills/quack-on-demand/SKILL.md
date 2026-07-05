@@ -240,6 +240,7 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
 # the pool's own initSql (a pool SET overrides a db SET) and before federation
 # ATTACHes. Takes effect on the next node spawn; restart the database's nodes to
 # apply immediately. Empty initSql clears it.
+# Engine defaults only, never credentials: the value is stored unredacted and inlined in pod specs; secrets belong in federation sources.
 curl -sS -X POST "http://localhost:20900/api/database/setInitSql" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","name":"acme_tpch","initSql":"SET memory_limit = '\''8GB'\'';"}'
 ```
