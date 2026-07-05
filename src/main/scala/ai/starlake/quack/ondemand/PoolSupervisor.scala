@@ -242,7 +242,10 @@ final class PoolSupervisor(
             maxConcurrentPerNode = p.maxConcurrentPerNode,
             disabled = p.disabled,
             dbInitSql = td.initSql,
-            initSql = p.initSql
+            initSql = p.initSql,
+            cpu = p.cpu,
+            memory = p.memory,
+            podTemplateYaml = p.podTemplateYaml
           )
         )
       }
@@ -339,7 +342,10 @@ final class PoolSupervisor(
       kindWire = state.kindWire,
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
-      placement = placementForNodeId(key, n.nodeId)
+      placement = placementForNodeId(key, n.nodeId),
+      cpu = Option(state.cpu).filter(_.nonEmpty),
+      memory = Option(state.memory).filter(_.nonEmpty),
+      podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
     )
 
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
@@ -410,7 +416,10 @@ final class PoolSupervisor(
         kindWire = state.kindWire,
         extraSetupSql = nodeExtra,
         dbInitSql = state.dbInitSql,
-        placement = placement
+        placement = placement,
+        cpu = Option(state.cpu).filter(_.nonEmpty),
+        memory = Option(state.memory).filter(_.nonEmpty),
+        podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
       )
     }
     specs
@@ -914,7 +923,10 @@ final class PoolSupervisor(
       // LOAD live here; ATTACH aliases live on federation sources. Order
       // matters at node-init time: initSql runs FIRST so PRAGMAs are in
       // effect before any federation source's ATTACH.
-      initSql: String = ""
+      initSql: String = "",
+      cpu: String = "",
+      memory: String = "",
+      podTemplateYaml: String = ""
   ): IO[List[RunningNode]] = locks.withLock(key)(IO.defer {
     val size = dist.total
     require(
@@ -993,7 +1005,10 @@ final class PoolSupervisor(
             maxConcurrentPerNode = maxConcurrentPerNode,
             disabled = disabled,
             cohorts = cohorts,
-            initSql = initSql
+            initSql = initSql,
+            cpu = cpu,
+            memory = memory,
+            podTemplateYaml = podTemplateYaml
           )
           IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
             poolRows.put(poolEntity.id, poolEntity)
@@ -1017,7 +1032,10 @@ final class PoolSupervisor(
                 kindWire = kindWire,
                 extraSetupSql = nodeExtra,
                 dbInitSql = td.initSql,
-                placement = placement
+                placement = placement,
+                cpu = Option(cpu).filter(_.nonEmpty),
+                memory = Option(memory).filter(_.nonEmpty),
+                podTemplateYaml = Option(podTemplateYaml).filter(_.nonEmpty)
               )
             }
             specs
@@ -1041,7 +1059,10 @@ final class PoolSupervisor(
                   dbInitSql = td.initSql,
                   initSql = initSql,
                   defaultDatabase = td.defaultDatabase,
-                  defaultSchema = td.defaultSchema
+                  defaultSchema = td.defaultSchema,
+                  cpu = cpu,
+                  memory = memory,
+                  podTemplateYaml = podTemplateYaml
                 )
                 pools.put(key, state)
                 running
@@ -1070,7 +1091,7 @@ final class PoolSupervisor(
             Right(updated)
   }
 
-  def setPoolResources(key: PoolKey, cpu: String, memory: String): IO[Either[String, PoolState]] =
+  def setPoolResources(key: PoolKey, cpu: String, memory: String): IO[Either[String, Pool]] =
     IO.blocking {
       pools.get(key) match
         case None        => Left(s"pool not found: $key")
@@ -1081,13 +1102,12 @@ final class PoolSupervisor(
               val updated = p.copy(cpu = cpu, memory = memory)
               store.upsertPool(updated)
               poolRows.put(updated.id, updated)
-              val newState = state.copy(cpu = cpu, memory = memory)
-              pools.put(key, newState)
+              pools.put(key, state.copy(cpu = cpu, memory = memory))
               publish.topologyChanged()
-              Right(newState)
+              Right(updated)
     }
 
-  def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[String, PoolState]] =
+  def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[String, Pool]] =
     IO.blocking {
       pools.get(key) match
         case None        => Left(s"pool not found: $key")
@@ -1098,10 +1118,9 @@ final class PoolSupervisor(
               val updated = p.copy(podTemplateYaml = yaml)
               store.upsertPool(updated)
               poolRows.put(updated.id, updated)
-              val newState = state.copy(podTemplateYaml = yaml)
-              pools.put(key, newState)
+              pools.put(key, state.copy(podTemplateYaml = yaml))
               publish.topologyChanged()
-              Right(newState)
+              Right(updated)
     }
 
   def setMaxConcurrent(key: PoolKey, nodeId: String, max: Int): IO[Option[RunningNode]] =
@@ -1176,7 +1195,10 @@ final class PoolSupervisor(
               maxConcurrent = state.maxConcurrentPerNode,
               kindWire = state.kindWire,
               extraSetupSql = nodeExtra,
-              dbInitSql = state.dbInitSql
+              dbInitSql = state.dbInitSql,
+              cpu = Option(state.cpu).filter(_.nonEmpty),
+              memory = Option(state.memory).filter(_.nonEmpty),
+              podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
             )
           }
           val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))

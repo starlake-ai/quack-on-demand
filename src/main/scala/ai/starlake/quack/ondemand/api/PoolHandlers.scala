@@ -64,8 +64,7 @@ final class PoolHandlers(
         cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
         initSql = p.initSql,
         cpu = p.cpu,
-        memory = p.memory,
-        podTemplateYaml = p.podTemplateYaml
+        memory = p.memory
       )
     }
 
@@ -125,7 +124,10 @@ final class PoolHandlers(
                   req.maxConcurrentPerNode,
                   cohorts,
                   req.disabled,
-                  req.initSql.getOrElse("")
+                  req.initSql.getOrElse(""),
+                  req.cpu,
+                  req.memory,
+                  req.podTemplateYaml
                 )
                 .map(_ =>
                   Right(
@@ -260,7 +262,7 @@ final class PoolHandlers(
             Left(
               (
                 StatusCode.BadRequest,
-                ErrorResponse("invalid_cpu", s"invalid cpu quantity: '${req.cpu}'")
+                ErrorResponse("invalid", s"invalid cpu quantity: '${req.cpu}'")
               )
             )
           )
@@ -269,7 +271,7 @@ final class PoolHandlers(
             Left(
               (
                 StatusCode.BadRequest,
-                ErrorResponse("invalid_memory", s"invalid memory quantity: '${req.memory}'")
+                ErrorResponse("invalid", s"invalid memory quantity: '${req.memory}'")
               )
             )
           )
@@ -293,20 +295,26 @@ final class PoolHandlers(
   def setPodTemplate(req: SetPoolTemplateRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
-    if !podTemplateEnabled then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse("feature_disabled", "pod template support is not enabled on this manager")
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        if !podTemplateEnabled then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse(
+                  "feature_disabled",
+                  "pod template support is not enabled on this manager"
+                )
+              )
+            )
           )
-        )
-      )
-    else
-      TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-        case Some(err) => IO.pure(Left(err))
-        case None      =>
-          QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+        else
+          val validationResult =
+            if req.podTemplateYaml.isEmpty then Right(())
+            else QuantitySyntax.validPodTemplate(req.podTemplateYaml)
+          validationResult match
             case Left(msg) =>
               IO.pure(
                 Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))

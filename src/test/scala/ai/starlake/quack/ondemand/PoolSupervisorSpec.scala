@@ -877,3 +877,39 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     result.toOption.get.podTemplateYaml shouldBe y
     sup.get(key).map(_.podTemplateYaml) shouldBe Some(y)
   }
+
+  // E3: threading - createPool with cpu/memory must flow through to NodeSpec and PoolState
+
+  "PoolSupervisor.createPool" should "thread cpu/memory/podTemplateYaml into every NodeSpec" in {
+    val backend = new CapturingBackend
+    val sup     = new PoolSupervisor(backend, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val tmpl = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    sup.createPool(
+      key, RoleDistribution(0, 0, 2),
+      cpu = "500m", memory = "2Gi", podTemplateYaml = tmpl
+    ).unsafeRunSync()
+    backend.specs.size shouldBe 2
+    backend.specs.foreach { spec =>
+      spec.cpu             shouldBe Some("500m")
+      spec.memory          shouldBe Some("2Gi")
+      spec.podTemplateYaml shouldBe Some(tmpl)
+    }
+  }
+
+  it should "expose cpu/memory/podTemplateYaml on the PoolState after createPool" in {
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val tmpl = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
+    sup.createPool(
+      key, RoleDistribution(0, 0, 1),
+      cpu = "250m", memory = "1Gi", podTemplateYaml = tmpl
+    ).unsafeRunSync()
+    sup.get(key).map(_.cpu)             shouldBe Some("250m")
+    sup.get(key).map(_.memory)          shouldBe Some("1Gi")
+    sup.get(key).map(_.podTemplateYaml) shouldBe Some(tmpl)
+  }
