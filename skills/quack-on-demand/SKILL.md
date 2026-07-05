@@ -232,20 +232,23 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
   }'
 ```
 
-### Set a database's init SQL
+### Update a database
 
 ```bash
-# Set a database's init SQL: engine defaults for every node of that database,
-# run at boot BEFORE the quack extension loads and the catalog ATTACH, ahead of
-# the pool's own initSql (a pool SET overrides a db SET) and before federation
-# ATTACHes. Takes effect on the next node spawn; restart the database's nodes to
-# apply immediately. Empty initSql clears it.
-# Engine defaults only, never credentials: the value is stored unredacted and inlined in pod specs; secrets belong in federation sources.
-curl -sS -X POST "http://localhost:20900/api/database/setInitSql" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+# Update a database: any subset of metastore, objectStore, defaultDatabase,
+# defaultSchema, initSql. Absent fields stay unchanged; empty clears. Editing
+# metastore/objectStore/initSql restarts ALL the database's nodes immediately
+# (in-flight statements on them fail); default database/schema edits do not.
+# pgPassword is preserved unless you send it: pgPassword=new rotates, empty removes.
+# Engine defaults only in initSql, never credentials: the value is stored
+# unredacted and inlined in pod specs; secrets belong in federation sources.
+curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","name":"acme_tpch","initSql":"SET memory_limit = '\''8GB'\'';"}'
-```
 
-Nodes unhealthy right after editing init SQL usually means the SQL is bad: fix or clear the field, then restart the nodes.
+# Rotate the metastore password (restarts the db's nodes):
+curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"acme_tpch","metastore":{"schemaName":"main","pgPassword":"newpass"}}'
+```
 
 ### Register a federated source
 

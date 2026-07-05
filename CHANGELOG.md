@@ -40,9 +40,14 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **Per-database init SQL.** Tenant-dbs carry an `initSql` executed at node boot
   before the quack extension loads, ahead of the pool's own initSql and the
   federation blob, so operators set temp directory, memory limit, or extension
-  loads once per database and pools can still override. New endpoint POST
-  /api/database/setInitSql; field on database create, the manifest, and the
-  Databases UI. Takes effect on the next node spawn.
+  loads once per database and pools can still override. Field on database create,
+  the manifest, and the Databases UI.
+  New endpoint POST /api/database/update edits any safe subset of a database
+  (metastore, object store, default database/schema, init SQL; name, kind, and
+  data path stay immutable) and restarts all the database's nodes when
+  node-affecting fields change. The Databases UI opens the editor on name
+  click, shows per-database table counts linking into the catalog browser,
+  and reports the effective data path for databases inheriting the default.
 
 ## 0.3.5
 
