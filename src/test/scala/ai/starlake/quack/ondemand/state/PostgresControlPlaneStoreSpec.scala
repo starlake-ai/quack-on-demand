@@ -188,6 +188,20 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listPools("tdb-1") shouldBe List(withIdle)
   }
 
+  it should "round-trip pool cpu, memory, and podTemplateYaml" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool.copy(cpu = "500m", memory = "2Gi", podTemplateYaml = "apiVersion: v1"))
+    val back = store.listPools(pool.tenantDbId).find(_.id == pool.id).get
+    back.cpu shouldBe "500m"
+    back.memory shouldBe "2Gi"
+    back.podTemplateYaml shouldBe "apiVersion: v1"
+    store.upsertPool(back.copy(cpu = "", memory = "", podTemplateYaml = ""))
+    val cleared = store.listPools(pool.tenantDbId).find(_.id == pool.id).get
+    cleared.cpu shouldBe ""
+    cleared.podTemplateYaml shouldBe ""
+  }
+
   it should "round-trip a node with pid set + lastSeen NULL" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

@@ -31,6 +31,9 @@ final case class PoolState(
       */
     initSql: String = "",
     defaultDatabase: Option[String] = None, // tenant-db-level override for SQL validation context
-    defaultSchema: Option[String] = None    // tenant-db-level override for SQL validation context
+    defaultSchema: Option[String] = None,   // tenant-db-level override for SQL validation context
+    cpu: String = "",
+    memory: String = "",
+    podTemplateYaml: String = ""
 ):
   def size: Int = nodes.size
