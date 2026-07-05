@@ -34,6 +34,30 @@ import org.slf4j.LoggerFactory
 
 import scala.collection.concurrent.TrieMap
 
+/** Patch applied to an existing tenant-db by [[PoolSupervisor.updateTenantDb]]. Absent fields are
+  * unchanged; present fields replace their stored counterpart. For map fields the replace-and-carry
+  * semantics in [[PoolSupervisor.mergeSecretKeys]] preserve response-redacted keys (pgPassword)
+  * when the incoming map omits them. An empty string value for a scalar Option field clears it
+  * (sets to None).
+  */
+final case class TenantDbPatch(
+    metastore: Option[Map[String, String]] = None,
+    objectStore: Option[Map[String, String]] = None,
+    defaultDatabase: Option[String] = None,
+    defaultSchema: Option[String] = None,
+    initSql: Option[String] = None
+)
+
+/** Result of [[PoolSupervisor.updateTenantDb]]: the updated tenant-db row, the list of node ids
+  * that were restarted, and per-node restart failures (nodeId, message). Failed restarts are
+  * collected rather than thrown; the reconcile loop heals them.
+  */
+final case class TenantDbUpdateResult(
+    td: TenantDb,
+    restartedNodes: List[String],
+    failedRestarts: List[(String, String)]
+)
+
 /** Owns the in-memory topology and mediates every mutation through [[ControlPlaneStore]]:
   *
   *   - `Tenant` ownership umbrella (`id`, `displayName`, `disabled`).
@@ -754,30 +778,110 @@ final class PoolSupervisor(
                 Right(())
     }
 
-  /** Update the initSql of an existing tenant-db. Takes effect on the next node spawn of the
-    * database's pools; running nodes keep their old setup. Also refreshes the dbInitSql carried by
-    * the database's cached PoolStates so a later respawn from cache uses the new value without
-    * waiting for restore().
+  /** Merge a patch into an existing tenant-db, persist it, refresh caches, and restart every node
+    * of the database's pools when node-affecting fields (metastore, objectStore, initSql) changed.
+    * Restart is all-at-once via the same per-node path restartNode uses; per-node failures are
+    * collected, not thrown (reconcile heals). Response-redacted keys (pgPassword) are preserved
+    * when an incoming map lacks them; an explicit empty value removes the key.
+    */
+  def updateTenantDb(
+      tenantName: String,
+      dbName: String,
+      patch: TenantDbPatch
+  ): IO[Either[String, TenantDbUpdateResult]] =
+    IO.blocking(findTenantDb(tenantName, dbName)).flatMap {
+      case None     => IO.pure(Left(s"tenant-db $tenantName/$dbName not found"))
+      case Some(td) =>
+        val merged = td.copy(
+          metastore = patch.metastore.fold(td.metastore)(mergeSecretKeys(td.metastore, _)),
+          objectStore = patch.objectStore.fold(td.objectStore)(mergeSecretKeys(td.objectStore, _)),
+          defaultDatabase = patch.defaultDatabase.fold(td.defaultDatabase)(nonBlank),
+          defaultSchema = patch.defaultSchema.fold(td.defaultSchema)(nonBlank),
+          initSql = patch.initSql.getOrElse(td.initSql)
+        )
+        TenantDb.validateSafety(merged) match
+          case Some(msg) => IO.pure(Left(s"invalid: $msg"))
+          case None      =>
+            val nodeAffecting =
+              merged.metastore != td.metastore ||
+                merged.objectStore != td.objectStore ||
+                merged.initSql != td.initSql
+            val refresh = IO.blocking {
+              store.upsertTenantDb(merged)
+              tenantDbs.put(merged.id, merged)
+              // Unlocked read-modify-write: same trade-off as documented on the
+              // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
+              pools.foreach { case (key, state) =>
+                if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
+                  pools.put(
+                    key,
+                    state.copy(
+                      metastore = effectiveMetastoreFor(merged),
+                      s3 = merged.objectStore,
+                      dbInitSql = merged.initSql,
+                      defaultDatabase = merged.defaultDatabase,
+                      defaultSchema = merged.defaultSchema
+                    )
+                  )
+              }
+              publish.topologyChanged()
+            }
+            val restarts =
+              if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
+              else
+                IO.delay {
+                  pools.toList.collect {
+                    case (key, state)
+                        if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name =>
+                      state.nodes.map(n => (key, n.nodeId))
+                  }.flatten
+                }.flatMap { targets =>
+                  targets.foldLeft(IO.pure((List.empty[String], List.empty[(String, String)]))) {
+                    case (acc, (key, nodeId)) =>
+                      acc.flatMap { case (ok, failed) =>
+                        restartNode(key, nodeId).map {
+                          case Right(()) => (ok :+ nodeId, failed)
+                          case Left(msg) => (ok, failed :+ (nodeId -> msg))
+                        }
+                      }
+                  }
+                }
+            refresh *> restarts.map { case (ok, failed) =>
+              Right(TenantDbUpdateResult(merged, ok, failed))
+            }
+    }
+
+  /** Empty patch value clears an Option field; non-blank sets it. */
+  private def nonBlank(s: String): Option[String] =
+    val t = s.trim
+    if t.isEmpty then None else Some(t)
+
+  /** Replace-the-map semantics with one exception: keys redacted from API responses (pgPassword)
+    * are carried over from the stored map when the incoming map lacks them, because no client can
+    * round-trip a value it never sees. An incoming redacted key with an EMPTY value removes it.
+    */
+  private def mergeSecretKeys(
+      stored: Map[String, String],
+      incoming: Map[String, String]
+  ): Map[String, String] =
+    val secretKeys = stored.keys.filter(_.equalsIgnoreCase("pgPassword")).toList
+    val carried    = secretKeys.collect {
+      case k if !incoming.keys.exists(_.equalsIgnoreCase(k)) => k -> stored(k)
+    }
+    val explicit = incoming.filter { case (k, v) =>
+      !(k.equalsIgnoreCase("pgPassword") && v.isEmpty)
+    }
+    explicit ++ carried
+
+  /** Forwarding shim for Task-2 compatibility; replaced by the handler calling updateTenantDb
+    * directly once the REST layer is updated.
     */
   def setTenantDbInitSql(
       tenantName: String,
       dbName: String,
       initSql: String
-  ): IO[Either[String, TenantDb]] = IO.blocking {
-    findTenantDb(tenantName, dbName) match
-      case None     => Left(s"tenant-db $tenantName/$dbName not found")
-      case Some(td) =>
-        val updated = td.copy(initSql = initSql)
-        store.upsertTenantDb(updated)
-        tenantDbs.put(updated.id, updated)
-        // Unlocked read-modify-write: a concurrent pool mutation that captured its state before this put can clobber the refresh. Self-healing on the next restore()/NOTIFY and within the documented next-spawn semantics.
-        pools.foreach { case (key, state) =>
-          if key.tenant == tenantName.toLowerCase && key.tenantDb == td.name then
-            pools.put(key, state.copy(dbInitSql = initSql))
-        }
-        publish.topologyChanged()
-        Right(updated)
-  }
+  ): IO[Either[String, TenantDb]] =
+    updateTenantDb(tenantName, dbName, TenantDbPatch(initSql = Some(initSql))).map(_.map(_.td))
 
   // ---------- Pool API ----------
 

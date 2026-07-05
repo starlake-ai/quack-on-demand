@@ -765,3 +765,63 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup2.restore()
     sup2.get(key).get.dbInitSql shouldBe "SET x=1;"
   }
+
+  // ---------- updateTenantDb ----------
+
+  /** Fresh supervisor + tenant acme + DuckDbFile tenant-db with pgPassword in metastore
+    * + one pool with 2 dual nodes. Returns (supervisor, backend, composed db name).
+    */
+  private def updateTenantDbFixture(): (PoolSupervisor, CapturingBackend, String) =
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName  = "acme",
+      suffix      = "secret",
+      kind        = TenantDbKind.DuckDbFile,
+      metastore   = Map("dbName" -> "acme_secret", "schemaName" -> "main", "pgPassword" -> "secret1"),
+      dataPath    = "/tmp/test"
+    ).unsafeRunSync()
+    val dbPoolKey = PoolKey("acme", "acme_secret", "bi")
+    sup.createPool(dbPoolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    (sup, b, "acme_secret")
+
+  "updateTenantDb" should "merge the patch, preserve redacted keys, and skip restart for metadata-only edits" in {
+    val (sup, backend, dbName) = updateTenantDbFixture()
+    val before = backend.stopped.size
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      defaultDatabase = Some("fedpg"), defaultSchema = Some("")
+    )).unsafeRunSync().toOption.get
+    out.td.defaultDatabase shouldBe Some("fedpg")
+    out.td.defaultSchema shouldBe None            // empty string clears
+    out.td.metastore.get("pgPassword") shouldBe Some("secret1") // untouched section preserved
+    out.restartedNodes shouldBe Nil               // metadata-only: no restart
+    backend.stopped.size shouldBe before
+  }
+
+  it should "replace an edited map but preserve pgPassword when the incoming map lacks it" in {
+    val (sup, _, dbName) = updateTenantDbFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("schemaName" -> "s2", "applicationName" -> "qod"))
+    )).unsafeRunSync().toOption.get
+    out.td.metastore.get("schemaName") shouldBe Some("s2")
+    out.td.metastore.get("pgPassword") shouldBe Some("secret1") // preserved
+    out.td.metastore.contains("applicationName") shouldBe true
+  }
+
+  it should "remove pgPassword when explicitly sent empty, and restart all nodes of the db" in {
+    val (sup, backend, dbName) = updateTenantDbFixture()
+    val before = backend.stopped.size
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("schemaName" -> "s2", "pgPassword" -> ""))
+    )).unsafeRunSync().toOption.get
+    out.td.metastore.contains("pgPassword") shouldBe false
+    out.restartedNodes.size shouldBe 2            // both nodes of the db's pool restarted
+    out.failedRestarts shouldBe Nil
+    backend.stopped.size shouldBe before + 2
+  }
+
+  it should "Left on unknown tenant-db" in {
+    val (sup, _, _) = updateTenantDbFixture()
+    sup.updateTenantDb("acme", "acme_nope", TenantDbPatch()).unsafeRunSync().isLeft shouldBe true
+  }
