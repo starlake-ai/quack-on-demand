@@ -124,7 +124,10 @@ object ManifestExporter:
               )
             )
           },
-          initSql = p.initSql
+          initSql = p.initSql,
+          cpu = p.cpu,
+          memory = p.memory,
+          podTemplateYaml = p.podTemplateYaml
         )
       }
 

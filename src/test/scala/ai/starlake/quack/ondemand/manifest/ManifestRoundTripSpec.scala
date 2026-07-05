@@ -69,7 +69,10 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         size = 3,
         distribution = RoleDistribution(writeonly = 1, readonly = 1, dual = 1),
         maxConcurrentPerNode = 0,
-        disabled = false
+        disabled = false,
+        cpu = "2",
+        memory = "8Gi",
+        podTemplateYaml = "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n"
       )
     )
 
@@ -146,6 +149,14 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Verify initSql is preserved after import
     val restored = dst.listTenantDbs("tpch").head
     restored.initSql shouldBe "SET memory_limit = '4GB';"
+
+    // Verify the Kubernetes pool fields are preserved after import. listPools
+    // takes a tenant-db id, and the importer minted a fresh surrogate id for
+    // the tenant-db, so list via the restored tenant-db's id.
+    val restoredPool = dst.listPools(restored.id).find(_.name == "sales").get
+    restoredPool.cpu shouldBe "2"
+    restoredPool.memory shouldBe "8Gi"
+    restoredPool.podTemplateYaml shouldBe "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n"
 
     // Step 7: second export from the imported store
     val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
