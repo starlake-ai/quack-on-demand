@@ -249,3 +249,4 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       (_: String) => None
     ).unsafeRunSync().toOption.get
     td.tableCount shouldBe None
+    td.effectiveDataPath shouldBe ""

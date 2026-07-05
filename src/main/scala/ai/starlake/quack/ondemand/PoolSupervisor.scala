@@ -80,6 +80,11 @@ final class PoolSupervisor(
       * Hikari pool releases its connections + heap on delete.
       */
     onTenantDbDeleted: (String, String) => Unit = (_, _) => (),
+    /** Callback fired from [[updateTenantDb]] when the stored metastore changes (e.g. credential
+      * rotation). `Main` wires it to the same evict function as [[onTenantDbDeleted]] so the stale
+      * catalog reader is replaced by a fresh one that picks up the new credentials.
+      */
+    onTenantDbChanged: (String, String) => Unit = (_, _) => (),
     /** Cross-replica per-pool lock. In non-HA mode the
       * [[ai.starlake.quack.ondemand.ha.PoolLocker.noop]] default makes every wrap a pass-through,
       * so single-manager behavior is unchanged. Under HA a
@@ -802,52 +807,67 @@ final class PoolSupervisor(
         TenantDb.validateSafety(merged) match
           case Some(msg) => IO.pure(Left(s"invalid: $msg"))
           case None      =>
-            val nodeAffecting =
-              merged.metastore != td.metastore ||
-                merged.objectStore != td.objectStore ||
-                merged.initSql != td.initSql
-            val refresh = IO.blocking {
-              store.upsertTenantDb(merged)
-              tenantDbs.put(merged.id, merged)
-              // Unlocked read-modify-write: same trade-off as documented on the
-              // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
-              pools.foreach { case (key, state) =>
-                if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
-                  pools.put(
-                    key,
-                    state.copy(
-                      metastore = effectiveMetastoreFor(merged),
-                      s3 = merged.objectStore,
-                      dbInitSql = merged.initSql,
-                      defaultDatabase = merged.defaultDatabase,
-                      defaultSchema = merged.defaultSchema
+            val droppedRequired =
+              (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --
+                merged.metastore.keySet
+            if droppedRequired.nonEmpty then
+              IO.pure(
+                Left(
+                  s"invalid: metastore update drops required key(s) ${droppedRequired.mkString(", ")}; " +
+                    "send the full map (pgPassword may be omitted, it is preserved)"
+                )
+              )
+            else {
+              val nodeAffecting =
+                merged.metastore != td.metastore ||
+                  merged.objectStore != td.objectStore ||
+                  merged.initSql != td.initSql
+              val refresh = IO.blocking {
+                store.upsertTenantDb(merged)
+                tenantDbs.put(merged.id, merged)
+                // Unlocked read-modify-write: same trade-off as documented on the
+                // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
+                pools.foreach { case (key, state) =>
+                  if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
+                    pools.put(
+                      key,
+                      state.copy(
+                        metastore = effectiveMetastoreFor(merged),
+                        s3 = merged.objectStore,
+                        dbInitSql = merged.initSql,
+                        defaultDatabase = merged.defaultDatabase,
+                        defaultSchema = merged.defaultSchema
+                      )
                     )
-                  )
-              }
-              publish.topologyChanged()
-            }
-            val restarts =
-              if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
-              else
-                IO.delay {
-                  pools.toList.collect {
-                    case (key, state)
-                        if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name =>
-                      state.nodes.map(n => (key, n.nodeId))
-                  }.flatten
-                }.flatMap { targets =>
-                  targets.foldLeft(IO.pure((List.empty[String], List.empty[(String, String)]))) {
-                    case (acc, (key, nodeId)) =>
-                      acc.flatMap { case (ok, failed) =>
-                        restartNode(key, nodeId).map {
-                          case Right(()) => (ok :+ nodeId, failed)
-                          case Left(msg) => (ok, failed :+ (nodeId -> msg))
-                        }
-                      }
-                  }
                 }
-            refresh *> restarts.map { case (ok, failed) =>
-              Right(TenantDbUpdateResult(merged, ok, failed))
+                if merged.metastore != td.metastore then
+                  try onTenantDbChanged(tenantName.toLowerCase, merged.name)
+                  catch case _: Throwable => ()
+                publish.topologyChanged()
+              }
+              val restarts =
+                if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
+                else
+                  IO.delay {
+                    pools.toList.collect {
+                      case (key, state)
+                          if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name =>
+                        state.nodes.map(n => (key, n.nodeId))
+                    }.flatten
+                  }.flatMap { targets =>
+                    targets.foldLeft(IO.pure((List.empty[String], List.empty[(String, String)]))) {
+                      case (acc, (key, nodeId)) =>
+                        acc.flatMap { case (ok, failed) =>
+                          restartNode(key, nodeId).map {
+                            case Right(()) => (ok :+ nodeId, failed)
+                            case Left(msg) => (ok, failed :+ (nodeId -> msg))
+                          }
+                        }
+                    }
+                  }
+              refresh *> restarts.map { case (ok, failed) =>
+                Right(TenantDbUpdateResult(merged, ok, failed))
+              }
             }
     }
 

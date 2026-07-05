@@ -322,6 +322,7 @@ object Main extends IOApp with LazyLogging:
       dbAdmin,
       federationBlobOf,
       onTenantDbDeleted = evictCatalogReader,
+      onTenantDbChanged = evictCatalogReader,
       locks = poolLocks,
       publish = publisher
     )

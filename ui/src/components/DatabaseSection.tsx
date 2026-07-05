@@ -147,15 +147,17 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     }
   }
 
-  async function handleDelete(dbName: string) {
+  async function handleDelete(dbName: string): Promise<boolean> {
     if (!confirm(`Delete database '${dbName}' from tenant '${tenant}'?\n\n` +
-                 `This drops the Postgres database '${dbName}' and any DuckLake catalog in it.`)) return;
+                 `This drops the Postgres database '${dbName}' and any DuckLake catalog in it.`)) return false;
     setError(null);
     try {
       await api.deleteTenantDb({ tenant, name: dbName });
       await reload();
+      return true;
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
+      return false;
     }
   }
 
@@ -360,7 +362,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             </label>
             <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
               <button type="button" className="danger"
-                onClick={() => { const n = editingDb.name; setEditingDb(null); void handleDelete(n); }}>
+                onClick={() => void (async () => { const ok = await handleDelete(editingDb.name); if (ok) setEditingDb(null); })()}>
                 Delete database
               </button>
               <div className="row" style={{ gap: 8 }}>
