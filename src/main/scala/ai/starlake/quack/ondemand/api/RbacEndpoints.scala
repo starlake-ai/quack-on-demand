@@ -40,7 +40,7 @@ object RbacEndpoints:
       .out(jsonBody[UserResponse])
 
   val updateUser: PublicEndpoint[
-    (UserUpdateRequest, Option[String]),
+    (UserUpdateRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UserResponse,
     Any
@@ -49,15 +49,20 @@ object RbacEndpoints:
       .in("user" / "update")
       .in(jsonBody[UserUpdateRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[UserResponse])
 
   val deleteUser: PublicEndpoint[
-    (UserDeleteRequest, Option[String]),
+    (UserDeleteRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("user" / "delete").in(jsonBody[UserDeleteRequest]).in(apiKey)
+    base.post
+      .in("user" / "delete")
+      .in(jsonBody[UserDeleteRequest])
+      .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listUsers: PublicEndpoint[
     (
@@ -102,12 +107,16 @@ object RbacEndpoints:
       .out(jsonBody[RoleResponse])
 
   val deleteRole: PublicEndpoint[
-    (RoleDeleteRequest, Option[String]),
+    (RoleDeleteRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("role" / "delete").in(jsonBody[RoleDeleteRequest]).in(apiKey)
+    base.post
+      .in("role" / "delete")
+      .in(jsonBody[RoleDeleteRequest])
+      .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listRoles: PublicEndpoint[
     (String, Option[String]),
@@ -134,7 +143,7 @@ object RbacEndpoints:
       .out(jsonBody[RolePermissionResponse])
 
   val revokeRolePermission: PublicEndpoint[
-    (RolePermissionRevokeRequest, Option[String]),
+    (RolePermissionRevokeRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -143,6 +152,7 @@ object RbacEndpoints:
       .in("role" / "permission" / "revoke")
       .in(jsonBody[RolePermissionRevokeRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listRolePermissions: PublicEndpoint[
     (String, Option[String]),
@@ -159,7 +169,7 @@ object RbacEndpoints:
   // ----- RBAC: column policies -----
 
   val createColumnPolicy: PublicEndpoint[
-    (CreateColumnPolicyRequest, Option[String]),
+    (CreateColumnPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     ColumnPolicyDto,
     Any
@@ -168,10 +178,11 @@ object RbacEndpoints:
       .in("role" / "column-policy" / "create")
       .in(jsonBody[CreateColumnPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[ColumnPolicyDto])
 
   val updateColumnPolicy: PublicEndpoint[
-    (UpdateColumnPolicyRequest, Option[String]),
+    (UpdateColumnPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -180,9 +191,10 @@ object RbacEndpoints:
       .in("role" / "column-policy" / "update")
       .in(jsonBody[UpdateColumnPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val deleteColumnPolicy: PublicEndpoint[
-    (DeleteColumnPolicyRequest, Option[String]),
+    (DeleteColumnPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -191,6 +203,7 @@ object RbacEndpoints:
       .in("role" / "column-policy" / "delete")
       .in(jsonBody[DeleteColumnPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listColumnPolicies: PublicEndpoint[
     (String, Option[String]),
@@ -207,7 +220,7 @@ object RbacEndpoints:
   // ----- RBAC: row policies -----
 
   val createRowPolicy: PublicEndpoint[
-    (CreateRowPolicyRequest, Option[String]),
+    (CreateRowPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RowPolicyDto,
     Any
@@ -216,10 +229,11 @@ object RbacEndpoints:
       .in("role" / "row-policy" / "create")
       .in(jsonBody[CreateRowPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[RowPolicyDto])
 
   val updateRowPolicy: PublicEndpoint[
-    (UpdateRowPolicyRequest, Option[String]),
+    (UpdateRowPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -228,9 +242,10 @@ object RbacEndpoints:
       .in("role" / "row-policy" / "update")
       .in(jsonBody[UpdateRowPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val deleteRowPolicy: PublicEndpoint[
-    (DeleteRowPolicyRequest, Option[String]),
+    (DeleteRowPolicyRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -239,6 +254,7 @@ object RbacEndpoints:
       .in("role" / "row-policy" / "delete")
       .in(jsonBody[DeleteRowPolicyRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listRowPolicies: PublicEndpoint[
     (String, Option[String]),
@@ -267,12 +283,16 @@ object RbacEndpoints:
       .out(jsonBody[GroupResponse])
 
   val deleteGroup: PublicEndpoint[
-    (GroupDeleteRequest, Option[String]),
+    (GroupDeleteRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    base.post.in("group" / "delete").in(jsonBody[GroupDeleteRequest]).in(apiKey)
+    base.post
+      .in("group" / "delete")
+      .in(jsonBody[GroupDeleteRequest])
+      .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listGroups: PublicEndpoint[
     (String, Option[String]),
@@ -288,7 +308,7 @@ object RbacEndpoints:
 
   // ----- RBAC: memberships (204 on success) -----
   val addUserRoleMembership: PublicEndpoint[
-    (UserRoleMembershipRequest, Option[String]),
+    (UserRoleMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -297,8 +317,9 @@ object RbacEndpoints:
       .in("membership" / "user-role" / "add")
       .in(jsonBody[UserRoleMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
   val removeUserRoleMembership: PublicEndpoint[
-    (UserRoleMembershipRequest, Option[String]),
+    (UserRoleMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -307,9 +328,10 @@ object RbacEndpoints:
       .in("membership" / "user-role" / "remove")
       .in(jsonBody[UserRoleMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val addUserGroupMembership: PublicEndpoint[
-    (UserGroupMembershipRequest, Option[String]),
+    (UserGroupMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -318,8 +340,9 @@ object RbacEndpoints:
       .in("membership" / "user-group" / "add")
       .in(jsonBody[UserGroupMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
   val removeUserGroupMembership: PublicEndpoint[
-    (UserGroupMembershipRequest, Option[String]),
+    (UserGroupMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -328,9 +351,10 @@ object RbacEndpoints:
       .in("membership" / "user-group" / "remove")
       .in(jsonBody[UserGroupMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val addGroupRoleMembership: PublicEndpoint[
-    (GroupRoleMembershipRequest, Option[String]),
+    (GroupRoleMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -339,8 +363,9 @@ object RbacEndpoints:
       .in("membership" / "group-role" / "add")
       .in(jsonBody[GroupRoleMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
   val removeGroupRoleMembership: PublicEndpoint[
-    (GroupRoleMembershipRequest, Option[String]),
+    (GroupRoleMembershipRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -349,6 +374,7 @@ object RbacEndpoints:
       .in("membership" / "group-role" / "remove")
       .in(jsonBody[GroupRoleMembershipRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listGroupRoleMembership: PublicEndpoint[
     (String, Option[String]),
@@ -377,7 +403,7 @@ object RbacEndpoints:
       .out(jsonBody[PoolPermissionResponse])
 
   val revokePoolPermission: PublicEndpoint[
-    (PoolPermissionRevokeRequest, Option[String]),
+    (PoolPermissionRevokeRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -386,6 +412,7 @@ object RbacEndpoints:
       .in("pool" / "permission" / "revoke")
       .in(jsonBody[PoolPermissionRevokeRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val listPoolPermissions: PublicEndpoint[
     (Option[String], Option[String], Option[String], Option[String]),

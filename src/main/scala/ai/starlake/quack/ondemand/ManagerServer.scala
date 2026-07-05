@@ -187,11 +187,11 @@ final class ManagerServer(
       RbacEndpoints.createUser.serverLogic { case (req, key, cookie) =>
         users.createUser(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.updateUser.serverLogic { case (req, key) =>
-        users.updateUser(req, key)(sessions.scopeOf)
+      RbacEndpoints.updateUser.serverLogic { case (req, key, cookie) =>
+        users.updateUser(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.deleteUser.serverLogic { case (req, key) =>
-        users.deleteUser(req, key)(sessions.scopeOf)
+      RbacEndpoints.deleteUser.serverLogic { case (req, key, cookie) =>
+        users.deleteUser(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listUsers.serverLogic { case (t, key) =>
         users.listUsers(t, key)(sessions.scopeOf)
@@ -202,8 +202,8 @@ final class ManagerServer(
       RbacEndpoints.createRole.serverLogic { case (req, key, cookie) =>
         roles.createRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.deleteRole.serverLogic { case (req, key) =>
-        roles.deleteRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.deleteRole.serverLogic { case (req, key, cookie) =>
+        roles.deleteRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listRoles.serverLogic { case (t, key) =>
         roles.listRoles(t, key)(sessions.scopeOf)
@@ -211,8 +211,8 @@ final class ManagerServer(
       RbacEndpoints.grantRolePermission.serverLogic { case (req, key) =>
         roles.grantPermission(req, key)(sessions.scopeOf)
       },
-      RbacEndpoints.revokeRolePermission.serverLogic { case (req, key) =>
-        roles.revokePermission(req, key)(sessions.scopeOf)
+      RbacEndpoints.revokeRolePermission.serverLogic { case (req, key, cookie) =>
+        roles.revokePermission(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
         roles.listPermissions(roleId, key)(sessions.scopeOf)
@@ -220,29 +220,29 @@ final class ManagerServer(
       RbacEndpoints.createGroup.serverLogic { case (req, key, cookie) =>
         groups.createGroup(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.deleteGroup.serverLogic { case (req, key) =>
-        groups.deleteGroup(req, key)(sessions.scopeOf)
+      RbacEndpoints.deleteGroup.serverLogic { case (req, key, cookie) =>
+        groups.deleteGroup(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listGroups.serverLogic { case (t, key) =>
         groups.listGroups(t, key)(sessions.scopeOf)
       },
-      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, key) =>
-        memberships.addUserRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, key, cookie) =>
+        memberships.addUserRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, key) =>
-        memberships.removeUserRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, key, cookie) =>
+        memberships.removeUserRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, key) =>
-        memberships.addUserGroup(req, key)(sessions.scopeOf)
+      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, key, cookie) =>
+        memberships.addUserGroup(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, key) =>
-        memberships.removeUserGroup(req, key)(sessions.scopeOf)
+      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, key, cookie) =>
+        memberships.removeUserGroup(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, key) =>
-        memberships.addGroupRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, key, cookie) =>
+        memberships.addGroupRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, key) =>
-        memberships.removeGroupRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, key, cookie) =>
+        memberships.removeGroupRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
         memberships.listGroupRoles(groupId, key)(sessions.scopeOf)
@@ -250,32 +250,32 @@ final class ManagerServer(
       RbacEndpoints.grantPoolPermission.serverLogic { case (req, key, cookie) =>
         poolPermissions.grant(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.revokePoolPermission.serverLogic { case (req, key) =>
-        poolPermissions.revoke(req, key)(sessions.scopeOf)
+      RbacEndpoints.revokePoolPermission.serverLogic { case (req, key, cookie) =>
+        poolPermissions.revoke(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g, key) =>
         poolPermissions.list(t, u, g, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createColumnPolicy.serverLogic { case (req, key) =>
-        columnPolicies.create(req, key)(sessions.scopeOf)
+      RbacEndpoints.createColumnPolicy.serverLogic { case (req, key, cookie) =>
+        columnPolicies.create(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.updateColumnPolicy.serverLogic { case (req, key) =>
-        columnPolicies.update(req, key)(sessions.scopeOf)
+      RbacEndpoints.updateColumnPolicy.serverLogic { case (req, key, cookie) =>
+        columnPolicies.update(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, key) =>
-        columnPolicies.delete(req, key)(sessions.scopeOf)
+      RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, key, cookie) =>
+        columnPolicies.delete(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listColumnPolicies.serverLogic { case (roleId, key) =>
         columnPolicies.list(roleId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createRowPolicy.serverLogic { case (req, key) =>
-        rowPolicies.create(req, key)(sessions.scopeOf)
+      RbacEndpoints.createRowPolicy.serverLogic { case (req, key, cookie) =>
+        rowPolicies.create(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.updateRowPolicy.serverLogic { case (req, key) =>
-        rowPolicies.update(req, key)(sessions.scopeOf)
+      RbacEndpoints.updateRowPolicy.serverLogic { case (req, key, cookie) =>
+        rowPolicies.update(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, key) =>
-        rowPolicies.delete(req, key)(sessions.scopeOf)
+      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, key, cookie) =>
+        rowPolicies.delete(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.listRowPolicies.serverLogic { case (roleId, key) =>
         rowPolicies.list(roleId, key)(sessions.scopeOf)
