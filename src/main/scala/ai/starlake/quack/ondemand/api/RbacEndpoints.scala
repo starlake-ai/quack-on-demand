@@ -131,7 +131,7 @@ object RbacEndpoints:
       .out(jsonBody[RoleListResponse])
 
   val grantRolePermission: PublicEndpoint[
-    (RolePermissionGrantRequest, Option[String]),
+    (RolePermissionGrantRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     RolePermissionResponse,
     Any
@@ -140,6 +140,7 @@ object RbacEndpoints:
       .in("role" / "permission" / "grant")
       .in(jsonBody[RolePermissionGrantRequest])
       .in(apiKey)
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[RolePermissionResponse])
 
   val revokeRolePermission: PublicEndpoint[

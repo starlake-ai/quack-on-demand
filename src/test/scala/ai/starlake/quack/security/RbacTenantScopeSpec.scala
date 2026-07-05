@@ -774,6 +774,29 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
     finally h.shutdown()
   }
 
+  // (d2) grant family: role/permission/grant
+  "role/permission/grant via session cookie" should "reject a tenant-A admin granting on a tenant-B role" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body = s"""{"roleId":"$GlobexRoleId","verb":"ALL"}"""
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/role/permission/grant",
+        body,
+        cookieToken = token
+      )
+      expectForbidden(
+        resp,
+        "tenant-A admin (cookie) -> /api/role/permission/grant on tenant-B role"
+      )
+    finally h.shutdown()
+  }
+
   // (a) membership family: membership/user-role/add (gated on the user's tenant)
   "membership/user-role/add via session cookie" should "reject a tenant-A admin adding a tenant-B user to a role" in {
     val (h, _, carolId) = bootWithTwoTenants()
