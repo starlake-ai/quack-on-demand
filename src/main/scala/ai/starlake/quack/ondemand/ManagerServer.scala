@@ -208,8 +208,8 @@ final class ManagerServer(
       RbacEndpoints.listRoles.serverLogic { case (t, key) =>
         roles.listRoles(t, key)(sessions.scopeOf)
       },
-      RbacEndpoints.grantRolePermission.serverLogic { case (req, key) =>
-        roles.grantPermission(req, key)(sessions.scopeOf)
+      RbacEndpoints.grantRolePermission.serverLogic { case (req, key, cookie) =>
+        roles.grantPermission(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.revokeRolePermission.serverLogic { case (req, key, cookie) =>
         roles.revokePermission(req, key.orElse(cookie))(sessions.scopeOf)
