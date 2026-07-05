@@ -248,8 +248,9 @@ final class PostgresControlPlaneStore(
       """INSERT INTO qodstate_pool
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
-        |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
+        |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
+        |   cpu, memory, pod_template_yaml)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -262,7 +263,10 @@ final class PostgresControlPlaneStore(
         |  idle_timeout_sec        = EXCLUDED.idle_timeout_sec,
         |  disabled                = EXCLUDED.disabled,
         |  cohorts                 = EXCLUDED.cohorts,
-        |  init_sql                = EXCLUDED.init_sql""".stripMargin
+        |  init_sql                = EXCLUDED.init_sql,
+        |  cpu                     = EXCLUDED.cpu,
+        |  memory                  = EXCLUDED.memory,
+        |  pod_template_yaml       = EXCLUDED.pod_template_yaml""".stripMargin
     )
     try
       ps.setString(1, p.id)
@@ -280,6 +284,9 @@ final class PostgresControlPlaneStore(
       ps.setBoolean(11, p.disabled)
       ps.setString(12, PostgresControlPlaneStore.cohortsToJson(p.cohorts))
       ps.setString(13, p.initSql)
+      ps.setString(14, p.cpu)
+      ps.setString(15, p.memory)
+      ps.setString(16, p.podTemplateYaml)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -288,7 +295,8 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
-        |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql
+        |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
+        |       cpu, memory, pod_template_yaml
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -319,7 +327,10 @@ final class PostgresControlPlaneStore(
       disabled = rs.getBoolean("disabled"),
       cohorts = PostgresControlPlaneStore.cohortsFromJson(rs.getString("cohorts")),
       // Column added in changeset 27; NULL on older rows -> default to "".
-      initSql = Option(rs.getString("init_sql")).getOrElse("")
+      initSql = Option(rs.getString("init_sql")).getOrElse(""),
+      cpu = Option(rs.getString("cpu")).getOrElse(""),
+      memory = Option(rs.getString("memory")).getOrElse(""),
+      podTemplateYaml = Option(rs.getString("pod_template_yaml")).getOrElse("")
     )
 
   // ---------------- Node ----------------
@@ -1344,7 +1355,7 @@ final class PostgresControlPlaneStore(
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(

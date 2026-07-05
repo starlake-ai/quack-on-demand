@@ -1,0 +1,26 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0017-qodstate-pool-resources
+      author: quack-on-demand
+      changes:
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name:         cpu
+                  type:         TEXT
+                  defaultValue: ""
+                  constraints:
+                    nullable: false
+              - column:
+                  name:         memory
+                  type:         TEXT
+                  defaultValue: ""
+                  constraints:
+                    nullable: false
+              - column:
+                  name:         pod_template_yaml
+                  type:         TEXT
+                  defaultValue: ""
+                  constraints:
+                    nullable: false
