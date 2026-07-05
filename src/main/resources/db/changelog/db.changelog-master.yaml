@@ -37,3 +37,5 @@ databaseChangeLog:
       file: db/changelog/0015-node-quarantined.yaml
   - include:
       file: db/changelog/0016-tenant-db-init-sql.yaml
+  - include:
+      file: db/changelog/0017-pool-resources.yaml

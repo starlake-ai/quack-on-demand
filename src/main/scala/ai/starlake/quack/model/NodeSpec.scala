@@ -20,5 +20,8 @@ final case class NodeSpec(
     // K8s scheduling hint inherited from the node's cohort. None / empty
     // = no placement constraint (default scheduler decides). Backends
     // other than KubernetesQuackBackend ignore this field.
-    placement: NodePlacement = NodePlacement.empty
+    placement: NodePlacement = NodePlacement.empty,
+    cpu: Option[String] = None,
+    memory: Option[String] = None,
+    podTemplateYaml: Option[String] = None
 )

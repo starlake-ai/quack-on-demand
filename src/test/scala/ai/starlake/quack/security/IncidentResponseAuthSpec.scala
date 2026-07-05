@@ -338,3 +338,33 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
+
+  // Cookie transport: pool/setPodTemplate must read the qod_session cookie.
+  // Before the fix the endpoint had no cookie input, so apiKey=None reached
+  // the handler and SuperuserCheck was bypassed (returning None = admit),
+  // then the feature-disabled gate fired with 400. After the fix the cookie
+  // is bound, key.orElse(cookie) = Some(aliceToken), and SuperuserCheck
+  // fires -> 403 superuser_required.
+
+  "pool/setPodTemplate via session cookie" should "reject a tenant-admin with 403 superuser_required" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val body =
+        s"""{"tenant":"${SecurityFixtures.TenantId}","tenantDb":"${SecurityFixtures.TenantDbName}","pool":"${SecurityFixtures.PoolName}","podTemplateYaml":"apiVersion: v1\\nkind: Pod"}"""
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/pool/setPodTemplate",
+        body,
+        cookieToken = token
+      )
+      withClue(s"tenant admin (cookie) -> /pool/setPodTemplate body: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+      }
+    finally h.shutdown()
+  }

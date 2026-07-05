@@ -11,6 +11,7 @@ import CohortEditor, {
   PlacementUnsupportedWarning,
 } from './CohortEditor';
 
+
 /** Pools card for the TenantDetail page. Mirrors DatabaseSection's
   * shape: list pools, plus an inline "+ New pool" form that opens
   * below the table instead of navigating to a dedicated route. */
@@ -48,6 +49,11 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   // Operator-authored per-pool init SQL prepended to the federation blob
   // at node spawn (PRAGMAs / SET / INSTALL / LOAD). Empty by default.
   const [initSql, setInitSql] = useState('');
+  // Kubernetes pod resource limits. Checkbox enables; slider sets the value.
+  const [cpuEnabled, setCpuEnabled] = useState(false);
+  const [cpuSlider, setCpuSlider]   = useState(2);
+  const [memEnabled, setMemEnabled] = useState(false);
+  const [memSlider, setMemSlider]   = useState(8);
 
   // Placement plan. Always available; on non-K8s backends the cohorts
   // are persisted so a YAML export still survives, but the runtime
@@ -157,6 +163,10 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     setCohorts([emptyCohort()]);
     setCreateDisabled(false);
     setInitSql('');
+    setCpuEnabled(false);
+    setCpuSlider(2);
+    setMemEnabled(false);
+    setMemSlider(8);
     setError(null);
     if (tenantDbs.length > 0) setTenantDb(tenantDbs[0].name);
   }
@@ -207,6 +217,8 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         ...(wireCohorts ? { cohorts: wireCohorts } : {}),
         ...(createDisabled ? { disabled: true } : {}),
         ...(initSql.trim() ? { initSql: initSql.trim() } : {}),
+        ...(cpuEnabled ? { cpu: String(cpuSlider) } : {}),
+        ...(memEnabled ? { memory: `${memSlider}Gi` } : {}),
       });
       const justCreated = { tenantDb, pool: poolName };
       setAdding(false);
@@ -417,6 +429,56 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               {maxConcurrent === 0 && (
                 <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>(0 = unlimited)</p>
               )}
+              <div className="row" style={{ gap: 20, alignItems: 'flex-start', marginTop: '.5rem', flexWrap: 'wrap' }}>
+                <div>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={cpuEnabled}
+                      onChange={ev => setCpuEnabled(ev.target.checked)}
+                    />
+                    CPU limit
+                  </label>
+                  {cpuEnabled && (
+                    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={16}
+                        step={0.5}
+                        value={cpuSlider}
+                        onChange={ev => setCpuSlider(Number(ev.target.value))}
+                        style={{ width: 140 }}
+                      />
+                      <span className="subtle">{cpuSlider} cores</span>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={memEnabled}
+                      onChange={ev => setMemEnabled(ev.target.checked)}
+                    />
+                    Memory limit
+                  </label>
+                  {memEnabled && (
+                    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                      <input
+                        type="range"
+                        min={1}
+                        max={64}
+                        step={1}
+                        value={memSlider}
+                        onChange={ev => setMemSlider(Number(ev.target.value))}
+                        style={{ width: 140 }}
+                      />
+                      <span className="subtle">{memSlider} Gi</span>
+                    </div>
+                  )}
+                </div>
+              </div>
               <label style={{ display: 'block', marginTop: '.5rem' }}>
                 <input
                   type="checkbox"
