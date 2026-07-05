@@ -1,7 +1,8 @@
 // src/test/scala/ai/starlake/quack/security/RbacTenantScopeSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.edge.StatementRecord
+import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   PoolPermission,
@@ -17,6 +18,7 @@ import org.scalatest.matchers.should.Matchers
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 
 /** Cross-tenant authZ on the RBAC REST surface.
   *
@@ -40,6 +42,9 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
   private val GlobexGroupId  = "g-globex01"
   private val GlobexPoolPerm = "pp-globex01" // group-scoped, no pool (covers all pools in tenant)
 
+  private val GlobexTenantDbId = "td-globex01"
+  private val GlobexPoolId     = "p-globex01"
+
   private val CarolUser     = "carol"
   private val CarolPassword = "carolpw"
 
@@ -57,6 +62,31 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
         id = GlobexTenantId,
         displayName = "globex",
         authProvider = "db"
+      )
+    )
+    // Seed a TenantDb and Pool for globex so pool/list tests have a real globex
+    // pool in the supervisor snapshot. Without these, the pool/list cross-tenant
+    // scoping test would pass trivially (empty list never contains the globex id).
+    s.upsertTenantDb(
+      TenantDb(
+        id = GlobexTenantDbId,
+        tenantId = GlobexTenantId,
+        name = "globex_main",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+    )
+    s.upsertPool(
+      Pool(
+        id = GlobexPoolId,
+        tenantId = GlobexTenantId,
+        tenantDbId = GlobexTenantDbId,
+        name = "bi",
+        size = 1,
+        distribution = RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
+        maxConcurrentPerNode = 0,
+        disabled = false
       )
     )
     s.upsertRole(
@@ -946,9 +976,13 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       )
       val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/pool/list", token)
       withClue(s"tenant-A admin (cookie) -> /api/pool/list: ${resp.body()}") {
-        // No pools in the fixture; confirms 200 and that globex pools are absent.
+        // addTenantB seeds a globex pool (tenant id = GlobexTenantId in the response).
+        // Post-fix: acme admin's cookie is resolved; only acme pools returned.
+        // The acme pool (tenant field = SecurityFixtures.TenantId) is present;
+        // the globex pool (tenant field = GlobexTenantId) is filtered out.
         resp.statusCode() shouldBe 200
-        resp.body() should not include "globex"
+        resp.body() should include(SecurityFixtures.TenantId)
+        resp.body() should not include GlobexTenantId
       }
     finally h.shutdown()
   }
@@ -956,6 +990,35 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
   "node/statements via session cookie" should "scope the result to the calling session's tenant" in {
     val (h, _, _) = bootWithTwoTenants()
     try
+      // Seed one acme statement and one globex statement so the tenant filter has
+      // real data to act on. Without seeding, the ring buffer is empty and the
+      // assertion would pass trivially regardless of whether filtering is applied.
+      h.stmtHistory.record(
+        StatementRecord(
+          ts = Instant.EPOCH,
+          user = SecurityFixtures.AliceUsername,
+          tenant = SecurityFixtures.TenantId,
+          pool = SecurityFixtures.PoolName,
+          nodeId = "n-acme-01",
+          sql = "SELECT 1",
+          durationMs = 1L,
+          status = "ok",
+          error = None
+        )
+      )
+      h.stmtHistory.record(
+        StatementRecord(
+          ts = Instant.EPOCH,
+          user = CarolUser,
+          tenant = GlobexTenantId,
+          pool = "bi",
+          nodeId = "n-globex-01",
+          sql = "SELECT 2",
+          durationMs = 1L,
+          status = "ok",
+          error = None
+        )
+      )
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,
         SecurityFixtures.AlicePassword,
@@ -963,8 +1026,11 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       )
       val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/node/statements", token)
       withClue(s"tenant-A admin (cookie) -> /api/node/statements: ${resp.body()}") {
-        // Ring buffer is empty in unit tests; confirms 200 and no globex tenant rows.
+        // Post-fix: acme admin's cookie resolves to an acme session.
+        // The acme statement (tenant = SecurityFixtures.TenantId) is included.
+        // The globex statement (tenant = GlobexTenantId) is filtered out.
         resp.statusCode() shouldBe 200
+        resp.body() should include(SecurityFixtures.TenantId)
         resp.body() should not include GlobexTenantId
       }
     finally h.shutdown()
