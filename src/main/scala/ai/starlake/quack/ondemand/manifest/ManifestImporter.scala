@@ -330,7 +330,10 @@ object ManifestImporter:
               maxConcurrentPerNode = mp.maxConcurrentPerNode,
               disabled = mp.disabled,
               cohorts = cohorts,
-              initSql = mp.initSql
+              initSql = mp.initSql,
+              cpu = mp.cpu,
+              memory = mp.memory,
+              podTemplateYaml = mp.podTemplateYaml
             )
             store.upsertPool(upserted)
             localPools.put(mp.name, upserted)

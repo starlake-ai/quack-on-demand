@@ -73,6 +73,7 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
   container's env contract, and resources onto it, so sidecars/volumes/affinity
   are expressible while adoption and routing keep working. Applies on next node
   spawn. The local backend ignores these (Kubernetes-only).
+- **Manifest round-trips pod sizing and templates.** Manifest export/import now carries per-pool `cpu`, `memory`, and `podTemplateYaml`; previously they were dropped, so a backup/restore silently lost pod sizing and the pod template. Verbatim round-trip (non-secret operator config); the manifest is superuser-only.
 
 ### Database configuration
 

@@ -68,7 +68,12 @@ final case class ManifestPool(
       * spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL / LOAD live here; ATTACH
       * aliases live on federated sources. Empty by default.
       */
-    initSql: String = ""
+    initSql: String = "",
+    // Kubernetes node-pod sizing (request=limit) and full pod template, round-tripped verbatim.
+    // Non-secret operator config; empty by default. Kubernetes-only, ignored by the local backend.
+    cpu: String = "",
+    memory: String = "",
+    podTemplateYaml: String = ""
 )
 
 final case class ManifestTenant(
@@ -284,6 +289,9 @@ object ConfigManifest:
         disabled             <- c.getOrElse[Boolean]("disabled")(false)
         cohorts              <- c.getOrElse[List[ManifestPoolCohort]]("cohorts")(Nil)
         initSql              <- c.getOrElse[String]("initSql")("")
+        cpu                  <- c.getOrElse[String]("cpu")("")
+        memory               <- c.getOrElse[String]("memory")("")
+        podTemplateYaml      <- c.getOrElse[String]("podTemplateYaml")("")
       yield ManifestPool(
         name,
         tenantDb,
@@ -291,7 +299,10 @@ object ConfigManifest:
         maxConcurrentPerNode,
         disabled,
         cohorts,
-        initSql
+        initSql,
+        cpu,
+        memory,
+        podTemplateYaml
       )
     },
     deriveEncoder[ManifestPool]
