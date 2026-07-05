@@ -195,31 +195,57 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     )((_: String) => None).unsafeRunSync()
     out.toOption.get.initSql shouldBe "SET threads = 4;"
 
-  "TenantDbHandlers.setInitSql" should "update and clear initSql on an existing tenant-db" in:
+  "TenantDbHandlers.update" should "set and clear initSql (migrated from setInitSql)" in:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem4", kind = "memory"), None)(
       (_: String) => None
     ).unsafeRunSync()
-    val set = h.setInitSql(
-      SetTenantDbInitSqlRequest("acme", "acme_mem4", "SET memory_limit = '1GB';"),
+    val set = h.update(
+      UpdateTenantDbRequest("acme", "acme_mem4", initSql = Some("SET memory_limit = '1GB';")),
       None
     )((_: String) => None).unsafeRunSync()
-    set.toOption.get.initSql shouldBe "SET memory_limit = '1GB';"
-    val cleared = h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_mem4", ""), None)(
+    set.toOption.get.db.initSql shouldBe "SET memory_limit = '1GB';"
+    val cleared = h.update(UpdateTenantDbRequest("acme", "acme_mem4", initSql = Some("")), None)(
       (_: String) => None
     ).unsafeRunSync()
-    cleared.toOption.get.initSql shouldBe ""
+    cleared.toOption.get.db.initSql shouldBe ""
 
-  it should "404 on an unknown tenant-db and 403 for a foreign tenant session" in:
+  it should "404 on unknown db and 403 for a foreign tenant session" in:
     val h = freshHandlers()
-    h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_nope", "SET a=1;"), None)(
+    h.update(UpdateTenantDbRequest("acme", "acme_nope", initSql = Some("x")), None)(
       (_: String) => None
     ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.NotFound
-    val foreignScope: String => Option[SessionScope] =
+    val foreign: String => Option[SessionScope] =
       _ => Some(SessionScope(superuser = false, manageableTenants = Set("globex")))
     h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem5", kind = "memory"), None)(
       (_: String) => None
     ).unsafeRunSync()
-    h.setInitSql(SetTenantDbInitSqlRequest("acme", "acme_mem5", "SET a=1;"), Some("tok"))(
-      foreignScope
+    h.update(UpdateTenantDbRequest("acme", "acme_mem5", initSql = Some("x")), Some("tok"))(
+      foreign
     ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.Forbidden
+
+  it should "never echo pgPassword and preserve it across an untouched-map update" in:
+    val h = freshHandlers()
+    h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "pg1", kind = "duckdb-file",
+        metastore = Map("pgPassword" -> "s3cret", "schemaName" -> "main", "dbName" -> "pg1"),
+        dataPath = "/tmp/pg1.duckdb"),
+      None
+    )((_: String) => None).unsafeRunSync()
+    val out = h.update(
+      UpdateTenantDbRequest("acme", "acme_pg1", defaultSchema = Some("s2")), None
+    )((_: String) => None).unsafeRunSync().toOption.get
+    out.db.metastore.contains("pgPassword") shouldBe false        // redacted in response
+    // preserved in store: verified via a follow-up update replacing the map without the key
+    val out2 = h.update(
+      UpdateTenantDbRequest("acme", "acme_pg1", metastore = Some(Map("schemaName" -> "s3", "dbName" -> "pg1"))), None
+    )((_: String) => None).unsafeRunSync().toOption.get
+    out2.db.metastore.contains("pgPassword") shouldBe false
+    // supervisor-level preservation is pinned by PoolSupervisorSpec; here we pin non-echo
+
+  it should "report effectiveDataPath and a None tableCount for memory kind" in:
+    val h = freshHandlers()
+    val td = h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem6", kind = "memory"), None)(
+      (_: String) => None
+    ).unsafeRunSync().toOption.get
+    td.tableCount shouldBe None

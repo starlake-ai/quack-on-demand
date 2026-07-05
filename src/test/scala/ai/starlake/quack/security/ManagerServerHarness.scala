@@ -283,7 +283,7 @@ object ManagerServerHarness:
     val nodes =
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     val tenants   = new TenantHandlers(sup)
-    val tenantDbs = new TenantDbHandlers(sup, federatedStore = None)
+    val tenantDbs = new TenantDbHandlers(sup, federatedStore = None, catalog = None)
     val health    = new HealthHandler(sup)
 
     val liveConfig    = ConfigFactory.load()

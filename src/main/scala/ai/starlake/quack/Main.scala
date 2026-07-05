@@ -342,24 +342,6 @@ object Main extends IOApp with LazyLogging:
       Some(tenantOidcRegistry)
     )
 
-    val pools     = new PoolHandlers(sup, tracker, engineStatsTracker)
-    val nodes     = new NodeHandlers(sup, tracker, store, publisher)
-    val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
-    val tenantDbs = new TenantDbHandlers(sup, manifestFedStore)
-
-    val healthCache =
-      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
-    def dbHealthy(): Boolean =
-      val (ts, ok) = healthCache.get()
-      val now      = System.nanoTime()
-      if now - ts < 5_000_000_000L then ok
-      else
-        val fresh = store.ping()
-        healthCache.set((now, fresh))
-        fresh
-
-    val health = new HealthHandler(sup, dbHealthy)
-
     // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
     // Postgres metastore. One reader per tenant, cached so we don't reopen
@@ -375,6 +357,24 @@ object Main extends IOApp with LazyLogging:
       def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(new CatalogHandlers(reader, kindOf))
+
+    val pools     = new PoolHandlers(sup, tracker, engineStatsTracker)
+    val nodes     = new NodeHandlers(sup, tracker, store, publisher)
+    val tenants   = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
+    val tenantDbs = new TenantDbHandlers(sup, manifestFedStore, catalog = catalogHandlers)
+
+    val healthCache =
+      new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
+    def dbHealthy(): Boolean =
+      val (ts, ok) = healthCache.get()
+      val now      = System.nanoTime()
+      if now - ts < 5_000_000_000L then ok
+      else
+        val fresh = store.ping()
+        healthCache.set((now, fresh))
+        fresh
+
+    val health = new HealthHandler(sup, dbHealthy)
 
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
       logger.warn(

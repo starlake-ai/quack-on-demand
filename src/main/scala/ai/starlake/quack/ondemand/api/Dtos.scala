@@ -282,11 +282,32 @@ final case class TenantDbResponse(
     defaultSchema: Option[String] = None,
     disabled: Boolean = false,
     federatedSourceCount: Int = 0,
-    initSql: String = ""
+    initSql: String = "",
+    // Resolved data path (stored value, or default base + db name when stored
+    // is empty), so the UI can show the real location instead of a dash.
+    effectiveDataPath: String = "",
+    // Tables across all schemas via the DuckLake catalog reader; None for
+    // non-DuckLake kinds or when the catalog is unreachable.
+    tableCount: Option[Int] = None
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
-final case class SetTenantDbInitSqlRequest(tenant: String, name: String, initSql: String)
+
+final case class UpdateTenantDbRequest(
+    tenant: String,
+    name: String,
+    metastore: Option[Map[String, String]] = None,
+    objectStore: Option[Map[String, String]] = None,
+    defaultDatabase: Option[String] = None,
+    defaultSchema: Option[String] = None,
+    initSql: Option[String] = None
+)
+final case class FailedRestart(nodeId: String, message: String)
+final case class UpdateTenantDbResponse(
+    db: TenantDbResponse,
+    restartedNodes: List[String] = Nil,
+    failedRestarts: List[FailedRestart] = Nil
+)
 
 // ----- Federation -----
 
@@ -910,10 +931,12 @@ object Dtos:
     },
     io.circe.generic.semiauto.deriveEncoder[TenantDbRequest]
   )
-  given Codec[TenantDbResponse]          = deriveCodec
-  given Codec[TenantDbListResponse]      = deriveCodec
-  given Codec[TenantDbOpRequest]         = deriveCodec
-  given Codec[SetTenantDbInitSqlRequest] = deriveCodec
+  given Codec[TenantDbResponse]       = deriveCodec
+  given Codec[TenantDbListResponse]   = deriveCodec
+  given Codec[TenantDbOpRequest]      = deriveCodec
+  given Codec[UpdateTenantDbRequest]  = deriveCodec
+  given Codec[FailedRestart]          = deriveCodec
+  given Codec[UpdateTenantDbResponse] = deriveCodec
 
   given Codec[LoginRequest] = deriveCodec
   // Hand-rolled so new optional fields fall back to defaults when absent on the wire,

@@ -873,16 +873,6 @@ final class PoolSupervisor(
     }
     explicit ++ carried
 
-  /** Forwarding shim for Task-2 compatibility; replaced by the handler calling updateTenantDb
-    * directly once the REST layer is updated.
-    */
-  def setTenantDbInitSql(
-      tenantName: String,
-      dbName: String,
-      initSql: String
-  ): IO[Either[String, TenantDb]] =
-    updateTenantDb(tenantName, dbName, TenantDbPatch(initSql = Some(initSql))).map(_.map(_.td))
-
   // ---------- Pool API ----------
 
   /** Create a pool under an existing tenant-db. The tenant-db's metastore + objectStore are the

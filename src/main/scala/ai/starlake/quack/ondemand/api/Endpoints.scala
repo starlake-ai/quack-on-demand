@@ -296,17 +296,17 @@ object Endpoints:
       .in(jsonBody[TenantDbOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
-  val setTenantDbInitSql: PublicEndpoint[
-    (SetTenantDbInitSqlRequest, Option[String]),
+  val updateTenantDb: PublicEndpoint[
+    (UpdateTenantDbRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
-    TenantDbResponse,
+    UpdateTenantDbResponse,
     Any
   ] =
     base.post
-      .in("database" / "setInitSql")
-      .in(jsonBody[SetTenantDbInitSqlRequest])
+      .in("database" / "update")
+      .in(jsonBody[UpdateTenantDbRequest])
       .in(header[Option[String]]("X-API-Key"))
-      .out(jsonBody[TenantDbResponse])
+      .out(jsonBody[UpdateTenantDbResponse])
 
   // ----- UI login -----
   // Login also sets the qod_session cookie (HttpOnly, SameSite=Lax) so the
