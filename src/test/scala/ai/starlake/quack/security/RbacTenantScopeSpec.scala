@@ -1105,10 +1105,12 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/user/list", token)
       withClue(s"tenant-A admin (cookie) -> /api/user/list: ${resp.body()}") {
         resp.statusCode() shouldBe 200
-        // carol (globex user) is seeded by addTenantB; her UserResponse.tenant = GlobexTenantId.
-        // Pre-fix: apiKey=None -> None arm -> no filter -> "t-globex01" leaks in the body.
+        // carol (globex user) is seeded by addTenantB; UserResponse serializes her
+        // username verbatim (the tenant field is the display name, not the id, so
+        // GlobexTenantId would never appear and cannot detect the leak).
+        // Pre-fix: apiKey=None -> None arm -> no filter -> carol leaks in the body.
         // Post-fix: cookie resolves to acme scope; handler filters to acme users only.
-        resp.body() should not include GlobexTenantId
+        resp.body() should not include CarolUser
         // alice is in acme -- verify a real scoped result is returned, not an empty list.
         resp.body() should include(SecurityFixtures.AliceUsername)
       }
