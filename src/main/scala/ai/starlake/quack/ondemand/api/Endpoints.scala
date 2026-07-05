@@ -33,8 +33,17 @@ object Endpoints:
     .in("api")
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
+  // Secured endpoints accept the session token via either the X-API-Key header
+  // (CLI / static key) or the qod_session cookie (browser). Resolved to one
+  // Option[String], header taking precedence. Using this input means an endpoint
+  // physically cannot forget the cookie transport.
+  val authToken: sttp.tapir.EndpointInput[Option[String]] =
+    header[Option[String]]("X-API-Key")
+      .and(cookie[Option[String]](SessionTokenStore.CookieName))
+      .map { case (h, c) => h.orElse(c) }(t => (t, None))
+
   val createPool: PublicEndpoint[
-    (CreatePoolRequest, Option[String], Option[String]),
+    (CreatePoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -42,12 +51,11 @@ object Endpoints:
     base.post
       .in("pool" / "create")
       .in(jsonBody[CreatePoolRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   val scalePool: PublicEndpoint[
-    (ScalePoolRequest, Option[String], Option[String]),
+    (ScalePoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -55,12 +63,11 @@ object Endpoints:
     base.post
       .in("pool" / "scale")
       .in(jsonBody[ScalePoolRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   val stopPool: PublicEndpoint[
-    (StopPoolRequest, Option[String], Option[String]),
+    (StopPoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -68,11 +75,10 @@ object Endpoints:
     base.post
       .in("pool" / "stop")
       .in(jsonBody[StopPoolRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val deletePool: PublicEndpoint[
-    (DeletePoolRequest, Option[String], Option[String]),
+    (DeletePoolRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -80,19 +86,17 @@ object Endpoints:
     base.post
       .in("pool" / "delete")
       .in(jsonBody[DeletePoolRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val listPools: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     PoolListResponse,
     Any
   ] =
     base.get
       .in("pool" / "list")
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolListResponse])
 
   val poolStatus: PublicEndpoint[
@@ -108,7 +112,7 @@ object Endpoints:
       .out(jsonBody[PoolResponse])
 
   val setMaxConcurrent: PublicEndpoint[
-    (SetMaxConcurrentRequest, Option[String], Option[String]),
+    (SetMaxConcurrentRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -116,11 +120,10 @@ object Endpoints:
     base.post
       .in("node" / "setMaxConcurrent")
       .in(jsonBody[SetMaxConcurrentRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val quarantineNode: PublicEndpoint[
-    (NodeOpRequest, Option[String], Option[String]),
+    (NodeOpRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -128,12 +131,10 @@ object Endpoints:
     base.post
       .in("node" / "quarantine")
       .in(jsonBody[NodeOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val unquarantineNode: PublicEndpoint[
-    (NodeOpRequest, Option[String], Option[String]),
+    (NodeOpRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -141,12 +142,10 @@ object Endpoints:
     base.post
       .in("node" / "unquarantine")
       .in(jsonBody[NodeOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val restartNode: PublicEndpoint[
-    (NodeOpRequest, Option[String], Option[String]),
+    (NodeOpRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -154,9 +153,7 @@ object Endpoints:
     base.post
       .in("node" / "restart")
       .in(jsonBody[NodeOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   /** Liveness probe: always 200 while the JVM is alive. No Postgres gate. */
   val health: PublicEndpoint[Unit, sttp.model.StatusCode, HealthResponse, Any] =
@@ -185,32 +182,30 @@ object Endpoints:
     * can't list cross-tenant config even with a stolen URL.
     */
   val serverConfig: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     ConfigListResponse,
     Any
   ] =
     base.get
       .in("config" / "server")
-      .in(sttp.tapir.header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[ConfigListResponse])
 
   val manifestExport: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     String,
     Any
   ] =
     base.get
       .in("manifest" / "export")
-      .in(sttp.tapir.header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(stringBody)
       .out(header("Content-Type", "application/yaml"))
 
   val manifestImport: PublicEndpoint[
-    (String, Option[String], Option[String]),
+    (String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     ManifestImportSummary,
     Any
@@ -218,12 +213,11 @@ object Endpoints:
     base.post
       .in("manifest" / "import")
       .in(stringBody)
-      .in(sttp.tapir.header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[ManifestImportSummary])
 
   val createTenant: PublicEndpoint[
-    (TenantRequest, Option[String], Option[String]),
+    (TenantRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -231,24 +225,22 @@ object Endpoints:
     base.post
       .in("tenant" / "create")
       .in(jsonBody[TenantRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[TenantResponse])
 
   val listTenants: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     TenantListResponse,
     Any
   ] =
     base.get
       .in("tenant" / "list")
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[TenantListResponse])
 
   val deleteTenant: PublicEndpoint[
-    (TenantOpRequest, Option[String], Option[String]),
+    (TenantOpRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -256,11 +248,10 @@ object Endpoints:
     base.post
       .in("tenant" / "delete")
       .in(jsonBody[TenantOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val setTenantDisabled: PublicEndpoint[
-    (SetTenantDisabledRequest, Option[String], Option[String]),
+    (SetTenantDisabledRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -268,12 +259,11 @@ object Endpoints:
     base.post
       .in("tenant" / "setDisabled")
       .in(jsonBody[SetTenantDisabledRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[TenantResponse])
 
   val setTenantAuth: PublicEndpoint[
-    (SetTenantAuthRequest, Option[String], Option[String]),
+    (SetTenantAuthRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -281,12 +271,11 @@ object Endpoints:
     base.post
       .in("tenant" / "setAuth")
       .in(jsonBody[SetTenantAuthRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[TenantResponse])
 
   val setPoolDisabled: PublicEndpoint[
-    (SetPoolDisabledRequest, Option[String], Option[String]),
+    (SetPoolDisabledRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -294,12 +283,11 @@ object Endpoints:
     base.post
       .in("pool" / "setDisabled")
       .in(jsonBody[SetPoolDisabledRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   val setPoolResources: PublicEndpoint[
-    (SetPoolResourcesRequest, Option[String], Option[String]),
+    (SetPoolResourcesRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -307,13 +295,11 @@ object Endpoints:
     base.post
       .in("pool" / "setResources")
       .in(jsonBody[SetPoolResourcesRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   val setPoolTemplate: PublicEndpoint[
-    (SetPoolTemplateRequest, Option[String], Option[String]),
+    (SetPoolTemplateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     PoolResponse,
     Any
@@ -321,14 +307,12 @@ object Endpoints:
     base.post
       .in("pool" / "setPodTemplate")
       .in(jsonBody[SetPoolTemplateRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[PoolResponse])
 
   // ----- Tenant databases -----
   val createTenantDb: PublicEndpoint[
-    (TenantDbRequest, Option[String], Option[String]),
+    (TenantDbRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantDbResponse,
     Any
@@ -336,8 +320,7 @@ object Endpoints:
     base.post
       .in("database" / "create")
       .in(jsonBody[TenantDbRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[TenantDbResponse])
 
   val listTenantDbs
@@ -345,7 +328,7 @@ object Endpoints:
     base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
 
   val deleteTenantDb: PublicEndpoint[
-    (TenantDbOpRequest, Option[String], Option[String]),
+    (TenantDbOpRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -353,11 +336,10 @@ object Endpoints:
     base.post
       .in("database" / "delete")
       .in(jsonBody[TenantDbOpRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
 
   val updateTenantDb: PublicEndpoint[
-    (UpdateTenantDbRequest, Option[String], Option[String]),
+    (UpdateTenantDbRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UpdateTenantDbResponse,
     Any
@@ -365,8 +347,7 @@ object Endpoints:
     base.post
       .in("database" / "update")
       .in(jsonBody[UpdateTenantDbRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[UpdateTenantDbResponse])
 
   // ----- UI login -----
@@ -415,15 +396,14 @@ object Endpoints:
       .out(setCookie(SessionTokenStore.CookieName))
 
   val whoami: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     WhoamiResponse,
     Any
   ] =
     base.get
       .in("auth" / "whoami")
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[WhoamiResponse])
 
   // Unauthenticated: the SPA calls this before login (tenant from the URL) to decide whether to
@@ -533,7 +513,7 @@ object Endpoints:
   // the calling session's `manageableTenants` (superuser / static-key / open
   // mode return the unfiltered window).
   val statementHistory: PublicEndpoint[
-    (Option[Int], Option[String], Option[String]),
+    (Option[Int], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     StatementHistoryResponse,
     Any
@@ -541,8 +521,7 @@ object Endpoints:
     base.get
       .in("node" / "statements")
       .in(query[Option[Int]]("limit"))
-      .in(header[Option[String]]("X-API-Key"))
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[StatementHistoryResponse])
 
   // ----- Federated sources -----
@@ -651,20 +630,18 @@ object Endpoints:
       .description("Get one table's columns + parquet data files.")
 
   val activeStatements: PublicEndpoint[
-    (Option[String], Option[String]),
+    Option[String],
     (sttp.model.StatusCode, ErrorResponse),
     ActiveStatementsResponse,
     Any
   ] =
     base.get
       .in("node" / "active-statements")
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[ActiveStatementsResponse])
 
   val killStatement: PublicEndpoint[
-    (KillStatementRequest, Option[String], Option[String]),
+    (KillStatementRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     KillStatementResponse,
     Any
@@ -672,7 +649,5 @@ object Endpoints:
     base.post
       .in("statement" / "kill")
       .in(jsonBody[KillStatementRequest])
-      .in(header[Option[String]]("X-API-Key"))
-      // SessionTokenStore.CookieName = "qod_session"
-      .in(cookie[Option[String]](SessionTokenStore.CookieName))
+      .in(authToken)
       .out(jsonBody[KillStatementResponse])

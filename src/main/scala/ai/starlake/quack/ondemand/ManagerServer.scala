@@ -163,10 +163,10 @@ final class ManagerServer(
       Endpoints.logout.serverLogic { case (apiKey, cookie, proto) =>
         auth.logout(apiKey, cookie, proto)
       },
-      Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
+      Endpoints.whoami.serverLogic(token => auth.whoami(token, None)),
       Endpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
-      Endpoints.statementHistory.serverLogic { case (limit, key, cookie) =>
-        statementHistory.recent(limit, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.statementHistory.serverLogic { case (limit, token) =>
+        statementHistory.recent(limit, token)(sessions.scopeOf)
       },
       Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
         auth.oidcStart(tenant, returnTo, proto)
@@ -184,14 +184,14 @@ final class ManagerServer(
     )
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      RbacEndpoints.createUser.serverLogic { case (req, key, cookie) =>
-        users.createUser(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.createUser.serverLogic { case (req, token) =>
+        users.createUser(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.updateUser.serverLogic { case (req, key, cookie) =>
-        users.updateUser(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.updateUser.serverLogic { case (req, token) =>
+        users.updateUser(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.deleteUser.serverLogic { case (req, key, cookie) =>
-        users.deleteUser(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.deleteUser.serverLogic { case (req, token) =>
+        users.deleteUser(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listUsers.serverLogic { case (t, key) =>
         users.listUsers(t, key)(sessions.scopeOf)
@@ -199,83 +199,83 @@ final class ManagerServer(
       RbacEndpoints.effectivePermissions.serverLogic { case (id, key) =>
         users.effective(id, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createRole.serverLogic { case (req, key, cookie) =>
-        roles.createRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.createRole.serverLogic { case (req, token) =>
+        roles.createRole(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.deleteRole.serverLogic { case (req, key, cookie) =>
-        roles.deleteRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.deleteRole.serverLogic { case (req, token) =>
+        roles.deleteRole(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listRoles.serverLogic { case (t, key) =>
         roles.listRoles(t, key)(sessions.scopeOf)
       },
-      RbacEndpoints.grantRolePermission.serverLogic { case (req, key, cookie) =>
-        roles.grantPermission(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.grantRolePermission.serverLogic { case (req, token) =>
+        roles.grantPermission(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.revokeRolePermission.serverLogic { case (req, key, cookie) =>
-        roles.revokePermission(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.revokeRolePermission.serverLogic { case (req, token) =>
+        roles.revokePermission(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
         roles.listPermissions(roleId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createGroup.serverLogic { case (req, key, cookie) =>
-        groups.createGroup(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.createGroup.serverLogic { case (req, token) =>
+        groups.createGroup(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.deleteGroup.serverLogic { case (req, key, cookie) =>
-        groups.deleteGroup(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.deleteGroup.serverLogic { case (req, token) =>
+        groups.deleteGroup(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listGroups.serverLogic { case (t, key) =>
         groups.listGroups(t, key)(sessions.scopeOf)
       },
-      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, key, cookie) =>
-        memberships.addUserRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.addUserRoleMembership.serverLogic { case (req, token) =>
+        memberships.addUserRole(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, key, cookie) =>
-        memberships.removeUserRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, token) =>
+        memberships.removeUserRole(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, key, cookie) =>
-        memberships.addUserGroup(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.addUserGroupMembership.serverLogic { case (req, token) =>
+        memberships.addUserGroup(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, key, cookie) =>
-        memberships.removeUserGroup(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, token) =>
+        memberships.removeUserGroup(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, key, cookie) =>
-        memberships.addGroupRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, token) =>
+        memberships.addGroupRole(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, key, cookie) =>
-        memberships.removeGroupRole(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, token) =>
+        memberships.removeGroupRole(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
         memberships.listGroupRoles(groupId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.grantPoolPermission.serverLogic { case (req, key, cookie) =>
-        poolPermissions.grant(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.grantPoolPermission.serverLogic { case (req, token) =>
+        poolPermissions.grant(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.revokePoolPermission.serverLogic { case (req, key, cookie) =>
-        poolPermissions.revoke(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.revokePoolPermission.serverLogic { case (req, token) =>
+        poolPermissions.revoke(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g, key) =>
         poolPermissions.list(t, u, g, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createColumnPolicy.serverLogic { case (req, key, cookie) =>
-        columnPolicies.create(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.createColumnPolicy.serverLogic { case (req, token) =>
+        columnPolicies.create(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.updateColumnPolicy.serverLogic { case (req, key, cookie) =>
-        columnPolicies.update(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.updateColumnPolicy.serverLogic { case (req, token) =>
+        columnPolicies.update(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, key, cookie) =>
-        columnPolicies.delete(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, token) =>
+        columnPolicies.delete(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listColumnPolicies.serverLogic { case (roleId, key) =>
         columnPolicies.list(roleId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createRowPolicy.serverLogic { case (req, key, cookie) =>
-        rowPolicies.create(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.createRowPolicy.serverLogic { case (req, token) =>
+        rowPolicies.create(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.updateRowPolicy.serverLogic { case (req, key, cookie) =>
-        rowPolicies.update(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.updateRowPolicy.serverLogic { case (req, token) =>
+        rowPolicies.update(req, token)(sessions.scopeOf)
       },
-      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, key, cookie) =>
-        rowPolicies.delete(req, key.orElse(cookie))(sessions.scopeOf)
+      RbacEndpoints.deleteRowPolicy.serverLogic { case (req, token) =>
+        rowPolicies.delete(req, token)(sessions.scopeOf)
       },
       RbacEndpoints.listRowPolicies.serverLogic { case (roleId, key) =>
         rowPolicies.list(roleId, key)(sessions.scopeOf)
@@ -310,67 +310,63 @@ final class ManagerServer(
       }
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      Endpoints.createPool.serverLogic { case (req, key, cookie) =>
-        pools.createPool(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.createPool.serverLogic { case (req, token) =>
+        pools.createPool(req, token)(sessions.scopeOf)
       },
-      Endpoints.scalePool.serverLogic { case (req, key, cookie) =>
-        pools.scalePool(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.scalePool.serverLogic { case (req, token) =>
+        pools.scalePool(req, token)(sessions.scopeOf)
       },
-      Endpoints.stopPool.serverLogic { case (req, key, cookie) =>
-        pools.stopPool(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.stopPool.serverLogic { case (req, token) =>
+        pools.stopPool(req, token)(sessions.scopeOf)
       },
-      Endpoints.deletePool.serverLogic { case (req, key, cookie) =>
-        pools.deletePool(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.deletePool.serverLogic { case (req, token) =>
+        pools.deletePool(req, token)(sessions.scopeOf)
       },
-      Endpoints.listPools.serverLogic { case (key, cookie) =>
-        pools.listPools(key.orElse(cookie))(sessions.scopeOf)
-      },
+      Endpoints.listPools.serverLogic(token => pools.listPools(token)(sessions.scopeOf)),
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
-      Endpoints.setPoolDisabled.serverLogic { case (req, key, cookie) =>
-        pools.setPoolDisabled(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setPoolDisabled.serverLogic { case (req, token) =>
+        pools.setPoolDisabled(req, token)(sessions.scopeOf)
       },
-      Endpoints.setPoolResources.serverLogic { case (req, key, cookie) =>
-        pools.setResources(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setPoolResources.serverLogic { case (req, token) =>
+        pools.setResources(req, token)(sessions.scopeOf)
       },
-      Endpoints.setPoolTemplate.serverLogic { case (req, key, cookie) =>
-        pools.setPodTemplate(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setPoolTemplate.serverLogic { case (req, token) =>
+        pools.setPodTemplate(req, token)(sessions.scopeOf)
       },
-      Endpoints.setMaxConcurrent.serverLogic { case (req, key, cookie) =>
-        nodes.setMaxConcurrent(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setMaxConcurrent.serverLogic { case (req, token) =>
+        nodes.setMaxConcurrent(req, token)(sessions.scopeOf)
       },
-      Endpoints.quarantineNode.serverLogic { case (req, key, cookie) =>
-        nodes.quarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.quarantineNode.serverLogic { case (req, token) =>
+        nodes.quarantineNode(req, token)(sessions.scopeOf)
       },
-      Endpoints.unquarantineNode.serverLogic { case (req, key, cookie) =>
-        nodes.unquarantineNode(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.unquarantineNode.serverLogic { case (req, token) =>
+        nodes.unquarantineNode(req, token)(sessions.scopeOf)
       },
-      Endpoints.restartNode.serverLogic { case (req, key, cookie) =>
-        nodes.restartNode(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.restartNode.serverLogic { case (req, token) =>
+        nodes.restartNode(req, token)(sessions.scopeOf)
       },
-      Endpoints.createTenant.serverLogic { case (req, key, cookie) =>
-        tenants.createTenant(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.createTenant.serverLogic { case (req, token) =>
+        tenants.createTenant(req, token)(sessions.scopeOf)
       },
-      Endpoints.listTenants.serverLogic { case (key, cookie) =>
-        tenants.listTenants(key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.listTenants.serverLogic(token => tenants.listTenants(token)(sessions.scopeOf)),
+      Endpoints.deleteTenant.serverLogic { case (req, token) =>
+        tenants.deleteTenant(req, token)(sessions.scopeOf)
       },
-      Endpoints.deleteTenant.serverLogic { case (req, key, cookie) =>
-        tenants.deleteTenant(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setTenantDisabled.serverLogic { case (req, token) =>
+        tenants.setTenantDisabled(req, token)(sessions.scopeOf)
       },
-      Endpoints.setTenantDisabled.serverLogic { case (req, key, cookie) =>
-        tenants.setTenantDisabled(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.setTenantAuth.serverLogic { case (req, token) =>
+        tenants.setTenantAuth(req, token)(sessions.scopeOf)
       },
-      Endpoints.setTenantAuth.serverLogic { case (req, key, cookie) =>
-        tenants.setTenantAuth(req, key.orElse(cookie))(sessions.scopeOf)
-      },
-      Endpoints.createTenantDb.serverLogic { case (req, key, cookie) =>
-        tenantDbs.createTenantDb(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.createTenantDb.serverLogic { case (req, token) =>
+        tenantDbs.createTenantDb(req, token)(sessions.scopeOf)
       },
       Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
-      Endpoints.deleteTenantDb.serverLogic { case (req, key, cookie) =>
-        tenantDbs.deleteTenantDb(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.deleteTenantDb.serverLogic { case (req, token) =>
+        tenantDbs.deleteTenantDb(req, token)(sessions.scopeOf)
       },
-      Endpoints.updateTenantDb.serverLogic { case (req, key, cookie) =>
-        tenantDbs.update(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.updateTenantDb.serverLogic { case (req, token) =>
+        tenantDbs.update(req, token)(sessions.scopeOf)
       },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
@@ -394,20 +390,14 @@ final class ManagerServer(
           )
         )
       ),
-      Endpoints.serverConfig.serverLogic { case (key, cookie) =>
-        serverConfig.list(key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(sessions.scopeOf)),
+      Endpoints.manifestExport.serverLogic(token => manifest.exportYaml(token)(sessions.scopeOf)),
+      Endpoints.manifestImport.serverLogic { case (body, token) =>
+        manifest.importYaml(body, token)(sessions.scopeOf)
       },
-      Endpoints.manifestExport.serverLogic { case (key, cookie) =>
-        manifest.exportYaml(key.orElse(cookie))(sessions.scopeOf)
-      },
-      Endpoints.manifestImport.serverLogic { case (body, key, cookie) =>
-        manifest.importYaml(body, key.orElse(cookie))(sessions.scopeOf)
-      },
-      Endpoints.activeStatements.serverLogic { case (key, cookie) =>
-        activeStmts.list(key.orElse(cookie))(sessions.scopeOf)
-      },
-      Endpoints.killStatement.serverLogic { case (req, key, cookie) =>
-        activeStmts.kill(req, key.orElse(cookie))(sessions.scopeOf)
+      Endpoints.activeStatements.serverLogic(token => activeStmts.list(token)(sessions.scopeOf)),
+      Endpoints.killStatement.serverLogic { case (req, token) =>
+        activeStmts.kill(req, token)(sessions.scopeOf)
       }
     ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
