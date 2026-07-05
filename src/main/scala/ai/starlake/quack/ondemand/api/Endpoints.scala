@@ -209,7 +209,7 @@ object Endpoints:
       .out(jsonBody[ManifestImportSummary])
 
   val createTenant: PublicEndpoint[
-    (TenantRequest, Option[String]),
+    (TenantRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -218,6 +218,7 @@ object Endpoints:
       .in("tenant" / "create")
       .in(jsonBody[TenantRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantResponse])
 
   val listTenants: PublicEndpoint[Option[
@@ -229,7 +230,7 @@ object Endpoints:
       .out(jsonBody[TenantListResponse])
 
   val deleteTenant: PublicEndpoint[
-    (TenantOpRequest, Option[String]),
+    (TenantOpRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -238,9 +239,10 @@ object Endpoints:
       .in("tenant" / "delete")
       .in(jsonBody[TenantOpRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val setTenantDisabled: PublicEndpoint[
-    (SetTenantDisabledRequest, Option[String]),
+    (SetTenantDisabledRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -249,10 +251,11 @@ object Endpoints:
       .in("tenant" / "setDisabled")
       .in(jsonBody[SetTenantDisabledRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantResponse])
 
   val setTenantAuth: PublicEndpoint[
-    (SetTenantAuthRequest, Option[String]),
+    (SetTenantAuthRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantResponse,
     Any
@@ -261,6 +264,7 @@ object Endpoints:
       .in("tenant" / "setAuth")
       .in(jsonBody[SetTenantAuthRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantResponse])
 
   val setPoolDisabled: PublicEndpoint[
@@ -306,7 +310,7 @@ object Endpoints:
 
   // ----- Tenant databases -----
   val createTenantDb: PublicEndpoint[
-    (TenantDbRequest, Option[String]),
+    (TenantDbRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     TenantDbResponse,
     Any
@@ -315,6 +319,7 @@ object Endpoints:
       .in("database" / "create")
       .in(jsonBody[TenantDbRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantDbResponse])
 
   val listTenantDbs
@@ -322,7 +327,7 @@ object Endpoints:
     base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
 
   val deleteTenantDb: PublicEndpoint[
-    (TenantDbOpRequest, Option[String]),
+    (TenantDbOpRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
@@ -331,9 +336,10 @@ object Endpoints:
       .in("database" / "delete")
       .in(jsonBody[TenantDbOpRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
   val updateTenantDb: PublicEndpoint[
-    (UpdateTenantDbRequest, Option[String]),
+    (UpdateTenantDbRequest, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     UpdateTenantDbResponse,
     Any
@@ -342,6 +348,7 @@ object Endpoints:
       .in("database" / "update")
       .in(jsonBody[UpdateTenantDbRequest])
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[UpdateTenantDbResponse])
 
   // ----- UI login -----

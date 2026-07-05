@@ -345,28 +345,28 @@ final class ManagerServer(
       Endpoints.restartNode.serverLogic { case (req, key, cookie) =>
         nodes.restartNode(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.createTenant.serverLogic { case (req, key) =>
-        tenants.createTenant(req, key)(sessions.scopeOf)
+      Endpoints.createTenant.serverLogic { case (req, key, cookie) =>
+        tenants.createTenant(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.scopeOf)),
-      Endpoints.deleteTenant.serverLogic { case (req, key) =>
-        tenants.deleteTenant(req, key)(sessions.scopeOf)
+      Endpoints.deleteTenant.serverLogic { case (req, key, cookie) =>
+        tenants.deleteTenant(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.setTenantDisabled.serverLogic { case (req, key) =>
-        tenants.setTenantDisabled(req, key)(sessions.scopeOf)
+      Endpoints.setTenantDisabled.serverLogic { case (req, key, cookie) =>
+        tenants.setTenantDisabled(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.setTenantAuth.serverLogic { case (req, key) =>
-        tenants.setTenantAuth(req, key)(sessions.scopeOf)
+      Endpoints.setTenantAuth.serverLogic { case (req, key, cookie) =>
+        tenants.setTenantAuth(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.createTenantDb.serverLogic { case (req, key) =>
-        tenantDbs.createTenantDb(req, key)(sessions.scopeOf)
+      Endpoints.createTenantDb.serverLogic { case (req, key, cookie) =>
+        tenantDbs.createTenantDb(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
-      Endpoints.deleteTenantDb.serverLogic { case (req, key) =>
-        tenantDbs.deleteTenantDb(req, key)(sessions.scopeOf)
+      Endpoints.deleteTenantDb.serverLogic { case (req, key, cookie) =>
+        tenantDbs.deleteTenantDb(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.updateTenantDb.serverLogic { case (req, key) =>
-        tenantDbs.update(req, key)(sessions.scopeOf)
+      Endpoints.updateTenantDb.serverLogic { case (req, key, cookie) =>
+        tenantDbs.update(req, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
