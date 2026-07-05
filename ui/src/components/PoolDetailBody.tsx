@@ -5,8 +5,6 @@ import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types'
 import { useAuth } from '../auth/AuthContext';
 import Tabs from './Tabs';
 
-const CPU_RE = /^\d+(\.\d+)?m?$/;
-const MEM_RE = /^\d+(\.\d+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$/;
 
 /** Header (title + Back / Scale / Delete pool actions) + the four-tab
   * body for one pool. No breadcrumb -- callers compose that themselves.
@@ -37,10 +35,12 @@ export default function PoolDetailBody({
   const [error, setError] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
-  // Pool resource edit state (Nodes tab).
-  const [resCpu, setResCpu]         = useState('');
-  const [resMem, setResMem]         = useState('');
-  const [resSaving, setResSaving]   = useState(false);
+  // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
+  const [resCpuEnabled, setResCpuEnabled] = useState(false);
+  const [resCpuSlider, setResCpuSlider]   = useState(2);
+  const [resMemEnabled, setResMemEnabled] = useState(false);
+  const [resMemSlider, setResMemSlider]   = useState(8);
+  const [resSaving, setResSaving]         = useState(false);
   const [resInitialized, setResInitialized] = useState(false);
 
   useEffect(() => {
@@ -59,12 +59,20 @@ export default function PoolDetailBody({
     return () => { cancelled = true; clearInterval(id); };
   }, [tenant, tenantDb, pool]);
 
-  // Populate resource inputs from the first successful poll; ignore
+  // Populate slider state from the first successful poll; ignore
   // subsequent polls so in-progress edits are not overwritten.
   useEffect(() => {
     if (data && !resInitialized) {
-      setResCpu(data.cpu || '');
-      setResMem(data.memory || '');
+      if (data.cpu) {
+        const parsed = parseFloat(data.cpu);
+        setResCpuEnabled(true);
+        setResCpuSlider(isNaN(parsed) ? 2 : Math.min(16, Math.max(0.5, parsed)));
+      }
+      if (data.memory) {
+        const parsed = parseInt(data.memory.replace(/Gi?$/, ''), 10);
+        setResMemEnabled(true);
+        setResMemSlider(isNaN(parsed) ? 8 : Math.min(64, Math.max(1, parsed)));
+      }
       setResInitialized(true);
     }
   }, [data, resInitialized]);
@@ -73,7 +81,11 @@ export default function PoolDetailBody({
     setResSaving(true);
     setActionErr(null);
     try {
-      await api.setPoolResources({ tenant, tenantDb, pool, cpu: resCpu.trim(), memory: resMem.trim() });
+      await api.setPoolResources({
+        tenant, tenantDb, pool,
+        cpu: resCpuEnabled ? String(resCpuSlider) : '',
+        memory: resMemEnabled ? `${resMemSlider}Gi` : '',
+      });
     } catch (e) {
       setActionErr(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -130,44 +142,63 @@ export default function PoolDetailBody({
     }
   }
 
-  const cpuResError = resCpu.trim() !== '' && !CPU_RE.test(resCpu.trim()) ? 'e.g. 500m or 2' : null;
-  const memResError = resMem.trim() !== '' && !MEM_RE.test(resMem.trim()) ? 'e.g. 2Gi or 512Mi' : null;
-
   const nodesTab = (
     <div className="card">
       <div className="card-title">Nodes</div>
       <div style={{ marginBottom: '0.75rem' }}>
-        <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div className="row" style={{ gap: 20, alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <div>
-            <div className="subtle" style={{ fontSize: '0.85em', marginBottom: 2 }}>
-              CPU limit (current: <code>{data.cpu || '-'}</code>)
-            </div>
-            <input
-              type="text"
-              value={resCpu}
-              onChange={e => setResCpu(e.target.value)}
-              placeholder="e.g. 500m or 2"
-              style={{ width: 120 }}
-            />
-            {cpuResError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{cpuResError}</div>}
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={resCpuEnabled}
+                onChange={e => setResCpuEnabled(e.target.checked)}
+              />
+              CPU limit
+            </label>
+            {resCpuEnabled && (
+              <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={16}
+                  step={0.5}
+                  value={resCpuSlider}
+                  onChange={e => setResCpuSlider(Number(e.target.value))}
+                  style={{ width: 140 }}
+                />
+                <span className="subtle">{resCpuSlider} cores</span>
+              </div>
+            )}
           </div>
           <div>
-            <div className="subtle" style={{ fontSize: '0.85em', marginBottom: 2 }}>
-              Memory limit (current: <code>{data.memory || '-'}</code>)
-            </div>
-            <input
-              type="text"
-              value={resMem}
-              onChange={e => setResMem(e.target.value)}
-              placeholder="e.g. 2Gi or 512Mi"
-              style={{ width: 120 }}
-            />
-            {memResError && <div style={{ color: 'var(--bad)', fontSize: '0.85em' }}>{memResError}</div>}
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={resMemEnabled}
+                onChange={e => setResMemEnabled(e.target.checked)}
+              />
+              Memory limit
+            </label>
+            {resMemEnabled && (
+              <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="range"
+                  min={1}
+                  max={64}
+                  step={1}
+                  value={resMemSlider}
+                  onChange={e => setResMemSlider(Number(e.target.value))}
+                  style={{ width: 140 }}
+                />
+                <span className="subtle">{resMemSlider} Gi</span>
+              </div>
+            )}
           </div>
           <div>
             <button
               type="button"
-              disabled={resSaving || !!cpuResError || !!memResError}
+              disabled={resSaving}
               onClick={() => void saveResources()}
             >
               {resSaving ? 'Saving...' : 'Save'}
