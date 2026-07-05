@@ -1086,3 +1086,54 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
+
+  // ---- cookie-transport tests for optional-tenant read endpoints (Task 5e) ----
+  // listUsers and listPoolPermissions accept an optional ?tenant= query param and
+  // self-filter when it is present. When it is absent and the caller is a cookie
+  // session, the None-arm returned unfiltered cross-tenant data pre-fix.
+  // Post-fix: both endpoints use authToken, so the cookie resolves to Some(scope)
+  // and the handler's None-arm infers the tenant from the session.
+
+  "user/list via session cookie" should "scope the result to the calling session's tenant" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/user/list", token)
+      withClue(s"tenant-A admin (cookie) -> /api/user/list: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        // carol (globex user) is seeded by addTenantB; her UserResponse.tenant = GlobexTenantId.
+        // Pre-fix: apiKey=None -> None arm -> no filter -> "t-globex01" leaks in the body.
+        // Post-fix: cookie resolves to acme scope; handler filters to acme users only.
+        resp.body() should not include GlobexTenantId
+        // alice is in acme -- verify a real scoped result is returned, not an empty list.
+        resp.body() should include(SecurityFixtures.AliceUsername)
+      }
+    finally h.shutdown()
+  }
+
+  "pool/permission/list via session cookie" should "scope the result to the calling session's tenant" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/pool/permission/list", token)
+      withClue(s"tenant-A admin (cookie) -> /api/pool/permission/list: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        // GlobexPoolPerm ("pp-globex01") is seeded by addTenantB with tenantId "t-globex01".
+        // PoolPermissionResponse serializes both id and tenantId, so both would appear on a leak.
+        // Pre-fix: apiKey=None -> None arm -> no tenant filter -> globex perm leaks.
+        // Post-fix: cookie resolves to acme scope; handler filters to acme permissions only.
+        resp.body() should not include GlobexTenantId
+        resp.body() should not include GlobexPoolPerm
+        // alice's pool permission (SecurityFixtures.PoolPermId) is in acme -- confirm real result.
+        resp.body() should include(SecurityFixtures.PoolPermId)
+      }
+    finally h.shutdown()
+  }
