@@ -519,3 +519,139 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       expectForbidden(resp, "tenant-A admin (cookie) -> /api/node/setMaxConcurrent on tenant-B")
     finally h.shutdown()
   }
+
+  // ---- cookie-transport tests for tenant + database endpoints ----
+  // Each case proves that a session carried via the qod_session cookie
+  // gets the correct rejection once the cookie input is wired to these endpoints.
+  // Pre-fix: the cookie is ignored (endpoint only has 2 inputs), apiKey=None
+  // reaches the handler, and the scope/superuser check admits. Post-fix:
+  // key.orElse(cookie) propagates the session.
+
+  "tenant/create via session cookie" should "reject a tenant admin with 403 superuser_required" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/tenant/create",
+        """{"id":"newt","displayName":"New Tenant"}""",
+        cookieToken = token
+      )
+      withClue(s"tenant admin (cookie) -> /api/tenant/create: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) shouldBe Some("superuser_required")
+      }
+    finally h.shutdown()
+  }
+
+  "tenant/delete via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/tenant/delete",
+        s"""{"name":"$GlobexTenantId"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/tenant/delete on tenant-B")
+    finally h.shutdown()
+  }
+
+  "tenant/setDisabled via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/tenant/setDisabled",
+        s"""{"name":"$GlobexTenantId","disabled":true}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/tenant/setDisabled on tenant-B")
+    finally h.shutdown()
+  }
+
+  "tenant/setAuth via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/tenant/setAuth",
+        s"""{"name":"$GlobexTenantId","authProvider":"db"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/tenant/setAuth on tenant-B")
+    finally h.shutdown()
+  }
+
+  "database/create via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/database/create",
+        s"""{"tenant":"$GlobexTenantId","name":"globex_main"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/database/create on tenant-B")
+    finally h.shutdown()
+  }
+
+  "database/delete via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/database/delete",
+        s"""{"tenant":"$GlobexTenantId","name":"globex_main"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/database/delete on tenant-B")
+    finally h.shutdown()
+  }
+
+  "database/update via session cookie" should "reject a tenant-A admin targeting tenant-B" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/database/update",
+        s"""{"tenant":"$GlobexTenantId","name":"globex_main"}""",
+        cookieToken = token
+      )
+      expectForbidden(resp, "tenant-A admin (cookie) -> /api/database/update on tenant-B")
+    finally h.shutdown()
+  }

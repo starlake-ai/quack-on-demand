@@ -36,70 +36,66 @@ final class TenantHandlers(
   def createTenant(req: TenantRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
-    if apiKey.flatMap(scopeOf).exists(s => !s.superuser) then
-      IO.pure(
-        Left(
-          (
-            StatusCode.Forbidden,
-            ErrorResponse(
-              "superuser_required",
-              "creating a tenant is restricted to superusers"
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        if req.id.isEmpty then
+          IO.pure(
+            Left(
+              (StatusCode.BadRequest, ErrorResponse("invalid_id", "tenant id must be non-empty"))
             )
           )
-        )
-      )
-    else if req.id.isEmpty then
-      IO.pure(
-        Left(
-          (StatusCode.BadRequest, ErrorResponse("invalid_id", "tenant id must be non-empty"))
-        )
-      )
-    else if !ai.starlake.quack.model.Names.isValid(req.id) || !req.id.headOption.exists(_.isLetter)
-    then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse(
-              "invalid_id",
-              "tenant id must be a slug: 1..63 chars, start with a letter, " +
-                "and contain only letters, digits and underscore"
+        else if !ai.starlake.quack.model.Names.isValid(req.id) || !req.id.headOption.exists(
+            _.isLetter
+          )
+        then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse(
+                  "invalid_id",
+                  "tenant id must be a slug: 1..63 chars, start with a letter, " +
+                    "and contain only letters, digits and underscore"
+                )
+              )
             )
           )
-        )
-      )
-    else if req.displayName.trim.isEmpty then
-      IO.pure(
-        Left(
-          (StatusCode.BadRequest, ErrorResponse("invalid_display_name", "display name is required"))
-        )
-      )
-    else if !Tenant.ValidAuthProviders.contains(req.authProvider) then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse(
-              "invalid_auth_provider",
-              s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"
+        else if req.displayName.trim.isEmpty then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid_display_name", "display name is required")
+              )
             )
           )
-        )
-      )
-    else
-      sup
-        .createTenant(
-          Tenant(
-            id = req.id,
-            displayName = req.displayName.trim,
-            authProvider = req.authProvider,
-            authConfig = req.authConfig
+        else if !Tenant.ValidAuthProviders.contains(req.authProvider) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse(
+                  "invalid_auth_provider",
+                  s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"
+                )
+              )
+            )
           )
-        )
-        .map {
-          case Right(t)  => Right(toResponse(t))
-          case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
-        }
+        else
+          sup
+            .createTenant(
+              Tenant(
+                id = req.id,
+                displayName = req.displayName.trim,
+                authProvider = req.authProvider,
+                authConfig = req.authConfig
+              )
+            )
+            .map {
+              case Right(t)  => Right(toResponse(t))
+              case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
+            }
 
   def listTenants(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
