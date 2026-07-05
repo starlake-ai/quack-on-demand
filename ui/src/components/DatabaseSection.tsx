@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
-import type { TenantDbKind, TenantDbResponse } from '../api/types';
+import type { TenantDbKind, TenantDbResponse, UpdateTenantDbRequest } from '../api/types';
 import CatalogBrowser from './CatalogBrowser';
 import DataPathEditor, {
   buildObjectStore, parseExtras as parseStoreExtras,
   type StoreType,
 } from './DataPathEditor';
 import FederationSection from './FederationSection';
-import { DeleteIcon } from './Icons';
 
 /** Databases card for the TenantDetail page. Lists tenant databases,
   * lets you add a new one (name + dataPath + structured metastore +
@@ -43,8 +42,14 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [defaultSchema, setDefaultSchema]     = useState('');
   const [initSql, setInitSql]               = useState('');
 
-  const [editingDb, setEditingDb] = useState<string | null>(null); // full db name
-  const [editSql, setEditSql]     = useState('');
+  const [editingDb, setEditingDb]             = useState<TenantDbResponse | null>(null);
+  const [editDefaultDb, setEditDefaultDb]     = useState('');
+  const [editDefaultSchema, setEditDefaultSchema] = useState('');
+  const [editInitSql, setEditInitSql]         = useState('');
+  const [editMetastore, setEditMetastore]     = useState('');
+  const [editObjectStore, setEditObjectStore] = useState('');
+  const [metastoreDirty, setMetastoreDirty]   = useState(false);
+  const [objectStoreDirty, setObjectStoreDirty] = useState(false);
 
   const reload = () =>
     api.listTenantDbs(tenant)
@@ -53,7 +58,13 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
 
   useEffect(() => {
     setEditingDb(null);
-    setEditSql('');
+    setEditDefaultDb('');
+    setEditDefaultSchema('');
+    setEditInitSql('');
+    setEditMetastore('');
+    setEditObjectStore('');
+    setMetastoreDirty(false);
+    setObjectStoreDirty(false);
     void reload();
   }, [tenant]);
 
@@ -148,6 +159,49 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     }
   }
 
+  function openEdit(d: TenantDbResponse) {
+    setEditingDb(d);
+    setEditDefaultDb(d.defaultDatabase ?? '');
+    setEditDefaultSchema(d.defaultSchema ?? '');
+    setEditInitSql(d.initSql ?? '');
+    setEditMetastore(Object.entries(d.metastore).map(([k, v]) => `${k}=${v}`).join('\n'));
+    setEditObjectStore(Object.entries(d.objectStore).map(([k, v]) => `${k}=${v}`).join('\n'));
+    setMetastoreDirty(false);
+    setObjectStoreDirty(false);
+  }
+
+  function nodeAffectingDirty(): boolean {
+    if (editingDb == null) return false;
+    return metastoreDirty || objectStoreDirty || editInitSql.trim() !== (editingDb.initSql ?? '');
+  }
+
+  async function handleUpdate(e: React.FormEvent) {
+    e.preventDefault();
+    if (editingDb == null) return;
+    if (nodeAffectingDirty() && !window.confirm(
+      `Save changes to "${editingDb.name}"?\n\n` +
+      `All nodes of this database restart immediately; statements running on them will fail. ` +
+      `Nodes respawn with the same ids.`)) return;
+    setError(null);
+    try {
+      const req: UpdateTenantDbRequest = { tenant, name: editingDb.name };
+      if (editDefaultDb.trim() !== (editingDb.defaultDatabase ?? '')) req.defaultDatabase = editDefaultDb.trim();
+      if (editDefaultSchema.trim() !== (editingDb.defaultSchema ?? '')) req.defaultSchema = editDefaultSchema.trim();
+      if (editInitSql.trim() !== (editingDb.initSql ?? '')) req.initSql = editInitSql.trim();
+      if (metastoreDirty) req.metastore = parseStoreExtras(editMetastore, new Set());
+      if (objectStoreDirty) req.objectStore = parseStoreExtras(editObjectStore, new Set());
+      const out = await api.updateTenantDb(req);
+      if (out.failedRestarts.length > 0) {
+        setError(`${out.failedRestarts.length} node restart(s) failed: ` +
+          out.failedRestarts.map(f => `${f.nodeId}: ${f.message}`).join('; '));
+      }
+      setEditingDb(null);
+      await reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
   // Browsing-a-database mode: full-width catalog browser scoped to that DB.
   if (browsing != null) {
     return (
@@ -199,8 +253,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <th>Kind</th>
               <th>Schema</th>
               <th>Data path</th>
+              <th>Tables</th>
               <th>Federation</th>
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -209,8 +263,8 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                 <td>
                   <a
                     href="#"
-                    onClick={ev => { ev.preventDefault(); setBrowsing(d.name); }}
-                    title="Browse this database's catalog"
+                    onClick={ev => { ev.preventDefault(); openEdit(d); }}
+                    title="Edit this database"
                   >
                     <code>{d.name}</code>
                   </a>
@@ -232,7 +286,21 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                   }}>{d.kind ?? 'ducklake'}</span>
                 </td>
                 <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
-                <td><code>{d.dataPath || '-'}</code></td>
+                <td>
+                  <code>{d.dataPath || d.effectiveDataPath || '-'}</code>
+                  {!d.dataPath && d.effectiveDataPath && (
+                    <span className="subtle" style={{ marginLeft: 4 }}>(inherited)</span>
+                  )}
+                </td>
+                <td>
+                  {d.tableCount == null ? (
+                    <span>-</span>
+                  ) : (
+                    <a href="#" onClick={ev => { ev.preventDefault(); setBrowsing(d.name); }}>
+                      {d.tableCount}
+                    </a>
+                  )}
+                </td>
                 <td>
                   <button type="button" className="link-button" onClick={() => setFederating(d.name)}>
                     Federation
@@ -249,19 +317,6 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                     )}
                   </button>
                 </td>
-                <td>
-                  <div className="row" style={{ gap: 6 }}>
-                    <button
-                      className="icon-btn"
-                      title="Edit init SQL"
-                      aria-label="Edit init SQL"
-                      onClick={() => { setEditingDb(d.name); setEditSql(d.initSql ?? ''); }}
-                    >
-                      Init SQL
-                    </button>
-                    <button className="icon-btn danger" title="Delete" aria-label="Delete" onClick={() => handleDelete(d.name)}><DeleteIcon /></button>
-                  </div>
-                </td>
               </tr>
             ))}
           </tbody>
@@ -269,36 +324,49 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       )}
 
       {editingDb != null && (
-        <form
-          style={{ marginTop: '0.75rem' }}
-          onSubmit={async e => {
-            e.preventDefault();
-            setError(null);
-            try {
-              await api.setTenantDbInitSql({ tenant, name: editingDb, initSql: editSql.trim() });
-              setEditingDb(null);
-              await reload();
-            } catch (err) {
-              setError(err instanceof ApiError ? err.message : String(err));
-            }
-          }}
-        >
+        <form style={{ marginTop: '0.75rem' }} onSubmit={handleUpdate}>
           <fieldset>
-            <legend>Init SQL for <code>{editingDb}</code></legend>
-            <p className="subtle" style={{ marginBottom: 4 }}>
-              Runs at node boot before the pool's own init SQL. Takes effect on the next
-              node spawn; restart the database's nodes to apply now. Empty clears it.
-              Engine defaults only, never credentials: secrets belong in federation sources, not here.
+            <legend>Edit <code>{editingDb.name}</code></legend>
+            <p className="subtle">
+              kind <code>{editingDb.kind}</code>, data path{' '}
+              <code>{editingDb.dataPath || editingDb.effectiveDataPath || '-'}</code>
+              {!editingDb.dataPath && editingDb.effectiveDataPath ? ' (inherited from default)' : ''}.
+              Name, kind, and data path are immutable: changing them is a data migration, not an edit.
             </p>
-            <textarea
-              value={editSql}
-              onChange={ev => setEditSql(ev.target.value)}
-              rows={6}
-              placeholder={"SET memory_limit = '8GB';"}
-            />
-            <div className="row" style={{ gap: 8, marginTop: '0.5rem', justifyContent: 'flex-end' }}>
-              <button type="button" className="cancel-button" onClick={() => setEditingDb(null)}>Cancel</button>
-              <button type="submit">Save</button>
+            <label>Default database
+              <input value={editDefaultDb} onChange={ev => setEditDefaultDb(ev.target.value)} />
+            </label>
+            <label>Default schema
+              <input value={editDefaultSchema} onChange={ev => setEditDefaultSchema(ev.target.value)} />
+            </label>
+            <label>Init SQL
+              <p className="subtle" style={{ marginBottom: 4 }}>
+                Runs at node boot before the quack extension loads and before the pool's own init SQL.
+                Engine defaults only, never credentials: secrets belong in federation sources, not here.
+              </p>
+              <textarea value={editInitSql} onChange={ev => setEditInitSql(ev.target.value)} rows={5} />
+            </label>
+            <label>Metastore (key=value per line)
+              <p className="subtle" style={{ marginBottom: 4 }}>
+                pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate,
+                or pgPassword= (empty) to remove it. Editing this section restarts the database's nodes.
+              </p>
+              <textarea value={editMetastore} rows={4}
+                onChange={ev => { setEditMetastore(ev.target.value); setMetastoreDirty(true); }} />
+            </label>
+            <label>Object store (key=value per line)
+              <textarea value={editObjectStore} rows={4}
+                onChange={ev => { setEditObjectStore(ev.target.value); setObjectStoreDirty(true); }} />
+            </label>
+            <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
+              <button type="button" className="icon-btn danger"
+                onClick={() => { const n = editingDb.name; setEditingDb(null); void handleDelete(n); }}>
+                Delete database
+              </button>
+              <div className="row" style={{ gap: 8 }}>
+                <button type="button" className="cancel-button" onClick={() => setEditingDb(null)}>Cancel</button>
+                <button type="submit">{nodeAffectingDirty() ? 'Save and restart nodes' : 'Save'}</button>
+              </div>
             </div>
           </fieldset>
         </form>

@@ -246,6 +246,12 @@ export interface TenantDbResponse {
     * 0 in file-storage mode (no federation tables). */
   federatedSourceCount?: number;
   initSql: string;
+  /** Data path resolved through the default-metastore chain.
+    * Present even when the tenant-db has no explicit dataPath. */
+  effectiveDataPath: string;
+  /** Total table count in the DuckLake catalog; null when unavailable
+    * (memory kind, duckdb-file without a live pool, etc.). */
+  tableCount: number | null;
 }
 
 export interface TenantDbListResponse {
@@ -257,10 +263,20 @@ export interface TenantDbOpRequest {
   name: string;
 }
 
-export interface SetTenantDbInitSqlRequest {
+export interface UpdateTenantDbRequest {
   tenant: string;
   name: string;
-  initSql: string;
+  metastore?: Record<string, string>;
+  objectStore?: Record<string, string>;
+  defaultDatabase?: string;
+  defaultSchema?: string;
+  initSql?: string;
+}
+export interface FailedRestart { nodeId: string; message: string; }
+export interface UpdateTenantDbResponse {
+  db: TenantDbResponse;
+  restartedNodes: string[];
+  failedRestarts: FailedRestart[];
 }
 
 // ----- RBAC: users -----
