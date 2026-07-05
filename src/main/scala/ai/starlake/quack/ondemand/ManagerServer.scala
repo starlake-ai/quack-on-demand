@@ -165,8 +165,8 @@ final class ManagerServer(
       },
       Endpoints.whoami.serverLogic { case (apiKey, cookie) => auth.whoami(apiKey, cookie) },
       Endpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
-      Endpoints.statementHistory.serverLogic { case (limit, key) =>
-        statementHistory.recent(limit, key)(sessions.scopeOf)
+      Endpoints.statementHistory.serverLogic { case (limit, key, cookie) =>
+        statementHistory.recent(limit, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
         auth.oidcStart(tenant, returnTo, proto)
@@ -322,7 +322,9 @@ final class ManagerServer(
       Endpoints.deletePool.serverLogic { case (req, key, cookie) =>
         pools.deletePool(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.listPools.serverLogic(apiKey => pools.listPools(apiKey)(sessions.scopeOf)),
+      Endpoints.listPools.serverLogic { case (key, cookie) =>
+        pools.listPools(key.orElse(cookie))(sessions.scopeOf)
+      },
       Endpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
       Endpoints.setPoolDisabled.serverLogic { case (req, key, cookie) =>
         pools.setPoolDisabled(req, key.orElse(cookie))(sessions.scopeOf)
@@ -348,7 +350,9 @@ final class ManagerServer(
       Endpoints.createTenant.serverLogic { case (req, key, cookie) =>
         tenants.createTenant(req, key.orElse(cookie))(sessions.scopeOf)
       },
-      Endpoints.listTenants.serverLogic(apiKey => tenants.listTenants(apiKey)(sessions.scopeOf)),
+      Endpoints.listTenants.serverLogic { case (key, cookie) =>
+        tenants.listTenants(key.orElse(cookie))(sessions.scopeOf)
+      },
       Endpoints.deleteTenant.serverLogic { case (req, key, cookie) =>
         tenants.deleteTenant(req, key.orElse(cookie))(sessions.scopeOf)
       },
@@ -390,10 +394,14 @@ final class ManagerServer(
           )
         )
       ),
-      Endpoints.serverConfig.serverLogic(apiKey => serverConfig.list(apiKey)(sessions.scopeOf)),
-      Endpoints.manifestExport.serverLogic(apiKey => manifest.exportYaml(apiKey)(sessions.scopeOf)),
-      Endpoints.manifestImport.serverLogic { case (body, apiKey) =>
-        manifest.importYaml(body, apiKey)(sessions.scopeOf)
+      Endpoints.serverConfig.serverLogic { case (key, cookie) =>
+        serverConfig.list(key.orElse(cookie))(sessions.scopeOf)
+      },
+      Endpoints.manifestExport.serverLogic { case (key, cookie) =>
+        manifest.exportYaml(key.orElse(cookie))(sessions.scopeOf)
+      },
+      Endpoints.manifestImport.serverLogic { case (body, key, cookie) =>
+        manifest.importYaml(body, key.orElse(cookie))(sessions.scopeOf)
       },
       Endpoints.activeStatements.serverLogic { case (key, cookie) =>
         activeStmts.list(key.orElse(cookie))(sessions.scopeOf)
