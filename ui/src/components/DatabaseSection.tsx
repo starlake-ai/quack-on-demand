@@ -350,8 +350,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             </label>
             <label>Metastore (key=value per line)
               <p className="subtle" style={{ marginBottom: 4 }}>
-                pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate,
-                or pgPassword= (empty) to remove it. Editing this section restarts the database's nodes.
+                pgPassword is hidden and kept unless you set it: add pgPassword=newvalue to rotate.
+                Removing a key this database's kind requires is rejected. Editing this section
+                restarts the database's nodes.
               </p>
               <textarea value={editMetastore} rows={4}
                 onChange={ev => { setEditMetastore(ev.target.value); setMetastoreDirty(true); }} />
