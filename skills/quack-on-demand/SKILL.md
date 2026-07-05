@@ -239,7 +239,8 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
 # defaultSchema, initSql. Absent fields stay unchanged; empty clears. Editing
 # metastore/objectStore/initSql restarts ALL the database's nodes immediately
 # (in-flight statements on them fail); default database/schema edits do not.
-# pgPassword is preserved unless you send it: pgPassword=new rotates, empty removes.
+# pgPassword is preserved unless you send it: pgPassword=new rotates. Removing a key
+# the database's kind requires (incl. pgPassword on ducklake) is rejected.
 # Engine defaults only in initSql, never credentials: the value is stored
 # unredacted and inlined in pod specs; secrets belong in federation sources.
 curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
