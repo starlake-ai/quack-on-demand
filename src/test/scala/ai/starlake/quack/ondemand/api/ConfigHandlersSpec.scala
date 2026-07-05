@@ -46,6 +46,10 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     byPath("quack-flightsql.auth.jwt.secretKey").envVar shouldBe "JWT_SECRET_KEY"
   }
 
+  it should "expose the pod-template gate env var" in {
+    liveEntries.exists(_.envVar == "QOD_POD_TEMPLATE_ENABLED") shouldBe true
+  }
+
   it should "flag known secrets as sensitive" in {
     val sens = liveEntries.filter(_.sensitive).map(_.path).toSet
     sens should contain("quack-on-demand.admin.password")

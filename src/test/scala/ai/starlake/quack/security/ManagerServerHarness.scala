@@ -71,7 +71,8 @@ object ManagerServerHarness:
       serviceType = "ClusterIP",
       quackPort = 21900,
       startupTimeoutSec = 60,
-      podLabel = "app=quack-node"
+      podLabel = "app=quack-node",
+      podTemplateEnabled = false
     ),
     federation = FederationConfig(secretStore = "env"),
     auth = ManagerAuthConfig(
