@@ -4,6 +4,7 @@ import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RunningNode}
 import cats.effect.IO
 import io.fabric8.kubernetes.api.model._
 import io.fabric8.kubernetes.client.KubernetesClient
+import io.fabric8.kubernetes.client.utils.Serialization
 import org.slf4j.LoggerFactory
 
 import java.time.Instant
@@ -32,7 +33,8 @@ final class KubernetesQuackBackend(
     startupTimeoutSec: Int,
     defaultMetastore: Map[String, String] = Map.empty,
     readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
-    readEnv: String => Option[String] = name => Option(System.getenv(name))
+    readEnv: String => Option[String] = name => Option(System.getenv(name)),
+    podTemplateEnabled: Boolean = true
 ) extends QuackBackend:
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -143,14 +145,45 @@ final class KubernetesQuackBackend(
     val containerPort = new ContainerPort()
     containerPort.setContainerPort(quackPort)
 
-    val container = new Container()
-    container.setName("quack")
-    container.setImage(image)
-    container.setEnv(envs)
-    container.setPorts(java.util.List.of(containerPort))
+    // Base pod: gated template, else built from scratch.
+    val templated =
+      spec.podTemplateYaml
+        .filter(_ => podTemplateEnabled)
+        .filter(_.nonEmpty)
+        .map(yaml => Serialization.unmarshal(yaml, classOf[Pod]))
+    if spec.podTemplateYaml.exists(_.nonEmpty) && !podTemplateEnabled then
+      logger.warn(
+        s"pool ${spec.poolKey} has a pod template but QOD_POD_TEMPLATE_ENABLED is off; using the built-in pod shape"
+      )
 
-    val podSpec = new PodSpec()
-    podSpec.setContainers(java.util.List.of(container))
+    val pod     = templated.getOrElse(new Pod())
+    val podSpec = Option(pod.getSpec).getOrElse(new PodSpec())
+    pod.setSpec(podSpec)
+
+    // Locate or create the quack container.
+    val containers = Option(podSpec.getContainers).map(_.asScala.toList).getOrElse(Nil)
+    val quack      = containers.find(_.getName == "quack").getOrElse {
+      val c = new Container()
+      c.setName("quack")
+      c
+    }
+    quack.setImage(image)
+    quack.setEnv(envs)
+    quack.setPorts(java.util.List.of(containerPort))
+
+    // Structured cpu/memory become request=limit on the quack container,
+    // overwriting any template resources. Only-provided keys are set.
+    val reqs = new java.util.HashMap[String, Quantity]()
+    spec.cpu.filter(_.nonEmpty).foreach(v => reqs.put("cpu", new Quantity(v)))
+    spec.memory.filter(_.nonEmpty).foreach(v => reqs.put("memory", new Quantity(v)))
+    if !reqs.isEmpty then
+      val rr = new ResourceRequirements()
+      rr.setRequests(new java.util.HashMap(reqs))
+      rr.setLimits(new java.util.HashMap(reqs))
+      quack.setResources(rr)
+
+    val others = containers.filterNot(_.getName == "quack")
+    podSpec.setContainers((quack :: others).asJava)
 
     // Apply the cohort's placement, if any. Empty selector + empty
     // tolerations leaves the default scheduler in charge -- same as
@@ -169,13 +202,11 @@ final class KubernetesQuackBackend(
       }
       podSpec.setTolerations(tols)
 
-    val meta = new ObjectMeta()
+    // Identity metadata overlay (always ours).
+    val meta = Option(pod.getMetadata).getOrElse(new ObjectMeta())
     meta.setName(spec.nodeId)
     meta.setLabels(buildLabels(spec))
-
-    val pod = new Pod()
     pod.setMetadata(meta)
-    pod.setSpec(podSpec)
     pod
 
   private def buildService(spec: NodeSpec): Service =

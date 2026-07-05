@@ -208,7 +208,8 @@ object Main extends IOApp with LazyLogging:
           mgrCfg.k8s.quackPort,
           mgrCfg.k8s.podLabel,
           mgrCfg.k8s.startupTimeoutSec,
-          mgrCfg.defaultMetastore.asMap
+          mgrCfg.defaultMetastore.asMap,
+          podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled
         )
       case other => sys.error(s"unknown runtime: $other")
 

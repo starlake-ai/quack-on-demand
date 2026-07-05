@@ -472,3 +472,95 @@ class KubernetesQuackBackendSpec
       .get() shouldBe null
     // ... but the shared federation Secret survives for the healthy sibling.
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
+
+  // ---------- per-pool resources + gated pod template ----------
+
+  private val ns       = "default"
+  private val image    = "starlakeai/quack:test"
+  private val baseSpec = NodeSpec(
+    PoolKey("acme", "acme_tpch", "bi"),
+    "quack-tmpl-1",
+    Role.Dual,
+    metastore = Map.empty,
+    s3 = Map.empty
+  )
+
+  private def makeBackend(podTemplateEnabled: Boolean): KubernetesQuackBackend =
+    new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      podTemplateEnabled = podTemplateEnabled
+    )
+
+  private def backend: KubernetesQuackBackend = makeBackend(podTemplateEnabled = true)
+
+  "resources overlay" should "set requests and limits equal on the quack container when cpu/memory are present" in:
+    val spec = baseSpec.copy(cpu = Some("500m"), memory = Some("2Gi"))
+    backend.start(spec).unsafeRunSync()
+    val c =
+      server.getClient.pods.inNamespace(ns).withName(spec.nodeId).get.getSpec.getContainers.get(0)
+    c.getResources.getRequests.get("cpu").toString shouldBe "500m"
+    c.getResources.getLimits.get("cpu").toString shouldBe "500m"
+    c.getResources.getRequests.get("memory").toString shouldBe "2Gi"
+    c.getResources.getLimits.get("memory").toString shouldBe "2Gi"
+
+  it should "set only the provided resource key" in:
+    backend.start(baseSpec.copy(memory = Some("1Gi"))).unsafeRunSync()
+    val c = server.getClient.pods
+      .inNamespace(ns)
+      .withName(baseSpec.nodeId)
+      .get
+      .getSpec
+      .getContainers
+      .get(0)
+    c.getResources.getLimits.get("memory").toString shouldBe "1Gi"
+    Option(c.getResources.getLimits.get("cpu")) shouldBe None
+
+  it should "build from the pod template and overlay the quack env contract when the gate is on" in:
+    val tmpl =
+      """apiVersion: v1
+        |kind: Pod
+        |spec:
+        |  containers:
+        |    - name: quack
+        |      image: placeholder
+        |    - name: sidecar
+        |      image: busybox""".stripMargin
+    val backendOn = makeBackend(podTemplateEnabled = true)
+    backendOn.start(baseSpec.copy(podTemplateYaml = Some(tmpl))).unsafeRunSync()
+    val pod = server.getClient.pods.inNamespace(ns).withName(baseSpec.nodeId).get
+    pod.getSpec.getContainers.asScala.map(_.getName) should contain allOf ("quack", "sidecar")
+    val quack = pod.getSpec.getContainers.asScala.find(_.getName == "quack").get
+    quack.getEnv.asScala.map(_.getName) should contain("QOD_NODE_TOKEN")
+    quack.getImage shouldBe image
+
+  it should "ignore a stored template and build from scratch when the gate is off" in:
+    val tmpl =
+      "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x\n    - name: sidecar\n      image: y"
+    val backendOff = makeBackend(podTemplateEnabled = false)
+    backendOff.start(baseSpec.copy(podTemplateYaml = Some(tmpl))).unsafeRunSync()
+    val pod = server.getClient.pods.inNamespace(ns).withName(baseSpec.nodeId).get
+    pod.getSpec.getContainers.asScala.map(_.getName) should contain only "quack"
+
+  it should "let structured resources overwrite the template's quack resources" in:
+    val tmpl =
+      "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x\n      resources:\n        limits:\n          memory: 99Gi"
+    val backendOn = makeBackend(podTemplateEnabled = true)
+    backendOn
+      .start(baseSpec.copy(podTemplateYaml = Some(tmpl), memory = Some("2Gi")))
+      .unsafeRunSync()
+    val quack = server.getClient.pods
+      .inNamespace(ns)
+      .withName(baseSpec.nodeId)
+      .get
+      .getSpec
+      .getContainers
+      .asScala
+      .find(_.getName == "quack")
+      .get
+    quack.getResources.getLimits.get("memory").toString shouldBe "2Gi"
