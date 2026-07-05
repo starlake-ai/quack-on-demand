@@ -83,12 +83,16 @@ object Endpoints:
       .in(header[Option[String]]("X-API-Key"))
       .in(cookie[Option[String]](SessionTokenStore.CookieName))
 
-  val listPools: PublicEndpoint[Option[
-    String
-  ], (sttp.model.StatusCode, ErrorResponse), PoolListResponse, Any] =
+  val listPools: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    PoolListResponse,
+    Any
+  ] =
     base.get
       .in("pool" / "list")
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[PoolListResponse])
 
   val poolStatus: PublicEndpoint[
@@ -180,24 +184,33 @@ object Endpoints:
     * profile carries a non-None `tenant`) with 403 `superuser_required` so a non-superuser admin
     * can't list cross-tenant config even with a stolen URL.
     */
-  val serverConfig: PublicEndpoint[Option[
-    String
-  ], (sttp.model.StatusCode, ErrorResponse), ConfigListResponse, Any] =
+  val serverConfig: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    ConfigListResponse,
+    Any
+  ] =
     base.get
       .in("config" / "server")
       .in(sttp.tapir.header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[ConfigListResponse])
 
-  val manifestExport
-      : PublicEndpoint[Option[String], (sttp.model.StatusCode, ErrorResponse), String, Any] =
+  val manifestExport: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    String,
+    Any
+  ] =
     base.get
       .in("manifest" / "export")
       .in(sttp.tapir.header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(stringBody)
       .out(header("Content-Type", "application/yaml"))
 
   val manifestImport: PublicEndpoint[
-    (String, Option[String]),
+    (String, Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     ManifestImportSummary,
     Any
@@ -206,6 +219,7 @@ object Endpoints:
       .in("manifest" / "import")
       .in(stringBody)
       .in(sttp.tapir.header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[ManifestImportSummary])
 
   val createTenant: PublicEndpoint[
@@ -221,12 +235,16 @@ object Endpoints:
       .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantResponse])
 
-  val listTenants: PublicEndpoint[Option[
-    String
-  ], (sttp.model.StatusCode, ErrorResponse), TenantListResponse, Any] =
+  val listTenants: PublicEndpoint[
+    (Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantListResponse,
+    Any
+  ] =
     base.get
       .in("tenant" / "list")
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[TenantListResponse])
 
   val deleteTenant: PublicEndpoint[
@@ -515,7 +533,7 @@ object Endpoints:
   // the calling session's `manageableTenants` (superuser / static-key / open
   // mode return the unfiltered window).
   val statementHistory: PublicEndpoint[
-    (Option[Int], Option[String]),
+    (Option[Int], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     StatementHistoryResponse,
     Any
@@ -524,6 +542,7 @@ object Endpoints:
       .in("node" / "statements")
       .in(query[Option[Int]]("limit"))
       .in(header[Option[String]]("X-API-Key"))
+      .in(cookie[Option[String]](SessionTokenStore.CookieName))
       .out(jsonBody[StatementHistoryResponse])
 
   // ----- Federated sources -----

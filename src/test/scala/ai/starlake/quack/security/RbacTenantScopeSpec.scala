@@ -141,6 +141,18 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
     client.send(b.build(), HttpResponse.BodyHandlers.ofString())
 
+  private def getWithCookie(
+      client: HttpClient,
+      url: String,
+      cookieToken: String
+  ): HttpResponse[String] =
+    val b = HttpRequest
+      .newBuilder(URI.create(url))
+      .header("Cookie", s"qod_session=$cookieToken")
+      .GET()
+      .timeout(RequestTimeout)
+    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
+
   private def errorCode(body: String): Option[String] =
     parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
 
@@ -840,5 +852,120 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
         resp,
         "tenant-A admin (cookie) -> /api/role/column-policy/create on tenant-B role"
       )
+    finally h.shutdown()
+  }
+
+  // ---- cookie-transport tests for superuser-gated endpoints (Task 5b) ----
+  // manifest/export, manifest/import, config/server are superuser-only.
+  // Pre-fix: apiKey=None -> None arm admits unconditionally.
+  // Post-fix: key.orElse(cookie) resolves the session -> 403 superuser_required.
+
+  "manifest/export via session cookie" should "reject a tenant admin with 403 superuser_required" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/manifest/export", token)
+      withClue(s"tenant admin (cookie) -> /api/manifest/export: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) shouldBe Some("superuser_required")
+      }
+    finally h.shutdown()
+  }
+
+  "manifest/import via session cookie" should "reject a tenant admin with 403 superuser_required" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = postWithCookie(
+        h.httpClient,
+        s"${h.baseUrl}/api/manifest/import",
+        "tenants: []",
+        cookieToken = token
+      )
+      withClue(s"tenant admin (cookie) -> /api/manifest/import: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) shouldBe Some("superuser_required")
+      }
+    finally h.shutdown()
+  }
+
+  "config/server via session cookie" should "reject a tenant admin with 403 superuser_required" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/config/server", token)
+      withClue(s"tenant admin (cookie) -> /api/config/server: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) shouldBe Some("superuser_required")
+      }
+    finally h.shutdown()
+  }
+
+  // ---- cookie-transport tests for self-filtering read endpoints (Task 5b) ----
+  // listTenants, listPools, statementHistory filter by the session's manageableTenants.
+  // Pre-fix: apiKey=None -> None arm -> returns unfiltered (all tenants / all pools).
+  // Post-fix: cookie resolves to acme session -> scoped to acme only.
+
+  "tenant/list via session cookie" should "scope the result to the calling session's tenant" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/tenant/list", token)
+      withClue(s"tenant-A admin (cookie) -> /api/tenant/list: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        // Post-fix: only acme is returned; globex must not appear.
+        resp.body() should include(SecurityFixtures.TenantId)
+        resp.body() should not include GlobexTenantId
+      }
+    finally h.shutdown()
+  }
+
+  "pool/list via session cookie" should "scope the result to the calling session's tenant" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/pool/list", token)
+      withClue(s"tenant-A admin (cookie) -> /api/pool/list: ${resp.body()}") {
+        // No pools in the fixture; confirms 200 and that globex pools are absent.
+        resp.statusCode() shouldBe 200
+        resp.body() should not include "globex"
+      }
+    finally h.shutdown()
+  }
+
+  "node/statements via session cookie" should "scope the result to the calling session's tenant" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantId)
+      )
+      val resp = getWithCookie(h.httpClient, s"${h.baseUrl}/api/node/statements", token)
+      withClue(s"tenant-A admin (cookie) -> /api/node/statements: ${resp.body()}") {
+        // Ring buffer is empty in unit tests; confirms 200 and no globex tenant rows.
+        resp.statusCode() shouldBe 200
+        resp.body() should not include GlobexTenantId
+      }
     finally h.shutdown()
   }

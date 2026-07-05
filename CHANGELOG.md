@@ -15,14 +15,17 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **RLS/CLS parse failures deny.** `FlightSqlRouter` denies when `RowPolicyRewriter` / `ColumnPolicyRewriter` cannot parse a statement that has policies attached (a parse failure means filtering cannot be verified), and the transient-failure retry resends the fully rewritten (RLS-wrapped) SQL instead of the CLS-only intermediate.
 - **Prepared statements peer-bound and re-authorized live.** A prepared-statement handle only executes for the peer that created it (a leaked handle replayed from another connection gets UNAUTHORIZED), and both Execute paths re-read the `EffectiveSet` from the live session at call time instead of replaying the Prepare-time snapshot - a grant revoked mid-session now takes effect on prepared statements exactly as it does on one-shot statements, and a handle whose session has expired resolves to a deny.
 - **Cross-tenant RBAC privilege escalation closed.** `addUserRole` / `addUserGroup` / `addGroupRole` enforce that the referenced role/group shares the principal's tenant.
-- **Cookie-authenticated sessions are now tenant/superuser-scoped on every
-  mutating endpoint.** Body-tenant and id-only REST endpoints previously
-  enforced scope only for the X-API-Key header path; a browser session
-  (HttpOnly qod_session cookie, no header) reached the handlers with no
-  resolved identity and was admitted, letting a tenant admin mutate other
-  tenants' pools, databases, and RBAC objects (and reach superuser-only
-  operations). All such endpoints now resolve the session cookie into the
-  scope check (header still takes precedence). Path/query-tenant endpoints
+- **Cookie-authenticated sessions are now tenant/superuser-scoped on all
+  REST endpoints.** Body-tenant, id-only, and read/superuser-gated endpoints
+  previously enforced scope only for the X-API-Key header path; a browser
+  session (HttpOnly qod_session cookie, no header) reached the handlers with
+  no resolved identity and was admitted. This let a tenant admin mutate other
+  tenants' pools, databases, and RBAC objects, reach superuser-only operations
+  (manifest export/import, server config), and receive unfiltered cross-tenant
+  reads from pool/tenant list and statement history. The worst case was
+  manifest import: a cookie-authenticated tenant admin could overwrite the
+  entire control plane. All such endpoints now resolve the session cookie into
+  the scope check (header still takes precedence). Path/query-tenant endpoints
   were already covered by the perimeter guard.
 - **Constant-time API-key compare.** `apiKeyGuard` compared `X-API-Key` with `String.equals`, leaking the key length-by-length via response timing; replaced with `MessageDigest.isEqual`.
 - **Internal exception text no longer reaches Flight clients.** Every catch-all INTERNAL arm in `FlightProducerImpl` now logs the full detail server-side against a short random errorId and returns only `internal error (errorId=...)`; raw messages could carry SQL fragments, hostnames, and file paths. Curated `RouterFailure` messages still flow through unchanged.
