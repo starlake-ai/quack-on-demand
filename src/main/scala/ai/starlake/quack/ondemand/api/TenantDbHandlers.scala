@@ -84,17 +84,17 @@ final class TenantDbHandlers(
                   defaultSchema = req.defaultSchema,
                   initSql = req.initSql
                 )
-                .map {
-                  case Right(td) => Right(toResponse(req.tenant, td))
+                .flatMap {
+                  case Right(td) => IO.blocking(Right(toResponse(req.tenant, td)))
                   case Left(msg) if msg.startsWith("tenant not found") =>
-                    Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+                    IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", msg))))
                   case Left(msg) if msg.startsWith("invalid kind=") =>
-                    Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg)))
+                    IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg))))
                   case Left(msg) =>
-                    Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
+                    IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", msg))))
                 }
 
-  def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.delay {
+  def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.blocking {
     Right(
       TenantDbListResponse(
         sup.listTenantDbsByTenant(tenant).map(td => toResponse(tenant, td))
@@ -129,17 +129,19 @@ final class TenantDbHandlers(
           defaultSchema = req.defaultSchema,
           initSql = req.initSql
         )
-        sup.updateTenantDb(req.tenant, req.name, patch).map {
+        sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
           case Right(r) =>
-            Right(
-              UpdateTenantDbResponse(
-                db = toResponse(req.tenant, r.td),
-                restartedNodes = r.restartedNodes,
-                failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
+            IO.blocking(
+              Right(
+                UpdateTenantDbResponse(
+                  db = toResponse(req.tenant, r.td),
+                  restartedNodes = r.restartedNodes,
+                  failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
+                )
               )
             )
           case Left(msg) if msg.startsWith("invalid") =>
-            Left((StatusCode.BadRequest, ErrorResponse("invalid", msg)))
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
           case Left(msg) =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", msg))))
         }
