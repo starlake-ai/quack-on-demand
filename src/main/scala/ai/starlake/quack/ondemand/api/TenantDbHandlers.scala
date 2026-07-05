@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import cats.effect.IO
@@ -15,7 +15,8 @@ import sttp.model.StatusCode
   */
 final class TenantDbHandlers(
     sup: PoolSupervisor,
-    federatedStore: Option[FederatedSourceStore] = None
+    federatedStore: Option[FederatedSourceStore] = None,
+    catalog: Option[CatalogHandlers] = None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -25,6 +26,16 @@ final class TenantDbHandlers(
 
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)
+
+  /** Sum of per-schema table counts via the catalog reader. None for non-DuckLake kinds and on any
+    * reader failure: the list call must never fail because a catalog is unreachable.
+    */
+  private def tableCountFor(tenantName: String, td: TenantDb): Option[Int] =
+    if td.kind != TenantDbKind.DuckLake then None
+    else
+      catalog.flatMap { c =>
+        scala.util.Try(c.listSchemas(tenantName, td.name).map(_.tableCount).sum).toOption
+      }
 
   private def toResponse(tenantName: String, td: TenantDb): TenantDbResponse =
     TenantDbResponse(
@@ -39,7 +50,9 @@ final class TenantDbHandlers(
       defaultSchema = td.defaultSchema,
       disabled = td.disabled,
       federatedSourceCount = federatedCount(td.id),
-      initSql = td.initSql
+      initSql = td.initSql,
+      effectiveDataPath = sup.effectiveMetastoreFor(tenantName, td.name).getOrElse("dataPath", ""),
+      tableCount = tableCountFor(tenantName, td)
     )
 
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
@@ -103,13 +116,30 @@ final class TenantDbHandlers(
             Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         }
 
-  def setInitSql(req: SetTenantDbInitSqlRequest, apiKey: Option[String])(
+  def update(req: UpdateTenantDbRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
-  ): Out[TenantDbResponse] =
+  ): Out[UpdateTenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
       case None      =>
-        sup.setTenantDbInitSql(req.tenant, req.name, req.initSql).map {
-          case Right(td) => Right(toResponse(req.tenant, td))
-          case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        val patch = TenantDbPatch(
+          metastore = req.metastore,
+          objectStore = req.objectStore,
+          defaultDatabase = req.defaultDatabase,
+          defaultSchema = req.defaultSchema,
+          initSql = req.initSql
+        )
+        sup.updateTenantDb(req.tenant, req.name, patch).map {
+          case Right(r) =>
+            Right(
+              UpdateTenantDbResponse(
+                db = toResponse(req.tenant, r.td),
+                restartedNodes = r.restartedNodes,
+                failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
+              )
+            )
+          case Left(msg) if msg.startsWith("invalid") =>
+            Left((StatusCode.BadRequest, ErrorResponse("invalid", msg)))
+          case Left(msg) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         }
