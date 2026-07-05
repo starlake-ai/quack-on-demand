@@ -49,6 +49,7 @@ final case class ManifestTenantDb(
     objectStore: Map[String, String] = Map.empty,
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
+    initSql: String = "",
     federatedSources: List[ManifestFederatedSource] = Nil
 )
 
@@ -256,6 +257,7 @@ object ConfigManifest:
         objectStore      <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
         defaultDatabase  <- c.getOrElse[Option[String]]("defaultDatabase")(None)
         defaultSchema    <- c.getOrElse[Option[String]]("defaultSchema")(None)
+        initSql          <- c.getOrElse[String]("initSql")("")
         federatedSources <- c.getOrElse[List[ManifestFederatedSource]]("federatedSources")(Nil)
       yield ManifestTenantDb(
         name,
@@ -265,6 +267,7 @@ object ConfigManifest:
         objectStore,
         defaultDatabase,
         defaultSchema,
+        initSql,
         federatedSources
       )
     },

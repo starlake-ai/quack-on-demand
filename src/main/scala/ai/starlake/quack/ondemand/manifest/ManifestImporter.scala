@@ -262,7 +262,8 @@ object ManifestImporter:
                 dataPath = mtd.dataPath,
                 objectStore = mtd.objectStore,
                 defaultDatabase = mtd.defaultDatabase,
-                defaultSchema = mtd.defaultSchema
+                defaultSchema = mtd.defaultSchema,
+                initSql = mtd.initSql
               )
               // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
               // schemaName keys (they are merged from the default metastore at spawn time), so we
