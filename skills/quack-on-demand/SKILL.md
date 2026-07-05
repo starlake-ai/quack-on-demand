@@ -232,6 +232,20 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
   }'
 ```
 
+### Set a database's init SQL
+
+```bash
+# Set a database's init SQL: engine defaults for every node of that database,
+# run at boot BEFORE the quack extension loads and the catalog ATTACH, ahead of
+# the pool's own initSql (a pool SET overrides a db SET) and before federation
+# ATTACHes. Takes effect on the next node spawn; restart the database's nodes to
+# apply immediately. Empty initSql clears it.
+curl -sS -X POST "http://localhost:20900/api/database/setInitSql" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"acme_tpch","initSql":"SET memory_limit = '\''8GB'\'';"}'
+```
+
+Nodes unhealthy right after editing init SQL usually means the SQL is bad: fix or clear the field, then restart the nodes.
+
 ### Register a federated source
 
 ```bash

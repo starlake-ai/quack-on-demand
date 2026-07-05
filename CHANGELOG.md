@@ -35,6 +35,15 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **Compose summary crash fixed.** The end-of-script summary still read the removed `_profile_set` array, so under `set -u` every `run-docker-compose.sh` run died after the stack was already up, losing the URL summary and the zero exit code.
 - **Release: tag pushed before `gh release create`** (which requires the tag on the remote).
 
+### Database configuration
+
+- **Per-database init SQL.** Tenant-dbs carry an `initSql` executed at node boot
+  before the quack extension loads, ahead of the pool's own initSql and the
+  federation blob, so operators set temp directory, memory limit, or extension
+  loads once per database and pools can still override. New endpoint POST
+  /api/database/setInitSql; field on database create, the manifest, and the
+  Databases UI. Takes effect on the next node spawn.
+
 ## 0.3.5
 
 ### Connectivity and auth
