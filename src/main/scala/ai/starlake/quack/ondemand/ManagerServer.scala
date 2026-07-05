@@ -184,8 +184,8 @@ final class ManagerServer(
     )
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
-      RbacEndpoints.createUser.serverLogic { case (req, key) =>
-        users.createUser(req, key)(sessions.scopeOf)
+      RbacEndpoints.createUser.serverLogic { case (req, key, cookie) =>
+        users.createUser(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.updateUser.serverLogic { case (req, key) =>
         users.updateUser(req, key)(sessions.scopeOf)
@@ -199,8 +199,8 @@ final class ManagerServer(
       RbacEndpoints.effectivePermissions.serverLogic { case (id, key) =>
         users.effective(id, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createRole.serverLogic { case (req, key) =>
-        roles.createRole(req, key)(sessions.scopeOf)
+      RbacEndpoints.createRole.serverLogic { case (req, key, cookie) =>
+        roles.createRole(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.deleteRole.serverLogic { case (req, key) =>
         roles.deleteRole(req, key)(sessions.scopeOf)
@@ -217,8 +217,8 @@ final class ManagerServer(
       RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
         roles.listPermissions(roleId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.createGroup.serverLogic { case (req, key) =>
-        groups.createGroup(req, key)(sessions.scopeOf)
+      RbacEndpoints.createGroup.serverLogic { case (req, key, cookie) =>
+        groups.createGroup(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.deleteGroup.serverLogic { case (req, key) =>
         groups.deleteGroup(req, key)(sessions.scopeOf)
@@ -247,8 +247,8 @@ final class ManagerServer(
       RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
         memberships.listGroupRoles(groupId, key)(sessions.scopeOf)
       },
-      RbacEndpoints.grantPoolPermission.serverLogic { case (req, key) =>
-        poolPermissions.grant(req, key)(sessions.scopeOf)
+      RbacEndpoints.grantPoolPermission.serverLogic { case (req, key, cookie) =>
+        poolPermissions.grant(req, key.orElse(cookie))(sessions.scopeOf)
       },
       RbacEndpoints.revokePoolPermission.serverLogic { case (req, key) =>
         poolPermissions.revoke(req, key)(sessions.scopeOf)
