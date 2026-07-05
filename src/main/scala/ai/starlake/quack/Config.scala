@@ -39,7 +39,13 @@ final case class K8sConfig(
       envVar = "QOD_K8S_POD_LABEL",
       description = "Label selector that identifies manager-owned node pods."
     )
-    podLabel: String
+    podLabel: String,
+    @field @ConfigField(
+      envVar = "QOD_POD_TEMPLATE_ENABLED",
+      description =
+        "Allow superusers to supply a full Pod-manifest YAML template for a pool's node pods. Off by default; raw manifests are cluster-level power."
+    )
+    podTemplateEnabled: Boolean
 )
 
 final case class AdminConfig(
