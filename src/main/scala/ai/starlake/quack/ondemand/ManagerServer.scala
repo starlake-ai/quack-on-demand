@@ -359,6 +359,9 @@ final class ManagerServer(
       Endpoints.deleteTenantDb.serverLogic { case (req, key) =>
         tenantDbs.deleteTenantDb(req, key)(sessions.scopeOf)
       },
+      Endpoints.setTenantDbInitSql.serverLogic { case (req, key) =>
+        tenantDbs.setInitSql(req, key)(sessions.scopeOf)
+      },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
       Endpoints.clientConfig.serverLogic(_ =>

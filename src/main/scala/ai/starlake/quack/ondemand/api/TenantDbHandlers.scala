@@ -38,7 +38,8 @@ final class TenantDbHandlers(
       defaultDatabase = td.defaultDatabase,
       defaultSchema = td.defaultSchema,
       disabled = td.disabled,
-      federatedSourceCount = federatedCount(td.id)
+      federatedSourceCount = federatedCount(td.id),
+      initSql = td.initSql
     )
 
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
@@ -67,7 +68,8 @@ final class TenantDbHandlers(
                   dataPath = req.dataPath,
                   objectStore = req.objectStore,
                   defaultDatabase = req.defaultDatabase,
-                  defaultSchema = req.defaultSchema
+                  defaultSchema = req.defaultSchema,
+                  initSql = req.initSql
                 )
                 .map {
                   case Right(td) => Right(toResponse(req.tenant, td))
@@ -99,4 +101,15 @@ final class TenantDbHandlers(
             Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
           case Left(msg) =>
             Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+        }
+
+  def setInitSql(req: SetTenantDbInitSqlRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[TenantDbResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        sup.setTenantDbInitSql(req.tenant, req.name, req.initSql).map {
+          case Right(td) => Right(toResponse(req.tenant, td))
+          case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         }

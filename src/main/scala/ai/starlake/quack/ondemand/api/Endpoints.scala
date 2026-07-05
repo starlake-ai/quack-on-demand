@@ -296,6 +296,18 @@ object Endpoints:
       .in(jsonBody[TenantDbOpRequest])
       .in(header[Option[String]]("X-API-Key"))
 
+  val setTenantDbInitSql: PublicEndpoint[
+    (SetTenantDbInitSqlRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantDbResponse,
+    Any
+  ] =
+    base.post
+      .in("database" / "setInitSql")
+      .in(jsonBody[SetTenantDbInitSqlRequest])
+      .in(header[Option[String]]("X-API-Key"))
+      .out(jsonBody[TenantDbResponse])
+
   // ----- UI login -----
   // Login also sets the qod_session cookie (HttpOnly, SameSite=Lax) so the
   // browser auto-attaches the JWT on subsequent `/api/...` calls without the

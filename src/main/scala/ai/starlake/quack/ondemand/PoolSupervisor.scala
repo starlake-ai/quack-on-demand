@@ -754,6 +754,30 @@ final class PoolSupervisor(
                 Right(())
     }
 
+  /** Update the initSql of an existing tenant-db. Takes effect on the next node spawn of the
+    * database's pools; running nodes keep their old setup. Also refreshes the dbInitSql carried by
+    * the database's cached PoolStates so a later respawn from cache uses the new value without
+    * waiting for restore().
+    */
+  def setTenantDbInitSql(
+      tenantName: String,
+      dbName: String,
+      initSql: String
+  ): IO[Either[String, TenantDb]] = IO.blocking {
+    findTenantDb(tenantName, dbName) match
+      case None     => Left(s"tenant-db $tenantName/$dbName not found")
+      case Some(td) =>
+        val updated = td.copy(initSql = initSql)
+        store.upsertTenantDb(updated)
+        tenantDbs.put(updated.id, updated)
+        pools.foreach { case (key, state) =>
+          if key.tenant == tenantName.toLowerCase && key.tenantDb == td.name then
+            pools.put(key, state.copy(dbInitSql = initSql))
+        }
+        publish.topologyChanged()
+        Right(updated)
+  }
+
   // ---------- Pool API ----------
 
   /** Create a pool under an existing tenant-db. The tenant-db's metastore + objectStore are the

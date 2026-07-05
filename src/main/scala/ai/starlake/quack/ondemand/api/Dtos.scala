@@ -267,7 +267,8 @@ final case class TenantDbRequest(
     dataPath: String = "",
     objectStore: Map[String, String] = Map.empty,
     defaultDatabase: Option[String] = None,
-    defaultSchema: Option[String] = None
+    defaultSchema: Option[String] = None,
+    initSql: String = ""
 )
 final case class TenantDbResponse(
     id: String,
@@ -280,10 +281,12 @@ final case class TenantDbResponse(
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
     disabled: Boolean = false,
-    federatedSourceCount: Int = 0
+    federatedSourceCount: Int = 0,
+    initSql: String = ""
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 final case class TenantDbOpRequest(tenant: String, name: String)
+final case class SetTenantDbInitSqlRequest(tenant: String, name: String, initSql: String)
 
 // ----- Federation -----
 
@@ -892,6 +895,7 @@ object Dtos:
         objectStore     <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
         defaultDatabase <- c.getOrElse[Option[String]]("defaultDatabase")(None)
         defaultSchema   <- c.getOrElse[Option[String]]("defaultSchema")(None)
+        initSql         <- c.getOrElse[String]("initSql")("")
       yield TenantDbRequest(
         tenant,
         name,
@@ -900,14 +904,16 @@ object Dtos:
         dataPath,
         objectStore,
         defaultDatabase,
-        defaultSchema
+        defaultSchema,
+        initSql
       )
     },
     io.circe.generic.semiauto.deriveEncoder[TenantDbRequest]
   )
-  given Codec[TenantDbResponse]     = deriveCodec
-  given Codec[TenantDbListResponse] = deriveCodec
-  given Codec[TenantDbOpRequest]    = deriveCodec
+  given Codec[TenantDbResponse]          = deriveCodec
+  given Codec[TenantDbListResponse]      = deriveCodec
+  given Codec[TenantDbOpRequest]         = deriveCodec
+  given Codec[SetTenantDbInitSqlRequest] = deriveCodec
 
   given Codec[LoginRequest] = deriveCodec
   // Hand-rolled so new optional fields fall back to defaults when absent on the wire,
