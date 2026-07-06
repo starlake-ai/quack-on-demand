@@ -30,7 +30,7 @@ Raw rows are kept for `QOD_STMT_HISTORY_RETENTION_DAYS` (default `7`) days and s
 
 **Hourly rollups** -- one row per `(tenant, pool, UTC hour)`, retained for `QOD_HOURLY_ROLLUP_RETENTION_DAYS` (default `90`) days. Each row holds the total statement count, error count, and p50/p95/p99 latency percentiles computed via `percentile_cont` over the raw rows in that bucket.
 
-**Daily rollups** -- one row per `(tenant, pool, username, UTC day)`. Daily rollups are intended for the upcoming per-user usage feature; the retention knob for daily rollups ships with that feature. Until then, daily rollups accumulate without a scheduled purge.
+**Daily rollups** -- one row per `(tenant, pool, username, UTC day)`. Daily rollups are the backing store for the [usage and accounting](/administration/usage-accounting) feature. They are retained for `QOD_USAGE_RETENTION_DAYS` (default 400) and purged by the same hourly duty that purges raw rows and hourly rollups.
 
 ## Watermark semantics
 
@@ -40,7 +40,7 @@ Practical consequences:
 
 - **Short outage (shorter than the raw retention window):** when the manager restarts, the rollup job sees the full backlog in `qodstate_stmt_history` and recomputes the missing buckets on the first tick. The trend chart catches up automatically.
 - **Long outage (longer than the raw retention window):** rows older than `QOD_STMT_HISTORY_RETENTION_DAYS` have been purged before the rollup job runs. Those buckets are permanently undercounted in the hourly aggregates. The chart will show a gap or low values for the affected range.
-- **Raw retention floor:** do not set `QOD_STMT_HISTORY_RETENTION_DAYS` below `2`. The daily recompute rebuilds the watermark's whole day, which may reach back up to 24 hours. A raw retention of fewer than 2 days can cause the daily bucket to be partially recomputed from an already-purged range.
+- **Raw retention floor:** do not set `QOD_STMT_HISTORY_RETENTION_DAYS` below `2`. The daily recompute rebuilds the watermark's whole day, which may reach back up to 24 hours. A raw retention of fewer than 2 days can cause the daily bucket to be partially recomputed from an already-purged range. The manager enforces this: `QOD_STMT_HISTORY_RETENTION_DAYS` must be `0` (keep forever) or at least `2`; any other positive value is refused at startup.
 
 The rollup job runs only on the singleton leader in HA mode (the replica holding the `HaCoordinator` Postgres advisory lock). Failover hands the duty to the next leader on its next tick; no manual intervention is needed.
 
@@ -64,7 +64,7 @@ The manager runs an hourly background purge:
 |---|---|---|
 | Raw statement rows (`qodstate_stmt_history`) | `QOD_STMT_HISTORY_RETENTION_DAYS` | `7` |
 | Hourly rollup rows (`qodstate_stmt_rollup`, hourly) | `QOD_HOURLY_ROLLUP_RETENTION_DAYS` | `90` |
-| Daily rollup rows (`qodstate_stmt_rollup`, daily) | ships with the usage feature | no purge until then |
+| Daily rollup rows (`qodstate_stmt_rollup`, daily) | `QOD_USAGE_RETENTION_DAYS` | `400` |
 
 To keep raw rows for a longer period:
 

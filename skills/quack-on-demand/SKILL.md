@@ -492,6 +492,36 @@ Trend filters: `granularity` (required: `hour` or `day`), `tenant`, `pool`, `fro
 
 `QOD_TELEMETRY_STORE=none` disables all recording, hides the History UI page, and keeps the drop counter at zero. Raw retention must stay at least 2 days so the daily recompute can rebuild its whole-day bucket.
 
+## Usage and accounting
+
+Durable per-tenant / per-pool / per-user metering over daily rollups. Tenant-scoped like the
+history endpoints: superusers see all tenants, tenant admins are pinned to their own.
+
+```bash
+# Month-to-date per tenant (defaults: current calendar month UTC, groupBy=tenant)
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/usage' | python3 -m json.tool
+
+# A closed month per pool, for billing
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&groupBy=pool&tenant=acme' \
+  | python3 -m json.tool
+
+# CSV extraction for billing (columns per the spec contract)
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z' \
+  | jq -r '["tenant","statements","errors","denied","engine_ms"],
+           (.groups[] | [.tenant, .statements, .errors, .denied, .engineMs]) | @csv'
+```
+
+Params: `from` / `to` (ISO-8601 instants, half-open, default = current calendar month),
+`groupBy` (`tenant` default, `pool`, `user`), `tenant`, `pool`. Groups are sorted by
+`engineMs` descending; each group carries a per-day `days` array. `dataStart` marks the
+oldest daily bucket still retained.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `QOD_USAGE_RETENTION_DAYS` | `400` | Delete daily rollup buckets older than N days (hourly purge); `0` = keep forever |
+
 ## Ad-hoc queries
 
 `scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees - handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.
