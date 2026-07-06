@@ -43,7 +43,8 @@ final class ManagerServer(
     activeStmts: ActiveStatementHandlers,
     audit: AuditRecorder = AuditRecorder.noop,
     auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
-    auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore)
+    auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore),
+    history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore)
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -186,6 +187,16 @@ final class ManagerServer(
       Endpoints.auditList.serverLogic {
         case (family, tenant, actor, action, q, from, to, limit, before, token) =>
           auditHandlers.list(family, tenant, actor, action, q, from, to, limit, before, token)(
+            sessions.scopeOf
+          )
+      },
+      Endpoints.historyTrends.serverLogic {
+        case (granularity, from, to, tenant, pool, token) =>
+          history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
+      },
+      Endpoints.historyStatements.serverLogic {
+        case (from, to, tenant, pool, user, status, q, limit, before, token) =>
+          history.statements(from, to, tenant, pool, user, status, q, limit, before, token)(
             sessions.scopeOf
           )
       },
