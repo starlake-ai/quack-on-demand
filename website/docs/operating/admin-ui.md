@@ -26,7 +26,7 @@ For how credentials are validated and how to wire an external provider, see [Aut
 
 ## Navigation
 
-The top navigation bar has **Nodes**, **Tenants**, **Users**, **Audit** (hidden when telemetry is disabled), and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it. The Audit tab is hidden when `QOD_TELEMETRY_STORE=none`; it is visible to superusers and tenant admins.
+The top navigation bar has **Nodes**, **Tenants**, **Users**, **Audit** (hidden when telemetry is disabled), **History** (hidden when telemetry is disabled), and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it. The Audit and History tabs are hidden when `QOD_TELEMETRY_STORE=none`; both are visible to superusers and tenant admins.
 
 ![The top navigation bar](/img/ui/nav.png)
 
@@ -123,6 +123,24 @@ The event table shows timestamp, family badge, actor, action, target, and an out
 Pagination uses a keyset "Load more" button rather than numbered pages. There is no live polling; audit is a forensic view, so a manual refresh button is provided.
 
 The four event families, the full action taxonomy, tenant scoping rules, retention, and the sanitization guarantee are documented on the [Audit log](/administration/audit-log) page.
+
+## History
+
+The `History` page gives a time-series view of FlightSQL activity. It is available to superusers and tenant admins. It is hidden from the navigation when `QOD_TELEMETRY_STORE=none`; a deep link to the page shows an empty state with a "telemetry is disabled" message.
+
+The page has a range picker at the top that sets the time window shared by all three charts and the statement table. Narrowing the window to a few hours switches the chart granularity to hourly; widening it to weeks uses daily buckets automatically.
+
+The three charts are:
+
+- **Statement volume** - total statements per bucket, with an error overlay.
+- **Latency percentiles** - p50, p95, and p99 as separate lines. Percentile data comes from the hourly rollup and is shown only when the granularity is hourly; daily buckets do not carry percentile aggregates.
+- **Error rate** - percentage of statements that completed with `status=error` or `status=denied`.
+
+Below the charts, a searchable statement table shows the raw rows for the selected window. Columns include timestamp, user, pool, status badge, duration, and a truncated SQL preview. Clicking a row expands the full SQL text (up to the 500-character recording cap). Pagination uses a keyset "Load more" button.
+
+The filter bar above the table accepts a free-text `q` search (substring match on SQL), a `status` filter, a user filter, and a pool selector. Superusers also have a tenant selector; tenant admins are pinned to their own tenant.
+
+The storage model, watermark semantics, retention knobs, and the curl API for both endpoints are covered on the [Statement history and trends](/operating/history-trends) page.
 
 ## Config (superuser only)
 

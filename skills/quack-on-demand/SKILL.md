@@ -442,6 +442,56 @@ Tenant admins see only their own tenant's rows. Superusers and static-key caller
 | `QOD_AUDIT_RETENTION_DAYS` | `90` | Delete rows older than N days (hourly purge); set to `0` to keep forever |
 | `QOD_TELEMETRY_STORE` | `postgres` | `none` disables all recording, hides the Audit UI page, and keeps the drop counter at zero |
 
+## Statement history and trends
+
+Statement history records every FlightSQL statement (including reads). Raw rows are searchable for a short window; aggregated rollups drive trend charts over a longer period. Both are tenant-scoped: superusers see all tenants, tenant admins see only their own.
+
+```bash
+# Most recent 50 statements for a tenant
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/history/statements?tenant=acme&limit=50' | python3 -m json.tool
+
+# Page through with the keyset cursor (use nextBefore from the previous response)
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/history/statements?before=<nextBefore-from-previous-page>'
+
+# Find yesterday's slow statements: fetch the window, filter durationMs locally
+# (there is no duration filter parameter on the endpoint)
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/history/statements?tenant=acme&pool=bi&from=2026-07-05T00:00:00Z&to=2026-07-06T00:00:00Z&limit=500' \
+  | python3 -c "
+import sys, json
+rows = json.load(sys.stdin).get('rows', [])
+slow = [r for r in rows if r.get('durationMs', 0) > 5000]
+for r in sorted(slow, key=lambda x: -x.get('durationMs', 0)):
+    print(r.get('durationMs'), r.get('username'), r.get('sql', '')[:80])
+"
+
+# Hourly trend for the last 7 days
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/history/trends?granularity=hour&tenant=acme&pool=bi&from=2026-06-29T00:00:00Z&to=2026-07-06T00:00:00Z' \
+  | python3 -m json.tool
+
+# Daily trend for the last 30 days
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/history/trends?granularity=day&tenant=acme&from=2026-06-06T00:00:00Z&to=2026-07-06T00:00:00Z' \
+  | python3 -m json.tool
+```
+
+Statement filters: `tenant`, `pool`, `user`, `status` (`ok`/`denied`/`error`), `q` (substring on SQL), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
+
+Trend filters: `granularity` (required: `hour` or `day`), `tenant`, `pool`, `from`, `to`. Hourly buckets include p50/p95/p99; daily buckets have null percentiles.
+
+**Retention env vars:**
+
+| Env var | Default | Effect |
+|---|---|---|
+| `QOD_STMT_HISTORY_RETENTION_DAYS` | `7` | Delete raw statement rows older than N days (hourly purge); set to `0` to keep forever |
+| `QOD_HOURLY_ROLLUP_RETENTION_DAYS` | `90` | Delete hourly rollup rows older than N days (hourly purge); set to `0` to keep forever |
+| `QOD_ROLLUP_INTERVAL_SEC` | `300` | How often the rollup job recomputes touched buckets (leader-gated in HA mode) |
+
+`QOD_TELEMETRY_STORE=none` disables all recording, hides the History UI page, and keeps the drop counter at zero. Raw retention must stay at least 2 days so the daily recompute can rebuild its whole-day bucket.
+
 ## Ad-hoc queries
 
 `scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees - handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.

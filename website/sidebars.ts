@@ -69,6 +69,7 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'operating/observability',
+        'operating/history-trends',
         'operating/manifest',
         'operating/admin-ui',
       ],
