@@ -206,6 +206,7 @@ final class ManagerServer(
             token
           )(sessions.scopeOf)
       },
+      Endpoints.auditActions.serverLogic(token => auditHandlers.actions(token)),
       Endpoints.historyTrends.serverLogic { case (granularity, from, to, tenant, pool, token) =>
         history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
       },
