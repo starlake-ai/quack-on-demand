@@ -251,6 +251,22 @@ class TelemetryModelsSpec extends AnyFlatSpec with Matchers:
     errors shouldBe 2L
   }
 
+  it should "exclude statements at or before fromExclusive and produce buckets only for the later hour" in {
+    val store = new RecordingTelemetryStore
+    val t1    = Instant.parse("2026-07-01T10:15:00Z") // inside hour 10
+    val t2    = Instant.parse("2026-07-01T11:15:00Z") // inside hour 11
+    store.appendStatements(List(ev(ts = t1), ev(ts = t2)))
+    // fromExclusive = boundary between hour 10 and hour 11
+    val endOfHour10 = Instant.parse("2026-07-01T11:00:00Z")
+    val endOfHour11 = Instant.parse("2026-07-01T12:00:00Z")
+    store.recomputeRollups(fromExclusive = Some(endOfHour10), toInclusive = endOfHour11)
+    val buckets = store.queryRollups(RollupQuery("hour"))
+    // Only hour 11 falls in (endOfHour10, endOfHour11]; hour 10 is excluded by fromExclusive
+    buckets should have size 1
+    buckets.head.bucketStart shouldBe Instant.parse("2026-07-01T11:00:00Z")
+    buckets.head.stmtCount shouldBe 1L
+  }
+
   // ---- RecordingTelemetryStore: purgeStatements --------------------------- //
 
   "RecordingTelemetryStore.purgeStatements" should "remove statements with ts < olderThan" in {

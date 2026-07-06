@@ -151,37 +151,37 @@ trait TelemetryStore:
   /** Append a batch of statement events. Implementations should be fire-and-forget safe; callers do
     * not check the return value.
     */
-  def appendStatements(events: List[StatementEvent]): Unit = ()
+  def appendStatements(events: List[StatementEvent]): Unit
 
   /** Return statement rows matching `q`, newest-first (descending id), limit clamped to [1,500].
     */
-  def searchStatements(q: StatementQuery): List[StatementRow] = Nil
+  def searchStatements(q: StatementQuery): List[StatementRow]
 
   /** Delete statement rows with ts < olderThan; returns the number of rows deleted. */
-  def purgeStatements(olderThan: Instant): Int = 0
+  def purgeStatements(olderThan: Instant): Int
 
   // --- Rollups ------------------------------------------------------------ //
 
   /** Return the timestamp of the last completed rollup pass, or None if rollups have never run. */
-  def rollupWatermark(): Option[Instant] = None
+  def rollupWatermark(): Option[Instant]
 
   /** Recompute hourly and daily rollup buckets for the time range (fromExclusive, toInclusive].
     * Replaces any existing buckets whose bucketStart falls within that window.
     */
-  def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit = ()
+  def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit
 
   /** Advance the rollup watermark to `to` (persisted so the next incremental pass knows where to
     * start).
     */
-  def advanceRollupWatermark(to: Instant): Unit = ()
+  def advanceRollupWatermark(to: Instant): Unit
 
   /** Return rollup buckets matching `q`, ascending by bucketStart. */
-  def queryRollups(q: RollupQuery): List[RollupBucket] = Nil
+  def queryRollups(q: RollupQuery): List[RollupBucket]
 
   /** Delete rollup buckets with bucketStart < olderThan for the given granularity; returns the
     * number of rows deleted.
     */
-  def purgeRollups(granularity: String, olderThan: Instant): Int = 0
+  def purgeRollups(granularity: String, olderThan: Instant): Int
 
 /** telemetry.store = none: records nothing anywhere, reads return empty. */
 object NoopTelemetryStore extends TelemetryStore:

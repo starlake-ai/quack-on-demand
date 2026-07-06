@@ -17,8 +17,16 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     def appendAudit(es: List[AuditEvent]): Unit =
       if failNext then { failNext = false; throw new RuntimeException("pg down") }
       events ++= es
-    def listAudit(q: AuditQuery): List[AuditRow] = Nil
-    def purgeAudit(olderThan: Instant): Int      = 0
+    def listAudit(q: AuditQuery): List[AuditRow]                                     = Nil
+    def purgeAudit(olderThan: Instant): Int                                          = 0
+    def appendStatements(events: List[StatementEvent]): Unit                         = ()
+    def searchStatements(q: StatementQuery): List[StatementRow]                      = Nil
+    def purgeStatements(olderThan: Instant): Int                                     = 0
+    def rollupWatermark(): Option[Instant]                                           = None
+    def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit = ()
+    def advanceRollupWatermark(to: Instant): Unit                                    = ()
+    def queryRollups(q: RollupQuery): List[RollupBucket]                             = Nil
+    def purgeRollups(granularity: String, olderThan: Instant): Int                   = 0
 
   private def session(username: String, superuser: Boolean) =
     SessionTokenStore.Session(
