@@ -40,7 +40,17 @@ class AuditEventSpec extends AnyFlatSpec with Matchers:
   }
 
   "TelemetryConfig.validate" should "accept postgres and none, refuse anything else" in {
-    TelemetryConfig.validate("postgres") shouldBe Right(())
-    TelemetryConfig.validate("none") shouldBe Right(())
-    TelemetryConfig.validate("clickhouse").isLeft shouldBe true
+    TelemetryConfig.validate("postgres", 7) shouldBe Right(())
+    TelemetryConfig.validate("none", 7) shouldBe Right(())
+    TelemetryConfig.validate("clickhouse", 7).isLeft shouldBe true
+  }
+
+  it should "reject stmtHistoryRetentionDays of 1" in {
+    TelemetryConfig.validate("postgres", 1).isLeft shouldBe true
+  }
+
+  it should "accept 0 (keep forever) and >= 2" in {
+    TelemetryConfig.validate("postgres", 0).isRight shouldBe true
+    TelemetryConfig.validate("postgres", 2).isRight shouldBe true
+    TelemetryConfig.validate("postgres", 7).isRight shouldBe true
   }

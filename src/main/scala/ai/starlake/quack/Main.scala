@@ -169,7 +169,10 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
-    TelemetryConfig.validate(mgrCfg.telemetry.store).left.foreach(msg => sys.error(msg))
+    TelemetryConfig
+      .validate(mgrCfg.telemetry.store, mgrCfg.telemetry.stmtHistoryRetentionDays)
+      .left
+      .foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
@@ -1237,6 +1240,13 @@ object Main extends IOApp with LazyLogging:
                             val n = telemetryStore.purgeRollups("hour", c)
                             if n > 0 then
                               logger.info(s"hourly-rollup purge: deleted $n buckets older than $c")
+                          }
+                        TelemetryPurge
+                          .cutoffFor(mgrCfg.telemetry.usageRetentionDays, now)
+                          .foreach { c =>
+                            val n = telemetryStore.purgeRollups("day", c)
+                            if n > 0 then
+                              logger.info(s"daily-rollup purge: deleted $n buckets older than $c")
                           }
                     }
                     .handleErrorWith(e => IO(logger.error(s"audit purge failed: ${e.getMessage}")))
