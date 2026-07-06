@@ -13,7 +13,11 @@ import sttp.model.StatusCode
   * superuser is rejected here even though it passed `apiKeyGuard`. Static `QOD_API_KEY` callers (no
   * session row) are admitted; they're already trusted operators.
   */
-final class ConfigHandlers(config: Config, entries: List[ConfigEntry]):
+final class ConfigHandlers(
+    config: Config,
+    entries: List[ConfigEntry],
+    val telemetryEnabled: Boolean = true
+):
 
   def list(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

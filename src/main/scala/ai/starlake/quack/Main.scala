@@ -36,6 +36,13 @@ import ai.starlake.quack.observability.metrics.{
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
+import ai.starlake.quack.ondemand.telemetry.{
+  AuditRecorder,
+  EventJournal,
+  NoopTelemetryStore,
+  PostgresTelemetryStore,
+  TelemetryStore
+}
 import ai.starlake.quack.ondemand.ha.{
   HaCoordinator,
   HaPreconditions,
@@ -841,6 +848,23 @@ object Main extends IOApp with LazyLogging:
       val columnPolicyHandlers = new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup)
       val rowPolicyHandlers    = new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup)
 
+      // Telemetry store selection: "postgres" (default) uses the control-plane
+      // database; "none" disables audit logging entirely. Constructed here so
+      // journalDropped can reference metricsReg.
+      val telemetryStore: TelemetryStore = mgrCfg.telemetry.store match
+        case "none" => NoopTelemetryStore
+        case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
+      if telemetryStore.enabled then logger.info("telemetry: postgres (qodstate_audit)")
+      else logger.info("telemetry: none (audit log disabled; nothing is recorded)")
+      val journalDropped: Int => Unit = n =>
+        metricsReg.composite
+          .counter("qod_journal_dropped_total", "table", "audit")
+          .increment(n.toDouble)
+      val eventJournal =
+        new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
+      val auditRecorder =
+        new AuditRecorder(telemetryStore, sessionTokens.get, onDrop = journalDropped)
+
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
       // @ConfigField-annotated scalar (including nested case-class
@@ -858,7 +882,8 @@ object Main extends IOApp with LazyLogging:
           metricsCls = classOf[MetricsConfig]
         )
       )
-      val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
+      val serverConfigHandlers =
+        new ConfigHandlers(liveConfig, configEntries, telemetryStore.enabled)
 
       val federatedSourceHandlers: Option[ai.starlake.quack.ondemand.api.FederatedSourceHandlers] =
         val dm               = mgrCfg.defaultMetastore
@@ -1009,6 +1034,12 @@ object Main extends IOApp with LazyLogging:
                     // idempotent; safe to run before the pools are drained.
                   try coordinator.foreach(_.close())
                   catch case _: Throwable => ()
+                    // Drain the audit event journal and close the telemetry store
+                    // before the control-plane pool shuts down.
+                  try eventJournal.drainNow()
+                  catch case _: Throwable => ()
+                  try telemetryStore.close()
+                  catch case _: Throwable => ()
                     // Drain the JDBC connection pools. Both close()s are
                     // idempotent + no-op if already closed.
                   try store.close()
@@ -1124,14 +1155,40 @@ object Main extends IOApp with LazyLogging:
                     ) *> IO.sleep(period)).foreverM.void.start
                 case None => IO.unit.start
 
+              val journalFiber =
+                if telemetryStore.enabled then eventJournal.start else IO.unit.start
+              val auditPurgeFiber =
+                if telemetryStore.enabled then
+                  (IO
+                    .blocking {
+                      if coordinator.forall(_.isLeader) then
+                        val cutoff = java.time.Instant
+                          .now()
+                          .minus(
+                            java.time.Duration.ofDays(mgrCfg.telemetry.auditRetentionDays.toLong)
+                          )
+                        val n = telemetryStore.purgeAudit(cutoff)
+                        if n > 0 then
+                          logger.info(s"audit purge: deleted $n events older than $cutoff")
+                    }
+                    .handleErrorWith(e => IO(logger.error(s"audit purge failed: ${e.getMessage}")))
+                    *> IO.sleep(scala.concurrent.duration.DurationInt(1).hours)).foreverM.void.start
+                else IO.unit.start
+
               healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
                 reconcileFiber.flatMap { rcFiber =>
                   coordinatorFiber.flatMap { coFiber =>
                     haRefreshFiber.flatMap { hrFiber =>
-                      IO.never[Unit]
-                        .guarantee(
-                          fiber.cancel *> rcFiber.cancel *> coFiber.cancel *> hrFiber.cancel *> gracefulShutdown
-                        )
+                      journalFiber.flatMap { jFiber =>
+                        auditPurgeFiber.flatMap { pFiber =>
+                          IO.never[Unit]
+                            .guarantee(
+                              fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                gracefulShutdown
+                            )
+                        }
+                      }
                     }
                   }
                 }
