@@ -28,6 +28,7 @@ const sidebars: SidebarsConfig = {
         'administration/onboarding',
         'administration/access-control',
         'administration/day-2-operations',
+        'administration/audit-log',
         'administration/lifecycle-config',
         'administration/manage-by-manifest',
       ],
