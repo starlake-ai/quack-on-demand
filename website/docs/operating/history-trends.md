@@ -22,7 +22,7 @@ Every statement that completes the FlightSQL execute path is recorded:
 | `durationMs` | Wall-clock duration from receive to completion |
 | `nodeId` | The node that executed the statement |
 
-**What is excluded:** `PREPARE` probe statements (the `LIMIT-0` schema-probe emitted by the ADBC prepare path) do not create a separate row. The matching `EXECUTE` carries a `prepareDurationMs` field instead.
+**What is excluded:** `PREPARE` probe statements (the `LIMIT-0` schema-probe emitted by the ADBC prepare path) do not create a separate row. The matching `EXECUTE` carries a `prepareMs` field instead.
 
 ## Two-tier storage model
 
@@ -108,9 +108,9 @@ for r in sorted(slow, key=lambda x: -x.get('durationMs', 0)):
     print(r.get('durationMs'), r.get('username'), r.get('sql', '')[:80])
 "
 
-# Errors only
+# Denied statements only
 curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&status=error&limit=100'
+  'http://localhost:20900/api/history/statements?tenant=acme&status=denied&limit=100'
 
 # Free-text search for a table name
 curl -sS -H "X-API-Key: $TOKEN" \
@@ -124,7 +124,7 @@ curl -sS -H "X-API-Key: $TOKEN" \
 | `tenant` | Filter by tenant (superusers can specify any tenant; tenant admins are pinned to their own) |
 | `pool` | Filter by pool key |
 | `user` | Filter by username (exact match) |
-| `status` | Filter by status: `ok`, `denied`, or `error` |
+| `status` | Filter by status: `ok`, `denied`, `transient`, `permanent`, `no-node`, `no-pool`, or `pin-lost` |
 | `q` | Substring match on the SQL text |
 | `from` | ISO-8601 instant; return only statements at or after this time |
 | `to` | ISO-8601 instant; return only statements before this time |
@@ -157,6 +157,6 @@ curl -sS -H "X-API-Key: $TOKEN" \
 | `from` | ISO-8601 instant; start of the range (inclusive) |
 | `to` | ISO-8601 instant; end of the range (exclusive) |
 
-Each bucket in the response carries `ts` (UTC bucket start), `count`, `errorCount`, and `p50Ms`/`p95Ms`/`p99Ms`. Percentile fields are present on hourly buckets only; daily buckets carry `null` for percentiles (daily rollups are per-user and are not yet surfaced as latency charts).
+Each bucket in the response carries `bucketStart` (UTC bucket start), `tenant`, `pool`, `username`, `stmtCount`, `errorCount`, `deniedCount`, `engineMsSum`, and `p50Ms`/`p95Ms`/`p99Ms`. Percentile fields are present on hourly buckets only; daily buckets carry `null` for percentiles (daily rollups are per-user and are not yet surfaced as latency charts).
 
 Buckets that had zero statements are not returned; gaps in the response represent idle periods.

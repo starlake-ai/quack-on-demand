@@ -134,7 +134,7 @@ The three charts are:
 
 - **Statement volume** - total statements per bucket, with an error overlay.
 - **Latency percentiles** - p50, p95, and p99 as separate lines. Percentile data comes from the hourly rollup and is shown only when the granularity is hourly; daily buckets do not carry percentile aggregates.
-- **Error rate** - percentage of statements that completed with `status=error` or `status=denied`.
+- **Error rate** - percentage of statements that completed with denied status or a non-ok failure status (transient, permanent, no-node, no-pool, or pin-lost).
 
 Below the charts, a searchable statement table shows the raw rows for the selected window. Columns include timestamp, user, pool, status badge, duration, and a truncated SQL preview. Clicking a row expands the full SQL text (up to the 500-character recording cap). Pagination uses a keyset "Load more" button.
 

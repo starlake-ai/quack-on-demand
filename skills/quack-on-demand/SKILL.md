@@ -478,7 +478,7 @@ curl -sS -H "X-API-Key: $TOKEN" \
   | python3 -m json.tool
 ```
 
-Statement filters: `tenant`, `pool`, `user`, `status` (`ok`/`denied`/`error`), `q` (substring on SQL), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
+Statement filters: `tenant`, `pool`, `user`, `status` (`ok`, `denied`, `transient`, `permanent`, `no-node`, `no-pool`, or `pin-lost`), `q` (substring on SQL), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
 
 Trend filters: `granularity` (required: `hour` or `day`), `tenant`, `pool`, `from`, `to`. Hourly buckets include p50/p95/p99; daily buckets have null percentiles.
 
