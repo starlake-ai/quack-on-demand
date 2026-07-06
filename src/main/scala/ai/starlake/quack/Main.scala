@@ -803,8 +803,17 @@ object Main extends IOApp with LazyLogging:
         metricsReg.composite
           .counter("qod_journal_dropped_total", "table", "audit")
           .increment(n.toDouble)
+      val journalStatementDropped: Int => Unit = n =>
+        metricsReg.composite
+          .counter("qod_journal_dropped_total", "table", "stmt_history")
+          .increment(n.toDouble)
       val eventJournal =
-        new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
+        new EventJournal(
+          telemetryStore,
+          mgrCfg.telemetry.journalCapacity,
+          onDrop = journalDropped,
+          onStatementDrop = journalStatementDropped
+        )
       auditRecorder.onDropCounter(journalDropped)
 
       val fsRouter = new FlightSqlRouter(
@@ -1202,18 +1211,49 @@ object Main extends IOApp with LazyLogging:
                   (IO
                     .blocking {
                       if coordinator.forall(_.isLeader) then
-                        TelemetryPurge.cutoffFor(
-                          mgrCfg.telemetry.auditRetentionDays,
-                          java.time.Instant.now()
-                        ) match
+                        val now = java.time.Instant.now()
+                        TelemetryPurge.cutoffFor(mgrCfg.telemetry.auditRetentionDays, now) match
                           case Some(cutoff) =>
                             val n = telemetryStore.purgeAudit(cutoff)
                             if n > 0 then
                               logger.info(s"audit purge: deleted $n events older than $cutoff")
                           case None => ()
+                        // raw retention must cover the rollup watermark's full day
+                        // (recompute rebuilds it); keep >= 2 days
+                        TelemetryPurge
+                          .cutoffFor(mgrCfg.telemetry.stmtHistoryRetentionDays, now)
+                          .foreach { c =>
+                            val n = telemetryStore.purgeStatements(c)
+                            if n > 0 then
+                              logger.info(s"stmt-history purge: deleted $n rows older than $c")
+                          }
+                        TelemetryPurge
+                          .cutoffFor(mgrCfg.telemetry.hourlyRollupRetentionDays, now)
+                          .foreach { c =>
+                            val n = telemetryStore.purgeRollups("hour", c)
+                            if n > 0 then
+                              logger.info(s"hourly-rollup purge: deleted $n buckets older than $c")
+                          }
                     }
                     .handleErrorWith(e => IO(logger.error(s"audit purge failed: ${e.getMessage}")))
                     *> IO.sleep(scala.concurrent.duration.DurationInt(1).hours)).foreverM.void.start
+                else IO.unit.start
+
+              val rollupFiber =
+                if telemetryStore.enabled then
+                  (IO
+                    .blocking {
+                      if coordinator.forall(_.isLeader) then
+                        val to = java.time.Instant.now().minusSeconds(60)
+                        telemetryStore.recomputeRollups(telemetryStore.rollupWatermark(), to)
+                        telemetryStore.advanceRollupWatermark(to)
+                    }
+                    .handleErrorWith(e => IO(logger.error(s"rollup pass failed: ${e.getMessage}")))
+                    *> IO.sleep(
+                      scala.concurrent.duration
+                        .DurationInt(mgrCfg.telemetry.rollupIntervalSec)
+                        .seconds
+                    )).foreverM.void.start
                 else IO.unit.start
 
               healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
@@ -1222,12 +1262,14 @@ object Main extends IOApp with LazyLogging:
                     haRefreshFiber.flatMap { hrFiber =>
                       journalFiber.flatMap { jFiber =>
                         auditPurgeFiber.flatMap { pFiber =>
-                          IO.never[Unit]
-                            .guarantee(
-                              fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                gracefulShutdown
-                            )
+                          rollupFiber.flatMap { rlFiber =>
+                            IO.never[Unit]
+                              .guarantee(
+                                fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                  hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                  rlFiber.cancel *> gracefulShutdown
+                              )
+                          }
                         }
                       }
                     }
