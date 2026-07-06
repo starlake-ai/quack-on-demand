@@ -1,4 +1,5 @@
 import type {
+  TrendsResponse,
   CreatePoolRequest,
   ScalePoolRequest,
   StopPoolRequest,
@@ -337,6 +338,10 @@ export const api = {
   // Audit log
   auditList: (params: Record<string, string>) =>
     get<AuditListResponse>(`/audit/list?${new URLSearchParams(params).toString()}`),
+
+  // History trends
+  historyTrends: (params: Record<string, string>) =>
+    get<TrendsResponse>(`/history/trends?${new URLSearchParams(params)}`),
 
   // Catalog browser
   listCatalogSchemas: (tenant: string, tenantDb: string) =>
