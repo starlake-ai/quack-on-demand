@@ -86,8 +86,16 @@ final class PoolHandlers(
       case None =>
         if req.podTemplateYaml.nonEmpty then
           SuperuserCheck.reject(apiKey)(scopeOf) match
-            case Some(err) => IO.pure(Left(err))
-            case None      =>
+            case Some(err) =>
+              audit.rest(
+                apiKey,
+                "control-plane",
+                "pool.create",
+                "denied",
+                tenant = Some(req.tenant)
+              )
+              IO.pure(Left(err))
+            case None =>
               if !podTemplateEnabled then
                 IO.pure(
                   Left(

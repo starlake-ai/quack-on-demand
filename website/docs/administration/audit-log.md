@@ -101,8 +101,8 @@ The `action` field is a dotted string. The full set of values emitted by the cur
 | Action | Description |
 |---|---|
 | `sql.denied` | Statement blocked by the ACL validator; detail includes the denied table and missing verb |
-| `sql.write` | DML statement completed; detail includes touched tables and duration |
-| `sql.ddl` | DDL statement completed; detail includes touched tables and duration |
+| `sql.write` | DML statement completed; detail includes sql text (capped at 500 chars) and durationMs |
+| `sql.ddl` | DDL statement completed; detail includes sql text (capped at 500 chars) and durationMs |
 
 ### Each event row
 
@@ -159,7 +159,7 @@ Specifically, the following never enter the audit trail:
 - Full metastore connection maps (which may contain passwords)
 - Raw pod template bodies (which may contain paths and credentials)
 
-SQL text in data-plane events (`sql.write`, `sql.ddl`, `sql.denied`) is capped at 500 characters.
+SQL text in data-plane events (`sql.write`, `sql.ddl`, `sql.denied`) is capped at 500 characters. The text is recorded verbatim; statements that inline credentials (for example `CREATE SECRET`) will persist those literals in the audit trail up to the 500-char cap. The key whitelist described above guards structured `detail` fields only, not SQL text.
 
 ## The `none` off switch
 
@@ -203,4 +203,4 @@ curl -sS -H "X-API-Key: $TOKEN" \
 | `limit` | Number of rows to return (default 50, max 500) |
 | `before` | Opaque keyset cursor from `nextBefore` in a prior response; used to fetch the next page of older results |
 
-Results are returned newest-first. The response includes a `nextBefore` cursor when there are more rows to fetch; it is absent on the last page.
+Results are returned newest-first. The response includes a `nextBefore` cursor whenever the page is non-empty; the UI shows a "Load more" button only when the page is full (the `limit` was reached).

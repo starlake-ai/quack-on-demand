@@ -41,6 +41,7 @@ import ai.starlake.quack.ondemand.telemetry.{
   EventJournal,
   NoopTelemetryStore,
   PostgresTelemetryStore,
+  TelemetryPurge,
   TelemetryStore
 }
 import ai.starlake.quack.ondemand.ha.{
@@ -804,6 +805,7 @@ object Main extends IOApp with LazyLogging:
           .increment(n.toDouble)
       val eventJournal =
         new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
+      auditRecorder.onDropCounter(journalDropped)
 
       val fsRouter = new FlightSqlRouter(
         sup,
@@ -1200,14 +1202,15 @@ object Main extends IOApp with LazyLogging:
                   (IO
                     .blocking {
                       if coordinator.forall(_.isLeader) then
-                        val cutoff = java.time.Instant
-                          .now()
-                          .minus(
-                            java.time.Duration.ofDays(mgrCfg.telemetry.auditRetentionDays.toLong)
-                          )
-                        val n = telemetryStore.purgeAudit(cutoff)
-                        if n > 0 then
-                          logger.info(s"audit purge: deleted $n events older than $cutoff")
+                        TelemetryPurge.cutoffFor(
+                          mgrCfg.telemetry.auditRetentionDays,
+                          java.time.Instant.now()
+                        ) match
+                          case Some(cutoff) =>
+                            val n = telemetryStore.purgeAudit(cutoff)
+                            if n > 0 then
+                              logger.info(s"audit purge: deleted $n events older than $cutoff")
+                          case None => ()
                     }
                     .handleErrorWith(e => IO(logger.error(s"audit purge failed: ${e.getMessage}")))
                     *> IO.sleep(scala.concurrent.duration.DurationInt(1).hours)).foreverM.void.start

@@ -223,9 +223,9 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
 
   "AuthHandlers.login" should
     "audit ok with superuser realm=system and authMethod in detail, no password key" in {
-      val store          = new RecordingTelemetryStore
-      val audit          = new AuditRecorder(store, _ => None)
-      val (handlers, _)  = buildAuthHandlers(audit)
+      val store         = new RecordingTelemetryStore
+      val audit         = new AuditRecorder(store, _ => None)
+      val (handlers, _) = buildAuthHandlers(audit)
       handlers
         .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
         .unsafeRunSync()
@@ -284,3 +284,81 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
         failures.head.outcome shouldBe "denied"
       finally harness.shutdown()
     }
+  // ---------------------------------------------------------------------------
+  // Helper: build auth handlers with a real session-lookup closure so the audit
+  // recorder can resolve JWTs to actor names before the token is revoked.
+  // ---------------------------------------------------------------------------
+
+  private def buildAuthHandlersWithSessionLookup(
+      audit: AuditRecorder
+  ): (AuthHandlers, SessionTokenStore) =
+    val fix      = SecurityFixtures.freshStore()
+    val sessions = new SessionTokenStore()
+    val authSvc  = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val handlers = new AuthHandlers(
+      authService = authSvc,
+      tokens = sessions,
+      identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil,
+      audit = audit
+    )
+    (handlers, sessions)
+
+  "AuthHandlers.logout" should "record actor from the session token before revoking" in {
+    val store    = new RecordingTelemetryStore
+    val sessions = new SessionTokenStore()
+    // Wire session lookup so actorOf resolves the JWT to a username.
+    val audit    = new AuditRecorder(store, sessions.get)
+    val fix      = SecurityFixtures.freshStore()
+    val authSvc  = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val handlers = new AuthHandlers(
+      authService = authSvc,
+      tokens = sessions,
+      identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil,
+      audit = audit
+    )
+    val loginResult = handlers
+      .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
+      .unsafeRunSync()
+    val tok = loginResult match
+      case Right(r) => r._2.token
+      case Left(_)  => fail("login failed")
+    store.events.clear()
+    // Logout via cookie path - actor must be captured BEFORE the token is revoked.
+    handlers.logout(apiKey = None, cookie = Some(tok)).unsafeRunSync()
+    val logoutEvents = store.events.filter(_.action == "auth.logout")
+    logoutEvents should have size 1
+    val e = logoutEvents.head
+    e.actor shouldBe SecurityFixtures.RootUsername
+    e.outcome shouldBe "ok"
+  }
+
+  "AuthHandlers.oidcLogout" should "record actor from the session token before revoking" in {
+    val store    = new RecordingTelemetryStore
+    val sessions = new SessionTokenStore()
+    val audit    = new AuditRecorder(store, sessions.get)
+    val fix      = SecurityFixtures.freshStore()
+    val authSvc  = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val handlers = new AuthHandlers(
+      authService = authSvc,
+      tokens = sessions,
+      identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil,
+      audit = audit
+    )
+    val loginResult = handlers
+      .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
+      .unsafeRunSync()
+    val tok = loginResult match
+      case Right(r) => r._2.token
+      case Left(_)  => fail("login failed")
+    store.events.clear()
+    // oidcLogout revokes the cookie; actor must be captured BEFORE revocation.
+    handlers.oidcLogout(sessionCookie = Some(tok), forwardedProto = None).unsafeRunSync()
+    val revokeEvents = store.events.filter(_.action == "auth.revoke")
+    revokeEvents should have size 1
+    val e = revokeEvents.head
+    e.actor shouldBe SecurityFixtures.RootUsername
+    e.outcome shouldBe "ok"
+  }
