@@ -233,6 +233,33 @@ final case class HaConfig(
     topologyRefreshSec: Int = 30
 )
 
+final case class TelemetryConfig(
+    @field
+    @ConfigField(
+      envVar = "QOD_TELEMETRY_STORE",
+      description =
+        "Telemetry store backing audit log (and, later, history/usage): postgres | none (record nothing)."
+    )
+    store: String = "postgres",
+    @field
+    @ConfigField(
+      envVar = "QOD_AUDIT_RETENTION_DAYS",
+      description = "Days to keep audit events before the hourly purge deletes them."
+    )
+    auditRetentionDays: Int = 90,
+    @field
+    @ConfigField(
+      envVar = "QOD_TELEMETRY_JOURNAL_CAPACITY",
+      description = "Bounded in-process telemetry journal capacity; overflow drops events (counted)."
+    )
+    journalCapacity: Int = 8192
+)
+
+object TelemetryConfig:
+  def validate(store: String): Either[String, Unit] = store match
+    case "postgres" | "none" => Right(())
+    case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
+
 final case class ManagerConfig(
     @field @ConfigField(
       envVar = "QOD_ON_DEMAND_HOST",
@@ -305,6 +332,7 @@ final case class ManagerConfig(
     )
     reconcileIntervalSec: Int,
     ha: HaConfig = HaConfig(),
+    telemetry: TelemetryConfig = TelemetryConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
