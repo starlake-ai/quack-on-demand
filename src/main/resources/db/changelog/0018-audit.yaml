@@ -1,0 +1,36 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0018-qodstate-audit
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_audit
+            columns:
+              - column: { name: id,          type: BIGSERIAL, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: ts,          type: TIMESTAMP WITH TIME ZONE, constraints: { nullable: false } }
+              - column: { name: family,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: actor,       type: TEXT, constraints: { nullable: false } }
+              - column: { name: actor_realm, type: TEXT, constraints: { nullable: false } }
+              - column: { name: tenant,      type: TEXT }
+              - column: { name: action,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: target,      type: TEXT }
+              - column: { name: outcome,     type: TEXT, constraints: { nullable: false } }
+              - column: { name: origin,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: detail,      type: JSONB, constraints: { nullable: false } }
+        - createIndex:
+            indexName: idx_qodstate_audit_ts
+            tableName: qodstate_audit
+            columns:
+              - column: { name: ts }
+        - createIndex:
+            indexName: idx_qodstate_audit_tenant_ts
+            tableName: qodstate_audit
+            columns:
+              - column: { name: tenant }
+              - column: { name: ts }
+        - createIndex:
+            indexName: idx_qodstate_audit_family_ts
+            tableName: qodstate_audit
+            columns:
+              - column: { name: family }
+              - column: { name: ts }
