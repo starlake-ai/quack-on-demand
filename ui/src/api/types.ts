@@ -160,6 +160,9 @@ export interface ClientConfigResponse {
   // True iff the runtime backend supports node placement (Kubernetes).
   // The UI hides cohort/placement controls when false.
   placementSupported?: boolean;
+  /** True when a telemetry store is configured (telemetry.store != none). The UI hides
+   *  the Audit page when false. */
+  telemetryEnabled?: boolean;
   // "db" (default) = password form; "oidc" = redirect to the IdP via /api/auth/oidc/start.
   identitySource?: 'db' | 'oidc';
   // Human-readable IdP label shown in the SSO redirect card (e.g. "Keycloak", "Google").
@@ -179,6 +182,25 @@ export interface ConfigEntryView {
 
 export interface ConfigListResponse {
   entries: ConfigEntryView[];
+}
+
+export interface AuditEventEntry {
+  id: string;
+  ts: string;
+  family: string;
+  actor: string;
+  actorRealm: string;
+  tenant: string | null;
+  action: string;
+  target: string | null;
+  outcome: string;
+  origin: string;
+  detail: Record<string, string>;
+}
+
+export interface AuditListResponse {
+  events: AuditEventEntry[];
+  nextBefore: string | null;
 }
 
 export interface ManifestImportSummary {

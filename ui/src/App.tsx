@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
@@ -57,6 +57,8 @@ function SsoError({ code, onRetry }: { code: string; onRetry: () => void }) {
     </div>
   );
 }
+import { api } from './api/client';
+import Audit from './pages/Audit';
 import TenantList from './pages/TenantList';
 import TenantDetail from './pages/TenantDetail';
 import PoolDetail from './pages/PoolDetail';
@@ -76,6 +78,12 @@ function Shell() {
   // leak. `authEnabled === false` is the no-auth dev mode; treat the
   // synthetic anonymous user as a superuser there.
   const isSuperuser = !authEnabled || tenant === null;
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  useEffect(() => {
+    api.clientConfig()
+      .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
+      .catch(() => setTelemetryEnabled(false));
+  }, []);
   return (
     <>
       <nav className="app-nav">
@@ -88,6 +96,9 @@ function Shell() {
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
         {role === 'admin' && isSuperuser && (
           <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
+        )}
+        {role === 'admin' && telemetryEnabled && (
+          <NavLink to="/audit"     className={({ isActive }) => isActive ? 'active' : ''}>Audit</NavLink>
         )}
         <span className="spacer" />
         {authEnabled ? (
@@ -116,6 +127,7 @@ function Shell() {
           {isSuperuser && (
             <Route path="/config"                                  element={<Config />} />
           )}
+          <Route path="/audit"                                     element={<Audit />} />
         </Routes>
       </main>
     </>
