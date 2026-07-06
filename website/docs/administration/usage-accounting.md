@@ -53,7 +53,7 @@ Invalid ISO-8601 values for `from` or `to` return `400 invalid_time`.
 
 ```json
 {
-  "from": "2026-06-01T00:00:00Z",
+  "from": "2026-02-01T00:00:00Z",
   "to": "2026-07-01T00:00:00Z",
   "groupBy": "pool",
   "dataStart": "2026-04-17T00:00:00Z",
@@ -79,7 +79,7 @@ Invalid ISO-8601 values for `from` or `to` return `400 invalid_time`.
 | `from` | string | Period start as ISO-8601 UTC instant |
 | `to` | string | Period end as ISO-8601 UTC instant |
 | `groupBy` | string | The grouping dimension used: `tenant`, `pool`, or `user` |
-| `dataStart` | string or null | Oldest daily bucket still in the ledger. Present and earlier than `from` only when the requested range starts before the retention horizon. Use it to detect a truncated edge. |
+| `dataStart` | string or null | The oldest daily bucket present in the ledger (across all retained data, not just the query window). When `dataStart` is later than `from`, the requested range extends before the retention horizon and the period's leading edge is incomplete. |
 | `groups` | array | One entry per (tenant, pool, username) combination with non-zero activity in the period. Sorted by `engineMs` descending. |
 | `groups[].tenant` | string | Tenant display name |
 | `groups[].pool` | string or null | Pool key; null when `groupBy=tenant` |
