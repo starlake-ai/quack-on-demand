@@ -80,9 +80,9 @@ The event journal that feeds the audit subsystem exposes one counter:
 |---|---|---|
 | `qod_journal_dropped_total` | `table` | Number of events dropped because the bounded journal queue was full, or because an append to the store failed |
 
-A non-zero value means the audit or history record undercounts by that amount. The `table` label identifies which telemetry table was affected (e.g. `qodstate_audit`). Under sustained overload the data-plane audit trail degrades before the data path does, by design: `offer` is non-blocking and the hot path never waits on Postgres.
+A non-zero value means the audit or history record undercounts by that amount. The `table` label identifies which telemetry table was affected (e.g. `table="audit"`). Under sustained overload the data-plane audit trail degrades before the data path does, by design: `offer` is non-blocking and the hot path never waits on Postgres.
 
-When this counter climbs, check Postgres write latency and the journal queue depth. If the rate is low and intermittent it indicates short Postgres blips; if it is sustained, consider scaling Postgres or reducing data-plane statement throughput.
+When this counter climbs, check Postgres write latency and the journal queue depth. If the rate is low and intermittent it indicates short Postgres blips; if it is sustained, consider scaling Postgres or reducing data-plane statement throughput. The journal queue depth is configured by `QOD_TELEMETRY_JOURNAL_CAPACITY` (default `8192`): the bounded in-process telemetry journal capacity; overflow drops events and increments `qod_journal_dropped_total`. Increase this value to buffer higher data-plane statement throughput under temporary Postgres write latency spikes; this trades memory for durability.
 
 The counter stays at zero when `QOD_TELEMETRY_STORE=none` because not recording is intentional, not a drop.
 
