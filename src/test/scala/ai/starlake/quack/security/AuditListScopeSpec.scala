@@ -257,3 +257,57 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
+
+  it should "return only acme rows for superuser ?tenant= (null rows no longer mixed in)" in {
+    val (h, _, _) = bootHarness()
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/audit/list?tenant=$AcmeTenantId",
+        apiKey = Some(token)
+      )
+      resp.statusCode() shouldBe 200
+      tenantsOf(resp.body()) shouldBe List(Some(AcmeTenantId))
+    finally h.shutdown()
+  }
+
+  it should "return only null-tenant rows for superuser ?noTenant=true" in {
+    val (h, _, _) = bootHarness()
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  =
+        get(h.httpClient, s"${h.baseUrl}/api/audit/list?noTenant=true", apiKey = Some(token))
+      resp.statusCode() shouldBe 200
+      tenantsOf(resp.body()) shouldBe List(None)
+    finally h.shutdown()
+  }
+
+  it should "let noTenant win when both tenant and noTenant are supplied" in {
+    val (h, _, _) = bootHarness()
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/audit/list?tenant=$AcmeTenantId&noTenant=true",
+        apiKey = Some(token)
+      )
+      resp.statusCode() shouldBe 200
+      tenantsOf(resp.body()) shouldBe List(None)
+    finally h.shutdown()
+  }
+
+  it should "keep a tenant admin pinned to their tenant when ?noTenant=true is requested" in {
+    val (h, _, _) = bootHarness()
+    try
+      val token = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(AcmeTenantId)
+      )
+      val resp =
+        get(h.httpClient, s"${h.baseUrl}/api/audit/list?noTenant=true", apiKey = Some(token))
+      resp.statusCode() shouldBe 200
+      tenantsOf(resp.body()) shouldBe List(Some(AcmeTenantId))
+    finally h.shutdown()
+  }

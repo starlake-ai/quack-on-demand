@@ -547,6 +547,7 @@ object Endpoints:
         Option[String],
         Option[Int],
         Option[String],
+        Option[Boolean],
         Option[String]
     ),
     (sttp.model.StatusCode, ErrorResponse),
@@ -564,6 +565,7 @@ object Endpoints:
       .in(query[Option[String]]("to"))
       .in(query[Option[Int]]("limit"))
       .in(query[Option[String]]("before"))
+      .in(query[Option[Boolean]]("noTenant"))
       .in(authToken)
       .out(jsonBody[AuditListResponse])
 
