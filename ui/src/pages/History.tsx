@@ -40,8 +40,10 @@ function granularity(r: Range): 'hour' | 'day' {
 function tickLabel(bucketStart: string, gran: 'hour' | 'day'): string {
   const d = new Date(bucketStart);
   if (gran === 'hour') {
-    // HH:mm
-    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+    // HH:mm in UTC (buckets are UTC-aligned)
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mi = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${hh}:${mi}`;
   }
   // MM-DD
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
@@ -57,13 +59,16 @@ interface AggBucket {
   errorCount: number;
   deniedCount: number;
   engineMsSum: number;
-  // Weighted p-tile numerators; divided by stmtCount at render time.
+  // Weighted p-tile numerators; divided by pctileStmtCount at render time.
   // Approximation: summing (pXX * stmtCount) and dividing by total stmtCount is not
   // strictly correct for merging percentiles - it approximates a weighted mean, not a
   // true merged percentile. We note this so future work can replace it with a t-digest.
   p50Weighted: number;
   p95Weighted: number;
   p99Weighted: number;
+  // Count of statements from groups that actually contributed percentile values (non-null).
+  // Used as denominator so that null-percentile groups do not dilute the weighted mean.
+  pctileStmtCount: number;
   hasPercentiles: boolean;
 }
 
@@ -82,6 +87,7 @@ function aggregate(buckets: TrendBucketEntry[], gran: 'hour' | 'day'): AggBucket
         p50Weighted: 0,
         p95Weighted: 0,
         p99Weighted: 0,
+        pctileStmtCount: 0,
         hasPercentiles: false,
       };
       map.set(b.bucketStart, agg);
@@ -94,6 +100,7 @@ function aggregate(buckets: TrendBucketEntry[], gran: 'hour' | 'day'): AggBucket
       agg.p50Weighted += b.p50Ms * b.stmtCount;
       agg.p95Weighted += b.p95Ms * b.stmtCount;
       agg.p99Weighted += b.p99Ms * b.stmtCount;
+      agg.pctileStmtCount += b.stmtCount;
       agg.hasPercentiles = true;
     }
   }
@@ -141,12 +148,12 @@ function toChartData(agg: AggBucket[]): {
       : 0;
     errorRate.push({ tick: b.tick, rate: Math.round(rate * 10) / 10 });
 
-    if (b.hasPercentiles && b.stmtCount > 0) {
+    if (b.hasPercentiles && b.pctileStmtCount > 0) {
       latency.push({
         tick: b.tick,
-        p50: Math.round(b.p50Weighted / b.stmtCount),
-        p95: Math.round(b.p95Weighted / b.stmtCount),
-        p99: Math.round(b.p99Weighted / b.stmtCount),
+        p50: Math.round(b.p50Weighted / b.pctileStmtCount),
+        p95: Math.round(b.p95Weighted / b.pctileStmtCount),
+        p99: Math.round(b.p99Weighted / b.pctileStmtCount),
       });
     } else {
       latency.push({ tick: b.tick, p50: null, p95: null, p99: null });
