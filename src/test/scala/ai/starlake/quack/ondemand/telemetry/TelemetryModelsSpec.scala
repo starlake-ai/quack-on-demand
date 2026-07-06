@@ -309,3 +309,19 @@ class TelemetryModelsSpec extends AnyFlatSpec with Matchers:
     store.queryRollups(RollupQuery("hour")) shouldBe Nil
     store.queryRollups(RollupQuery("day")) shouldBe Nil
   }
+
+  "NoopTelemetryStore.queryUsage" should "return an empty result" in {
+    val r = NoopTelemetryStore.queryUsage(
+      UsageQuery(
+        groupBy = "tenant",
+        from = Instant.parse("2026-07-01T00:00:00Z"),
+        to = Instant.parse("2026-08-01T00:00:00Z")
+      )
+    )
+    r.groups shouldBe Nil
+    r.dataStart shouldBe None
+  }
+
+  "TelemetryConfig.usageRetentionDays" should "default to 400" in {
+    ai.starlake.quack.TelemetryConfig().usageRetentionDays shouldBe 400
+  }

@@ -506,4 +506,7 @@ final class PostgresTelemetryStore(
       finally ps.close()
     }
 
+  override def queryUsage(q: UsageQuery): UsageResult =
+    throw new UnsupportedOperationException("implemented in the usage-accounting Task 2")
+
   override def close(): Unit = if !dataSource.isClosed then dataSource.close()

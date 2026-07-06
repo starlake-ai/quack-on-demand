@@ -27,6 +27,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     def advanceRollupWatermark(to: Instant): Unit                                    = ()
     def queryRollups(q: RollupQuery): List[RollupBucket]                             = Nil
     def purgeRollups(granularity: String, olderThan: Instant): Int                   = 0
+    def queryUsage(q: UsageQuery): UsageResult = UsageResult(Nil, None)
 
   private def session(username: String, superuser: Boolean) =
     SessionTokenStore.Session(

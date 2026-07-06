@@ -272,7 +272,14 @@ final case class TelemetryConfig(
       description =
         "Seconds between rollup computation passes that aggregate raw statement history into rollup buckets."
     )
-    rollupIntervalSec: Int = 300
+    rollupIntervalSec: Int = 300,
+    @field
+    @ConfigField(
+      envVar = "QOD_USAGE_RETENTION_DAYS",
+      description =
+        "Days to keep daily rollup buckets (the usage-accounting ledger) before the periodic purge removes them. 400 covers a full billing year."
+    )
+    usageRetentionDays: Int = 400
 )
 
 object TelemetryConfig:
