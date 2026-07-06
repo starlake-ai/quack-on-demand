@@ -11,8 +11,8 @@ import scala.util.Try
 /** REST handler for `GET /api/audit/list`.
   *
   * Scoping rules:
-  *   - Superuser or unresolvable token (static key / open mode): `tenants` = requested tenant filter
-  *     (or None), `includeNullTenant` = true.
+  *   - Superuser or unresolvable token (static key / open mode): `tenants` = requested tenant
+  *     filter (or None), `includeNullTenant` = true.
   *   - Tenant admin (resolved, not superuser): `tenants` pinned to `manageableTenants`; a requested
   *     `?tenant=` narrows WITHIN them only (tenant not in manageable set falls back to the full
   *     manageable set, no error -- no existence leak); `includeNullTenant` = false.
@@ -40,17 +40,20 @@ final class AuditHandlers(store: TelemetryStore):
         label: String
     ): Either[(StatusCode, ErrorResponse), Option[Instant]] =
       s match
-        case None => Right(None)
+        case None    => Right(None)
         case Some(v) =>
           Try(Instant.parse(v)).toOption
             .map(i => Right(Some(i)))
             .getOrElse(
               Left(
-                (StatusCode.BadRequest, ErrorResponse("invalid_time", s"$label must be ISO-8601 instant"))
+                (
+                  StatusCode.BadRequest,
+                  ErrorResponse("invalid_time", s"$label must be ISO-8601 instant")
+                )
               )
             )
 
-    val scoped = apiKey.flatMap(scopeOf)
+    val scoped                 = apiKey.flatMap(scopeOf)
     val (tenants, includeNull) = scoped match
       case Some(s) if !s.superuser =>
         // Pin to manageable tenants; a requested ?tenant= narrows within them only.

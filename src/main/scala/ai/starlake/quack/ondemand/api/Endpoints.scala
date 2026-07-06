@@ -530,8 +530,18 @@ object Endpoints:
   // `before` is an opaque cursor (last row's id as a string from a prior response).
   // `from`/`to` must be ISO-8601 instants; invalid values return 400 invalid_time.
   val auditList: PublicEndpoint[
-    (Option[String], Option[String], Option[String], Option[String], Option[String],
-      Option[String], Option[String], Option[Int], Option[String], Option[String]),
+    (
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[Int],
+        Option[String],
+        Option[String]
+    ),
     (sttp.model.StatusCode, ErrorResponse),
     AuditListResponse,
     Any

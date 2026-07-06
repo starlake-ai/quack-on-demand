@@ -3,7 +3,13 @@ package ai.starlake.quack.edge
 import ai.starlake.acl.model.TableRef
 import ai.starlake.acl.parser.{TableAccess, Verb}
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext, ValidationResult}
+import ai.starlake.quack.edge.sql.{
+  Allowed,
+  Denied,
+  StatementValidator,
+  ValidationContext,
+  ValidationResult
+}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -39,7 +45,7 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
 
   private def buildSupervisor(): PoolSupervisor =
     val backend = new QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
           s.nodeId,
@@ -68,19 +74,18 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup
 
-  /** Builds a router wired to a [[RecordingTelemetryStore]]-backed journal.
-    * Returns (router, journal, store) so the test can call drainNow() and then
-    * assert on store.events.
+  /** Builds a router wired to a [[RecordingTelemetryStore]]-backed journal. Returns (router,
+    * journal, store) so the test can call drainNow() and then assert on store.events.
     */
   private def setupWithJournal(
       stub: () => QuackResponse = defaultStub,
       validator: StatementValidator = StatementValidator.allowAll
   ): (FlightSqlRouter, EventJournal, RecordingTelemetryStore) =
-    val sup  = buildSupervisor()
+    val sup     = buildSupervisor()
     val store   = new RecordingTelemetryStore
     val journal = new EventJournal(store)
     val tracker = new NodeLoadTracker
-    val client = new QuackHttpClient(
+    val client  = new QuackHttpClient(
       TestArrow.sharedAllocator,
       nativeClient = true,
       nodeDisableSsl = true
@@ -89,7 +94,7 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
         IO.pure(stub())
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
-    val router = new FlightSqlRouter(
+    val router   = new FlightSqlRouter(
       sup,
       sessions,
       tracker,
@@ -100,7 +105,7 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     (router, journal, store)
 
   "FlightSqlRouter audit journal" should
-    "emit data-write/sql.write/ok for an INSERT with actor, tenant, origin, sql, durationMs" in:
+    "emit data-write/sql.write/ok for an INSERT with actor, tenant, origin, sql, durationMs" in {
       val (router, journal, store) = setupWithJournal()
       router
         .execute("aud-1", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")
@@ -116,8 +121,9 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       e.origin shouldBe "flightsql"
       e.detail.contains("sql") shouldBe true
       e.detail.contains("durationMs") shouldBe true
+    }
 
-  it should "emit data-write/sql.ddl/ok for a CREATE TABLE" in:
+  it should "emit data-write/sql.ddl/ok for a CREATE TABLE" in {
     val (router, journal, store) = setupWithJournal()
     router
       .execute("aud-2", "alice", poolKey, "CREATE TABLE acme.public.foo (id INT)")
@@ -128,14 +134,16 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     e.family shouldBe "data-write"
     e.action shouldBe "sql.ddl"
     e.outcome shouldBe "ok"
+  }
 
-  it should "emit NO journal event for a SELECT" in:
+  it should "emit NO journal event for a SELECT" in {
     val (router, journal, store) = setupWithJournal()
     router.execute("aud-3", "alice", poolKey, "SELECT 1").unsafeRunSync()
     journal.drainNow()
     store.events shouldBe empty
+  }
 
-  it should "emit data-denial/sql.denied/denied with canonical:verb in detail(denied)" in:
+  it should "emit data-denial/sql.denied/denied with canonical:verb in detail(denied)" in {
     val access  = TableAccess(TableRef("cat", "sch", "tbl"), Verb.Write)
     val denying = new StatementValidator:
       def validate(ctx: ValidationContext): ValidationResult =
@@ -154,11 +162,12 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     e.tenant shouldBe Some("acme")
     e.origin shouldBe "flightsql"
     e.detail("denied") shouldBe "cat.sch.tbl:Write"
+  }
 
-  it should "not throw and not record when using the default noop journal (EventJournal.noop)" in:
-    val sup      = buildSupervisor()
-    val tracker  = new NodeLoadTracker
-    val client   = new QuackHttpClient(
+  it should "not throw and not record when using the default noop journal (EventJournal.noop)" in {
+    val sup     = buildSupervisor()
+    val tracker = new NodeLoadTracker
+    val client  = new QuackHttpClient(
       TestArrow.sharedAllocator,
       nativeClient = true,
       nodeDisableSsl = true
@@ -173,3 +182,4 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       .execute("aud-5", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")
       .unsafeRunSync()
     result shouldBe a[Right[?, ?]]
+  }

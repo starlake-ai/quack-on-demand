@@ -71,6 +71,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
         while rs.next() do tables += rs.getString(1)
         rs.close()
         tables.toList shouldBe List(
+          "qodstate_audit",
           "qodstate_federated_secret",
           "qodstate_federated_source",
           "qodstate_group",
@@ -111,8 +112,9 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       // 2 federation tables (federated_source, federated_secret) +
       // 2 policy tables (role_column_policy, Liquibase 0012;
       // role_row_policy, Liquibase 0013) +
-      // 1 session/auth table (revoked_jti, Liquibase 0014).
+      // 1 session/auth table (revoked_jti, Liquibase 0014) +
+      // 1 telemetry table (audit, Liquibase 0018).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 17
+      rs.getInt(1) shouldBe 18
     finally c.close()
   }

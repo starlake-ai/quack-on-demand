@@ -250,7 +250,8 @@ final case class TelemetryConfig(
     @field
     @ConfigField(
       envVar = "QOD_TELEMETRY_JOURNAL_CAPACITY",
-      description = "Bounded in-process telemetry journal capacity; overflow drops events (counted)."
+      description =
+        "Bounded in-process telemetry journal capacity; overflow drops events (counted)."
     )
     journalCapacity: Int = 8192
 )
