@@ -165,4 +165,32 @@ final class PostgresTelemetryStore(
       finally ps.close()
     }
 
+  // --- Statement history stubs (implemented in Task 2) -------------------- //
+
+  override def appendStatements(events: List[StatementEvent]): Unit =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def searchStatements(q: StatementQuery): List[StatementRow] =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def purgeStatements(olderThan: Instant): Int =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  // --- Rollup stubs (implemented in Task 3) -------------------------------- //
+
+  override def rollupWatermark(): Option[Instant] =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def advanceRollupWatermark(to: Instant): Unit =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def queryRollups(q: RollupQuery): List[RollupBucket] =
+    throw new UnsupportedOperationException("implemented in a later task")
+
+  override def purgeRollups(granularity: String, olderThan: Instant): Int =
+    throw new UnsupportedOperationException("implemented in a later task")
+
   override def close(): Unit = if !dataSource.isClosed then dataSource.close()

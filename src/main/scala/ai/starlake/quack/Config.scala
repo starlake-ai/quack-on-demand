@@ -253,7 +253,26 @@ final case class TelemetryConfig(
       description =
         "Bounded in-process telemetry journal capacity; overflow drops events (counted)."
     )
-    journalCapacity: Int = 8192
+    journalCapacity: Int = 8192,
+    @field
+    @ConfigField(
+      envVar = "QOD_STMT_HISTORY_RETENTION_DAYS",
+      description = "Days to keep statement-history rows before the periodic purge removes them."
+    )
+    stmtHistoryRetentionDays: Int = 7,
+    @field
+    @ConfigField(
+      envVar = "QOD_HOURLY_ROLLUP_RETENTION_DAYS",
+      description = "Days to keep hourly rollup buckets before the periodic purge removes them."
+    )
+    hourlyRollupRetentionDays: Int = 90,
+    @field
+    @ConfigField(
+      envVar = "QOD_ROLLUP_INTERVAL_SEC",
+      description =
+        "Seconds between rollup computation passes that aggregate raw statement history into rollup buckets."
+    )
+    rollupIntervalSec: Int = 300
 )
 
 object TelemetryConfig:
