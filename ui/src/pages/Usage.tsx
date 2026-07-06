@@ -9,7 +9,7 @@ import {
   Legend,
 } from 'recharts';
 import { api } from '../api/client';
-import type { UsageGroupEntry } from '../api/types';
+import type { UsageGroupEntry, TenantResponse, PoolResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 
 const CHART_HEIGHT = 260;
@@ -136,6 +136,19 @@ export default function Usage() {
       .catch(() => setTelemetryEnabled(false));
   }, []);
 
+  const [tenantOptions, setTenantOptions] = useState<TenantResponse[]>([]);
+  const [poolOptions, setPoolOptions] = useState<PoolResponse[]>([]);
+
+  useEffect(() => {
+    api.listPools().then(r => setPoolOptions(r.pools)).catch(() => setPoolOptions([]));
+  }, []);
+
+  useEffect(() => {
+    if (superuser) {
+      api.listTenants().then(r => setTenantOptions(r.tenants)).catch(() => setTenantOptions([]));
+    }
+  }, [superuser]);
+
   const fetchUsage = useCallback(() => {
     const f = filterRef.current;
     const params: Record<string, string> = { groupBy: f.groupBy };
@@ -165,7 +178,7 @@ export default function Usage() {
 
   useEffect(() => {
     if (telemetryEnabled) fetchUsage();
-  }, [telemetryEnabled, month, custom, fromDate, toDate, groupBy, fetchUsage]);
+  }, [telemetryEnabled, month, custom, fromDate, toDate, groupBy, tenant, pool, fetchUsage]);
 
   if (!telemetryEnabled) {
     return (
@@ -188,6 +201,10 @@ export default function Usage() {
 
   const { rows, labels } = chartRows(groups, resGroupBy, metric);
   const truncated = dataStart && resFrom && dataStart > resFrom;
+
+  const poolNames = [...new Set(
+    poolOptions.filter(p => !tenant || p.tenant === tenant).map(p => p.pool),
+  )].sort();
 
   return (
     <>
@@ -223,19 +240,19 @@ export default function Usage() {
           <option value="engineMs">engine-ms</option>
         </select>
         {superuser && (
-          <input
-            placeholder="tenant"
-            value={tenant}
-            style={{ width: 140 }}
-            onChange={e => setTenant(e.target.value)}
-          />
+          <select value={tenant} onChange={e => { setTenant(e.target.value); setPool(''); }}>
+            <option value="">all tenants</option>
+            {tenantOptions.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+              </option>
+            ))}
+          </select>
         )}
-        <input
-          placeholder="pool"
-          value={pool}
-          style={{ width: 140 }}
-          onChange={e => setPool(e.target.value)}
-        />
+        <select value={pool} onChange={e => setPool(e.target.value)}>
+          <option value="">all pools</option>
+          {poolNames.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
         <button type="button" className="copy-btn" onClick={fetchUsage} disabled={loading}>
           Refresh
         </button>
