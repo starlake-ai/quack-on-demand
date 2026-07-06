@@ -112,10 +112,10 @@ The `Audit` page shows a tenant-scoped, newest-first table of administrative and
 
 The page has a filter bar with:
 
-- **Family** - badge-style toggles for `control-plane`, `auth`, `data-denial`, and `data-write`.
+- **Family** - dropdown select for `control-plane`, `auth`, `data-denial`, and `data-write`.
 - **Tenant** - visible to superusers only; tenant admins are pinned to their own tenant.
 - **Actor** - filter by username.
-- **Action** - substring filter on the action string (e.g. `auth.login`).
+- **Action** - exact-match filter on the action string (e.g. `auth.login.failure`); use the `q` parameter for free-text substring search.
 - **Time range** - from / to ISO-8601 instant fields.
 
 The event table shows timestamp, family badge, actor, action, target, and an outcome badge (`ok`, `denied`, `error`). Each row is expandable to reveal the `detail` key-value map as a formatted list.

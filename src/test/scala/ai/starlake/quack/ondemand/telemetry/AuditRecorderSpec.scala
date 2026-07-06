@@ -72,3 +72,14 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     now = 60001
     rl.allow("1.2.3.4") shouldBe true
   }
+  "onDropCounter" should "route drops through the registered hook instead of the constructor hook" in {
+    val store     = new RecordingStore
+    var ctorDrops = 0
+    var hookDrops = 0
+    val r         = new AuditRecorder(store, _ => None, onDrop = ctorDrops += _)
+    r.onDropCounter(hookDrops += _)
+    store.failNext = true
+    noException should be thrownBy r.rest(None, "control-plane", "role.create", "ok")
+    ctorDrops shouldBe 0
+    hookDrops shouldBe 1
+  }

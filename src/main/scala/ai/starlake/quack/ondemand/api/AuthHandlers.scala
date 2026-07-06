@@ -230,8 +230,9 @@ final class AuthHandlers(
   ): IO[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
     sessionCookie match
       case Some(tok) =>
+        val (actor, realm) = audit.actorOf(Some(tok))
         tokens.revoke(tok)
-        audit.rest(Some(tok), "auth", "auth.revoke", "ok")
+        audit.restAs(actor, realm, "auth", "auth.revoke", "ok")
       case None => ()
     // id_token_hint is not persisted in this iteration; RP-initiated logout still
     // clears the local cookie and (when configured) hits the IdP end-session endpoint.
@@ -483,9 +484,10 @@ final class AuthHandlers(
     // revoke() now always does JDBC (persist + NOTIFY the denylist), so this runs
     // on the blocking pool. `oidcLogout` already uses IO.blocking for the same call.
     IO.blocking {
-      val tok = apiKey.orElse(cookie)
+      val tok            = apiKey.orElse(cookie)
+      val (actor, realm) = audit.actorOf(tok)
       tok.foreach(tokens.revoke)
-      audit.rest(tok, "auth", "auth.logout", "ok")
+      audit.restAs(actor, realm, "auth", "auth.logout", "ok")
       Right(clearCookie(forwardedProto))
     }
 

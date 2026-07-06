@@ -17,6 +17,12 @@ final class AuditRecorder(
     onDrop: Int => Unit = _ => ()
 ) extends LazyLogging:
 
+  @volatile private var dropHook: Int => Unit = onDrop
+
+  /** Wire a drop counter after construction (called from runWithMetrics once metricsReg is live).
+    */
+  def onDropCounter(f: Int => Unit): Unit = dropHook = f
+
   /** (actor, realm) for a REST caller: session token wins; an unresolved non-empty token is the
     * static QOD_API_KEY; no token at all is the open dev mode.
     */
@@ -67,7 +73,7 @@ final class AuditRecorder(
         )
       catch
         case NonFatal(e) =>
-          onDrop(1)
+          dropHook(1)
           logger.error(s"audit write failed for action '$action': ${e.getMessage}")
 
 object AuditRecorder:
