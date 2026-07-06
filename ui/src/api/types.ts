@@ -652,3 +652,23 @@ export interface TrendBucketEntry {
 export interface TrendsResponse {
   buckets: TrendBucketEntry[];
 }
+
+// ----- Persisted statement search -----
+export interface StatementHistoryRowEntry {
+  id: string;
+  ts: string;
+  username: string;
+  tenant: string;
+  pool: string;
+  nodeId: string;
+  sql: string;
+  durationMs: number;
+  prepareMs: number | null;
+  status: string;
+  error: string | null;
+}
+
+export interface StatementSearchResponse {
+  statements: StatementHistoryRowEntry[];
+  nextBefore: string | null;
+}
