@@ -672,3 +672,31 @@ export interface StatementSearchResponse {
   statements: StatementHistoryRowEntry[];
   nextBefore: string | null;
 }
+
+// ----- Usage and accounting -------------------------------------------------
+
+export interface UsageDayEntry {
+  day: string; // ISO-8601 UTC day-bucket start
+  statements: number;
+  errors: number;
+  engineMs: number;
+}
+
+export interface UsageGroupEntry {
+  tenant: string;
+  pool: string | null;     // set only for groupBy=pool
+  username: string | null; // set only for groupBy=user
+  statements: number;
+  errors: number;
+  denied: number;
+  engineMs: number;
+  days: UsageDayEntry[];
+}
+
+export interface UsageResponse {
+  from: string;
+  to: string;
+  groupBy: string;
+  dataStart: string | null;
+  groups: UsageGroupEntry[]; // sorted by engineMs descending
+}

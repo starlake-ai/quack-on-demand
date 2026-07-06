@@ -84,6 +84,8 @@ import type {
   AuditListResponse,
   // Persisted statement search
   StatementSearchResponse,
+  // Usage and accounting
+  UsageResponse,
 } from './types';
 
 const BASE = '/api';
@@ -348,6 +350,10 @@ export const api = {
   // Persisted statement search (newest first, keyset pagination via `before`)
   historyStatements: (params: Record<string, string>) =>
     get<StatementSearchResponse>(`/history/statements?${new URLSearchParams(params)}`),
+
+  // Usage and accounting
+  usage: (params: Record<string, string>) =>
+    get<UsageResponse>(`/usage?${new URLSearchParams(params)}`),
 
   // Catalog browser
   listCatalogSchemas: (tenant: string, tenantDb: string) =>

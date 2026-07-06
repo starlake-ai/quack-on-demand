@@ -60,6 +60,7 @@ function SsoError({ code, onRetry }: { code: string; onRetry: () => void }) {
 import { api } from './api/client';
 import Audit from './pages/Audit';
 import History from './pages/History';
+import Usage from './pages/Usage';
 import TenantList from './pages/TenantList';
 import TenantDetail from './pages/TenantDetail';
 import PoolDetail from './pages/PoolDetail';
@@ -104,6 +105,9 @@ function Shell() {
         {role === 'admin' && telemetryEnabled && (
           <NavLink to="/history"   className={({ isActive }) => isActive ? 'active' : ''}>History</NavLink>
         )}
+        {role === 'admin' && telemetryEnabled && (
+          <NavLink to="/usage"     className={({ isActive }) => isActive ? 'active' : ''}>Usage</NavLink>
+        )}
         <span className="spacer" />
         {authEnabled ? (
           <>
@@ -133,6 +137,7 @@ function Shell() {
           )}
           <Route path="/audit"                                     element={<Audit />} />
           <Route path="/history"                                   element={<History />} />
+          <Route path="/usage"                                     element={<Usage />} />
         </Routes>
       </main>
     </>
