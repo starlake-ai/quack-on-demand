@@ -11,7 +11,7 @@ import ai.starlake.quack.ondemand.{ManagerServer, PoolSupervisor}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder, NoopTelemetryStore, TelemetryStore}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.typesafe.config.ConfigFactory
@@ -183,6 +183,7 @@ object ManagerServerHarness:
       httpClient: HttpClient,
       stmtHistory: ai.starlake.quack.edge.StatementHistoryStore,
       activeRegistry: ActiveStatementRegistry,
+      telemetryStore: TelemetryStore,
       shutdown: () => Unit
   ):
 
@@ -237,7 +238,8 @@ object ManagerServerHarness:
       staticApiKey: Option[String] = None,
       enableProviders: Boolean = true,
       audit: AuditRecorder = AuditRecorder.noop,
-      auditLimiter: AuditRateLimiter = new AuditRateLimiter()
+      auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
+      telemetryStore: TelemetryStore = NoopTelemetryStore
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -276,6 +278,7 @@ object ManagerServerHarness:
 
     val statementStore     = new StatementHistoryStore()
     val historyHandlers    = new StatementHistoryHandlers(statementStore, sup)
+    val auditHandlers      = new AuditHandlers(telemetryStore)
     val activeRegistry     = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeRegistry,
@@ -330,7 +333,8 @@ object ManagerServerHarness:
       rowPolicies = rowPolicyHandlers,
       activeStmts = activeStmtHandlers,
       audit = audit,
-      auditLimiter = auditLimiter
+      auditLimiter = auditLimiter,
+      auditHandlers = auditHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port
@@ -373,6 +377,7 @@ object ManagerServerHarness:
       httpClient = httpClient,
       stmtHistory = statementStore,
       activeRegistry = activeRegistry,
+      telemetryStore = telemetryStore,
       shutdown = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which

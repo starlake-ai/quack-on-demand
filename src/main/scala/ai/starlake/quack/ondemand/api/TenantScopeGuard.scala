@@ -21,6 +21,15 @@ object TenantScopeGuard:
   private val CatalogTenant    = "^/api/catalog/tenant/([^/]+)/".r
   private val FederatedTenants = "^/api/tenants/([^/]+)/tenant-dbs/".r
 
+  // Paths where ?tenant= is a filter hint handled by the endpoint's own scoping
+  // logic, not an authz scope that the perimeter guard should enforce. Adding a
+  // path here means the guard will NOT fire 403 for a cross-tenant ?tenant= value
+  // on these routes; instead the handler silently falls back to the caller's
+  // manageable-tenant set.
+  private val QueryTenantExempt = Set(
+    "/api/audit/list"
+  )
+
   /** Returns the request's tenant id (path or query), or `None` if no tenant is encoded in the URL
     * form. Public-API URLs (`/api/auth/login`, `/api/config/client`) always return `None` here
     * because the guard never runs on them.
@@ -31,4 +40,7 @@ object TenantScopeGuard:
       .map(_.group(1))
       .orElse(CatalogTenant.findFirstMatchIn(path).map(_.group(1)))
       .orElse(FederatedTenants.findFirstMatchIn(path).map(_.group(1)))
-      .orElse(queryTenant.map(_.trim).filter(_.nonEmpty))
+      .orElse(
+        if QueryTenantExempt.contains(path) then None
+        else queryTenant.map(_.trim).filter(_.nonEmpty)
+      )

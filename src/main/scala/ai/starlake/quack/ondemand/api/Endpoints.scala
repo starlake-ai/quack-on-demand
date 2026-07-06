@@ -26,6 +26,8 @@ private given Schema[ActiveStatementInfo]      = Schema.derived
 private given Schema[ActiveStatementsResponse] = Schema.derived
 private given Schema[KillStatementRequest]     = Schema.derived
 private given Schema[KillStatementResponse]    = Schema.derived
+private given Schema[AuditEventEntry]          = Schema.derived
+private given Schema[AuditListResponse]        = Schema.derived
 
 object Endpoints:
 
@@ -523,6 +525,30 @@ object Endpoints:
       .in(query[Option[Int]]("limit"))
       .in(authToken)
       .out(jsonBody[StatementHistoryResponse])
+
+  // Tenant-scoped audit log with keyset pagination. All query params are optional.
+  // `before` is an opaque cursor (last row's id as a string from a prior response).
+  // `from`/`to` must be ISO-8601 instants; invalid values return 400 invalid_time.
+  val auditList: PublicEndpoint[
+    (Option[String], Option[String], Option[String], Option[String], Option[String],
+      Option[String], Option[String], Option[Int], Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    AuditListResponse,
+    Any
+  ] =
+    base.get
+      .in("audit" / "list")
+      .in(query[Option[String]]("family"))
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("actor"))
+      .in(query[Option[String]]("action"))
+      .in(query[Option[String]]("q"))
+      .in(query[Option[String]]("from"))
+      .in(query[Option[String]]("to"))
+      .in(query[Option[Int]]("limit"))
+      .in(query[Option[String]]("before"))
+      .in(authToken)
+      .out(jsonBody[AuditListResponse])
 
   // ----- Federated sources -----
 
