@@ -125,8 +125,8 @@ Every row in `qodstate_audit` carries:
 
 Access to `GET /api/audit/list` follows the same scope rules as every other RBAC read:
 
-- **Superusers** see all rows, including rows where `tenant` is null.
-- **Tenant admins** see only rows whose `tenant` equals one of their administrable tenants. Rows with `tenant IS NULL` are not visible to tenant admins.
+- **Superusers** see all rows, including rows where `tenant` is null. The `tenant` filter returns only that tenant's rows (null-tenant rows are not included when a tenant filter is set). Use `noTenant=true` to select only the null-tenant rows.
+- **Tenant admins** see only rows whose `tenant` equals one of their administrable tenants. Rows with `tenant IS NULL` are not visible to tenant admins. The `noTenant` parameter is ignored for tenant admins.
 - **Static-key callers** are treated as superusers.
 
 Rows with `tenant IS NULL` represent events with no tenant scope: anonymous authentication failures, node operations that span tenants, and manifest imports. These are exclusively visible to superusers so tenant admins cannot infer deployment topology from them.
@@ -189,12 +189,19 @@ curl -sS -H "X-API-Key: $TOKEN" \
   'http://localhost:20900/api/audit/list?action=auth.login.failure&from=2026-07-01T00:00:00Z'
 ```
 
+The exhaustive action vocabulary (for building filter UIs) is served by a static registry:
+
+```bash
+curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/audit/actions | python3 -m json.tool
+```
+
 ### Filter parameters
 
 | Parameter | Description |
 |---|---|
 | `family` | Filter by event family (`control-plane`, `auth`, `data-denial`, `data-write`) |
-| `tenant` | Filter by tenant id (superusers can specify any tenant; tenant admins are pinned to their own) |
+| `tenant` | Filter by tenant id; superusers and static-key callers only -- returns exactly that tenant's rows (null-tenant rows are not included). Tenant admins are pinned to their own tenant and cannot override this parameter. |
+| `noTenant` | Set to `true` to return only rows with no tenant scope (superusers and static-key callers only; ignored for tenant admins). Wins over `tenant` when both are supplied: if `noTenant=true` and `?tenant=x` are both present, only null-tenant rows are returned. |
 | `actor` | Filter by actor username (exact match) |
 | `action` | Filter by action string (exact match, e.g. `auth.login.failure`) |
 | `q` | Substring match on `target` and `action` |
