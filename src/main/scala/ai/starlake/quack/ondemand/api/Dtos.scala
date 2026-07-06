@@ -466,6 +466,27 @@ final case class StatementSearchResponse(
     nextBefore: Option[String]
 )
 
+// ----- Usage and accounting ------------------------------------------------
+
+final case class UsageDayEntry(day: String, statements: Long, errors: Long, engineMs: Long)
+final case class UsageGroupEntry(
+    tenant: String,
+    pool: Option[String],
+    username: Option[String],
+    statements: Long,
+    errors: Long,
+    denied: Long,
+    engineMs: Long,
+    days: List[UsageDayEntry]
+)
+final case class UsageResponse(
+    from: String,
+    to: String,
+    groupBy: String,
+    dataStart: Option[String],
+    groups: List[UsageGroupEntry]
+)
+
 // ----- Audit log ---------------------------------------------------------
 
 final case class AuditEventEntry(
@@ -1097,6 +1118,11 @@ object Dtos:
   given Codec[TrendsResponse]           = deriveCodec
   given Codec[StatementHistoryRowEntry] = deriveCodec
   given Codec[StatementSearchResponse]  = deriveCodec
+
+  // Usage and accounting
+  given Codec[UsageDayEntry]   = deriveCodec
+  given Codec[UsageGroupEntry] = deriveCodec
+  given Codec[UsageResponse]   = deriveCodec
 
   // Audit log
   given Codec[AuditEventEntry]   = deriveCodec

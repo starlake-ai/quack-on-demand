@@ -32,6 +32,9 @@ private given Schema[TrendBucketEntry]         = Schema.derived
 private given Schema[TrendsResponse]           = Schema.derived
 private given Schema[StatementHistoryRowEntry] = Schema.derived
 private given Schema[StatementSearchResponse]  = Schema.derived
+private given Schema[UsageDayEntry]            = Schema.derived
+private given Schema[UsageGroupEntry]          = Schema.derived
+private given Schema[UsageResponse]            = Schema.derived
 
 object Endpoints:
 
@@ -621,6 +624,32 @@ object Endpoints:
       .in(query[Option[String]]("before"))
       .in(authToken)
       .out(jsonBody[StatementSearchResponse])
+
+  // Tenant-scoped usage accounting over daily rollups. Defaults: current calendar month (UTC),
+  // groupBy=tenant. groupBy must be tenant | pool | user (400 invalid_group_by otherwise);
+  // from/to must be ISO-8601 instants (400 invalid_time).
+  val usage: PublicEndpoint[
+    (
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String]
+    ),
+    (sttp.model.StatusCode, ErrorResponse),
+    UsageResponse,
+    Any
+  ] =
+    base.get
+      .in("usage")
+      .in(query[Option[String]]("from"))
+      .in(query[Option[String]]("to"))
+      .in(query[Option[String]]("groupBy"))
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("pool"))
+      .in(authToken)
+      .out(jsonBody[UsageResponse])
 
   // ----- Federated sources -----
 

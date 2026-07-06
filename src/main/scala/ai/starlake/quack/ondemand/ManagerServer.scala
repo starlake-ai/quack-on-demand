@@ -44,7 +44,8 @@ final class ManagerServer(
     audit: AuditRecorder = AuditRecorder.noop,
     auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
     auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore),
-    history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore)
+    history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore),
+    usage: UsageHandlers = new UsageHandlers(NoopTelemetryStore)
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -198,6 +199,9 @@ final class ManagerServer(
           history.statements(from, to, tenant, pool, user, status, q, limit, before, token)(
             sessions.scopeOf
           )
+      },
+      Endpoints.usage.serverLogic { case (from, to, groupBy, tenant, pool, token) =>
+        usage.usage(from, to, groupBy, tenant, pool, token)(sessions.scopeOf)
       },
       Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
         auth.oidcStart(tenant, returnTo, proto)
