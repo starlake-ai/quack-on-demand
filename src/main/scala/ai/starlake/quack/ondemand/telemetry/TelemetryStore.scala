@@ -125,6 +125,50 @@ final case class RollupQuery(
 )
 
 // ---------------------------------------------------------------------------
+// Usage models
+// ---------------------------------------------------------------------------
+
+/** Filter for [[TelemetryStore.queryUsage]]. Aggregates DAILY rollup buckets in the half-open
+  * period `[from, to)` grouped by `groupBy`:
+  *   - "tenant": one group per tenant
+  *   - "pool": one group per (tenant, pool)
+  *   - "user": one group per (tenant, username)
+  *
+  * `tenants = None` means no tenant restriction (superuser context); `Some(emptySet)` means no
+  * rows. `groupBy` must be validated by the caller; stores reject unknown values.
+  */
+final case class UsageQuery(
+    groupBy: String, // "tenant" | "pool" | "user"
+    tenants: Option[Set[String]] = None,
+    pool: Option[String] = None,
+    from: Instant,
+    to: Instant
+)
+
+/** Per-day sub-total inside a usage group (feeds the stacked bar chart). */
+final case class UsageDay(day: Instant, statements: Long, errors: Long, engineMs: Long)
+
+/** One usage group: totals over the period plus per-day sub-totals (ascending by day). `pool` is
+  * Some only for groupBy=pool, `username` Some only for groupBy=user.
+  */
+final case class UsageGroup(
+    tenant: String,
+    pool: Option[String],
+    username: Option[String],
+    statements: Long,
+    errors: Long,
+    denied: Long,
+    engineMs: Long,
+    days: List[UsageDay]
+)
+
+/** Result of [[TelemetryStore.queryUsage]]. `groups` are sorted by engineMs descending. `dataStart`
+  * is the oldest daily bucket visible to the caller's tenant scope regardless of the requested
+  * period or pool filter; the UI uses it to mark the retention-truncated edge.
+  */
+final case class UsageResult(groups: List[UsageGroup], dataStart: Option[Instant])
+
+// ---------------------------------------------------------------------------
 // Trait and Noop store
 // ---------------------------------------------------------------------------
 
@@ -183,6 +227,13 @@ trait TelemetryStore:
     */
   def purgeRollups(granularity: String, olderThan: Instant): Int
 
+  // --- Usage ---------------------------------------------------------------- //
+
+  /** Aggregate daily rollup buckets in `[q.from, q.to)` into per-group totals with per-day
+    * sub-totals. Groups are sorted by engineMs descending. See [[UsageQuery]] for scoping.
+    */
+  def queryUsage(q: UsageQuery): UsageResult
+
 /** telemetry.store = none: records nothing anywhere, reads return empty. */
 object NoopTelemetryStore extends TelemetryStore:
   val enabled                                                                               = false
@@ -197,3 +248,4 @@ object NoopTelemetryStore extends TelemetryStore:
   override def advanceRollupWatermark(to: Instant): Unit                                    = ()
   override def queryRollups(q: RollupQuery): List[RollupBucket]                             = Nil
   override def purgeRollups(granularity: String, olderThan: Instant): Int                   = 0
+  override def queryUsage(q: UsageQuery): UsageResult = UsageResult(Nil, None)

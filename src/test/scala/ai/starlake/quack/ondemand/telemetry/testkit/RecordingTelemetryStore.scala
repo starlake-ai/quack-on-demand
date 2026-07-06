@@ -10,7 +10,10 @@ import ai.starlake.quack.ondemand.telemetry.{
   StatementEvent,
   StatementQuery,
   StatementRow,
-  TelemetryStore
+  TelemetryStore,
+  UsageMath,
+  UsageQuery,
+  UsageResult
 }
 
 import java.time.Instant
@@ -231,6 +234,48 @@ class RecordingTelemetryStore extends TelemetryStore:
       b.granularity != granularity || !b.bucketStart.isBefore(olderThan)
     }
     before - rollupBuckets.size
+
+  // --- Usage ---------------------------------------------------------------- //
+
+  override def queryUsage(q: UsageQuery): UsageResult =
+    require(
+      q.groupBy == "tenant" || q.groupBy == "pool" || q.groupBy == "user",
+      s"unknown groupBy: ${q.groupBy}"
+    )
+    val tenantScoped = q.tenants match
+      case Some(ts) if ts.isEmpty => Nil
+      case Some(ts)               => rollupBuckets.toList.filter(b => ts.contains(b.tenant))
+      case None                   => rollupBuckets.toList
+    val daily   = tenantScoped.filter(_.granularity == "day")
+    val inRange = daily
+      .filter(b => q.pool.forall(_ == b.pool))
+      .filter(b => !b.bucketStart.isBefore(q.from) && b.bucketStart.isBefore(q.to))
+    UsageResult(
+      groups = UsageMath.fold(q.groupBy, rowsOf(inRange, q.groupBy)),
+      dataStart = daily.map(_.bucketStart).minOption
+    )
+
+  /** Aggregate to one DayRow per (group key, day), mirroring the SQL GROUP BY. */
+  private def rowsOf(buckets: List[RollupBucket], groupBy: String): List[UsageMath.DayRow] =
+    buckets
+      .groupBy { b =>
+        val poolKey = if groupBy == "pool" then b.pool else ""
+        val userKey = if groupBy == "user" then b.username else ""
+        (b.tenant, poolKey, userKey, b.bucketStart)
+      }
+      .toList
+      .map { case ((tenant, poolKey, userKey, day), bs) =>
+        UsageMath.DayRow(
+          tenant = tenant,
+          pool = poolKey,
+          username = userKey,
+          day = day,
+          statements = bs.map(_.stmtCount).sum,
+          errors = bs.map(_.errorCount).sum,
+          denied = bs.map(_.deniedCount).sum,
+          engineMs = bs.map(_.engineMsSum).sum
+        )
+      }
 
   // --- Percentile helper -------------------------------------------------- //
 
