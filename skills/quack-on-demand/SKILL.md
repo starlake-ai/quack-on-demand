@@ -428,9 +428,15 @@ curl -sS -H "X-API-Key: $TOKEN" \
 # Failed logins in a time window
 curl -sS -H "X-API-Key: $TOKEN" \
   'http://localhost:20900/api/audit/list?action=auth.login.failure&from=2026-07-01T00:00:00Z'
+
+# Only no-tenant rows (anonymous auth failures, node ops, manifest imports; superuser only)
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/audit/list?noTenant=true' | python3 -m json.tool
+
+# Exhaustive action vocabulary for exact ?action= filters
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/audit/actions' | python3 -m json.tool
 ```
 
-Filters: `family`, `tenant`, `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
+Filters: `family`, `tenant` (superuser: returns only that tenant's rows; null-tenant rows not included when this is set), `noTenant=true` (superuser: only null-tenant rows; wins over `tenant`), `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
 
 Tenant admins see only their own tenant's rows. Superusers and static-key callers see everything, including null-tenant rows (anonymous failures, node ops, manifest imports).
 

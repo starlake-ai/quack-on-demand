@@ -113,9 +113,9 @@ The `Audit` page shows a tenant-scoped, newest-first table of administrative and
 The page has a filter bar with:
 
 - **Family** - dropdown select for `control-plane`, `auth`, `data-denial`, and `data-write`.
-- **Tenant** - visible to superusers only; tenant admins are pinned to their own tenant.
+- **Tenant** - a select populated from the live tenant list, visible to superusers only. Includes a "(no tenant)" option to show only tenant-less events (anonymous authentication failures, node operations, and manifest imports). Tenant admins are pinned to their own tenant and do not see this filter.
 - **Actor** - filter by username.
-- **Action** - exact-match filter on the action string (e.g. `auth.login.failure`); use the `q` parameter for free-text substring search.
+- **Action** - a select populated from the exhaustive action vocabulary served by `GET /api/audit/actions`.
 - **Time range** - from / to ISO-8601 instant fields.
 
 The event table shows timestamp, family badge, actor, action, target, and an outcome badge (`ok`, `denied`, `error`). Each row is expandable to reveal the `detail` key-value map as a formatted list.
@@ -151,7 +151,7 @@ The page has a filter bar at the top with:
 - **Period picker** - a month input (defaults to the current calendar month) or a custom date range, toggled by the "custom range" button. Custom ranges translate to a half-open `[from, to)` interval in UTC before being sent to the API.
 - **Group-by selector** - `by tenant` (superusers only), `by pool`, or `by user`. Tenant admins land on the `by pool` grouping; the `by tenant` option is hidden for them because the API pins them to their own tenant.
 - **Metric toggle** - `statements` (total statement count) or `engine-ms` (summed execution time in milliseconds). Switching updates the chart; the totals table always shows all four measures.
-- **Tenant and pool filters** - optional free-text inputs to narrow the result. The tenant filter is visible to superusers only.
+- **Tenant and pool filters** - the tenant filter (visible to superusers only) is a select populated from the live tenant list; the pool select narrows its options to the chosen tenant.
 
 Below the filters, a stacked per-day bar chart shows each group's contribution over the period. The top 8 groups by `engineMs` receive distinct colors; all remaining groups are merged into a single gray "other" segment. Periods with no activity show an empty chart.
 
