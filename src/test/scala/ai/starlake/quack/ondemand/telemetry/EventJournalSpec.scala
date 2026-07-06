@@ -21,15 +21,19 @@ class EventJournalSpec extends AnyFlatSpec with Matchers:
   )
 
   private class RecordingStore extends TelemetryStore:
-    val enabled  = true
-    val batches  = scala.collection.mutable.ListBuffer.empty[List[AuditEvent]]
-    var failNext = false
+    val enabled         = true
+    val batches         = scala.collection.mutable.ListBuffer.empty[List[AuditEvent]]
+    val stmtBatches     = scala.collection.mutable.ListBuffer.empty[List[StatementEvent]]
+    var failNext        = false
+    var failNextStmts   = false
     def appendAudit(events: List[AuditEvent]): Unit =
       if failNext then { failNext = false; throw new RuntimeException("pg down") }
       batches += events
+    def appendStatements(events: List[StatementEvent]): Unit =
+      if failNextStmts then { failNextStmts = false; throw new RuntimeException("pg stmt down") }
+      stmtBatches += events
     def listAudit(q: AuditQuery): List[AuditRow]                                     = Nil
     def purgeAudit(olderThan: Instant): Int                                          = 0
-    def appendStatements(events: List[StatementEvent]): Unit                         = ()
     def searchStatements(q: StatementQuery): List[StatementRow]                      = Nil
     def purgeStatements(olderThan: Instant): Int                                     = 0
     def rollupWatermark(): Option[Instant]                                           = None
@@ -83,4 +87,94 @@ class EventJournalSpec extends AnyFlatSpec with Matchers:
     (1 to 5).foreach(i => journal.offer(ev(i)))
     dropped shouldBe 0
     journal.drainNow() // no-op, nothing recorded, nothing thrown
+  }
+
+  // ---------------------------------------------------------------------------
+  // Statement queue
+  // ---------------------------------------------------------------------------
+
+  private def stev(i: Int) = StatementEvent(
+    ts = java.time.Instant.parse("2026-07-06T00:00:00Z"),
+    username = "alice",
+    tenant = "acme",
+    pool = "bi",
+    nodeId = s"node-$i",
+    sql = s"SELECT $i",
+    durationMs = i.toLong,
+    prepareMs = None,
+    status = "ok",
+    error = None
+  )
+
+  "offerStatement + drainNow" should "batch queued statement events into one appendStatements call" in {
+    val store   = new RecordingStore
+    val journal = new EventJournal(store)
+    (1 to 3).foreach(i => journal.offerStatement(stev(i)))
+    journal.drainNow()
+    store.stmtBatches.toList shouldBe List(List(stev(1), stev(2), stev(3)))
+  }
+
+  it should "split statement drains larger than batchMax" in {
+    val store   = new RecordingStore
+    val journal = new EventJournal(store, batchMax = 2)
+    (1 to 5).foreach(i => journal.offerStatement(stev(i)))
+    journal.drainNow()
+    store.stmtBatches.map(_.size).toList shouldBe List(2, 2, 1)
+  }
+
+  it should "count overflow on onStatementDrop and leave onDrop untouched" in {
+    var auditDropped = 0
+    var stmtDropped  = 0
+    val store        = new RecordingStore
+    val journal = new EventJournal(
+      store,
+      capacity = 2,
+      onDrop = auditDropped += _,
+      onStatementDrop = stmtDropped += _
+    )
+    (1 to 5).foreach(i => journal.offerStatement(stev(i)))
+    stmtDropped shouldBe 3
+    auditDropped shouldBe 0
+    journal.drainNow()
+    store.stmtBatches.flatten.size shouldBe 2
+  }
+
+  it should "count a failed appendStatements as drops and keep the drain going" in {
+    var stmtDropped = 0
+    val store       = new RecordingStore
+    val journal     = new EventJournal(store, onStatementDrop = stmtDropped += _)
+    store.failNextStmts = true
+    journal.offerStatement(stev(1))
+    journal.offer(ev(1))
+    journal.drainNow()
+    // audit batch still lands
+    store.batches.flatten.map(_.action) shouldBe List("sql.write.1")
+    // statement batch was dropped
+    stmtDropped shouldBe 1
+    store.stmtBatches.flatten shouldBe empty
+    // next drain succeeds
+    journal.offerStatement(stev(2))
+    journal.drainNow()
+    store.stmtBatches.flatten.map(_.sql) shouldBe List("SELECT 2")
+  }
+
+  it should "be silent on offerStatement when the store is disabled" in {
+    var stmtDropped = 0
+    val journal =
+      new EventJournal(NoopTelemetryStore, capacity = 1, onStatementDrop = stmtDropped += _)
+    (1 to 5).foreach(i => journal.offerStatement(stev(i)))
+    stmtDropped shouldBe 0
+    journal.drainNow()
+  }
+
+  it should "land both audit and statement events in one drainNow when interleaved" in {
+    val store   = new RecordingStore
+    val journal = new EventJournal(store)
+    journal.offer(ev(1))
+    journal.offerStatement(stev(1))
+    journal.offer(ev(2))
+    journal.offerStatement(stev(2))
+    journal.drainNow()
+    store.batches.flatten.map(_.action) shouldBe List("sql.write.1", "sql.write.2")
+    store.stmtBatches.flatten.map(_.sql) shouldBe List("SELECT 1", "SELECT 2")
   }
