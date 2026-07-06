@@ -4,6 +4,7 @@ import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -11,7 +12,8 @@ final class PoolHandlers(
     sup: PoolSupervisor,
     tracker: NodeLoadTracker,
     engineStats: EngineStatsTracker = new EngineStatsTracker,
-    podTemplateEnabled: Boolean = false
+    podTemplateEnabled: Boolean = false,
+    audit: AuditRecorder = AuditRecorder.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -72,8 +74,16 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.create",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         if req.podTemplateYaml.nonEmpty then
           SuperuserCheck.reject(apiKey)(scopeOf) match
             case Some(err) => IO.pure(Left(err))
@@ -96,10 +106,10 @@ final class PoolHandlers(
                     IO.pure(
                       Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
                     )
-                  case Right(()) => createPoolInner(req)
-        else createPoolInner(req)
+                  case Right(()) => createPoolInner(req, apiKey)
+        else createPoolInner(req, apiKey)
 
-  private def createPoolInner(req: CreatePoolRequest): Out[PoolResponse] =
+  private def createPoolInner(req: CreatePoolRequest, apiKey: Option[String]): Out[PoolResponse] =
     if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
       IO.pure(
         Left(
@@ -172,6 +182,15 @@ final class PoolHandlers(
                   req.podTemplateYaml
                 )
                 .map(_ =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    "pool.create",
+                    "ok",
+                    tenant = Some(req.tenant),
+                    target = Some(key.toString),
+                    detail = Map("size" -> req.size.toString)
+                  )
                   Right(
                     respond(key).getOrElse(
                       PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
@@ -188,8 +207,16 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.scale",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.get(key) match
           case None =>
@@ -208,6 +235,15 @@ final class PoolHandlers(
               sup
                 .scale(key, req.targetSize, req.roleDistribution, req.force)
                 .map(_ =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    "pool.scale",
+                    "ok",
+                    tenant = Some(req.tenant),
+                    target = Some(key.toString),
+                    detail = Map("targetSize" -> req.targetSize.toString)
+                  )
                   Right(
                     respond(key).getOrElse(
                       PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
@@ -219,27 +255,67 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.stop",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.get(key) match
           case None =>
             IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
           case Some(_) =>
-            sup.stopPool(key, req.force).map(_ => Right(()))
+            sup
+              .stopPool(key, req.force)
+              .map(_ =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "pool.stop",
+                  "ok",
+                  tenant = Some(req.tenant),
+                  target = Some(key.toString)
+                )
+                Right(())
+              )
 
   def deletePool(req: DeletePoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.delete",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.get(key) match
           case None =>
             IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
           case Some(_) =>
-            sup.deletePool(key, req.force).map(_ => Right(()))
+            sup
+              .deletePool(key, req.force)
+              .map(_ =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "pool.delete",
+                  "ok",
+                  tenant = Some(req.tenant),
+                  target = Some(key.toString)
+                )
+                Right(())
+              )
 
   def listPools(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -273,11 +349,28 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.setDisabled",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         val key = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.setPoolDisabled(key, req.disabled).map {
           case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "pool.setDisabled",
+              "ok",
+              tenant = Some(req.tenant),
+              target = Some(key.toString),
+              detail = Map("disabled" -> req.disabled.toString)
+            )
             respond(key) match
               case Some(r) => Right(r)
               case None    =>
@@ -297,8 +390,16 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.setResources",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
           IO.pure(
             Left(
@@ -323,6 +424,18 @@ final class PoolHandlers(
             case Left(msg) =>
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
             case Right(_) =>
+              val cpuDetail    = if req.cpu.nonEmpty then Map("cpu" -> req.cpu) else Map.empty
+              val memoryDetail =
+                if req.memory.nonEmpty then Map("memory" -> req.memory) else Map.empty
+              audit.rest(
+                apiKey,
+                "control-plane",
+                "pool.setResources",
+                "ok",
+                tenant = Some(req.tenant),
+                target = Some(key.toString),
+                detail = cpuDetail ++ memoryDetail
+              )
               respond(key) match
                 case Some(r) => Right(r)
                 case None    =>
@@ -338,8 +451,16 @@ final class PoolHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.setPodTemplate",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         if !podTemplateEnabled then
           IO.pure(
             Left(
@@ -367,6 +488,15 @@ final class PoolHandlers(
                 case Left(msg) =>
                   Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
                 case Right(_) =>
+                  // Never include the template body in detail (may contain secrets/paths).
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    "pool.setPodTemplate",
+                    "ok",
+                    tenant = Some(req.tenant),
+                    target = Some(key.toString)
+                  )
                   respond(key) match
                     case Some(r) => Right(r)
                     case None    =>

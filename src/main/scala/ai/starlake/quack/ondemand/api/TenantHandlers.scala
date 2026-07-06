@@ -4,6 +4,7 @@ import ai.starlake.quack.edge.auth.TenantOidcRegistry
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -14,7 +15,8 @@ import sttp.model.StatusCode
   */
 final class TenantHandlers(
     sup: PoolSupervisor,
-    onAuthChanged: String => Unit = _ => ()
+    onAuthChanged: String => Unit = _ => (),
+    audit: AuditRecorder = AuditRecorder.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -37,8 +39,10 @@ final class TenantHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(apiKey, "control-plane", "tenant.create", "denied")
+        IO.pure(Left(err))
+      case None =>
         if req.id.isEmpty then
           IO.pure(
             Left(
@@ -93,7 +97,17 @@ final class TenantHandlers(
               )
             )
             .map {
-              case Right(t)  => Right(toResponse(t))
+              case Right(t) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "tenant.create",
+                  "ok",
+                  tenant = Some(t.id),
+                  target = Some(t.id),
+                  detail = Map("displayName" -> t.displayName, "authProvider" -> t.authProvider)
+                )
+                Right(toResponse(t))
               case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
             }
 
@@ -117,10 +131,27 @@ final class TenantHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "tenant.delete",
+          "denied",
+          tenant = Some(req.name)
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteTenant(req.name).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "tenant.delete",
+              "ok",
+              tenant = Some(req.name),
+              target = Some(req.name)
+            )
+            Right(())
           case Left(msg) =>
             if msg.startsWith("tenant not found") then
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
@@ -131,10 +162,28 @@ final class TenantHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "tenant.setDisabled",
+          "denied",
+          tenant = Some(req.name)
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.setTenantDisabled(req.name, req.disabled).map {
-          case Right(t)  => Right(toResponse(t))
+          case Right(t) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "tenant.setDisabled",
+              "ok",
+              tenant = Some(t.id),
+              target = Some(t.id),
+              detail = Map("disabled" -> req.disabled.toString)
+            )
+            Right(toResponse(t))
           case Left(msg) =>
             if msg.startsWith("tenant not found") then
               Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
@@ -145,11 +194,28 @@ final class TenantHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "tenant.auth.update",
+          "denied",
+          tenant = Some(req.name)
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
           case Right(t) =>
             onAuthChanged(t.id)
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "tenant.auth.update",
+              "ok",
+              tenant = Some(t.id),
+              target = Some(t.id),
+              detail = Map("authProvider" -> req.authProvider)
+            )
             Right(toResponse(t))
           case Left(msg) =>
             if msg.startsWith("tenant not found") then

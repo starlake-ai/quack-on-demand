@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -13,7 +14,11 @@ import sttp.model.StatusCode
   * (body-tenant for create/list; id-of-resource for delete/grant/revoke/list). See
   * [[TenantScopeCheck]].
   */
-final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
+final class RoleHandlers(
+    sup: PoolSupervisor,
+    mappers: UserHandlers,
+    audit: AuditRecorder = AuditRecorder.noop
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -39,10 +44,22 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
         )
       case Some(tid) =>
         TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(err) => IO.pure(Left(err))
-          case None      =>
+          case Some(err) =>
+            audit.rest(apiKey, "control-plane", "role.create", "denied", tenant = Some(tid))
+            IO.pure(Left(err))
+          case None =>
             sup.createRole(tid, req.name, req.description).map {
-              case Right(r)  => Right(mappers.toRoleResponse(r))
+              case Right(r) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "role.create",
+                  "ok",
+                  tenant = Some(tid),
+                  target = Some(r.id),
+                  detail = Map("name" -> req.name)
+                )
+                Right(mappers.toRoleResponse(r))
               case Left(err) =>
                 val code =
                   if err.startsWith("role '") then StatusCode.Conflict else StatusCode.BadRequest
@@ -52,11 +69,29 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   def deleteRole(req: RoleDeleteRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val roleTenant = sup.tenantForRole(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.delete",
+          "denied",
+          tenant = roleTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteRole(req.id).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "role.delete",
+              "ok",
+              tenant = roleTenant,
+              target = Some(req.id)
+            )
+            Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 
@@ -75,11 +110,35 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   def grantPermission(req: RolePermissionGrantRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[RolePermissionResponse] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(req.roleId))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val roleTenant = sup.tenantForRole(req.roleId)
+    TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.permission.grant",
+          "denied",
+          tenant = roleTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.grantRolePermission(req.roleId, req.catalog, req.schema, req.table, req.verb).map {
-          case Right(p)  => Right(mappers.toRolePermissionResponse(p))
+          case Right(p) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "role.permission.grant",
+              "ok",
+              tenant = roleTenant,
+              target = Some(p.id),
+              detail = Map(
+                "catalog" -> req.catalog,
+                "schema"  -> req.schema,
+                "table"   -> req.table,
+                "verb"    -> req.verb
+              )
+            )
+            Right(mappers.toRolePermissionResponse(p))
           case Left(err) =>
             val code =
               if err.startsWith("role not found") then StatusCode.NotFound
@@ -90,11 +149,29 @@ final class RoleHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   def revokePermission(req: RolePermissionRevokeRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRolePermission(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val permTenant = sup.tenantForRolePermission(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, permTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.permission.revoke",
+          "denied",
+          tenant = permTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.revokeRolePermission(req.id).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "role.permission.revoke",
+              "ok",
+              tenant = permTenant,
+              target = Some(req.id)
+            )
+            Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 

@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -13,16 +14,28 @@ import sttp.model.StatusCode
   * [[PoolSupervisor.tenantForRole]], then gate via [[TenantScopeCheck.rejectForResource]]). See
   * [[TenantScopeCheck]].
   */
-final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
+final class RoleColumnPolicyHandlers(
+    sup: PoolSupervisor,
+    audit: AuditRecorder = AuditRecorder.noop
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   def create(req: CreateColumnPolicyRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[ColumnPolicyDto] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(req.roleId))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val roleTenant = sup.tenantForRole(req.roleId)
+    TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.columnPolicy.set",
+          "denied",
+          tenant = roleTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup
           .createColumnPolicy(
             req.roleId,
@@ -34,7 +47,18 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
             req.transformSql
           )
           .map {
-            case Right(p)     => Right(toDto(p))
+            case Right(p) =>
+              audit.rest(
+                apiKey,
+                "control-plane",
+                "role.columnPolicy.set",
+                "ok",
+                tenant = roleTenant,
+                target = Some(s"${req.roleId}/${req.tableName}/${req.columnName}"),
+                detail =
+                  Map("table" -> req.tableName, "column" -> req.columnName, "action" -> req.action)
+              )
+              Right(toDto(p))
             case Left(reason) =>
               Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", reason)))
           }
@@ -42,11 +66,29 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
   def update(req: UpdateColumnPolicyRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForColumnPolicy(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val policyTenant = sup.tenantForColumnPolicy(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, policyTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.columnPolicy.set",
+          "denied",
+          tenant = policyTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.updateColumnPolicy(req.id, req.action, req.transformSql).map {
-          case Right(())                          => Right(())
+          case Right(()) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "role.columnPolicy.set",
+              "ok",
+              tenant = policyTenant,
+              target = Some(req.id)
+            )
+            Right(())
           case Left(r) if r.endsWith("not found") =>
             Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
           case Left(r) =>
@@ -56,12 +98,30 @@ final class RoleColumnPolicyHandlers(sup: PoolSupervisor):
   def delete(req: DeleteColumnPolicyRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForColumnPolicy(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val policyTenant = sup.tenantForColumnPolicy(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, policyTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "role.columnPolicy.delete",
+          "denied",
+          tenant = policyTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteColumnPolicy(req.id).map {
-          case Right(()) => Right(())
-          case Left(r)   => Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
+          case Right(()) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "role.columnPolicy.delete",
+              "ok",
+              tenant = policyTenant,
+              target = Some(req.id)
+            )
+            Right(())
+          case Left(r) => Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
         }
 
   def list(roleId: String, apiKey: Option[String])(

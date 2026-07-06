@@ -4,6 +4,7 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import io.circe.syntax.*
 import io.circe.yaml.v12.{parser, Printer}
@@ -16,7 +17,8 @@ final class ManifestHandlers(
     supervisor: PoolSupervisor,
     managerVersion: String,
     hostname: String,
-    federatedStore: Option[FederatedSourceStore] = None
+    federatedStore: Option[FederatedSourceStore] = None,
+    audit: AuditRecorder = AuditRecorder.noop
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
@@ -53,8 +55,10 @@ final class ManifestHandlers(
   ): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
     IO.blocking {
       superuserCheck(apiKey)(scopeOf) match
-        case Some(err) => Left(err)
-        case None      =>
+        case Some(err) =>
+          audit.rest(apiKey, "control-plane", "manifest.import", "denied")
+          Left(err)
+        case None =>
           parser.parse(body).flatMap(_.as[ConfigManifest]) match
             case Left(e) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
@@ -74,14 +78,28 @@ final class ManifestHandlers(
                   // so without this broadcast, HA peers stay stale until their
                   // 30s periodic refresh fires.
                   supervisor.broadcastStateChanged()
-                  Right(
-                    ManifestImportSummary(
-                      tenants = m.tenants.size,
-                      tenantDbs = m.tenants.map(_.tenantDbs.size).sum,
-                      pools = m.tenants.map(_.pools.size).sum,
-                      roles = m.roles.size,
-                      groups = m.groups.size,
-                      users = m.users.size
+                  val summary = ManifestImportSummary(
+                    tenants = m.tenants.size,
+                    tenantDbs = m.tenants.map(_.tenantDbs.size).sum,
+                    pools = m.tenants.map(_.pools.size).sum,
+                    roles = m.roles.size,
+                    groups = m.groups.size,
+                    users = m.users.size
+                  )
+                  // Record counts only in detail (no YAML body, no secret values).
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    "manifest.import",
+                    "ok",
+                    detail = Map(
+                      "tenants"   -> summary.tenants.toString,
+                      "tenantDbs" -> summary.tenantDbs.toString,
+                      "pools"     -> summary.pools.toString,
+                      "roles"     -> summary.roles.toString,
+                      "groups"    -> summary.groups.toString,
+                      "users"     -> summary.users.toString
                     )
                   )
+                  Right(summary)
     }

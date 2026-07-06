@@ -2,11 +2,16 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
 /** REST handlers for the group surface (`/api/group/...`). */
-final class GroupHandlers(sup: PoolSupervisor, mappers: UserHandlers):
+final class GroupHandlers(
+    sup: PoolSupervisor,
+    mappers: UserHandlers,
+    audit: AuditRecorder = AuditRecorder.noop
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -32,10 +37,22 @@ final class GroupHandlers(sup: PoolSupervisor, mappers: UserHandlers):
         )
       case Some(tid) =>
         TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(err) => IO.pure(Left(err))
-          case None      =>
+          case Some(err) =>
+            audit.rest(apiKey, "control-plane", "group.create", "denied", tenant = Some(tid))
+            IO.pure(Left(err))
+          case None =>
             sup.createGroup(tid, req.name, req.description).map {
-              case Right(g)  => Right(mappers.toGroupResponse(g))
+              case Right(g) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "group.create",
+                  "ok",
+                  tenant = Some(tid),
+                  target = Some(g.id),
+                  detail = Map("name" -> req.name)
+                )
+                Right(mappers.toGroupResponse(g))
               case Left(err) =>
                 val code =
                   if err.startsWith("group '") then StatusCode.Conflict else StatusCode.BadRequest
@@ -45,11 +62,29 @@ final class GroupHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   def deleteGroup(req: GroupDeleteRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForGroup(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val groupTenant = sup.tenantForGroup(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, groupTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "group.delete",
+          "denied",
+          tenant = groupTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteGroup(req.id).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "group.delete",
+              "ok",
+              tenant = groupTenant,
+              target = Some(req.id)
+            )
+            Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 

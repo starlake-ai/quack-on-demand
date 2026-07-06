@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -14,7 +15,8 @@ import sttp.model.StatusCode
   */
 final class FederatedSourceHandlers(
     fedStore: FederatedSourceStore,
-    resolver: (String, String) => Option[String]
+    resolver: (String, String) => Option[String],
+    audit: AuditRecorder = AuditRecorder.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -80,6 +82,14 @@ final class FederatedSourceHandlers(
               disabled = req.disabled
             )
           )
+          // NEVER include setupSql in detail (may contain connection strings).
+          audit.rest(
+            None,
+            "control-plane",
+            "federation.source.upsert",
+            "ok",
+            target = Some(req.alias)
+          )
           Right(
             toSourceResponse(
               fedStore
@@ -131,6 +141,13 @@ final class FederatedSourceHandlers(
               Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
             case Some(s) =>
               fedStore.deleteSource(s.id)
+              audit.rest(
+                None,
+                "control-plane",
+                "federation.source.delete",
+                "ok",
+                target = Some(alias)
+              )
               Right(())
     }
 
@@ -196,6 +213,14 @@ final class FederatedSourceHandlers(
                     externalRef = req.externalRef
                   )
                   fedStore.upsertSecret(sec)
+                  // NEVER include value or externalRef in detail (secret material).
+                  audit.rest(
+                    None,
+                    "control-plane",
+                    "federation.secret.upsert",
+                    "ok",
+                    target = Some(s"$alias/${req.name}")
+                  )
                   Right(toSecretResponse(sec))
     }
 
@@ -220,5 +245,12 @@ final class FederatedSourceHandlers(
                   )
                 case Some(_) =>
                   fedStore.deleteSecret(s.id, name)
+                  audit.rest(
+                    None,
+                    "control-plane",
+                    "federation.secret.delete",
+                    "ok",
+                    target = Some(s"$alias/$name")
+                  )
                   Right(())
     }
