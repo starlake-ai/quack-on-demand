@@ -1058,7 +1058,7 @@ object Dtos:
   given Codec[StatementHistoryResponse] = deriveCodec
 
   // Audit log
-  given Codec[AuditEventEntry]  = deriveCodec
+  given Codec[AuditEventEntry]   = deriveCodec
   given Codec[AuditListResponse] = deriveCodec
 
   // RBAC: users
