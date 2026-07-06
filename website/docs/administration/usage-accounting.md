@@ -44,7 +44,7 @@ curl -sS -H "X-API-Key: $TOKEN" \
 | `from` | ISO-8601 instant (e.g. `2026-06-01T00:00:00Z`). Start of the period, inclusive. Defaults to the first instant of the current calendar month (UTC). |
 | `to` | ISO-8601 instant. End of the period, exclusive (half-open `[from, to)` interval). Defaults to the first instant of the following calendar month (UTC). |
 | `groupBy` | Grouping dimension: `tenant` (default), `pool`, or `user`. Returns `400 invalid_group_by` for any other value. |
-| `tenant` | Filter by tenant display name. Superusers can specify any tenant; tenant admins are silently pinned to their own tenant regardless of this value. |
+| `tenant` | Filter by tenant id. Superusers can specify any tenant; tenant admins are silently pinned to their own tenant regardless of this value. |
 | `pool` | Filter by pool key. Combined with `tenant` to narrow further. |
 
 Invalid ISO-8601 values for `from` or `to` return `400 invalid_time`.
@@ -79,9 +79,9 @@ Invalid ISO-8601 values for `from` or `to` return `400 invalid_time`.
 | `from` | string | Period start as ISO-8601 UTC instant |
 | `to` | string | Period end as ISO-8601 UTC instant |
 | `groupBy` | string | The grouping dimension used: `tenant`, `pool`, or `user` |
-| `dataStart` | string or null | The oldest daily bucket present in the ledger (across all retained data, not just the query window). When `dataStart` is later than `from`, the requested range extends before the retention horizon and the period's leading edge is incomplete. |
-| `groups` | array | One entry per (tenant, pool, username) combination with non-zero activity in the period. Sorted by `engineMs` descending. |
-| `groups[].tenant` | string | Tenant display name |
+| `dataStart` | string or null | The oldest daily bucket present in the ledger (across all retained data visible to your tenant scope, not just the query window). When `dataStart` is later than `from`, the requested range extends before the retention horizon and the period's leading edge is incomplete. |
+| `groups` | array | One entry per group key (per tenant for `groupBy=tenant`, per tenant and pool for `pool`, per tenant and user for `user`) with non-zero activity in the period. Sorted by `engineMs` descending. |
+| `groups[].tenant` | string | Tenant id |
 | `groups[].pool` | string or null | Pool key; null when `groupBy=tenant` |
 | `groups[].username` | string or null | Username; null when `groupBy` is not `user` |
 | `groups[].statements` | integer | Total statements in the period |
