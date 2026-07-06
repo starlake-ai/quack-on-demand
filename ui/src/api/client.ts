@@ -82,6 +82,7 @@ import type {
   KillStatementResponse,
   // Audit
   AuditListResponse,
+  AuditActionsResponse,
   // Persisted statement search
   StatementSearchResponse,
   // Usage and accounting
@@ -342,6 +343,7 @@ export const api = {
   // Audit log
   auditList: (params: Record<string, string>) =>
     get<AuditListResponse>(`/audit/list?${new URLSearchParams(params).toString()}`),
+  auditActions: () => get<AuditActionsResponse>('/audit/actions'),
 
   // History trends
   historyTrends: (params: Record<string, string>) =>

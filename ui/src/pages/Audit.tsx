@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { AuditEventEntry } from '../api/types';
+import type { AuditEventEntry, TenantResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 
 const FAMILIES = ['control-plane', 'auth', 'data-denial', 'data-write'];
+const NO_TENANT = '__none__'; // client-side sentinel; never sent as ?tenant=
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const cls = outcome === 'ok' ? 'good' : outcome === 'denied' ? 'warn' : 'bad';
@@ -24,16 +25,30 @@ export default function Audit() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [err, setErr] = useState('');
 
+  const [tenants, setTenants] = useState<TenantResponse[]>([]);
+  const [actions, setActions] = useState<string[]>([]);
+
   useEffect(() => {
     api.clientConfig()
       .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
       .catch(() => setTelemetryEnabled(false));
   }, []);
 
+  useEffect(() => {
+    api.auditActions().then(r => setActions(r.actions)).catch(() => setActions([]));
+  }, []);
+
+  useEffect(() => {
+    if (superuser) {
+      api.listTenants().then(r => setTenants(r.tenants)).catch(() => setTenants([]));
+    }
+  }, [superuser]);
+
   const params = useCallback((before?: string) => {
     const p: Record<string, string> = { limit: '50' };
     if (family) p.family = family;
-    if (tenant) p.tenant = tenant;
+    if (tenant === NO_TENANT) p.noTenant = 'true';
+    else if (tenant) p.tenant = tenant;
     if (actor) p.actor = actor;
     if (action) p.action = action;
     if (from) p.from = new Date(from).toISOString();
@@ -72,10 +87,21 @@ export default function Audit() {
           {FAMILIES.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
         {superuser && (
-          <input placeholder="tenant id" value={tenant} onChange={e => setTenant(e.target.value)} />
+          <select value={tenant} onChange={e => setTenant(e.target.value)}>
+            <option value="">all tenants</option>
+            <option value={NO_TENANT}>(no tenant)</option>
+            {tenants.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+              </option>
+            ))}
+          </select>
         )}
         <input placeholder="actor" value={actor} onChange={e => setActor(e.target.value)} />
-        <input placeholder="action" value={action} onChange={e => setAction(e.target.value)} />
+        <select value={action} onChange={e => setAction(e.target.value)}>
+          <option value="">all actions</option>
+          {actions.map(a => <option key={a} value={a}>{a}</option>)}
+        </select>
         <input type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} />
         <input type="datetime-local" value={to} onChange={e => setTo(e.target.value)} />
         <button type="button" className="copy-btn" onClick={() => load(false)}>Refresh</button>

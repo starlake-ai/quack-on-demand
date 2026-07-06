@@ -203,6 +203,10 @@ export interface AuditListResponse {
   nextBefore: string | null;
 }
 
+export interface AuditActionsResponse {
+  actions: string[];
+}
+
 export interface ManifestImportSummary {
   tenants:   number;
   tenantDbs: number;
