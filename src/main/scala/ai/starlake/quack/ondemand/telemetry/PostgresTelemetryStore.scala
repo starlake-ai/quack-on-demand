@@ -507,6 +507,98 @@ final class PostgresTelemetryStore(
     }
 
   override def queryUsage(q: UsageQuery): UsageResult =
-    throw new UnsupportedOperationException("implemented in the usage-accounting Task 2")
+    require(
+      q.groupBy == "tenant" || q.groupBy == "pool" || q.groupBy == "user",
+      s"unknown groupBy: ${q.groupBy}"
+    )
+    withConn { c =>
+      val keyCols = q.groupBy match
+        case "pool" => "tenant, pool"
+        case "user" => "tenant, username"
+        case _      => "tenant"
+      val keyCount = if q.groupBy == "tenant" then 1 else 2
+
+      // Tenant-scope fragment is shared by the aggregate query and the dataStart query.
+      val tenantPart: Option[(String, (PreparedStatement, Int) => Int)] = q.tenants match
+        case Some(ts) if ts.isEmpty =>
+          Some(("FALSE", (_, i) => i))
+        case Some(ts) =>
+          val tenantList   = ts.toList
+          val placeholders = tenantList.map(_ => "?").mkString(", ")
+          Some(
+            (
+              s"tenant IN ($placeholders)",
+              (ps, i) => {
+                tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
+                i + tenantList.size
+              }
+            )
+          )
+        case None => None
+
+      val parts = List.newBuilder[(String, (PreparedStatement, Int) => Int)]
+      parts += (("granularity = 'day'", (_, i) => i))
+      tenantPart.foreach(parts += _)
+      q.pool.foreach { v =>
+        parts += (("pool = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
+      }
+      parts += ((
+        "bucket_start >= ?",
+        (ps, i) => { ps.setTimestamp(i, Timestamp.from(q.from)); i + 1 }
+      ))
+      parts += ((
+        "bucket_start < ?",
+        (ps, i) => { ps.setTimestamp(i, Timestamp.from(q.to)); i + 1 }
+      ))
+
+      val builtParts = parts.result()
+      val whereSql   = builtParts.map(_._1).mkString(" WHERE ", " AND ", "")
+      val sql        =
+        s"SELECT $keyCols, bucket_start," +
+          " sum(stmt_count), sum(error_count), sum(denied_count), sum(engine_ms_sum)" +
+          s" FROM qodstate_stmt_rollup$whereSql" +
+          s" GROUP BY $keyCols, bucket_start" +
+          s" ORDER BY $keyCols, bucket_start"
+      val ps = c.prepareStatement(sql)
+      try
+        builtParts.foldLeft(1) { case (i, (_, bind)) => bind(ps, i) }
+        val rs   = ps.executeQuery()
+        val rows = ListBuffer.empty[UsageMath.DayRow]
+        try
+          while rs.next() do
+            val tenant = rs.getString(1)
+            val second = if keyCount == 2 then rs.getString(2) else ""
+            rows += UsageMath.DayRow(
+              tenant = tenant,
+              pool = if q.groupBy == "pool" then second else "",
+              username = if q.groupBy == "user" then second else "",
+              day = rs.getTimestamp(keyCount + 1).toInstant,
+              statements = rs.getLong(keyCount + 2),
+              errors = rs.getLong(keyCount + 3),
+              denied = rs.getLong(keyCount + 4),
+              engineMs = rs.getLong(keyCount + 5)
+            )
+        finally rs.close()
+
+        // dataStart: oldest daily bucket in the same tenant scope (period and pool ignored;
+        // it marks the retention edge, not the current filter).
+        val dsParts = List(("granularity = 'day'", (_: PreparedStatement, i: Int) => i)) ++
+          tenantPart.toList
+        val dsWhere = dsParts.map(_._1).mkString(" WHERE ", " AND ", "")
+        val dsPs    =
+          c.prepareStatement(s"SELECT min(bucket_start) FROM qodstate_stmt_rollup$dsWhere")
+        val dataStart =
+          try
+            dsParts.foldLeft(1) { case (i, (_, bind)) => bind(dsPs, i) }
+            val dsRs = dsPs.executeQuery()
+            try
+              if dsRs.next() then Option(dsRs.getTimestamp(1)).map(_.toInstant)
+              else None
+            finally dsRs.close()
+          finally dsPs.close()
+
+        UsageResult(UsageMath.fold(q.groupBy, rows.toList), dataStart)
+      finally ps.close()
+    }
 
   override def close(): Unit = if !dataSource.isClosed then dataSource.close()
