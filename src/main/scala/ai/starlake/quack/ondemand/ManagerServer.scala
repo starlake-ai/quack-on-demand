@@ -191,10 +191,20 @@ final class ManagerServer(
         statementHistory.recent(limit, token)(sessions.scopeOf)
       },
       Endpoints.auditList.serverLogic {
-        case (family, tenant, actor, action, q, from, to, limit, before, token) =>
-          auditHandlers.list(family, tenant, actor, action, q, from, to, limit, before, token)(
-            sessions.scopeOf
-          )
+        case (family, tenant, actor, action, q, from, to, limit, before, noTenant, token) =>
+          auditHandlers.list(
+            family,
+            tenant,
+            actor,
+            action,
+            q,
+            from,
+            to,
+            limit,
+            before,
+            noTenant,
+            token
+          )(sessions.scopeOf)
       },
       Endpoints.historyTrends.serverLogic { case (granularity, from, to, tenant, pool, token) =>
         history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
