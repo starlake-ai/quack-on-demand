@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.{AuditQuery, TelemetryStore}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditQuery, TelemetryStore}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -109,3 +109,7 @@ final class AuditHandlers(store: TelemetryStore):
         nextBefore = rows.lastOption.map(_.id.toString)
       )
   }
+
+  /** Static vocabulary; auth is enforced by the API-key perimeter, no tenant scoping needed. */
+  def actions(apiKey: Option[String]): Out[AuditActionsResponse] =
+    IO.pure(Right(AuditActionsResponse(AuditActions.all)))

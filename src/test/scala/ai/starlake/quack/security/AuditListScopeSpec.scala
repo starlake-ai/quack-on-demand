@@ -311,3 +311,27 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
       tenantsOf(resp.body()) shouldBe List(Some(AcmeTenantId))
     finally h.shutdown()
   }
+
+  "GET /api/audit/actions" should "return the sorted exhaustive action vocabulary" in {
+    val (h, _, _) = bootHarness()
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = get(h.httpClient, s"${h.baseUrl}/api/audit/actions", apiKey = Some(token))
+      resp.statusCode() shouldBe 200
+      val actions = io.circe.parser
+        .parse(resp.body())
+        .flatMap(_.hcursor.get[List[String]]("actions"))
+        .fold(e => fail(s"bad body: $e"), identity)
+      actions shouldBe actions.sorted
+      actions.size should be > 40
+      actions should contain allOf ("auth.login.failure", "role.create", "sql.denied")
+    finally h.shutdown()
+  }
+
+  it should "be guarded by the API-key perimeter like audit/list" in {
+    val (h, _, _) = bootHarness(staticApiKey = Some("perimeter-key"))
+    try
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/audit/actions", apiKey = None)
+      resp.statusCode() shouldBe 401
+    finally h.shutdown()
+  }

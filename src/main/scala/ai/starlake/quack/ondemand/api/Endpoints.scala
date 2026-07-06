@@ -28,6 +28,7 @@ private given Schema[KillStatementRequest]     = Schema.derived
 private given Schema[KillStatementResponse]    = Schema.derived
 private given Schema[AuditEventEntry]          = Schema.derived
 private given Schema[AuditListResponse]        = Schema.derived
+private given Schema[AuditActionsResponse]     = Schema.derived
 private given Schema[TrendBucketEntry]         = Schema.derived
 private given Schema[TrendsResponse]           = Schema.derived
 private given Schema[StatementHistoryRowEntry] = Schema.derived
@@ -568,6 +569,19 @@ object Endpoints:
       .in(query[Option[Boolean]]("noTenant"))
       .in(authToken)
       .out(jsonBody[AuditListResponse])
+
+  // Exhaustive audit action vocabulary (static registry, no store access). Feeds the
+  // Audit page's action select.
+  val auditActions: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    AuditActionsResponse,
+    Any
+  ] =
+    base.get
+      .in("audit" / "actions")
+      .in(authToken)
+      .out(jsonBody[AuditActionsResponse])
 
   // Tenant-scoped rollup trends (hourly or daily aggregates). granularity is required ("hour" |
   // "day"); invalid values return 400 invalid_granularity. from/to must be ISO-8601 instants.

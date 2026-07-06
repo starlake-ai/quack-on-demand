@@ -503,6 +503,7 @@ final case class AuditEventEntry(
     detail: Map[String, String]
 )
 final case class AuditListResponse(events: List[AuditEventEntry], nextBefore: Option[String])
+final case class AuditActionsResponse(actions: List[String])
 
 // ----- RBAC: users -------------------------------------------------------
 
@@ -1125,8 +1126,9 @@ object Dtos:
   given Codec[UsageResponse]   = deriveCodec
 
   // Audit log
-  given Codec[AuditEventEntry]   = deriveCodec
-  given Codec[AuditListResponse] = deriveCodec
+  given Codec[AuditEventEntry]      = deriveCodec
+  given Codec[AuditListResponse]    = deriveCodec
+  given Codec[AuditActionsResponse] = deriveCodec
 
   // RBAC: users
   // Custom decoders so Option[String] fields keep their case-class defaults
