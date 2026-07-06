@@ -17,7 +17,7 @@ Every statement that completes the FlightSQL execute path is recorded:
 | `tenant` | Tenant display name |
 | `pool` | Pool key |
 | `username` | The authenticated user |
-| `status` | `ok`, `denied`, `error` |
+| `status` | `ok`, `denied`, `transient`, `permanent`, `no-node`, `no-pool`, `pin-lost` |
 | `sql` | SQL text, capped at 500 characters |
 | `durationMs` | Wall-clock duration from receive to completion |
 | `nodeId` | The node that executed the statement |
@@ -102,7 +102,7 @@ curl -sS -H "X-API-Key: $TOKEN" \
   'http://localhost:20900/api/history/statements?tenant=acme&pool=bi&from=2026-07-05T00:00:00Z&to=2026-07-06T00:00:00Z&limit=500' \
   | python3 -c "
 import sys, json
-rows = json.load(sys.stdin).get('rows', [])
+rows = json.load(sys.stdin).get('statements', [])
 slow = [r for r in rows if r.get('durationMs', 0) > 5000]
 for r in sorted(slow, key=lambda x: -x.get('durationMs', 0)):
     print(r.get('durationMs'), r.get('username'), r.get('sql', '')[:80])

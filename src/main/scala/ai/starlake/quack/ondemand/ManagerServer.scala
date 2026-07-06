@@ -190,9 +190,8 @@ final class ManagerServer(
             sessions.scopeOf
           )
       },
-      Endpoints.historyTrends.serverLogic {
-        case (granularity, from, to, tenant, pool, token) =>
-          history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
+      Endpoints.historyTrends.serverLogic { case (granularity, from, to, tenant, pool, token) =>
+        history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
       },
       Endpoints.historyStatements.serverLogic {
         case (from, to, tenant, pool, user, status, q, limit, before, token) =>
