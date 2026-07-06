@@ -914,10 +914,13 @@ object Main extends IOApp with LazyLogging:
         val fedHandlersStore = new FederatedSourceStore(jdbcUrlForFed, dm.pgUser, dm.pgPassword)
         val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
           sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
+        val tenantIdResolver: String => Option[String] = tenantName =>
+          sup.getTenant(tenantName).map(_.id)
         Some(
           new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
             fedHandlersStore,
             resolver,
+            tenantIdResolver,
             audit = auditRecorder
           )
         )

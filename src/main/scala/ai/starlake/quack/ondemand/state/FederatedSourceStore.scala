@@ -5,6 +5,19 @@ import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import java.sql.{Connection, DriverManager, ResultSet}
 import scala.collection.mutable.ListBuffer
 
+/** Minimal interface consumed by [[ai.starlake.quack.ondemand.api.FederatedSourceHandlers]]. The
+  * concrete Postgres-backed store and any test stubs both implement this trait.
+  */
+trait FederatedSourceOps:
+  def upsertSource(s: FederatedSource): Unit
+  def deleteSource(id: String): Unit
+  def getSource(tenantDbId: String, alias: String): Option[FederatedSource]
+  def listSources(tenantDbId: String): List[FederatedSource]
+  def upsertSecret(s: FederatedSecret): Unit
+  def deleteSecret(sourceId: String, name: String): Unit
+  def getSecret(sourceId: String, name: String): Option[FederatedSecret]
+  def listSecrets(sourceId: String): List[FederatedSecret]
+
 /** Postgres-backed CRUD against `qodstate_federated_source` and `qodstate_federated_secret`.
   * Cascade-delete on source -> secret is enforced by the FK constraint, so deleting a source
   * automatically wipes its secrets.
@@ -13,7 +26,7 @@ class FederatedSourceStore(
     jdbcUrl: String,
     user: String,
     password: String
-):
+) extends FederatedSourceOps:
 
   Class.forName("org.postgresql.Driver")
 

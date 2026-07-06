@@ -534,12 +534,15 @@ object Endpoints:
     )
 
   val createFederatedSource: PublicEndpoint[
-    (String, String, FederatedSourceCreateRequest),
+    (String, String, FederatedSourceCreateRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     FederatedSourceResponse,
     Any
   ] =
-    fedBase.post.in(jsonBody[FederatedSourceCreateRequest]).out(jsonBody[FederatedSourceResponse])
+    fedBase.post
+      .in(jsonBody[FederatedSourceCreateRequest])
+      .in(authToken)
+      .out(jsonBody[FederatedSourceResponse])
 
   val listFederatedSources: PublicEndpoint[
     (String, String),
@@ -558,12 +561,12 @@ object Endpoints:
     fedBase.get.in(path[String]("alias")).out(jsonBody[FederatedSourceResponse])
 
   val deleteFederatedSource: PublicEndpoint[
-    (String, String, String),
+    (String, String, String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    fedBase.delete.in(path[String]("alias"))
+    fedBase.delete.in(path[String]("alias")).in(authToken)
 
   val listFederatedSecrets: PublicEndpoint[
     (String, String, String),
@@ -576,7 +579,7 @@ object Endpoints:
       .out(jsonBody[FederatedSecretListResponse])
 
   val upsertFederatedSecret: PublicEndpoint[
-    (String, String, String, FederatedSecretUpsertRequest),
+    (String, String, String, FederatedSecretUpsertRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     FederatedSecretResponse,
     Any
@@ -584,15 +587,16 @@ object Endpoints:
     fedBase.put
       .in(path[String]("alias") / "secrets")
       .in(jsonBody[FederatedSecretUpsertRequest])
+      .in(authToken)
       .out(jsonBody[FederatedSecretResponse])
 
   val deleteFederatedSecret: PublicEndpoint[
-    (String, String, String, String),
+    (String, String, String, String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     Unit,
     Any
   ] =
-    fedBase.delete.in(path[String]("alias") / "secrets" / path[String]("name"))
+    fedBase.delete.in(path[String]("alias") / "secrets" / path[String]("name")).in(authToken)
 
   // ----- Catalog browser -----
 
