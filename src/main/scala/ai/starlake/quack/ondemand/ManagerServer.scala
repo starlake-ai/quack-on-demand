@@ -385,7 +385,8 @@ final class ManagerServer(
               ssoProviderName =
                 if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then
                   issuerHost(cfg.auth.management.oidc.issuerUrl)
-                else ""
+                else "",
+              telemetryEnabled = serverConfig.telemetryEnabled
             )
           )
         )

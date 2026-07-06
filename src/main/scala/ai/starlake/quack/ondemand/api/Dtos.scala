@@ -173,7 +173,10 @@ final case class ClientConfigResponse(
     identitySource: String = "db",
     // Best-effort label for the SSO provider (the issuer host, e.g.
     // "accounts.google.com"); empty in db mode. Cosmetic only (UI copy).
-    ssoProviderName: String = ""
+    ssoProviderName: String = "",
+    // True iff telemetry.store != none; the UI uses this to show or hide
+    // the audit-log page.
+    telemetryEnabled: Boolean = true
 )
 
 /** One row of the admin UI Config page: a single scalar from `application.conf` with its env-var
