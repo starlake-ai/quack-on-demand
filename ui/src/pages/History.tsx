@@ -11,8 +11,9 @@ import {
   Legend,
 } from 'recharts';
 import { api } from '../api/client';
-import type { TrendBucketEntry } from '../api/types';
+import type { TrendBucketEntry, StatementHistoryRowEntry } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import SqlHighlight from '../components/SqlHighlight';
 
 // Granularity thresholds: ranges <= 48 h use per-hour buckets, else per-day.
 type Range = '1h' | '24h' | '7d' | '30d';
@@ -174,6 +175,33 @@ const C_P50     = '#60a5fa'; // --link
 const C_P95     = '#f59e0b'; // --accent
 const C_P99     = '#f87171'; // --bad
 
+const STATUS_OPTIONS = [
+  { label: 'All statuses', value: '' },
+  { label: 'ok',           value: 'ok' },
+  { label: 'denied',       value: 'denied' },
+  { label: 'transient',    value: 'transient' },
+  { label: 'permanent',    value: 'permanent' },
+  { label: 'no-node',      value: 'no-node' },
+  { label: 'no-pool',      value: 'no-pool' },
+  { label: 'pin-lost',     value: 'pin-lost' },
+];
+
+function shortTs(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+  } catch { return iso; }
+}
+
+function StmtStatusBadge({ status }: { status: string }) {
+  const cls = status === 'ok'        ? 'good'
+    : status === 'denied'            ? 'warn'
+    : status === 'transient'         ? 'warn'
+    : status === 'killed'            ? 'warn'
+    : 'bad';
+  return <span className={`badge ${cls}`}>{status}</span>;
+}
+
 export default function History() {
   const { superuser } = useAuth();
 
@@ -185,10 +213,28 @@ export default function History() {
   const [loading, setLoading] = useState(false);
   const [err, setErr]         = useState('');
 
+  // Table-specific filters
+  const [userFilter,   setUserFilter]   = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [sqlFilter,    setSqlFilter]    = useState('');
+
+  // Statement table state
+  const [stmts,       setStmts]       = useState<StatementHistoryRowEntry[]>([]);
+  const [nextBefore,  setNextBefore]  = useState<string | null>(null);
+  const [stmtLoading, setStmtLoading] = useState(false);
+  const [stmtErr,     setStmtErr]     = useState('');
+  const [expanded,    setExpanded]    = useState<string | null>(null);
+
+  // Ref guard for load-more: prevents double-fire even if the button
+  // becomes briefly enabled before React processes the loading state.
+  const stmtInFlightRef = useRef(false);
+  // Mirror of nextBefore in a ref so loadMore never closes over a stale value.
+  const nextBeforeRef = useRef<string | null>(null);
+
   // Ref holding current filter values so fetch() always reads the latest without
   // re-creating the callback on every keystroke (avoids per-keystroke fetches).
-  const filterRef = useRef({ range, tenant, pool });
-  filterRef.current = { range, tenant, pool };
+  const filterRef = useRef({ range, tenant, pool, userFilter, statusFilter, sqlFilter });
+  filterRef.current = { range, tenant, pool, userFilter, statusFilter, sqlFilter };
 
   useEffect(() => {
     api.clientConfig()
@@ -211,10 +257,57 @@ export default function History() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Refetch on range button click (range state change).
+  const fetchStmts = useCallback(() => {
+    if (stmtInFlightRef.current) return;
+    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
+    const params: Record<string, string> = {};
+    if (t)  params.tenant = t;
+    if (p)  params.pool   = p;
+    if (u)  params.user   = u;
+    if (s)  params.status = s;
+    if (sq) params.sql    = sq;
+    setStmtLoading(true);
+    stmtInFlightRef.current = true;
+    setStmtErr('');
+    api.historyStatements(params)
+      .then(res => {
+        setStmts(res.statements);
+        setNextBefore(res.nextBefore);
+        nextBeforeRef.current = res.nextBefore;
+      })
+      .catch(e => setStmtErr(String(e)))
+      .finally(() => { setStmtLoading(false); stmtInFlightRef.current = false; });
+  }, []);
+
+  const loadMore = useCallback(() => {
+    if (stmtInFlightRef.current || !nextBeforeRef.current) return;
+    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
+    const params: Record<string, string> = { before: nextBeforeRef.current };
+    if (t)  params.tenant = t;
+    if (p)  params.pool   = p;
+    if (u)  params.user   = u;
+    if (s)  params.status = s;
+    if (sq) params.sql    = sq;
+    setStmtLoading(true);
+    stmtInFlightRef.current = true;
+    setStmtErr('');
+    api.historyStatements(params)
+      .then(res => {
+        setStmts(prev => [...prev, ...res.statements]);
+        setNextBefore(res.nextBefore);
+        nextBeforeRef.current = res.nextBefore;
+      })
+      .catch(e => setStmtErr(String(e)))
+      .finally(() => { setStmtLoading(false); stmtInFlightRef.current = false; });
+  }, []);
+
+  // Refetch charts AND table on range button click or initial load.
   useEffect(() => {
-    if (telemetryEnabled) fetch();
-  }, [telemetryEnabled, range, fetch]);
+    if (telemetryEnabled) {
+      fetch();
+      fetchStmts();
+    }
+  }, [telemetryEnabled, range, fetch, fetchStmts]);
 
   if (!telemetryEnabled) {
     return (
@@ -233,6 +326,7 @@ export default function History() {
     <>
       <h2>History</h2>
 
+      {/* Shared chart + table filters */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
         {RANGE_OPTIONS.map(opt => (
           <button
@@ -262,10 +356,10 @@ export default function History() {
         <button
           type="button"
           className="copy-btn"
-          disabled={loading}
-          onClick={fetch}
+          disabled={loading || stmtLoading}
+          onClick={() => { fetch(); fetchStmts(); }}
         >
-          {loading ? 'Loading...' : 'Refresh'}
+          {loading || stmtLoading ? 'Loading...' : 'Refresh'}
         </button>
       </div>
 
@@ -324,6 +418,125 @@ export default function History() {
           </div>
         </>
       )}
+
+      {/* Statement history table */}
+      <h3 style={{ marginTop: '2rem', marginBottom: 8 }}>Statement history</h3>
+
+      {/* Table-specific filters (no per-keystroke fetch; use Refresh above) */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+        <input
+          placeholder="user"
+          value={userFilter}
+          style={{ width: 140 }}
+          onChange={e => setUserFilter(e.target.value)}
+        />
+        <select
+          value={statusFilter}
+          style={{ height: 32 }}
+          onChange={e => setStatusFilter(e.target.value)}
+        >
+          {STATUS_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <input
+          placeholder="SQL substring"
+          value={sqlFilter}
+          style={{ width: 200 }}
+          onChange={e => setSqlFilter(e.target.value)}
+        />
+        <span className="muted" style={{ fontSize: '.82rem' }}>
+          Press Refresh above to apply filters
+        </span>
+      </div>
+
+      {stmtErr && <p className="login-err">{stmtErr}</p>}
+
+      <div className="card" style={{ padding: 0, marginBottom: 8 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Tenant</th>
+              <th>Pool</th>
+              <th>Node</th>
+              <th style={{ textAlign: 'right' }}>Duration</th>
+              <th>Status</th>
+              <th>SQL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stmts.length === 0 && !stmtLoading ? (
+              <tr>
+                <td colSpan={8} className="empty">No statements found. Press Refresh to load.</td>
+              </tr>
+            ) : stmts.map(h => {
+              const isOpen = expanded === h.id;
+              return (
+                <tr
+                  key={h.id}
+                  onClick={() => setExpanded(isOpen ? null : h.id)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  <td className="subtle">
+                    <code title={h.ts}>{shortTs(h.ts)}</code>
+                  </td>
+                  <td>{h.username}</td>
+                  <td>{h.tenant}</td>
+                  <td>{h.pool}</td>
+                  <td><code>{h.nodeId}</code></td>
+                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <div>{h.durationMs} ms</div>
+                    {h.prepareMs != null && (
+                      <div
+                        style={{ fontSize: '.78em', opacity: 0.6 }}
+                        title="FlightSQL Prepare-time LIMIT-0 probe duration"
+                      >
+                        prep {h.prepareMs} ms
+                      </div>
+                    )}
+                  </td>
+                  <td><StmtStatusBadge status={h.status} /></td>
+                  <td>
+                    <div className="sql-cell">
+                      <pre style={{
+                        margin: 0, fontSize: '.85em',
+                        whiteSpace: isOpen ? 'pre-wrap' : 'nowrap',
+                        overflow: isOpen ? 'visible' : 'hidden',
+                        textOverflow: 'ellipsis',
+                        maxWidth: isOpen ? 'none' : '500px',
+                      }}>
+                        <SqlHighlight sql={h.sql.trim()} />
+                      </pre>
+                    </div>
+                    {h.error && isOpen && (
+                      <p className="login-err" style={{ marginTop: 4 }}>{h.error}</p>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {nextBefore !== null && (
+        <div style={{ textAlign: 'center', marginBottom: 16 }}>
+          <button
+            type="button"
+            className="copy-btn"
+            disabled={stmtLoading}
+            onClick={loadMore}
+          >
+            {stmtLoading ? 'Loading...' : 'Load more'}
+          </button>
+        </div>
+      )}
+
+      <p className="subtle" style={{ textAlign: 'right' }}>
+        Newest first, 50 per page · click a row to expand SQL
+      </p>
     </>
   );
 }

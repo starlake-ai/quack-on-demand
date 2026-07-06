@@ -82,6 +82,8 @@ import type {
   KillStatementResponse,
   // Audit
   AuditListResponse,
+  // Persisted statement search
+  StatementSearchResponse,
 } from './types';
 
 const BASE = '/api';
@@ -342,6 +344,10 @@ export const api = {
   // History trends
   historyTrends: (params: Record<string, string>) =>
     get<TrendsResponse>(`/history/trends?${new URLSearchParams(params)}`),
+
+  // Persisted statement search (newest first, keyset pagination via `before`)
+  historyStatements: (params: Record<string, string>) =>
+    get<StatementSearchResponse>(`/history/statements?${new URLSearchParams(params)}`),
 
   // Catalog browser
   listCatalogSchemas: (tenant: string, tenantDb: string) =>
