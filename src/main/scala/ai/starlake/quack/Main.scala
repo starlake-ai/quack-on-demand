@@ -634,6 +634,7 @@ object Main extends IOApp with LazyLogging:
       audit = auditRecorder
     )
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
+    val auditHandlers   = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val sessions        = new SessionRegistry
     val arrowAllocator  = new org.apache.arrow.memory.RootAllocator()
     val client          = new QuackHttpClient(
@@ -969,7 +970,8 @@ object Main extends IOApp with LazyLogging:
         rowPolicyHandlers,
         activeStmtHandlers,
         audit = auditRecorder,
-        auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter()
+        auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter(),
+        auditHandlers = auditHandlers
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder, NoopTelemetryStore}
 import cats.data.{Kleisli, OptionT}
 import cats.effect.{IO, Resource}
 import cats.implicits._
@@ -42,7 +42,8 @@ final class ManagerServer(
     rowPolicies: RoleRowPolicyHandlers,
     activeStmts: ActiveStatementHandlers,
     audit: AuditRecorder = AuditRecorder.noop,
-    auditLimiter: AuditRateLimiter = new AuditRateLimiter()
+    auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
+    auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore)
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -181,6 +182,12 @@ final class ManagerServer(
       Endpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
       Endpoints.statementHistory.serverLogic { case (limit, token) =>
         statementHistory.recent(limit, token)(sessions.scopeOf)
+      },
+      Endpoints.auditList.serverLogic {
+        case (family, tenant, actor, action, q, from, to, limit, before, token) =>
+          auditHandlers.list(family, tenant, actor, action, q, from, to, limit, before, token)(
+            sessions.scopeOf
+          )
       },
       Endpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
         auth.oidcStart(tenant, returnTo, proto)

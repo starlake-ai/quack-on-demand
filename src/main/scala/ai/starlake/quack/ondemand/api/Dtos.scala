@@ -431,6 +431,23 @@ final case class StatementHistoryEntry(
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
+// ----- Audit log ---------------------------------------------------------
+
+final case class AuditEventEntry(
+    id: String,
+    ts: String,
+    family: String,
+    actor: String,
+    actorRealm: String,
+    tenant: Option[String],
+    action: String,
+    target: Option[String],
+    outcome: String,
+    origin: String,
+    detail: Map[String, String]
+)
+final case class AuditListResponse(events: List[AuditEventEntry], nextBefore: Option[String])
+
 // ----- RBAC: users -------------------------------------------------------
 
 final case class UserCreateRequest(
@@ -1039,6 +1056,10 @@ object Dtos:
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
+
+  // Audit log
+  given Codec[AuditEventEntry]  = deriveCodec
+  given Codec[AuditListResponse] = deriveCodec
 
   // RBAC: users
   // Custom decoders so Option[String] fields keep their case-class defaults
