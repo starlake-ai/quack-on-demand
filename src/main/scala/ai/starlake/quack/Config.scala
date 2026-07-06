@@ -283,9 +283,16 @@ final case class TelemetryConfig(
 )
 
 object TelemetryConfig:
-  def validate(store: String): Either[String, Unit] = store match
-    case "postgres" | "none" => Right(())
-    case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
+  def validate(store: String, stmtHistoryRetentionDays: Int): Either[String, Unit] =
+    store match
+      case "postgres" | "none" =>
+        if stmtHistoryRetentionDays == 0 || stmtHistoryRetentionDays >= 2 then Right(())
+        else
+          Left(
+            "telemetry.stmtHistoryRetentionDays must be 0 (keep forever) or >= 2: the daily" +
+              " rollup recompute rebuilds whole-day buckets from raw rows"
+          )
+      case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
 
 final case class ManagerConfig(
     @field @ConfigField(
