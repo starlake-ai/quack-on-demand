@@ -794,6 +794,16 @@ object Main extends IOApp with LazyLogging:
         )
       val rowPolicyRewriter = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = rlsEnabled)
 
+      // journalDropped references metricsReg (parameter of runWithMetrics);
+      // eventJournal must be constructed before fsRouter so the router can be
+      // passed it as its last constructor argument.
+      val journalDropped: Int => Unit = n =>
+        metricsReg.composite
+          .counter("qod_journal_dropped_total", "table", "audit")
+          .increment(n.toDouble)
+      val eventJournal =
+        new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -805,7 +815,8 @@ object Main extends IOApp with LazyLogging:
         classifier,
         columnPolicyRewriter,
         rowPolicyRewriter,
-        activeStatements
+        activeStatements,
+        eventJournal
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
@@ -879,15 +890,6 @@ object Main extends IOApp with LazyLogging:
         new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup, audit = auditRecorder)
       val rowPolicyHandlers =
         new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup, audit = auditRecorder)
-
-      // telemetryStore is built early (before handler construction) so all handlers
-      // share one instance. journalDropped references metricsReg so it lives here.
-      val journalDropped: Int => Unit = n =>
-        metricsReg.composite
-          .counter("qod_journal_dropped_total", "table", "audit")
-          .increment(n.toDouble)
-      val eventJournal =
-        new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every

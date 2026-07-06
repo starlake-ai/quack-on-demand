@@ -192,7 +192,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
       ctx("bob", "SELECT * FROM acme.public.t", eff)
     )
     result match
-      case Denied(msg) =>
+      case Denied(msg, _) =>
         msg.length should be > 0
       case Allowed =>
         fail("expected Denied for bob with no permissions, got Allowed")
@@ -210,7 +210,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
       ctx("bob", "INSERT INTO acme.public.t VALUES (1)", eff)
     )
     result match
-      case Denied(msg) =>
+      case Denied(msg, _) =>
         msg.length should be > 0
       case Allowed =>
         fail("expected Denied for bob with no INSERT grant, got Allowed")
@@ -267,7 +267,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
       ctx("alice", "INSERT INTO acme.public.t VALUES (1)", eff)
     )
     result match
-      case Denied(msg) =>
+      case Denied(msg, _) =>
         msg.length should be > 0
       case Allowed =>
         fail("expected Denied for alice with RO-only grant on INSERT, got Allowed")

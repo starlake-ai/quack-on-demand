@@ -154,7 +154,7 @@ final class PostgresAclValidator(
       val msg =
         s"$principal lacks grants on ${unauthorized.map(a => s"${a.table.canonical}:${a.verb}").mkString(", ")}"
       logger.warn(s"ACL DENIED: $msg")
-      Denied(msg)
+      Denied(msg, unauthorized)
 
   /** Whether a role-permission verb covers a parser-emitted access verb. Grant verbs are the
     * canonical (RO / RW / DDL / ALL) set; the parser emits the collapsed

@@ -1,10 +1,12 @@
 package ai.starlake.quack.edge
 
+import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext}
 import ai.starlake.quack.model.{PoolKey, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.ondemand.telemetry.{AuditEvent, EventJournal}
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
@@ -42,9 +44,23 @@ final class FlightSqlRouter(
       ),
     val rowPolicyRewriter: ai.starlake.quack.edge.rls.RowPolicyRewriter =
       new ai.starlake.quack.edge.rls.RowPolicyRewriter(),
-    val registry: ActiveStatementRegistry = new ActiveStatementRegistry()
+    val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
+    val journal: EventJournal = EventJournal.noop
 ):
 
+  /** Record a statement outcome into the in-memory history, the metrics instruments, and
+    * (selectively) the audit journal.
+    *
+    * Journal emission rules:
+    *   - status "denied" -> family "data-denial", action "sql.denied".
+    *   - status "ok" && kind Dml -> family "data-write", action "sql.write".
+    *   - status "ok" && kind Ddl -> family "data-write", action "sql.ddl".
+    *   - All other statuses (transient, permanent, no-node, ...) -> no journal event.
+    *
+    * `realm`: "system" when the actor is a superuser principal (user.tenant.isEmpty); "tenant"
+    * otherwise. Computed by the caller (maybeRecord) from the session's EffectiveSet so that
+    * `record` does not need a reference to it.
+    */
   private def record(
       user: String,
       poolKey: PoolKey,
@@ -53,6 +69,9 @@ final class FlightSqlRouter(
       durationMs: Long,
       status: String,
       error: Option[String],
+      kind: StatementKind,
+      deniedRefs: Set[TableAccess] = Set.empty,
+      realm: String = "tenant",
       prepareDurationMs: Option[Long] = None
   ): Unit =
     history.record(
@@ -70,6 +89,42 @@ final class FlightSqlRouter(
       )
     )
     stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
+    if status == "denied" then
+      journal.offer(
+        AuditEvent(
+          java.time.Instant.now(),
+          "data-denial",
+          user,
+          realm,
+          Some(poolKey.tenant),
+          "sql.denied",
+          None,
+          "denied",
+          "flightsql",
+          Map("sql" -> sql.take(500)) ++
+            Option
+              .when(deniedRefs.nonEmpty)(
+                "denied" -> deniedRefs.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")
+              )
+              .toMap ++
+            error.map("reason" -> _.take(500)).toMap
+        )
+      )
+    else if status == "ok" && (kind == StatementKind.Dml || kind == StatementKind.Ddl) then
+      journal.offer(
+        AuditEvent(
+          java.time.Instant.now(),
+          "data-write",
+          user,
+          realm,
+          Some(poolKey.tenant),
+          if kind == StatementKind.Ddl then "sql.ddl" else "sql.write",
+          None,
+          "ok",
+          "flightsql",
+          Map("sql" -> sql.take(500), "durationMs" -> durationMs.toString)
+        )
+      )
 
   def session(connectionId: String) = sessions.get(connectionId)
 
@@ -140,18 +195,41 @@ final class FlightSqlRouter(
     )
     // No-op variant when the caller is the Prepare-time probe -- we don't want the LIMIT-0
     // wrapper to clutter the operator's history view or skew the per-pool metrics.
+    // `deniedRefs` carries the unauthorized TableAccess set from the ACL validator; it is
+    // non-empty only on the ACL denial arm and forwarded into the journal event's "denied" key.
     def maybeRecord(
         nodeId: String,
         durationMs: Long,
         status: String,
         error: Option[String],
+        deniedRefs: Set[TableAccess] = Set.empty,
         prepMs: Option[Long] = prepareDurationMs
     ): Unit =
-      if recordExecution then record(user, poolKey, nodeId, sql, durationMs, status, error, prepMs)
+      if recordExecution then
+        val realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant"
+        record(
+          user,
+          poolKey,
+          nodeId,
+          sql,
+          durationMs,
+          status,
+          error,
+          kind,
+          deniedRefs,
+          realm,
+          prepMs
+        )
 
     validator.validate(ctx) match
-      case Denied(reason) =>
-        maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+      case Denied(reason, deniedRefs) =>
+        maybeRecord(
+          nodeId = "-",
+          durationMs = 0,
+          status = "denied",
+          error = Some(reason),
+          deniedRefs = deniedRefs
+        )
         return IO.pure(Left(RouterFailure.AccessDenied(s"access denied: $reason")))
       case Allowed => () // fall through
 

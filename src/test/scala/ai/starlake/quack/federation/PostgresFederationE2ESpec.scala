@@ -222,8 +222,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     val withRevoke = mkEffective(tenantId, perms = Nil)
     val ctxRevoke  = mkCtx("SELECT * FROM fedpg.public.orders", tenantId, withRevoke)
     validator.validate(ctxRevoke) match
-      case Denied(msg) => msg should (include("fedpg") or include("orders"))
-      case other       => fail(s"expected Denied after revoke, got $other")
+      case Denied(msg, _) => msg should (include("fedpg") or include("orders"))
+      case other          => fail(s"expected Denied after revoke, got $other")
   }
 
   it should "allow a DuckLake-join query when both local and federated grants exist" in {
@@ -242,8 +242,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     val eff      = mkEffective(tenantId, perms = List(perm("tpch", "main", "lineitem", "RO")))
     val sql      = "SELECT o.id FROM fedpg.public.orders o JOIN tpch.main.lineitem l ON o.id = l.id"
     validator.validate(mkCtx(sql, tenantId, eff)) match
-      case Denied(msg) => msg should (include("fedpg") or include("orders"))
-      case other       => fail(s"expected Denied, got $other")
+      case Denied(msg, _) => msg should (include("fedpg") or include("orders"))
+      case other          => fail(s"expected Denied, got $other")
   }
 
   // -----------------------------------------------------------------------
@@ -287,8 +287,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     val tenantId = "t-acl-file-deny"
     val eff      = mkEffective(tenantId, Nil)
     validator.validate(mkCtx("SELECT * FROM fedpg.public.orders", tenantId, eff)) match
-      case Denied(_) => succeed
-      case other     => fail(s"expected Denied, got $other")
+      case Denied(_, _) => succeed
+      case other        => fail(s"expected Denied, got $other")
   }
 
   // -----------------------------------------------------------------------
@@ -349,8 +349,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     val sql      =
       "SELECT o.id, c.name FROM fedpg.public.orders o JOIN tpch.main.customer c ON o.cust_id = c.id"
     validator.validate(mkCtx(sql, tenantId, eff)) match
-      case Denied(msg) => msg should (include("tpch") or include("customer"))
-      case other       => fail(s"expected Denied for ungranted local table, got $other")
+      case Denied(msg, _) => msg should (include("tpch") or include("customer"))
+      case other          => fail(s"expected Denied for ungranted local table, got $other")
   }
 
   // -----------------------------------------------------------------------

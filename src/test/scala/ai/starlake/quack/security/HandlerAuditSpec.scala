@@ -8,14 +8,8 @@ import ai.starlake.quack.ondemand.api.*
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{FederatedSourceOps, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{
-  AuditEvent,
-  AuditQuery,
-  AuditRateLimiter,
-  AuditRecorder,
-  AuditRow,
-  TelemetryStore
-}
+import ai.starlake.quack.ondemand.telemetry.{AuditEvent, AuditRateLimiter, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -34,18 +28,6 @@ import java.time.Instant
   * Uses the same in-memory fixture stack as [[RbacTenantScopeSpec]] (no HTTP, no Postgres).
   */
 class HandlerAuditSpec extends AnyFlatSpec with Matchers:
-
-  // ---------------------------------------------------------------------------
-  // Minimal TelemetryStore that collects events for assertion.
-  // ---------------------------------------------------------------------------
-
-  private class RecordingStore extends TelemetryStore:
-    val enabled                                                 = true
-    val events: scala.collection.mutable.ListBuffer[AuditEvent] =
-      scala.collection.mutable.ListBuffer.empty
-    def appendAudit(es: List[AuditEvent]): Unit  = events ++= es
-    def listAudit(q: AuditQuery): List[AuditRow] = Nil
-    def purgeAudit(olderThan: Instant): Int      = 0
 
   // ---------------------------------------------------------------------------
   // Stub QuackBackend: no real child processes (mirrors ManagerServerHarness).
@@ -119,7 +101,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
   // ---------------------------------------------------------------------------
 
   "createRole" should "audit ok with actor, action, tenant, and target on success" in {
-    val store        = new RecordingStore
+    val store        = new RecordingTelemetryStore
     val audit        = new AuditRecorder(store, _ => None)
     val (roles, tid) = buildRoleHandlers(audit)
     // Static-key token: scopeOf returns None (no session row) => TenantScopeCheck admits.
@@ -138,7 +120,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "audit denied when the caller's session scope excludes the target tenant" in {
-    val store        = new RecordingStore
+    val store        = new RecordingTelemetryStore
     val audit        = new AuditRecorder(store, _ => None)
     val (roles, tid) = buildRoleHandlers(audit)
     // Non-superuser scope scoped to a DIFFERENT tenant: TenantScopeCheck rejects.
@@ -199,7 +181,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
 
   "FederatedSourceHandlers.createSource" should
     "audit ok with actor 'static-key' and tenant id on success" in {
-      val store = new RecordingStore
+      val store = new RecordingTelemetryStore
       val audit = new AuditRecorder(store, _ => None)
       val h     = buildFederatedHandlers(audit)
       h.createSource(
@@ -241,7 +223,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
 
   "AuthHandlers.login" should
     "audit ok with superuser realm=system and authMethod in detail, no password key" in {
-      val store          = new RecordingStore
+      val store          = new RecordingTelemetryStore
       val audit          = new AuditRecorder(store, _ => None)
       val (handlers, _)  = buildAuthHandlers(audit)
       handlers
@@ -259,7 +241,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
     }
 
   it should "audit a failed login (wrong password) as denied, detail username only, no password key" in {
-    val store         = new RecordingStore
+    val store         = new RecordingTelemetryStore
     val audit         = new AuditRecorder(store, _ => None)
     val (handlers, _) = buildAuthHandlers(audit)
     handlers
@@ -277,7 +259,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
   "apiKeyGuard" should
     "emit at most one auth.api-key.failure per source per minute on a bad key" in {
       val fix     = SecurityFixtures.freshStore()
-      val store   = new RecordingStore
+      val store   = new RecordingTelemetryStore
       val audit   = new AuditRecorder(store, _ => None)
       val limiter = new AuditRateLimiter()
       val harness = ManagerServerHarness.boot(
