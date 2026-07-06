@@ -79,6 +79,8 @@ import type {
   ActiveStatementsResponse,
   KillStatementRequest,
   KillStatementResponse,
+  // Audit
+  AuditListResponse,
 } from './types';
 
 const BASE = '/api';
@@ -331,6 +333,10 @@ export const api = {
   // Active statements + kill
   activeStatements: () => get<ActiveStatementsResponse>('/node/active-statements'),
   killStatement:    (req: KillStatementRequest) => post<KillStatementResponse>('/statement/kill', req),
+
+  // Audit log
+  auditList: (params: Record<string, string>) =>
+    get<AuditListResponse>(`/audit/list?${new URLSearchParams(params).toString()}`),
 
   // Catalog browser
   listCatalogSchemas: (tenant: string, tenantDb: string) =>
