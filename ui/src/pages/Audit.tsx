@@ -12,7 +12,7 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
 
 export default function Audit() {
   const { superuser } = useAuth();
-  const [telemetryEnabled, setTelemetryEnabled] = useState(true);
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [events, setEvents] = useState<AuditEventEntry[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [family, setFamily] = useState('');
