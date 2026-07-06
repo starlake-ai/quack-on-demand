@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
-import ai.starlake.quack.ondemand.state.FederatedSourceStore
+import ai.starlake.quack.ondemand.state.FederatedSourceOps
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -9,13 +9,16 @@ import sttp.model.StatusCode
 /** REST handlers for FederatedSource + FederatedSecret rows.
   *
   * @param fedStore
-  *   the federation store
+  *   the federation store (any [[FederatedSourceOps]] implementation)
   * @param resolver
   *   resolves (tenantName, tenantDbName) to the surrogate tenantDbId, or None if not found
+  * @param tenantIdResolver
+  *   resolves a tenant name / display-name to its surrogate tenant id for audit attribution
   */
 final class FederatedSourceHandlers(
-    fedStore: FederatedSourceStore,
+    fedStore: FederatedSourceOps,
     resolver: (String, String) => Option[String],
+    tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop
 ):
 
@@ -63,7 +66,8 @@ final class FederatedSourceHandlers(
   def createSource(
       tenantName: String,
       tenantDbName: String,
-      req: FederatedSourceCreateRequest
+      req: FederatedSourceCreateRequest,
+      apiKey: Option[String]
   ): Out[FederatedSourceResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
@@ -84,10 +88,11 @@ final class FederatedSourceHandlers(
           )
           // NEVER include setupSql in detail (may contain connection strings).
           audit.rest(
-            None,
+            apiKey,
             "control-plane",
             "federation.source.upsert",
             "ok",
+            tenant = tenantIdResolver(tenantName),
             target = Some(req.alias)
           )
           Right(
@@ -131,7 +136,12 @@ final class FederatedSourceHandlers(
               Left(StatusCode.NotFound -> ErrorResponse("not_found", s"source '$alias' not found"))
     }
 
-  def deleteSource(tenantName: String, tenantDbName: String, alias: String): Out[Unit] =
+  def deleteSource(
+      tenantName: String,
+      tenantDbName: String,
+      alias: String,
+      apiKey: Option[String]
+  ): Out[Unit] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
         case Left(e)           => Left(e)
@@ -142,10 +152,11 @@ final class FederatedSourceHandlers(
             case Some(s) =>
               fedStore.deleteSource(s.id)
               audit.rest(
-                None,
+                apiKey,
                 "control-plane",
                 "federation.source.delete",
                 "ok",
+                tenant = tenantIdResolver(tenantName),
                 target = Some(alias)
               )
               Right(())
@@ -173,7 +184,8 @@ final class FederatedSourceHandlers(
       tenantName: String,
       tenantDbName: String,
       alias: String,
-      req: FederatedSecretUpsertRequest
+      req: FederatedSecretUpsertRequest,
+      apiKey: Option[String]
   ): Out[FederatedSecretResponse] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
@@ -215,10 +227,11 @@ final class FederatedSourceHandlers(
                   fedStore.upsertSecret(sec)
                   // NEVER include value or externalRef in detail (secret material).
                   audit.rest(
-                    None,
+                    apiKey,
                     "control-plane",
                     "federation.secret.upsert",
                     "ok",
+                    tenant = tenantIdResolver(tenantName),
                     target = Some(s"$alias/${req.name}")
                   )
                   Right(toSecretResponse(sec))
@@ -228,7 +241,8 @@ final class FederatedSourceHandlers(
       tenantName: String,
       tenantDbName: String,
       alias: String,
-      name: String
+      name: String,
+      apiKey: Option[String]
   ): Out[Unit] =
     IO.blocking {
       resolveTenantDbId(tenantName, tenantDbName) match
@@ -246,10 +260,11 @@ final class FederatedSourceHandlers(
                 case Some(_) =>
                   fedStore.deleteSecret(s.id, name)
                   audit.rest(
-                    None,
+                    apiKey,
                     "control-plane",
                     "federation.secret.delete",
                     "ok",
+                    tenant = tenantIdResolver(tenantName),
                     target = Some(s"$alias/$name")
                   )
                   Right(())

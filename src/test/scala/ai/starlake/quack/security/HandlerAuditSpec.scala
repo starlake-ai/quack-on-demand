@@ -2,12 +2,12 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.*
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.UserStore
+import ai.starlake.quack.ondemand.state.{FederatedSourceOps, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditEvent,
   AuditQuery,
@@ -152,3 +152,65 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
     e.outcome shouldBe "denied"
     e.tenant shouldBe Some(tid)
   }
+
+  // ---------------------------------------------------------------------------
+  // In-memory FederatedSourceOps stub for federation audit tests.
+  // ---------------------------------------------------------------------------
+
+  private class InMemoryFederatedSourceOps extends FederatedSourceOps:
+    private val sources = scala.collection.mutable.Map.empty[String, FederatedSource]
+    private val secrets = scala.collection.mutable.Map.empty[String, FederatedSecret]
+
+    def upsertSource(s: FederatedSource): Unit                                = sources(s.id) = s
+    def deleteSource(id: String): Unit                                        = sources -= id
+    def getSource(tenantDbId: String, alias: String): Option[FederatedSource] =
+      sources.values.find(s => s.tenantDbId == tenantDbId && s.alias == alias)
+    def listSources(tenantDbId: String): List[FederatedSource] =
+      sources.values.filter(_.tenantDbId == tenantDbId).toList.sortBy(_.alias)
+    def upsertSecret(s: FederatedSecret): Unit             = secrets(s.id) = s
+    def deleteSecret(sourceId: String, name: String): Unit =
+      secrets.filterInPlace((_, s) => !(s.federatedSourceId == sourceId && s.name == name))
+    def getSecret(sourceId: String, name: String): Option[FederatedSecret] =
+      secrets.values.find(s => s.federatedSourceId == sourceId && s.name == name)
+    def listSecrets(sourceId: String): List[FederatedSecret] =
+      secrets.values.filter(_.federatedSourceId == sourceId).toList.sortBy(_.name)
+
+  // ---------------------------------------------------------------------------
+  // Build FederatedSourceHandlers over the in-memory store.
+  // ---------------------------------------------------------------------------
+
+  private def buildFederatedHandlers(audit: AuditRecorder): FederatedSourceHandlers =
+    val memStore = new InMemoryFederatedSourceOps
+    val tid      = SecurityFixtures.TenantId
+    val tdId     = SecurityFixtures.TenantDbId
+    val resolver = (tn: String, tdn: String) =>
+      if tn == SecurityFixtures.TenantName && tdn == SecurityFixtures.TenantDbName then Some(tdId)
+      else None
+    val tenantIdResolver = (tn: String) =>
+      if tn == SecurityFixtures.TenantName then Some(tid) else None
+    new FederatedSourceHandlers(memStore, resolver, tenantIdResolver, audit)
+
+  // ---------------------------------------------------------------------------
+  // Federation audit tests
+  // ---------------------------------------------------------------------------
+
+  "FederatedSourceHandlers.createSource" should
+    "audit ok with actor 'static-key' and tenant id on success" in {
+      val store = new RecordingStore
+      val audit = new AuditRecorder(store, _ => None)
+      val h     = buildFederatedHandlers(audit)
+      h.createSource(
+        SecurityFixtures.TenantName,
+        SecurityFixtures.TenantDbName,
+        FederatedSourceCreateRequest(alias = "ext-s3", setupSql = "ATTACH ...", None, false),
+        Some("any-static-key")
+      ).unsafeRunSync()
+      store.events should not be empty
+      val e = store.events.head
+      e.family shouldBe "control-plane"
+      e.action shouldBe "federation.source.upsert"
+      e.outcome shouldBe "ok"
+      e.actor shouldBe "static-key"
+      e.tenant shouldBe Some(SecurityFixtures.TenantId)
+      e.target shouldBe Some("ext-s3")
+    }

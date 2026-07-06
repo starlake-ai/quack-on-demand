@@ -62,7 +62,8 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
         .createSource(
           "acme",
           "acme_prod",
-          FederatedSourceCreateRequest(alias = "fedpg", setupSql = "INSTALL postgres;")
+          FederatedSourceCreateRequest(alias = "fedpg", setupSql = "INSTALL postgres;"),
+          None
         )
         .unsafeRunSync()
       created.isRight shouldBe true
@@ -80,13 +81,15 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
     h.createSource(
       "acme",
       "acme_prod",
-      FederatedSourceCreateRequest(alias = "dup", setupSql = "v1")
+      FederatedSourceCreateRequest(alias = "dup", setupSql = "v1"),
+      None
     ).unsafeRunSync()
     val second = h
       .createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "dup", setupSql = "v2")
+        FederatedSourceCreateRequest(alias = "dup", setupSql = "v2"),
+        None
       )
       .unsafeRunSync()
     second.isRight shouldBe true
@@ -102,7 +105,8 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       h.createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "src1", setupSql = "...")
+        FederatedSourceCreateRequest(alias = "src1", setupSql = "..."),
+        None
       ).unsafeRunSync()
 
       val r = h
@@ -110,7 +114,8 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
           "acme",
           "acme_prod",
           "src1",
-          FederatedSecretUpsertRequest(name = "PG_PASSWORD", value = Some("hunter2"))
+          FederatedSecretUpsertRequest(name = "PG_PASSWORD", value = Some("hunter2")),
+          None
         )
         .unsafeRunSync()
       r.isRight shouldBe true
@@ -128,9 +133,10 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       h.createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "todel", setupSql = "...")
+        FederatedSourceCreateRequest(alias = "todel", setupSql = "..."),
+        None
       ).unsafeRunSync()
-      val del = h.deleteSource("acme", "acme_prod", "todel").unsafeRunSync()
+      val del = h.deleteSource("acme", "acme_prod", "todel", None).unsafeRunSync()
       del.isRight shouldBe true
 
       val list = h.listSources("acme", "acme_prod").unsafeRunSync().toOption.value
@@ -138,7 +144,7 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
     }
 
   it should "return 404 for an unknown alias" in withHandlers { (h, _) =>
-    val del = h.deleteSource("acme", "acme_prod", "ghost").unsafeRunSync()
+    val del = h.deleteSource("acme", "acme_prod", "ghost", None).unsafeRunSync()
     del.isLeft shouldBe true
     del.swap.toOption.value._1.code shouldBe 404
   }

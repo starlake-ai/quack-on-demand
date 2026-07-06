@@ -287,24 +287,24 @@ final class ManagerServer(
     val federatedSourceEndpoints: List[ServerEndpoint[Any, IO]] =
       federatedSources.toList.flatMap { h =>
         List[ServerEndpoint[Any, IO]](
-          Endpoints.createFederatedSource.serverLogic { case (t, td, req) =>
-            h.createSource(t, td, req)
+          Endpoints.createFederatedSource.serverLogic { case (t, td, req, token) =>
+            h.createSource(t, td, req, token)
           },
           Endpoints.listFederatedSources.serverLogic { case (t, td) => h.listSources(t, td) },
           Endpoints.getFederatedSource.serverLogic { case (t, td, alias) =>
             h.getSource(t, td, alias)
           },
-          Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias) =>
-            h.deleteSource(t, td, alias)
+          Endpoints.deleteFederatedSource.serverLogic { case (t, td, alias, token) =>
+            h.deleteSource(t, td, alias, token)
           },
           Endpoints.listFederatedSecrets.serverLogic { case (t, td, alias) =>
             h.listSecrets(t, td, alias)
           },
-          Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req) =>
-            h.upsertSecret(t, td, alias, req)
+          Endpoints.upsertFederatedSecret.serverLogic { case (t, td, alias, req, token) =>
+            h.upsertSecret(t, td, alias, req, token)
           },
-          Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name) =>
-            h.deleteSecret(t, td, alias, name)
+          Endpoints.deleteFederatedSecret.serverLogic { case (t, td, alias, name, token) =>
+            h.deleteSecret(t, td, alias, name, token)
           }
         )
       }
