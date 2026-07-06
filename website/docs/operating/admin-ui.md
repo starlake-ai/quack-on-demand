@@ -26,7 +26,7 @@ For how credentials are validated and how to wire an external provider, see [Aut
 
 ## Navigation
 
-The top navigation bar has **Nodes**, **Tenants**, **Users**, and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it.
+The top navigation bar has **Nodes**, **Tenants**, **Users**, **Audit** (hidden when telemetry is disabled), and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it. The Audit tab is hidden when `QOD_TELEMETRY_STORE=none`; it is visible to superusers and tenant admins.
 
 ![The top navigation bar](/img/ui/nav.png)
 
@@ -105,6 +105,24 @@ The model these screens edit (the EffectiveSet, verbs, wildcards, the two gates)
 The catalog browser lists the schemas and tables of a database (the DuckLake catalog) and drills into a table for its columns. It is reached contextually from table links rather than the top nav. Use it to confirm what a pool actually exposes, including federated catalogs attached to the database.
 
 ![The catalog browser with a schema's tables listed](/img/ui/catalog.png)
+
+## Audit
+
+The `Audit` page shows a tenant-scoped, newest-first table of administrative and data-plane events. It is available to superusers and tenant admins. It is hidden from the navigation when `QOD_TELEMETRY_STORE=none`; a deep link to the page shows an empty state with a "telemetry is disabled" message.
+
+The page has a filter bar with:
+
+- **Family** - badge-style toggles for `control-plane`, `auth`, `data-denial`, and `data-write`.
+- **Tenant** - visible to superusers only; tenant admins are pinned to their own tenant.
+- **Actor** - filter by username.
+- **Action** - substring filter on the action string (e.g. `auth.login`).
+- **Time range** - from / to ISO-8601 instant fields.
+
+The event table shows timestamp, family badge, actor, action, target, and an outcome badge (`ok`, `denied`, `error`). Each row is expandable to reveal the `detail` key-value map as a formatted list.
+
+Pagination uses a keyset "Load more" button rather than numbered pages. There is no live polling; audit is a forensic view, so a manual refresh button is provided.
+
+The four event families, the full action taxonomy, tenant scoping rules, retention, and the sanitization guarantee are documented on the [Audit log](/administration/audit-log) page.
 
 ## Config (superuser only)
 

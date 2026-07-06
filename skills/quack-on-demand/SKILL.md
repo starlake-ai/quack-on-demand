@@ -412,6 +412,35 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/statement/kil
   -d '{"id":"<statement-id>"}'
 ```
 
+## Audit log
+
+The audit log records control-plane mutations, auth events, data-plane denials, and data-plane writes. It is backed by the `qodstate_audit` Postgres table when `QOD_TELEMETRY_STORE=postgres` (the default).
+
+```bash
+# Most recent 50 control-plane events
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/audit/list?family=control-plane&limit=50' | python3 -m json.tool
+
+# Page through with the keyset cursor (use nextBefore from the previous response)
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/audit/list?before=<nextBefore-from-previous-page>'
+
+# Failed logins in a time window
+curl -sS -H "X-API-Key: $TOKEN" \
+  'http://localhost:20900/api/audit/list?action=auth.login.failure&from=2026-07-01T00:00:00Z'
+```
+
+Filters: `family`, `tenant`, `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
+
+Tenant admins see only their own tenant's rows. Superusers and static-key callers see everything, including null-tenant rows (anonymous failures, node ops, manifest imports).
+
+**Retention and the off switch:**
+
+| Env var | Default | Effect |
+|---|---|---|
+| `QOD_AUDIT_RETENTION_DAYS` | `90` | Delete rows older than N days (hourly purge); set to `0` to keep forever |
+| `QOD_TELEMETRY_STORE` | `postgres` | `none` disables all recording, hides the Audit UI page, and keeps the drop counter at zero |
+
 ## Ad-hoc queries
 
 `scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees - handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.

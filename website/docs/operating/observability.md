@@ -72,6 +72,20 @@ Override the cadence with `QOD_METRICS_AWS_STEP_SEC` / `QOD_METRICS_AZURE_STEP_S
 
 **Only one sink runs per process.** There are no per-backend enable flags; the single `sink` field is the sole selector. Selecting a cloud sink means `/metrics` is unavailable and no other sink is active.
 
+## Audit journal health
+
+The event journal that feeds the audit subsystem exposes one counter:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `qod_journal_dropped_total` | `table` | Number of events dropped because the bounded journal queue was full, or because an append to the store failed |
+
+A non-zero value means the audit or history record undercounts by that amount. The `table` label identifies which telemetry table was affected (e.g. `qodstate_audit`). Under sustained overload the data-plane audit trail degrades before the data path does, by design: `offer` is non-blocking and the hot path never waits on Postgres.
+
+When this counter climbs, check Postgres write latency and the journal queue depth. If the rate is low and intermittent it indicates short Postgres blips; if it is sustained, consider scaling Postgres or reducing data-plane statement throughput.
+
+The counter stays at zero when `QOD_TELEMETRY_STORE=none` because not recording is intentional, not a drop.
+
 ## Common labels
 
 Attach static labels to every series to distinguish environments in a shared Grafana:
