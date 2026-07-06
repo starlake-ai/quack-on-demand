@@ -167,7 +167,7 @@ Apache 2.0.
 
 ## Community
 
-- **Questions / discussion** -> [Discord](https://discord.gg/VTxrj8KU)
+- **Questions / discussion** -> [Discord](https://discord.gg/xHj9D6Rebp)
 - **Bug or feature** -> file an issue using the templates
 
 ## Contributing
