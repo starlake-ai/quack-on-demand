@@ -259,13 +259,14 @@ export default function History() {
 
   const fetchStmts = useCallback(() => {
     if (stmtInFlightRef.current) return;
-    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
-    const params: Record<string, string> = {};
+    const { range: r, tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
+    const from = new Date(Date.now() - rangeMs(r)).toISOString();
+    const params: Record<string, string> = { from };
     if (t)  params.tenant = t;
     if (p)  params.pool   = p;
     if (u)  params.user   = u;
     if (s)  params.status = s;
-    if (sq) params.sql    = sq;
+    if (sq) params.q      = sq;
     setStmtLoading(true);
     stmtInFlightRef.current = true;
     setStmtErr('');
@@ -281,13 +282,14 @@ export default function History() {
 
   const loadMore = useCallback(() => {
     if (stmtInFlightRef.current || !nextBeforeRef.current) return;
-    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
-    const params: Record<string, string> = { before: nextBeforeRef.current };
+    const { range: r, tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
+    const from = new Date(Date.now() - rangeMs(r)).toISOString();
+    const params: Record<string, string> = { before: nextBeforeRef.current, from };
     if (t)  params.tenant = t;
     if (p)  params.pool   = p;
     if (u)  params.user   = u;
     if (s)  params.status = s;
-    if (sq) params.sql    = sq;
+    if (sq) params.q      = sq;
     setStmtLoading(true);
     stmtInFlightRef.current = true;
     setStmtErr('');

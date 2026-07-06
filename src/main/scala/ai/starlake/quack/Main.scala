@@ -637,9 +637,9 @@ object Main extends IOApp with LazyLogging:
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val historyApiHandlers = new ai.starlake.quack.ondemand.api.HistoryHandlers(telemetryStore)
-    val sessions        = new SessionRegistry
-    val arrowAllocator  = new org.apache.arrow.memory.RootAllocator()
-    val client          = new QuackHttpClient(
+    val sessions           = new SessionRegistry
+    val arrowAllocator     = new org.apache.arrow.memory.RootAllocator()
+    val client             = new QuackHttpClient(
       arrowAllocator,
       nativeClient = mgrCfg.nativeClient,
       nodeDisableSsl = mgrCfg.nodeDisableSsl
