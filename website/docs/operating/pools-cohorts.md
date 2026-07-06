@@ -73,6 +73,23 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
 
 A graceful stop (`force=false`) drains in-flight statements before terminating nodes. `force=true` terminates immediately. The same `force` flag applies when `scale` shrinks a pool.
 
+## Node pod sizing (Kubernetes)
+
+On the Kubernetes backend a pool carries optional `cpu` and `memory` quantities. Each is applied as both the request and the limit on the `quack` container of every node pod, so setting both yields Guaranteed QoS. The local backend ignores them.
+
+```bash
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setResources \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","cpu":"2","memory":"8Gi"}'
+```
+
+- Values take effect on the next node spawn (idle-timeout replacement, scale-up, manual restart). Restart the pool's nodes to apply immediately. An empty string clears a value.
+- The API accepts any valid Kubernetes quantity. The admin UI exposes the same setting as sliders on the pool create form and the pool detail page, covering 0.5 to 128 CPU cores and 1 to 1024 Gi of memory; values outside the slider range set through the API are shown as raw text.
+- Size the DuckDB engine below the pod: set `SET memory_limit = '...'` (about 80% of pod memory) in the database or pool `initSql` so the engine spills to disk before the kernel OOM-kills the pod.
+- The Helm chart's `resources` value sizes the manager container, not node pods; node pods are sized per pool with this endpoint.
+
+When requests-and-limits are not enough (sidecars, volumes, affinity), a pool can carry a full Pod-manifest template via `POST /api/pool/setPodTemplate` (API-only, superuser-only, gated behind `QOD_POD_TEMPLATE_ENABLED`, default off). The template must contain a container named `quack`; the manager overlays the pod name, its identity labels, and the quack container's env contract and resources.
+
 ## Cohorts and Kubernetes placement
 
 By default the supervisor schedules every node in a pool with no placement constraint. On the Kubernetes backend you can instead split a pool into cohorts, each pinned to a class of nodes with a `nodeSelector` and tolerations. This is how you keep, for example, the write nodes on memory-optimized hardware and the read nodes on cheaper general-purpose nodes.

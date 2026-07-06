@@ -84,8 +84,8 @@ export default function PoolDetailBody({
       if (storedCpu) {
         const parsed = parseFloat(storedCpu);
         // A CPU value round-trips through the slider only when it is a plain
-        // decimal number (no suffix) in the slider range [0.5, 16].
-        const rt = /^\d+(\.\d+)?$/.test(storedCpu) && !isNaN(parsed) && parsed >= 0.5 && parsed <= 16;
+        // decimal number (no suffix) in the slider range [0.5, 128].
+        const rt = /^\d+(\.\d+)?$/.test(storedCpu) && !isNaN(parsed) && parsed >= 0.5 && parsed <= 128;
         setCpuRoundTrips(rt);
         if (rt) {
           setResCpuEnabled(true);
@@ -96,8 +96,8 @@ export default function PoolDetailBody({
       if (storedMem) {
         const parsed = parseInt(storedMem.replace(/Gi$/, ''), 10);
         // A memory value round-trips only when it is an integer Gi value in
-        // the slider range [1, 64].
-        const rt = /^\d+Gi$/.test(storedMem) && !isNaN(parsed) && parsed >= 1 && parsed <= 64;
+        // the slider range [1, 1024].
+        const rt = /^\d+Gi$/.test(storedMem) && !isNaN(parsed) && parsed >= 1 && parsed <= 1024;
         setMemRoundTrips(rt);
         if (rt) {
           setResMemEnabled(true);
@@ -196,7 +196,7 @@ export default function PoolDetailBody({
                   className="copy-btn"
                   onClick={() => {
                     const parsed = parseFloat(rawCpu);
-                    setResCpuSlider(isNaN(parsed) ? 2 : Math.min(16, Math.max(0.5, parsed)));
+                    setResCpuSlider(isNaN(parsed) ? 2 : Math.min(128, Math.max(0.5, parsed)));
                     setResCpuEnabled(true);
                     setCpuTouched(true);
                   }}
@@ -217,7 +217,7 @@ export default function PoolDetailBody({
                     <input
                       type="range"
                       min={0.5}
-                      max={16}
+                      max={128}
                       step={0.5}
                       value={resCpuSlider}
                       onChange={e => { setResCpuSlider(Number(e.target.value)); setCpuTouched(true); }}
@@ -239,7 +239,7 @@ export default function PoolDetailBody({
                   className="copy-btn"
                   onClick={() => {
                     const parsed = parseInt(rawMemory.replace(/Gi$/, ''), 10);
-                    setResMemSlider(isNaN(parsed) ? 8 : Math.min(64, Math.max(1, parsed)));
+                    setResMemSlider(isNaN(parsed) ? 8 : Math.min(1024, Math.max(1, parsed)));
                     setResMemEnabled(true);
                     setMemTouched(true);
                   }}
@@ -260,7 +260,7 @@ export default function PoolDetailBody({
                     <input
                       type="range"
                       min={1}
-                      max={64}
+                      max={1024}
                       step={1}
                       value={resMemSlider}
                       onChange={e => { setResMemSlider(Number(e.target.value)); setMemTouched(true); }}
