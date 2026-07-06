@@ -11,6 +11,7 @@ import ai.starlake.quack.ondemand.state.{FederatedSourceOps, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditEvent,
   AuditQuery,
+  AuditRateLimiter,
   AuditRecorder,
   AuditRow,
   TelemetryStore
@@ -20,6 +21,8 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.net.URI
+import java.net.http.{HttpRequest, HttpResponse}
 import java.sql.DriverManager
 import java.time.Instant
 
@@ -213,4 +216,89 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
       e.actor shouldBe "static-key"
       e.tenant shouldBe Some(SecurityFixtures.TenantId)
       e.target shouldBe Some("ext-s3")
+    }
+
+  // ---------------------------------------------------------------------------
+  // AuthHandlers fixture
+  // ---------------------------------------------------------------------------
+
+  private def buildAuthHandlers(audit: AuditRecorder): (AuthHandlers, SessionTokenStore) =
+    val fix      = SecurityFixtures.freshStore()
+    val sessions = new SessionTokenStore()
+    val authSvc  = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val handlers = new AuthHandlers(
+      authService = authSvc,
+      tokens = sessions,
+      identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _) => Nil,
+      audit = audit
+    )
+    (handlers, sessions)
+
+  // ---------------------------------------------------------------------------
+  // Auth audit tests
+  // ---------------------------------------------------------------------------
+
+  "AuthHandlers.login" should
+    "audit ok with superuser realm=system and authMethod in detail, no password key" in {
+      val store          = new RecordingStore
+      val audit          = new AuditRecorder(store, _ => None)
+      val (handlers, _)  = buildAuthHandlers(audit)
+      handlers
+        .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
+        .unsafeRunSync()
+      store.events should not be empty
+      val e = store.events.head
+      e.family shouldBe "auth"
+      e.action shouldBe "auth.login"
+      e.outcome shouldBe "ok"
+      e.actor shouldBe SecurityFixtures.RootUsername
+      e.actorRealm shouldBe "system"
+      e.detail.get("authMethod") shouldBe defined
+      e.detail.keys.exists(k => k.toLowerCase.contains("password")) shouldBe false
+    }
+
+  it should "audit a failed login (wrong password) as denied, detail username only, no password key" in {
+    val store         = new RecordingStore
+    val audit         = new AuditRecorder(store, _ => None)
+    val (handlers, _) = buildAuthHandlers(audit)
+    handlers
+      .login(LoginRequest(SecurityFixtures.BobUsername, "not-the-right-password"))
+      .unsafeRunSync()
+    store.events should not be empty
+    val e = store.events.head
+    e.family shouldBe "auth"
+    e.action shouldBe "auth.login.failure"
+    e.outcome shouldBe "denied"
+    e.detail.get("username") shouldBe Some(SecurityFixtures.BobUsername)
+    e.detail.keys.exists(k => k.toLowerCase.contains("password")) shouldBe false
+  }
+
+  "apiKeyGuard" should
+    "emit at most one auth.api-key.failure per source per minute on a bad key" in {
+      val fix     = SecurityFixtures.freshStore()
+      val store   = new RecordingStore
+      val audit   = new AuditRecorder(store, _ => None)
+      val limiter = new AuditRateLimiter()
+      val harness = ManagerServerHarness.boot(
+        fix.store,
+        staticApiKey = Some("correct-key"),
+        audit = audit,
+        auditLimiter = limiter
+      )
+      try
+        def badRequest(): Unit =
+          val req = HttpRequest
+            .newBuilder(URI.create(s"${harness.baseUrl}/api/tenant/list"))
+            .header("X-API-Key", "wrong-key")
+            .GET()
+            .build()
+          harness.httpClient.send(req, HttpResponse.BodyHandlers.ofString())
+          ()
+        badRequest()
+        badRequest()
+        val failures = store.events.filter(_.action == "auth.api-key.failure")
+        failures should have size 1
+        failures.head.outcome shouldBe "denied"
+      finally harness.shutdown()
     }
