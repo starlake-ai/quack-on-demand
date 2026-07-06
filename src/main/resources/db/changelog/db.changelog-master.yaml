@@ -41,3 +41,5 @@ databaseChangeLog:
       file: db/changelog/0017-pool-resources.yaml
   - include:
       file: db/changelog/0018-audit.yaml
+  - include:
+      file: db/changelog/0019-stmt-history.yaml
