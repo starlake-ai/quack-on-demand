@@ -21,11 +21,11 @@ class EventJournalSpec extends AnyFlatSpec with Matchers:
   )
 
   private class RecordingStore extends TelemetryStore:
-    val enabled         = true
-    val batches         = scala.collection.mutable.ListBuffer.empty[List[AuditEvent]]
-    val stmtBatches     = scala.collection.mutable.ListBuffer.empty[List[StatementEvent]]
-    var failNext        = false
-    var failNextStmts   = false
+    val enabled       = true
+    val batches       = scala.collection.mutable.ListBuffer.empty[List[AuditEvent]]
+    val stmtBatches   = scala.collection.mutable.ListBuffer.empty[List[StatementEvent]]
+    var failNext      = false
+    var failNextStmts = false
     def appendAudit(events: List[AuditEvent]): Unit =
       if failNext then { failNext = false; throw new RuntimeException("pg down") }
       batches += events
@@ -126,7 +126,7 @@ class EventJournalSpec extends AnyFlatSpec with Matchers:
     var auditDropped = 0
     var stmtDropped  = 0
     val store        = new RecordingStore
-    val journal = new EventJournal(
+    val journal      = new EventJournal(
       store,
       capacity = 2,
       onDrop = auditDropped += _,
@@ -160,7 +160,7 @@ class EventJournalSpec extends AnyFlatSpec with Matchers:
 
   it should "be silent on offerStatement when the store is disabled" in {
     var stmtDropped = 0
-    val journal =
+    val journal     =
       new EventJournal(NoopTelemetryStore, capacity = 1, onStatementDrop = stmtDropped += _)
     (1 to 5).foreach(i => journal.offerStatement(stev(i)))
     stmtDropped shouldBe 0

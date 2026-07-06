@@ -11,7 +11,12 @@ import ai.starlake.quack.ondemand.{ManagerServer, PoolSupervisor}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder, NoopTelemetryStore, TelemetryStore}
+import ai.starlake.quack.ondemand.telemetry.{
+  AuditRateLimiter,
+  AuditRecorder,
+  NoopTelemetryStore,
+  TelemetryStore
+}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.typesafe.config.ConfigFactory

@@ -1,12 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{
-  Denied,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
+import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -41,7 +36,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
 
   private def buildSupervisor(): PoolSupervisor = {
     val backend = new QuackBackend {
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
           s.nodeId,
@@ -173,8 +168,8 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
   }
 
   it should "cap sql at 500 chars before persisting" in {
-    val padding  = "x" * 600
-    val longSql  = s"SELECT $padding FROM t"
+    val padding                  = "x" * 600
+    val longSql                  = s"SELECT $padding FROM t"
     val (router, journal, store) = setupWithJournal()
     router.execute("hist-5", "alice", poolKey, longSql).unsafeRunSync()
     journal.drainNow()
