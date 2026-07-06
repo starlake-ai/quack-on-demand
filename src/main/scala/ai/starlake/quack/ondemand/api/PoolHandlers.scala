@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -78,7 +78,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.create",
+          AuditActions.PoolCreate,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -90,7 +90,7 @@ final class PoolHandlers(
               audit.rest(
                 apiKey,
                 "control-plane",
-                "pool.create",
+                AuditActions.PoolCreate,
                 "denied",
                 tenant = Some(req.tenant)
               )
@@ -193,7 +193,7 @@ final class PoolHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "pool.create",
+                    AuditActions.PoolCreate,
                     "ok",
                     tenant = Some(req.tenant),
                     target = Some(key.toString),
@@ -219,7 +219,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.scale",
+          AuditActions.PoolScale,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -246,7 +246,7 @@ final class PoolHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "pool.scale",
+                    AuditActions.PoolScale,
                     "ok",
                     tenant = Some(req.tenant),
                     target = Some(key.toString),
@@ -267,7 +267,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.stop",
+          AuditActions.PoolStop,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -284,7 +284,7 @@ final class PoolHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "pool.stop",
+                  AuditActions.PoolStop,
                   "ok",
                   tenant = Some(req.tenant),
                   target = Some(key.toString)
@@ -300,7 +300,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.delete",
+          AuditActions.PoolDelete,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -317,7 +317,7 @@ final class PoolHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "pool.delete",
+                  AuditActions.PoolDelete,
                   "ok",
                   tenant = Some(req.tenant),
                   target = Some(key.toString)
@@ -361,7 +361,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.setDisabled",
+          AuditActions.PoolSetDisabled,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -373,7 +373,7 @@ final class PoolHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "pool.setDisabled",
+              AuditActions.PoolSetDisabled,
               "ok",
               tenant = Some(req.tenant),
               target = Some(key.toString),
@@ -402,7 +402,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.setResources",
+          AuditActions.PoolSetResources,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -438,7 +438,7 @@ final class PoolHandlers(
               audit.rest(
                 apiKey,
                 "control-plane",
-                "pool.setResources",
+                AuditActions.PoolSetResources,
                 "ok",
                 tenant = Some(req.tenant),
                 target = Some(key.toString),
@@ -463,7 +463,7 @@ final class PoolHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.setPodTemplate",
+          AuditActions.PoolSetPodTemplate,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -500,7 +500,7 @@ final class PoolHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "pool.setPodTemplate",
+                    AuditActions.PoolSetPodTemplate,
                     "ok",
                     tenant = Some(req.tenant),
                     target = Some(key.toString)

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -51,7 +51,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForUser(req.userId).flatten
     gateOnUser(apiKey, req.userId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.user-role.add", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipUserRoleAdd,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.addUserRole(req.userId, req.roleId)).map { r =>
@@ -59,7 +65,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.user-role.add",
+              AuditActions.MembershipUserRoleAdd,
               "ok",
               tenant = ten,
               target = Some(s"${req.userId}:${req.roleId}")
@@ -73,7 +79,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForUser(req.userId).flatten
     gateOnUser(apiKey, req.userId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.user-role.remove", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipUserRoleRemove,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.removeUserRole(req.userId, req.roleId)).map { r =>
@@ -81,7 +93,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.user-role.remove",
+              AuditActions.MembershipUserRoleRemove,
               "ok",
               tenant = ten,
               target = Some(s"${req.userId}:${req.roleId}")
@@ -95,7 +107,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForUser(req.userId).flatten
     gateOnUser(apiKey, req.userId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.user-group.add", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipUserGroupAdd,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.addUserGroup(req.userId, req.groupId)).map { r =>
@@ -103,7 +121,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.user-group.add",
+              AuditActions.MembershipUserGroupAdd,
               "ok",
               tenant = ten,
               target = Some(s"${req.userId}:${req.groupId}")
@@ -117,7 +135,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForUser(req.userId).flatten
     gateOnUser(apiKey, req.userId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.user-group.remove", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipUserGroupRemove,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.removeUserGroup(req.userId, req.groupId)).map { r =>
@@ -125,7 +149,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.user-group.remove",
+              AuditActions.MembershipUserGroupRemove,
               "ok",
               tenant = ten,
               target = Some(s"${req.userId}:${req.groupId}")
@@ -139,7 +163,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForGroup(req.groupId)
     gateOnGroup(apiKey, req.groupId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.group-role.add", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipGroupRoleAdd,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.addGroupRole(req.groupId, req.roleId)).map { r =>
@@ -147,7 +177,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.group-role.add",
+              AuditActions.MembershipGroupRoleAdd,
               "ok",
               tenant = ten,
               target = Some(s"${req.groupId}:${req.roleId}")
@@ -161,7 +191,13 @@ final class MembershipHandlers(
     val ten = sup.tenantForGroup(req.groupId)
     gateOnGroup(apiKey, req.groupId)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "membership.group-role.remove", "denied", tenant = ten)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.MembershipGroupRoleRemove,
+          "denied",
+          tenant = ten
+        )
         IO.pure(Left(err))
       case None =>
         mapErr(sup.removeGroupRole(req.groupId, req.roleId)).map { r =>
@@ -169,7 +205,7 @@ final class MembershipHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "membership.group-role.remove",
+              AuditActions.MembershipGroupRoleRemove,
               "ok",
               tenant = ten,
               target = Some(s"${req.groupId}:${req.roleId}")

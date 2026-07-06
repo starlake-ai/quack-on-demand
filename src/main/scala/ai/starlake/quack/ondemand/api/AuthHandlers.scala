@@ -16,7 +16,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.UserGrant
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 import sttp.model.headers.{Cookie, CookieValueWithMeta}
@@ -232,7 +232,7 @@ final class AuthHandlers(
       case Some(tok) =>
         val (actor, realm) = audit.actorOf(Some(tok))
         tokens.revoke(tok)
-        audit.restAs(actor, realm, "auth", "auth.revoke", "ok")
+        audit.restAs(actor, realm, "auth", AuditActions.AuthRevoke, "ok")
       case None => ()
     // id_token_hint is not persisted in this iteration; RP-initiated logout still
     // clears the local cookie and (when configured) hits the IdP end-session endpoint.
@@ -332,7 +332,7 @@ final class AuthHandlers(
             req.username,
             "tenant",
             "auth",
-            "auth.login.failure",
+            AuditActions.AuthLoginFailure,
             "denied",
             tenant = req.tenant,
             detail = Map("username" -> req.username)
@@ -398,7 +398,7 @@ final class AuthHandlers(
         profile.username,
         "tenant",
         "auth",
-        "auth.login.failure",
+        AuditActions.AuthLoginFailure,
         "denied",
         tenant = profile.tenant,
         detail = Map("reason" -> "not_provisioned")
@@ -417,7 +417,7 @@ final class AuthHandlers(
         profile.username,
         "tenant",
         "auth",
-        "auth.login.failure",
+        AuditActions.AuthLoginFailure,
         "denied",
         tenant = profile.tenant,
         detail = Map("reason" -> "admin_required")
@@ -436,7 +436,7 @@ final class AuthHandlers(
         profile.username,
         realm,
         "auth",
-        "auth.login.failure",
+        AuditActions.AuthLoginFailure,
         "denied",
         tenant = profile.tenant,
         detail = Map("reason" -> "admin_required")
@@ -458,7 +458,7 @@ final class AuthHandlers(
         profile.username,
         realm,
         "auth",
-        "auth.login",
+        AuditActions.AuthLogin,
         "ok",
         tenant = profile.tenant,
         detail = Map("authMethod" -> profile.authMethod)
@@ -487,7 +487,7 @@ final class AuthHandlers(
       val tok            = apiKey.orElse(cookie)
       val (actor, realm) = audit.actorOf(tok)
       tok.foreach(tokens.revoke)
-      audit.restAs(actor, realm, "auth", "auth.logout", "ok")
+      audit.restAs(actor, realm, "auth", AuditActions.AuthLogout, "ok")
       Right(clearCookie(forwardedProto))
     }
 

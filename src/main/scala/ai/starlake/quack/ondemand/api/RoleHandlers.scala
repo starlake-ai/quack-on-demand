@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -45,7 +45,13 @@ final class RoleHandlers(
       case Some(tid) =>
         TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
           case Some(err) =>
-            audit.rest(apiKey, "control-plane", "role.create", "denied", tenant = Some(tid))
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.RoleCreate,
+              "denied",
+              tenant = Some(tid)
+            )
             IO.pure(Left(err))
           case None =>
             sup.createRole(tid, req.name, req.description).map {
@@ -53,7 +59,7 @@ final class RoleHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "role.create",
+                  AuditActions.RoleCreate,
                   "ok",
                   tenant = Some(tid),
                   target = Some(r.id),
@@ -75,7 +81,7 @@ final class RoleHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.delete",
+          AuditActions.RoleDelete,
           "denied",
           tenant = roleTenant
         )
@@ -86,7 +92,7 @@ final class RoleHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.delete",
+              AuditActions.RoleDelete,
               "ok",
               tenant = roleTenant,
               target = Some(req.id)
@@ -116,7 +122,7 @@ final class RoleHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.permission.grant",
+          AuditActions.RolePermissionGrant,
           "denied",
           tenant = roleTenant
         )
@@ -127,7 +133,7 @@ final class RoleHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.permission.grant",
+              AuditActions.RolePermissionGrant,
               "ok",
               tenant = roleTenant,
               target = Some(p.id),
@@ -155,7 +161,7 @@ final class RoleHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.permission.revoke",
+          AuditActions.RolePermissionRevoke,
           "denied",
           tenant = permTenant
         )
@@ -166,7 +172,7 @@ final class RoleHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.permission.revoke",
+              AuditActions.RolePermissionRevoke,
               "ok",
               tenant = permTenant,
               target = Some(req.id)

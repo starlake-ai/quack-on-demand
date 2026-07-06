@@ -4,7 +4,7 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import io.circe.syntax.*
 import io.circe.yaml.v12.{parser, Printer}
@@ -56,7 +56,7 @@ final class ManifestHandlers(
     IO.blocking {
       superuserCheck(apiKey)(scopeOf) match
         case Some(err) =>
-          audit.rest(apiKey, "control-plane", "manifest.import", "denied")
+          audit.rest(apiKey, "control-plane", AuditActions.ManifestImport, "denied")
           Left(err)
         case None =>
           parser.parse(body).flatMap(_.as[ConfigManifest]) match
@@ -90,7 +90,7 @@ final class ManifestHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "manifest.import",
+                    AuditActions.ManifestImport,
                     "ok",
                     detail = Map(
                       "tenants"   -> summary.tenants.toString,

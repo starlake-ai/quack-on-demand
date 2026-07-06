@@ -6,7 +6,7 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -62,7 +62,7 @@ final class NodeHandlers(
   private def setQuarantine(req: NodeOpRequest, apiKey: Option[String], quarantined: Boolean)(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val action = if quarantined then "node.quarantine" else "node.unquarantine"
+    val action = if quarantined then AuditActions.NodeQuarantine else AuditActions.NodeUnquarantine
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>
         audit.rest(apiKey, "control-plane", action, "denied", target = Some(req.nodeId))
@@ -90,12 +90,24 @@ final class NodeHandlers(
   ): Out[Unit] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "node.restart", "denied", target = Some(req.nodeId))
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.NodeRestart,
+          "denied",
+          target = Some(req.nodeId)
+        )
         IO.pure(Left(err))
       case None =>
         sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).map {
           case Right(()) =>
-            audit.rest(apiKey, "control-plane", "node.restart", "ok", target = Some(req.nodeId))
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.NodeRestart,
+              "ok",
+              target = Some(req.nodeId)
+            )
             Right(())
           case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
         }

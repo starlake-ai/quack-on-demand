@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.auth.TenantOidcRegistry
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -40,7 +40,7 @@ final class TenantHandlers(
   ): Out[TenantResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", "tenant.create", "denied")
+        audit.rest(apiKey, "control-plane", AuditActions.TenantCreate, "denied")
         IO.pure(Left(err))
       case None =>
         if req.id.isEmpty then
@@ -101,7 +101,7 @@ final class TenantHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "tenant.create",
+                  AuditActions.TenantCreate,
                   "ok",
                   tenant = Some(t.id),
                   target = Some(t.id),
@@ -135,7 +135,7 @@ final class TenantHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "tenant.delete",
+          AuditActions.TenantDelete,
           "denied",
           tenant = Some(req.name)
         )
@@ -146,7 +146,7 @@ final class TenantHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "tenant.delete",
+              AuditActions.TenantDelete,
               "ok",
               tenant = Some(req.name),
               target = Some(req.name)
@@ -166,7 +166,7 @@ final class TenantHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "tenant.setDisabled",
+          AuditActions.TenantSetDisabled,
           "denied",
           tenant = Some(req.name)
         )
@@ -177,7 +177,7 @@ final class TenantHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "tenant.setDisabled",
+              AuditActions.TenantSetDisabled,
               "ok",
               tenant = Some(t.id),
               target = Some(t.id),
@@ -198,7 +198,7 @@ final class TenantHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "tenant.auth.update",
+          AuditActions.TenantAuthUpdate,
           "denied",
           tenant = Some(req.name)
         )
@@ -210,7 +210,7 @@ final class TenantHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "tenant.auth.update",
+              AuditActions.TenantAuthUpdate,
               "ok",
               tenant = Some(t.id),
               target = Some(t.id),

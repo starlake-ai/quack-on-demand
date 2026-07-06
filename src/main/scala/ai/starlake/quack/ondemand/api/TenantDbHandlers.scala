@@ -4,7 +4,7 @@ import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -65,7 +65,7 @@ final class TenantDbHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "database.create",
+          AuditActions.DatabaseCreate,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -99,7 +99,7 @@ final class TenantDbHandlers(
                     audit.rest(
                       apiKey,
                       "control-plane",
-                      "database.create",
+                      AuditActions.DatabaseCreate,
                       "ok",
                       tenant = Some(req.tenant),
                       target = Some(td.name),
@@ -130,7 +130,7 @@ final class TenantDbHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "database.delete",
+          AuditActions.DatabaseDelete,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -141,7 +141,7 @@ final class TenantDbHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "database.delete",
+              AuditActions.DatabaseDelete,
               "ok",
               tenant = Some(req.tenant),
               target = Some(req.name)
@@ -161,7 +161,7 @@ final class TenantDbHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "database.update",
+          AuditActions.DatabaseUpdate,
           "denied",
           tenant = Some(req.tenant)
         )
@@ -187,7 +187,7 @@ final class TenantDbHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "database.update",
+              AuditActions.DatabaseUpdate,
               "ok",
               tenant = Some(req.tenant),
               target = Some(req.name),

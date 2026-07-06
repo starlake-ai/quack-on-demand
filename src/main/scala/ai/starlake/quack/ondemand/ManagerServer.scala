@@ -2,7 +2,12 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder, NoopTelemetryStore}
+import ai.starlake.quack.ondemand.telemetry.{
+  AuditActions,
+  AuditRateLimiter,
+  AuditRecorder,
+  NoopTelemetryStore
+}
 import cats.data.{Kleisli, OptionT}
 import cats.effect.{IO, Resource}
 import cats.implicits._
@@ -125,7 +130,7 @@ final class ManagerServer(
               "anonymous",
               "system",
               "auth",
-              "auth.api-key.failure",
+              AuditActions.AuthApiKeyFailure,
               "denied",
               detail = Map("path" -> path, "source" -> source)
             )

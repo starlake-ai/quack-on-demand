@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -30,7 +30,7 @@ final class RoleColumnPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.columnPolicy.set",
+          AuditActions.RoleColumnPolicySet,
           "denied",
           tenant = roleTenant
         )
@@ -51,7 +51,7 @@ final class RoleColumnPolicyHandlers(
               audit.rest(
                 apiKey,
                 "control-plane",
-                "role.columnPolicy.set",
+                AuditActions.RoleColumnPolicySet,
                 "ok",
                 tenant = roleTenant,
                 target = Some(s"${req.roleId}/${req.tableName}/${req.columnName}"),
@@ -72,7 +72,7 @@ final class RoleColumnPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.columnPolicy.set",
+          AuditActions.RoleColumnPolicySet,
           "denied",
           tenant = policyTenant
         )
@@ -83,7 +83,7 @@ final class RoleColumnPolicyHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.columnPolicy.set",
+              AuditActions.RoleColumnPolicySet,
               "ok",
               tenant = policyTenant,
               target = Some(req.id)
@@ -104,7 +104,7 @@ final class RoleColumnPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.columnPolicy.delete",
+          AuditActions.RoleColumnPolicyDelete,
           "denied",
           tenant = policyTenant
         )
@@ -115,7 +115,7 @@ final class RoleColumnPolicyHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.columnPolicy.delete",
+              AuditActions.RoleColumnPolicyDelete,
               "ok",
               tenant = policyTenant,
               target = Some(req.id)

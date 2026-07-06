@@ -11,7 +11,7 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission,
   UserStore
 }
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -102,7 +102,13 @@ final class UserHandlers(
         val deniedTenant = req.tenant.flatMap(raw =>
           sup.listTenants().find(t => t.id == raw || t.displayName == raw.toLowerCase).map(_.id)
         )
-        audit.rest(apiKey, "control-plane", "user.create", "denied", tenant = deniedTenant)
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.UserCreate,
+          "denied",
+          tenant = deniedTenant
+        )
         IO.pure(Left(err))
       case None =>
         sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
@@ -112,7 +118,7 @@ final class UserHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "user.create",
+              AuditActions.UserCreate,
               "ok",
               tenant = tenantId,
               target = Some(u.username),
@@ -141,7 +147,7 @@ final class UserHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "user.update",
+          AuditActions.UserUpdate,
           "denied",
           tenant = userTenant.flatten
         )
@@ -153,7 +159,7 @@ final class UserHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "user.update",
+              AuditActions.UserUpdate,
               "ok",
               tenant = u.tenant,
               target = Some(u.username)
@@ -181,7 +187,7 @@ final class UserHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "user.delete",
+          AuditActions.UserDelete,
           "denied",
           tenant = userTenant.flatten
         )
@@ -192,7 +198,7 @@ final class UserHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "user.delete",
+              AuditActions.UserDelete,
               "ok",
               tenant = userTenant.flatten,
               target = usernameLookup
