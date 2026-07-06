@@ -86,6 +86,12 @@ When this counter climbs, check Postgres write latency and the journal queue dep
 
 The counter stays at zero when `QOD_TELEMETRY_STORE=none` because not recording is intentional, not a drop.
 
+## Metrics vs. the usage ledger
+
+`statements_total` and `statement_duration_seconds` (both tagged `tenant`, `pool`, `status`) are the real-time, in-process view of statement activity: they increment on every completed statement and are exported at the Prometheus scrape interval or cloud-push cadence. They answer questions like "what is the current QPS per tenant?" but do not persist across process restarts.
+
+The [Usage page](/administration/usage-accounting) and `GET /api/usage` are the durable ledger view of the same quantities. They are backed by the daily rollup store in Postgres, retained for `QOD_USAGE_RETENTION_DAYS` (default 400 days), and are the right integration surface for monthly billing exports and capacity planning over longer windows. The `qod_journal_dropped_total{table="stmt_history"}` counter bridges the two views: a non-zero value means the usage ledger undercounts by that amount for the affected period.
+
 ## Common labels
 
 Attach static labels to every series to distinguish environments in a shared Grafana:

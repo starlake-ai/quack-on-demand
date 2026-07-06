@@ -26,7 +26,7 @@ For how credentials are validated and how to wire an external provider, see [Aut
 
 ## Navigation
 
-The top navigation bar has **Nodes**, **Tenants**, **Users**, **Audit** (hidden when telemetry is disabled), **History** (hidden when telemetry is disabled), and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it. The Audit and History tabs are hidden when `QOD_TELEMETRY_STORE=none`; both are visible to superusers and tenant admins.
+The top navigation bar has **Nodes**, **Tenants**, **Users**, **Audit** (hidden when telemetry is disabled), **History** (hidden when telemetry is disabled), **Usage** (hidden when telemetry is disabled), and (for a superuser admin only) **Config**, plus the user pill and Sign out. The Config tab is hidden for non-superusers, and its backend endpoints reject them as well, so a deep link does not leak it. The Audit and History tabs are hidden when `QOD_TELEMETRY_STORE=none`; both are visible to superusers and tenant admins.
 
 ![The top navigation bar](/img/ui/nav.png)
 
@@ -141,6 +141,25 @@ Below the charts, a searchable statement table shows the raw rows for the select
 The filter bar above the table accepts a free-text `q` search (substring match on SQL), a `status` filter, a user filter, and a pool selector. Superusers also have a tenant selector; tenant admins are pinned to their own tenant.
 
 The storage model, watermark semantics, retention knobs, and the curl API for both endpoints are covered on the [Statement history and trends](/operating/history-trends) page.
+
+## Usage
+
+The `Usage` page is the durable metering ledger for FlightSQL activity, aggregated per tenant, pool, or user. It is available to superusers and tenant admins. It is hidden from the navigation when `QOD_TELEMETRY_STORE=none`; a deep link to the page shows a "telemetry is disabled" message.
+
+The page has a filter bar at the top with:
+
+- **Period picker** - a month input (defaults to the current calendar month) or a custom date range, toggled by the "custom range" button. Custom ranges translate to a half-open `[from, to)` interval in UTC before being sent to the API.
+- **Group-by selector** - `by tenant` (superusers only), `by pool`, or `by user`. Tenant admins land on the `by pool` grouping; the `by tenant` option is hidden for them because the API pins them to their own tenant.
+- **Metric toggle** - `statements` (total statement count) or `engine-ms` (summed execution time in milliseconds). Switching updates both the chart and the totals table.
+- **Tenant and pool filters** - optional free-text inputs to narrow the result. The tenant filter is visible to superusers only.
+
+Below the filters, a stacked per-day bar chart shows each group's contribution over the period. The top 8 groups by `engineMs` receive distinct colors; all remaining groups are merged into a single gray "other" segment. Periods with no activity show an empty chart.
+
+Below the chart, a totals table shows one row per group, sorted by `engineMs` descending, with columns for tenant, pool (when `groupBy=pool`), user (when `groupBy=user`), statements, errors, denied, and engine-ms. A **Download CSV** button above the table produces a client-side CSV using the column contract described on the [Usage and accounting](/administration/usage-accounting) page.
+
+The `dataStart` field in the API response drives a notice below the filter bar when the requested period starts before the retention horizon: "Data starts YYYY-MM-DD (older buckets purged)."
+
+The full API reference, CSV column contract, retention knob, and scoping rules are documented on the [Usage and accounting](/administration/usage-accounting) page.
 
 ## Config (superuser only)
 
