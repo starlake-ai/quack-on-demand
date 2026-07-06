@@ -630,7 +630,8 @@ object Main extends IOApp with LazyLogging:
       // Let operators log in with either the tenant id or its display name.
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
       oidc = oidcSso,
-      sqlToken = sqlTokenSvc
+      sqlToken = sqlTokenSvc,
+      audit = auditRecorder
     )
     val historyHandlers = new StatementHistoryHandlers(stmtHistory, sup)
     val sessions        = new SessionRegistry
@@ -964,7 +965,9 @@ object Main extends IOApp with LazyLogging:
         federatedSourceHandlers,
         columnPolicyHandlers,
         rowPolicyHandlers,
-        activeStmtHandlers
+        activeStmtHandlers,
+        audit = auditRecorder,
+        auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter()
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own

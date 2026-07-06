@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
 import ai.starlake.quack.ondemand.api._
+import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder}
 import cats.data.{Kleisli, OptionT}
 import cats.effect.{IO, Resource}
 import cats.implicits._
@@ -39,7 +40,9 @@ final class ManagerServer(
     federatedSources: Option[FederatedSourceHandlers] = None,
     columnPolicies: RoleColumnPolicyHandlers,
     rowPolicies: RoleRowPolicyHandlers,
-    activeStmts: ActiveStatementHandlers
+    activeStmts: ActiveStatementHandlers,
+    audit: AuditRecorder = AuditRecorder.noop,
+    auditLimiter: AuditRateLimiter = new AuditRateLimiter()
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -112,7 +115,18 @@ final class ManagerServer(
         val openMode     = staticConfigured.isEmpty
 
         val admitted = staticMatch || sessionAdmin || openMode
-        if !admitted then OptionT.pure[IO](Response[IO](Status.Unauthorized))
+        if !admitted then
+          val source = req.remote.map(_.host.toString).getOrElse("unknown")
+          if auditLimiter.allow(source) then
+            audit.restAs(
+              "anonymous",
+              "system",
+              "auth",
+              "auth.api-key.failure",
+              "denied",
+              detail = Map("path" -> path, "source" -> source)
+            )
+          OptionT.pure[IO](Response[IO](Status.Unauthorized))
         else
           // Per-request tenant scope check. Only applies when there is a known
           // session (not the static key, not open mode). Body-tenant endpoints

@@ -11,6 +11,7 @@ import ai.starlake.quack.ondemand.{ManagerServer, PoolSupervisor}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, UserStore}
+import ai.starlake.quack.ondemand.telemetry.{AuditRateLimiter, AuditRecorder}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.typesafe.config.ConfigFactory
@@ -234,7 +235,9 @@ object ManagerServerHarness:
   def boot(
       store: InMemoryControlPlaneStore,
       staticApiKey: Option[String] = None,
-      enableProviders: Boolean = true
+      enableProviders: Boolean = true,
+      audit: AuditRecorder = AuditRecorder.noop,
+      auditLimiter: AuditRateLimiter = new AuditRateLimiter()
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -267,7 +270,8 @@ object ManagerServerHarness:
       authModeResolver = new ai.starlake.quack.ondemand.auth.ManagementAuthModeResolver(
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
-      )
+      ),
+      audit = audit
     )
 
     val statementStore     = new StatementHistoryStore()
@@ -324,7 +328,9 @@ object ManagerServerHarness:
       federatedSources = None,
       columnPolicies = columnPolicyHandlers,
       rowPolicies = rowPolicyHandlers,
-      activeStmts = activeStmtHandlers
+      activeStmts = activeStmtHandlers,
+      audit = audit,
+      auditLimiter = auditLimiter
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

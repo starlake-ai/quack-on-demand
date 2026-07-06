@@ -16,6 +16,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.UserGrant
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 import sttp.model.headers.{Cookie, CookieValueWithMeta}
@@ -73,7 +74,11 @@ final class AuthHandlers(
     /** Optional data-plane SQL-token service backing the `/api/auth/sql-token` routes. `None` when
       * no edge OIDC provider is configured; the handlers gate on `.enabled`.
       */
-    sqlToken: Option[SqlTokenOidcService] = None
+    sqlToken: Option[SqlTokenOidcService] = None,
+    /** Audit recorder for auth events (login, logout, revoke). Defaults to noop so callers that
+      * don't wire telemetry (tests, legacy code) are unaffected.
+      */
+    audit: AuditRecorder = AuditRecorder.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -223,7 +228,11 @@ final class AuthHandlers(
       sessionCookie: Option[String],
       forwardedProto: Option[String]
   ): IO[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
-    sessionCookie.foreach(tokens.revoke)
+    sessionCookie match
+      case Some(tok) =>
+        tokens.revoke(tok)
+        audit.rest(Some(tok), "auth", "auth.revoke", "ok")
+      case None => ()
     // id_token_hint is not persisted in this iteration; RP-initiated logout still
     // clears the local cookie and (when configured) hits the IdP end-session endpoint.
     // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
@@ -318,6 +327,15 @@ final class AuthHandlers(
         case None    => AuthScope.System
       authService.authenticateBasic(scope, req.username, req.password) match
         case Left(err) =>
+          audit.restAs(
+            req.username,
+            "tenant",
+            "auth",
+            "auth.login.failure",
+            "denied",
+            tenant = req.tenant,
+            detail = Map("username" -> req.username)
+          )
           Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))
         case Right(profile) =>
           val tenantOpt = scope match
@@ -373,7 +391,17 @@ final class AuthHandlers(
       case RequiredScope.SystemStrict => superuser
       case RequiredScope.Tenant(t)    => superuser || manageableTenants.contains(t)
 
+    val realm = if superuser then "system" else "tenant"
     if grants.isEmpty then
+      audit.restAs(
+        profile.username,
+        "tenant",
+        "auth",
+        "auth.login.failure",
+        "denied",
+        tenant = profile.tenant,
+        detail = Map("reason" -> "not_provisioned")
+      )
       Left(
         (
           StatusCode.Forbidden,
@@ -384,6 +412,15 @@ final class AuthHandlers(
         )
       )
     else if !superuser && manageableTenants.isEmpty then
+      audit.restAs(
+        profile.username,
+        "tenant",
+        "auth",
+        "auth.login.failure",
+        "denied",
+        tenant = profile.tenant,
+        detail = Map("reason" -> "admin_required")
+      )
       Left(
         (
           StatusCode.Forbidden,
@@ -394,6 +431,15 @@ final class AuthHandlers(
         )
       )
     else if !scopeOk then
+      audit.restAs(
+        profile.username,
+        realm,
+        "auth",
+        "auth.login.failure",
+        "denied",
+        tenant = profile.tenant,
+        detail = Map("reason" -> "admin_required")
+      )
       Left(
         (
           StatusCode.Forbidden,
@@ -407,7 +453,16 @@ final class AuthHandlers(
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
       val token        = tokens.mintWithScope(profile, sessionScope)
-      val resp         = LoginResponse(
+      audit.restAs(
+        profile.username,
+        realm,
+        "auth",
+        "auth.login",
+        "ok",
+        tenant = profile.tenant,
+        detail = Map("authMethod" -> profile.authMethod)
+      )
+      val resp = LoginResponse(
         token = token,
         username = profile.username,
         tenant = None,
@@ -428,7 +483,9 @@ final class AuthHandlers(
     // revoke() now always does JDBC (persist + NOTIFY the denylist), so this runs
     // on the blocking pool. `oidcLogout` already uses IO.blocking for the same call.
     IO.blocking {
-      apiKey.orElse(cookie).foreach(tokens.revoke)
+      val tok = apiKey.orElse(cookie)
+      tok.foreach(tokens.revoke)
+      audit.rest(tok, "auth", "auth.logout", "ok")
       Right(clearCookie(forwardedProto))
     }
 
