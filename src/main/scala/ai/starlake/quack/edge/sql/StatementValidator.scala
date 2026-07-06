@@ -24,8 +24,11 @@ case class ValidationContext(
 )
 
 sealed trait ValidationResult
-case object Allowed               extends ValidationResult
-case class Denied(reason: String) extends ValidationResult
+case object Allowed extends ValidationResult
+case class Denied(
+    reason: String,
+    unauthorized: Set[ai.starlake.acl.parser.TableAccess] = Set.empty
+) extends ValidationResult
 
 trait StatementValidator:
   def validate(context: ValidationContext): ValidationResult

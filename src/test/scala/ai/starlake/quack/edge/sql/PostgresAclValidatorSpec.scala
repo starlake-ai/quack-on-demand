@@ -76,8 +76,8 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
     val eff = effectiveWith(permissions = Nil)
     val ctx = mkCtx("SELECT * FROM fedpg.public.orders", eff)
     validator.validate(ctx) match
-      case Denied(msg) => msg should include("fedpg")
-      case other       => fail(s"expected Denied, got $other")
+      case Denied(msg, _) => msg should include("fedpg")
+      case other          => fail(s"expected Denied, got $other")
   }
 
   it should "allow SELECT joining DuckLake + federated alias when both grants exist" in {
@@ -99,8 +99,8 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
       eff
     )
     validator.validate(ctx) match
-      case Denied(msg) => msg should (include("fedpg") or include("orders"))
-      case other       => fail(s"expected Denied, got $other")
+      case Denied(msg, _) => msg should (include("fedpg") or include("orders"))
+      case other          => fail(s"expected Denied, got $other")
   }
 
   it should "allow with catalog-level wildcard on the federated alias" in {
@@ -126,8 +126,8 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
       effectiveSet    = None
     )
     validator.validate(ctx) match
-      case Denied(msg) => msg should include("no RBAC")
-      case other       => fail(s"expected Denied, got $other")
+      case Denied(msg, _) => msg should include("no RBAC")
+      case other          => fail(s"expected Denied, got $other")
   }
 
   it should "allow when the principal is a superuser (tenant=None)" in {
