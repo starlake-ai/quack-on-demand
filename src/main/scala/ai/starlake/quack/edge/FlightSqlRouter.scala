@@ -6,7 +6,7 @@ import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, Validati
 import ai.starlake.quack.model.{PoolKey, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.telemetry.{AuditEvent, EventJournal}
+import ai.starlake.quack.ondemand.telemetry.{AuditEvent, EventJournal, StatementEvent}
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
@@ -89,6 +89,20 @@ final class FlightSqlRouter(
       )
     )
     stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
+    journal.offerStatement(
+      StatementEvent(
+        java.time.Instant.now(),
+        user,
+        poolKey.tenant,
+        poolKey.pool,
+        nodeId,
+        sql.take(500),
+        durationMs,
+        prepareDurationMs,
+        status,
+        error.map(_.take(500))
+      )
+    )
     if status == "denied" then
       journal.offer(
         AuditEvent(
