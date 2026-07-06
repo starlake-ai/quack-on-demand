@@ -94,7 +94,7 @@ Top-level keys in `values.yaml`:
 | `rbac` | Controls creation of the Role and RoleBinding for Kubernetes API access. |
 | `podAnnotations` / `podLabels` | Extra annotations and labels on the manager pod. |
 | `podSecurityContext` / `securityContext` | Pod- and container-level security contexts. |
-| `resources` | CPU and memory requests/limits for the manager container. |
+| `resources` | CPU and memory requests/limits for the manager container. Node pods are sized per pool via `pool/setResources`; see [Pools and cohorts](/operating/pools-cohorts). |
 | `nodeSelector` / `tolerations` / `affinity` | Manager pod scheduling constraints. |
 | `priorityClassName` | Priority class for the manager pod. |
 | `terminationGracePeriodSeconds` | Grace period (default 60 s) to allow in-flight FlightSQL statements to finish. |

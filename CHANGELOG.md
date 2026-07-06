@@ -52,7 +52,7 @@ The full report lives at `docs/security-audit-2026-07-02.md`; the findings below
 - **Kubernetes node-pod sizing and templates.** Pools carry `cpu` and `memory`
   (each applied as request and limit on the quack container, Guaranteed QoS
   when both set) via `POST /api/pool/setResources` and sliders on the pool
-  create form and pool detail page (CPU 0.5-16 cores, memory 1-64 Gi).
+  create form and pool detail page (CPU 0.5-128 cores, memory 1-1024 Gi).
   Behind `QOD_POD_TEMPLATE_ENABLED` (default off, superuser only), a pool may
   carry a full Pod-manifest template through `POST /api/pool/setPodTemplate`
   (API-only); the manager overlays the pod identity labels, the quack

@@ -444,7 +444,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                       <input
                         type="range"
                         min={0.5}
-                        max={16}
+                        max={128}
                         step={0.5}
                         value={cpuSlider}
                         onChange={ev => setCpuSlider(Number(ev.target.value))}
@@ -468,7 +468,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                       <input
                         type="range"
                         min={1}
-                        max={64}
+                        max={1024}
                         step={1}
                         value={memSlider}
                         onChange={ev => setMemSlider(Number(ev.target.value))}
