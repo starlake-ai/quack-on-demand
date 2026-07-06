@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore, StatementRecord}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import io.circe.Codec
 import io.circe.generic.semiauto.deriveCodec
@@ -80,7 +80,7 @@ final class ActiveStatementHandlers(
           audit.rest(
             apiKey,
             "control-plane",
-            "statement.kill",
+            AuditActions.StatementKill,
             "ok",
             tenant = Some(s.tenant),
             target = Some(req.id)
@@ -95,7 +95,7 @@ final class ActiveStatementHandlers(
           audit.rest(
             apiKey,
             "control-plane",
-            "statement.kill",
+            AuditActions.StatementKill,
             "ok",
             target = Some(req.id)
           )

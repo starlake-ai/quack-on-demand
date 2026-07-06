@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -90,7 +90,7 @@ final class FederatedSourceHandlers(
           audit.rest(
             apiKey,
             "control-plane",
-            "federation.source.upsert",
+            AuditActions.FederationSourceUpsert,
             "ok",
             tenant = tenantIdResolver(tenantName),
             target = Some(req.alias)
@@ -154,7 +154,7 @@ final class FederatedSourceHandlers(
               audit.rest(
                 apiKey,
                 "control-plane",
-                "federation.source.delete",
+                AuditActions.FederationSourceDelete,
                 "ok",
                 tenant = tenantIdResolver(tenantName),
                 target = Some(alias)
@@ -229,7 +229,7 @@ final class FederatedSourceHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "federation.secret.upsert",
+                    AuditActions.FederationSecretUpsert,
                     "ok",
                     tenant = tenantIdResolver(tenantName),
                     target = Some(s"$alias/${req.name}")
@@ -262,7 +262,7 @@ final class FederatedSourceHandlers(
                   audit.rest(
                     apiKey,
                     "control-plane",
-                    "federation.secret.delete",
+                    AuditActions.FederationSecretDelete,
                     "ok",
                     tenant = tenantIdResolver(tenantName),
                     target = Some(s"$alias/$name")

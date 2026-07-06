@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -30,7 +30,7 @@ final class RoleRowPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.rowPolicy.set",
+          AuditActions.RoleRowPolicySet,
           "denied",
           tenant = roleTenant
         )
@@ -49,7 +49,7 @@ final class RoleRowPolicyHandlers(
               audit.rest(
                 apiKey,
                 "control-plane",
-                "role.rowPolicy.set",
+                AuditActions.RoleRowPolicySet,
                 "ok",
                 tenant = roleTenant,
                 target = Some(s"${req.roleId}/${req.tableName}"),
@@ -69,7 +69,7 @@ final class RoleRowPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.rowPolicy.set",
+          AuditActions.RoleRowPolicySet,
           "denied",
           tenant = policyTenant
         )
@@ -80,7 +80,7 @@ final class RoleRowPolicyHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.rowPolicy.set",
+              AuditActions.RoleRowPolicySet,
               "ok",
               tenant = policyTenant,
               target = Some(req.id)
@@ -101,7 +101,7 @@ final class RoleRowPolicyHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "role.rowPolicy.delete",
+          AuditActions.RoleRowPolicyDelete,
           "denied",
           tenant = policyTenant
         )
@@ -112,7 +112,7 @@ final class RoleRowPolicyHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "role.rowPolicy.delete",
+              AuditActions.RoleRowPolicyDelete,
               "ok",
               tenant = policyTenant,
               target = Some(req.id)

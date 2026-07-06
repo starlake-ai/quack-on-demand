@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -38,7 +38,13 @@ final class GroupHandlers(
       case Some(tid) =>
         TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
           case Some(err) =>
-            audit.rest(apiKey, "control-plane", "group.create", "denied", tenant = Some(tid))
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.GroupCreate,
+              "denied",
+              tenant = Some(tid)
+            )
             IO.pure(Left(err))
           case None =>
             sup.createGroup(tid, req.name, req.description).map {
@@ -46,7 +52,7 @@ final class GroupHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "group.create",
+                  AuditActions.GroupCreate,
                   "ok",
                   tenant = Some(tid),
                   target = Some(g.id),
@@ -68,7 +74,7 @@ final class GroupHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "group.delete",
+          AuditActions.GroupDelete,
           "denied",
           tenant = groupTenant
         )
@@ -79,7 +85,7 @@ final class GroupHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "group.delete",
+              AuditActions.GroupDelete,
               "ok",
               tenant = groupTenant,
               target = Some(req.id)

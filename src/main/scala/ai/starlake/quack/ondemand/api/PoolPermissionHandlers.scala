@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -44,7 +44,7 @@ final class PoolPermissionHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "pool.permission.grant",
+              AuditActions.PoolPermissionGrant,
               "denied",
               tenant = Some(tid)
             )
@@ -55,7 +55,7 @@ final class PoolPermissionHandlers(
                 audit.rest(
                   apiKey,
                   "control-plane",
-                  "pool.permission.grant",
+                  AuditActions.PoolPermissionGrant,
                   "ok",
                   tenant = Some(tid),
                   target = Some(p.id)
@@ -77,7 +77,7 @@ final class PoolPermissionHandlers(
         audit.rest(
           apiKey,
           "control-plane",
-          "pool.permission.revoke",
+          AuditActions.PoolPermissionRevoke,
           "denied",
           tenant = permTenant
         )
@@ -88,7 +88,7 @@ final class PoolPermissionHandlers(
             audit.rest(
               apiKey,
               "control-plane",
-              "pool.permission.revoke",
+              AuditActions.PoolPermissionRevoke,
               "ok",
               tenant = permTenant,
               target = Some(req.id)
