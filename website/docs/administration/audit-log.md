@@ -200,7 +200,7 @@ curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/audit/actions | pytho
 | Parameter | Description |
 |---|---|
 | `family` | Filter by event family (`control-plane`, `auth`, `data-denial`, `data-write`) |
-| `tenant` | Filter by tenant id; superusers and static-key callers only -- returns exactly that tenant's rows (null-tenant rows are not included). Tenant admins are pinned to their own tenant and cannot override this parameter. |
+| `tenant` | Filter by tenant id. Superusers and static-key callers: returns exactly that tenant's rows (null-tenant rows not included). Tenant admins: narrows within their manageable tenants; a tenant outside their set silently falls back to all manageable rows. |
 | `noTenant` | Set to `true` to return only rows with no tenant scope (superusers and static-key callers only; ignored for tenant admins). Wins over `tenant` when both are supplied: if `noTenant=true` and `?tenant=x` are both present, only null-tenant rows are returned. |
 | `actor` | Filter by actor username (exact match) |
 | `action` | Filter by action string (exact match, e.g. `auth.login.failure`) |
