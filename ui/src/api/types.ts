@@ -633,3 +633,22 @@ export interface ActiveStatementsResponse {
 }
 export interface KillStatementRequest { id: string; }
 export interface KillStatementResponse { status: string; } // accepted | already-completed
+
+// ----- History trends -----
+export interface TrendBucketEntry {
+  bucketStart: string;   // ISO-8601 UTC
+  tenant: string;
+  pool: string;
+  username: string;
+  stmtCount: number;
+  errorCount: number;
+  deniedCount: number;
+  engineMsSum: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+}
+
+export interface TrendsResponse {
+  buckets: TrendBucketEntry[];
+}
