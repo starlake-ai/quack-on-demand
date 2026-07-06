@@ -93,6 +93,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
+  given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -111,6 +112,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]               = deriveReader[HaConfig]
+  given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -158,6 +160,8 @@ object Main extends IOApp with LazyLogging:
       )
       .left
       .foreach(msg => sys.error(msg))
+
+    TelemetryConfig.validate(mgrCfg.telemetry.store).left.foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
