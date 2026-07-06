@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -9,7 +10,11 @@ import sttp.model.StatusCode
   * id) the same way the role/group handlers do. The grant principal is either `userId` or
   * `groupId`; passing both is a 400.
   */
-final class PoolPermissionHandlers(sup: PoolSupervisor, mappers: UserHandlers):
+final class PoolPermissionHandlers(
+    sup: PoolSupervisor,
+    mappers: UserHandlers,
+    audit: AuditRecorder = AuditRecorder.noop
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -35,10 +40,27 @@ final class PoolPermissionHandlers(sup: PoolSupervisor, mappers: UserHandlers):
         )
       case Some(tid) =>
         TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(err) => IO.pure(Left(err))
-          case None      =>
+          case Some(err) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "pool.permission.grant",
+              "denied",
+              tenant = Some(tid)
+            )
+            IO.pure(Left(err))
+          case None =>
             sup.grantPoolPermission(tid, req.poolId, req.userId, req.groupId).map {
-              case Right(p)  => Right(mappers.toPoolPermissionResponse(p))
+              case Right(p) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  "pool.permission.grant",
+                  "ok",
+                  tenant = Some(tid),
+                  target = Some(p.id)
+                )
+                Right(mappers.toPoolPermissionResponse(p))
               case Left(err) =>
                 val code =
                   if err.contains("not found") then StatusCode.NotFound
@@ -49,11 +71,29 @@ final class PoolPermissionHandlers(sup: PoolSupervisor, mappers: UserHandlers):
   def revoke(req: PoolPermissionRevokeRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForResource(apiKey, sup.tenantForPoolPermission(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val permTenant = sup.tenantForPoolPermission(req.id)
+    TenantScopeCheck.rejectForResource(apiKey, permTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "pool.permission.revoke",
+          "denied",
+          tenant = permTenant
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.revokePoolPermission(req.id).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "pool.permission.revoke",
+              "ok",
+              tenant = permTenant,
+              target = Some(req.id)
+            )
+            Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 

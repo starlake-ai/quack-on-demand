@@ -4,6 +4,7 @@ import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -16,7 +17,8 @@ import sttp.model.StatusCode
 final class TenantDbHandlers(
     sup: PoolSupervisor,
     federatedStore: Option[FederatedSourceStore] = None,
-    catalog: Option[CatalogHandlers] = None
+    catalog: Option[CatalogHandlers] = None,
+    audit: AuditRecorder = AuditRecorder.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -59,8 +61,16 @@ final class TenantDbHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "database.create",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         if req.tenant.isEmpty || req.name.isEmpty then
           IO.pure(
             Left(
@@ -85,7 +95,17 @@ final class TenantDbHandlers(
                   initSql = req.initSql
                 )
                 .flatMap {
-                  case Right(td) => IO.blocking(Right(toResponse(req.tenant, td)))
+                  case Right(td) =>
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      "database.create",
+                      "ok",
+                      tenant = Some(req.tenant),
+                      target = Some(td.name),
+                      detail = Map("kind" -> kind.wireValue)
+                    )
+                    IO.blocking(Right(toResponse(req.tenant, td)))
                   case Left(msg) if msg.startsWith("tenant not found") =>
                     IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", msg))))
                   case Left(msg) if msg.startsWith("invalid kind=") =>
@@ -106,10 +126,27 @@ final class TenantDbHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "database.delete",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteTenantDb(req.tenant, req.name).map {
-          case Right(_)                                 => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "database.delete",
+              "ok",
+              tenant = Some(req.tenant),
+              target = Some(req.name)
+            )
+            Right(())
           case Left(msg) if msg.contains("active pool") =>
             Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
           case Left(msg) =>
@@ -120,8 +157,16 @@ final class TenantDbHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[UpdateTenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "database.update",
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
         val patch = TenantDbPatch(
           metastore = req.metastore,
           objectStore = req.objectStore,
@@ -131,6 +176,24 @@ final class TenantDbHandlers(
         )
         sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
           case Right(r) =>
+            // Record field names ONLY (never values - metastore / objectStore may contain credentials).
+            val editedFields = List(
+              req.metastore.map(_ => "metastore"),
+              req.objectStore.map(_ => "objectStore"),
+              req.defaultDatabase.map(_ => "defaultDatabase"),
+              req.defaultSchema.map(_ => "defaultSchema"),
+              req.initSql.map(_ => "initSql")
+            ).flatten.mkString(",")
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "database.update",
+              "ok",
+              tenant = Some(req.tenant),
+              target = Some(req.name),
+              detail =
+                if editedFields.nonEmpty then Map("editedFields" -> editedFields) else Map.empty
+            )
             IO.blocking(
               Right(
                 UpdateTenantDbResponse(

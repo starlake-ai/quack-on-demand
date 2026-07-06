@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore, StatementRecord}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import io.circe.Codec
 import io.circe.generic.semiauto.deriveCodec
@@ -28,7 +29,8 @@ final class ActiveStatementHandlers(
     registry: ActiveStatementRegistry,
     history: StatementHistoryStore,
     store: ControlPlaneStore,
-    haEnabled: Boolean
+    haEnabled: Boolean,
+    audit: AuditRecorder = AuditRecorder.noop
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -73,14 +75,29 @@ final class ActiveStatementHandlers(
         case Some(s) if filter.exists(t => !t.contains(s.tenant)) =>
           // Cross-tenant: 404, never 403 (no existence leak across tenants).
           Left((StatusCode.NotFound, ErrorResponse("not_found", s"statement ${req.id} not found")))
-        case Some(_) =>
+        case Some(s) =>
           killAndRecord(req.id)
+          audit.rest(
+            apiKey,
+            "control-plane",
+            "statement.kill",
+            "ok",
+            tenant = Some(s.tenant),
+            target = Some(req.id)
+          )
           Right(KillStatementResponse("accepted"))
         case None if haEnabled =>
           // Another replica may own it: fan out, carrying the caller's tenant scope.
           store.notifyListeners(
             KillBroadcast.Channel,
             KillBroadcast.encode(req.id, filter.map(_.toList))
+          )
+          audit.rest(
+            apiKey,
+            "control-plane",
+            "statement.kill",
+            "ok",
+            target = Some(req.id)
           )
           Right(KillStatementResponse("accepted"))
         case None =>

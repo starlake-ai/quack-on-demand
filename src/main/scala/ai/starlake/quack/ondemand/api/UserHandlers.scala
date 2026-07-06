@@ -11,6 +11,7 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission,
   UserStore
 }
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -23,7 +24,11 @@ import java.time.format.DateTimeFormatter
   * [[ai.starlake.quack.ondemand.state.ControlPlaneStore]] via
   * [[PoolSupervisor.effectiveSetForUser]] / `effectiveSetsForUsers`.
   */
-final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
+final class UserHandlers(
+    sup: PoolSupervisor,
+    userStore: UserStore,
+    audit: AuditRecorder = AuditRecorder.noop
+):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -92,10 +97,27 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
           .getOrElse(raw)
         TenantScopeCheck.reject(apiKey, canonical)(scopeOf)
     scopeGate match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+      case Some(err) =>
+        // Record denied with tenant from the resolved canonical if available.
+        val deniedTenant = req.tenant.flatMap(raw =>
+          sup.listTenants().find(t => t.id == raw || t.displayName == raw.toLowerCase).map(_.id)
+        )
+        audit.rest(apiKey, "control-plane", "user.create", "denied", tenant = deniedTenant)
+        IO.pure(Left(err))
+      case None =>
         sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
           case Right(u) =>
+            val tenantId = u.tenant
+            // NEVER include password in detail.
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "user.create",
+              "ok",
+              tenant = tenantId,
+              target = Some(u.username),
+              detail = Map("username" -> u.username, "role" -> u.role)
+            )
             toResponseFor(u.id) match
               case Some(r) => Right(r)
               case None    =>
@@ -113,11 +135,29 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   def updateUser(req: UserUpdateRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[UserResponse] =
-    TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val userTenant = sup.tenantForUser(req.id)
+    TenantScopeCheck.rejectForUser(apiKey, userTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "user.update",
+          "denied",
+          tenant = userTenant.flatten
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
           case Right(u) =>
+            // NEVER include password in detail.
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "user.update",
+              "ok",
+              tenant = u.tenant,
+              target = Some(u.username)
+            )
             toResponseFor(u.id) match
               case Some(r) => Right(r)
               case None    =>
@@ -134,11 +174,30 @@ final class UserHandlers(sup: PoolSupervisor, userStore: UserStore):
   def deleteUser(req: UserDeleteRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(req.id))(scopeOf) match
-      case Some(err) => IO.pure(Left(err))
-      case None      =>
+    val userTenant     = sup.tenantForUser(req.id)
+    val usernameLookup = sup.effectiveSetForUser(req.id).map(_.user.username)
+    TenantScopeCheck.rejectForUser(apiKey, userTenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          "user.delete",
+          "denied",
+          tenant = userTenant.flatten
+        )
+        IO.pure(Left(err))
+      case None =>
         sup.deleteUser(req.id).map {
-          case Right(_)  => Right(())
+          case Right(_) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              "user.delete",
+              "ok",
+              tenant = userTenant.flatten,
+              target = usernameLookup
+            )
+            Right(())
           case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
         }
 

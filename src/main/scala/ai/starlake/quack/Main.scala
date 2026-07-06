@@ -272,7 +272,16 @@ object Main extends IOApp with LazyLogging:
     // NOTIFY (topology / RBAC / revocation) run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
-    val haOn      = mgrCfg.ha.enabled
+    // Telemetry store is built early so every handler (including those constructed
+    // before runWithMetrics) can record audit events. The metrics drop-counter is
+    // wired inside runWithMetrics once metricsReg is available; until then dropped
+    // events are silently ignored (best-effort, failure-safe by design).
+    val telemetryStore: TelemetryStore = mgrCfg.telemetry.store match
+      case "none" => NoopTelemetryStore
+      case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
+    if telemetryStore.enabled then logger.info("telemetry: postgres (qodstate_audit)")
+    else logger.info("telemetry: none (audit log disabled; nothing is recorded)")
+    val haOn = mgrCfg.ha.enabled
     // Per-tenant-db Postgres provisioning. The admin connection opens
     // against the `postgres` system DB and issues CREATE/DROP DATABASE
     // for each `qodstate_tenant_db` row the supervisor manages.
@@ -371,11 +380,6 @@ object Main extends IOApp with LazyLogging:
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(new CatalogHandlers(reader, kindOf))
 
-    val pools   = new PoolHandlers(sup, tracker, engineStatsTracker, mgrCfg.k8s.podTemplateEnabled)
-    val nodes   = new NodeHandlers(sup, tracker, store, publisher)
-    val tenants = new TenantHandlers(sup, onAuthChanged = tenantOidcRegistry.invalidate)
-    val tenantDbs = new TenantDbHandlers(sup, manifestFedStore, catalog = catalogHandlers)
-
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
     def dbHealthy(): Boolean =
@@ -414,13 +418,38 @@ object Main extends IOApp with LazyLogging:
             )
     )
 
+    // auditRecorder built here so the sessionTokens.get lookup closure is ready.
+    // All handlers (early and inside runWithMetrics) share this instance.
+    val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
+
+    val pools = new PoolHandlers(
+      sup,
+      tracker,
+      engineStatsTracker,
+      mgrCfg.k8s.podTemplateEnabled,
+      audit = auditRecorder
+    )
+    val nodes   = new NodeHandlers(sup, tracker, store, publisher, audit = auditRecorder)
+    val tenants = new TenantHandlers(
+      sup,
+      onAuthChanged = tenantOidcRegistry.invalidate,
+      audit = auditRecorder
+    )
+    val tenantDbs = new TenantDbHandlers(
+      sup,
+      manifestFedStore,
+      catalog = catalogHandlers,
+      audit = auditRecorder
+    )
+
     val stmtHistory        = new ai.starlake.quack.edge.StatementHistoryStore()
     val activeStatements   = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeStatements,
       stmtHistory,
       store,
-      haEnabled = haOn
+      haEnabled = haOn,
+      audit = auditRecorder
     )
 
     // Leader elector + LISTEN dispatcher. Present only under HA. Handlers close
@@ -839,31 +868,25 @@ object Main extends IOApp with LazyLogging:
       // and the in-memory RbacResolver cache stay in lockstep. The user
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
-      val userStoreForRbac     = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val userHandlers         = new UserHandlers(sup, userStoreForRbac)
-      val roleHandlers         = new RoleHandlers(sup, userHandlers)
-      val groupHandlers        = new GroupHandlers(sup, userHandlers)
-      val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
-      val poolPermHandlers     = new PoolPermissionHandlers(sup, userHandlers)
-      val columnPolicyHandlers = new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup)
-      val rowPolicyHandlers    = new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup)
+      val userStoreForRbac   = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+      val userHandlers       = new UserHandlers(sup, userStoreForRbac, audit = auditRecorder)
+      val roleHandlers       = new RoleHandlers(sup, userHandlers, audit = auditRecorder)
+      val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
+      val membershipHandlers = new MembershipHandlers(sup, userHandlers, audit = auditRecorder)
+      val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers, audit = auditRecorder)
+      val columnPolicyHandlers =
+        new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup, audit = auditRecorder)
+      val rowPolicyHandlers =
+        new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup, audit = auditRecorder)
 
-      // Telemetry store selection: "postgres" (default) uses the control-plane
-      // database; "none" disables audit logging entirely. Constructed here so
-      // journalDropped can reference metricsReg.
-      val telemetryStore: TelemetryStore = mgrCfg.telemetry.store match
-        case "none" => NoopTelemetryStore
-        case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
-      if telemetryStore.enabled then logger.info("telemetry: postgres (qodstate_audit)")
-      else logger.info("telemetry: none (audit log disabled; nothing is recorded)")
+      // telemetryStore is built early (before handler construction) so all handlers
+      // share one instance. journalDropped references metricsReg so it lives here.
       val journalDropped: Int => Unit = n =>
         metricsReg.composite
           .counter("qod_journal_dropped_total", "table", "audit")
           .increment(n.toDouble)
       val eventJournal =
         new EventJournal(telemetryStore, mgrCfg.telemetry.journalCapacity, onDrop = journalDropped)
-      val auditRecorder =
-        new AuditRecorder(telemetryStore, sessionTokens.get, onDrop = journalDropped)
 
       // Config page registry. The roots list pairs each typed config
       // class with its HOCON prefix; the reflector pulls every
@@ -892,7 +915,11 @@ object Main extends IOApp with LazyLogging:
         val resolver: (String, String) => Option[String] = (tenantName, tenantDbName) =>
           sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
         Some(
-          new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(fedHandlersStore, resolver)
+          new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
+            fedHandlersStore,
+            resolver,
+            audit = auditRecorder
+          )
         )
 
       // manifestFedStore is hoisted above the supervisor build (see top of
@@ -906,7 +933,8 @@ object Main extends IOApp with LazyLogging:
         managerVersion = "dev",
         hostname =
           scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
-        federatedStore = manifestFedStore
+        federatedStore = manifestFedStore,
+        audit = auditRecorder
       )
 
       val mgr = new ManagerServer(
