@@ -165,16 +165,129 @@ final class PostgresTelemetryStore(
       finally ps.close()
     }
 
-  // --- Statement history stubs (implemented in Task 2) -------------------- //
+  // --- Statement history -------------------------------------------------- //
 
   override def appendStatements(events: List[StatementEvent]): Unit =
-    throw new UnsupportedOperationException("implemented in a later task")
+    if events.nonEmpty then
+      withConn { c =>
+        val ps = c.prepareStatement(
+          "INSERT INTO qodstate_stmt_history" +
+            " (ts, username, tenant, pool, node_id, sql, status, duration_ms, prepare_ms, error)" +
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        try
+          events.foreach { e =>
+            ps.setTimestamp(1, Timestamp.from(e.ts))
+            ps.setString(2, e.username)
+            ps.setString(3, e.tenant)
+            ps.setString(4, e.pool)
+            ps.setString(5, e.nodeId)
+            ps.setString(6, e.sql)
+            ps.setString(7, e.status)
+            ps.setLong(8, e.durationMs)
+            ps.setObject(
+              9,
+              e.prepareMs.map(java.lang.Long.valueOf).orNull,
+              java.sql.Types.BIGINT
+            )
+            ps.setString(10, e.error.orNull)
+            ps.addBatch()
+          }
+          ps.executeBatch()
+        finally ps.close()
+      }
 
   override def searchStatements(q: StatementQuery): List[StatementRow] =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      // Each part: (sql_fragment, setter(ps, startIdx) => nextIdx).
+      // Parts are collected in order, then the SQL is assembled and parameters bound
+      // sequentially with a running counter.
+      val parts = List.newBuilder[(String, (PreparedStatement, Int) => Int)]
+
+      q.tenants match
+        case Some(ts) if ts.isEmpty =>
+          parts += (("FALSE", (_, i) => i))
+        case Some(ts) =>
+          val tenantList   = ts.toList
+          val placeholders = tenantList.map(_ => "?").mkString(", ")
+          parts += ((
+            s"tenant IN ($placeholders)",
+            (ps, i) => {
+              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
+              i + tenantList.size
+            }
+          ))
+        case None => // no tenant restriction for superuser callers
+
+      q.pool.foreach { v =>
+        parts += (("pool = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
+      }
+      q.user.foreach { v =>
+        parts += (("username = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
+      }
+      q.status.foreach { v =>
+        parts += (("status = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
+      }
+      q.q.foreach { v =>
+        val pat = s"%$v%"
+        parts += (("sql LIKE ?", (ps, i) => { ps.setString(i, pat); i + 1 }))
+      }
+      q.from.foreach { v =>
+        parts += (("ts >= ?", (ps, i) => { ps.setTimestamp(i, Timestamp.from(v)); i + 1 }))
+      }
+      q.to.foreach { v =>
+        parts += (("ts < ?", (ps, i) => { ps.setTimestamp(i, Timestamp.from(v)); i + 1 }))
+      }
+      q.beforeId.foreach { v =>
+        parts += (("id < ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
+      }
+
+      val builtParts = parts.result()
+      val whereSql   =
+        if builtParts.isEmpty then ""
+        else builtParts.map(_._1).mkString(" WHERE ", " AND ", "")
+      val limitVal = math.max(1, math.min(q.limit, 500))
+      val sql      =
+        "SELECT id, ts, username, tenant, pool, node_id, sql," +
+          " status, duration_ms, prepare_ms, error" +
+          s" FROM qodstate_stmt_history$whereSql ORDER BY id DESC LIMIT $limitVal"
+      val ps = c.prepareStatement(sql)
+      try
+        builtParts.foldLeft(1) { case (idx, (_, setter)) => setter(ps, idx) }
+        val rs  = ps.executeQuery()
+        val out = ListBuffer.empty[StatementRow]
+        while rs.next() do
+          val prepMs = {
+            val v = rs.getLong("prepare_ms")
+            if rs.wasNull() then None else Some(v)
+          }
+          out += StatementRow(
+            rs.getLong("id"),
+            StatementEvent(
+              rs.getTimestamp("ts").toInstant,
+              rs.getString("username"),
+              rs.getString("tenant"),
+              rs.getString("pool"),
+              rs.getString("node_id"),
+              rs.getString("sql"),
+              rs.getLong("duration_ms"),
+              prepMs,
+              rs.getString("status"),
+              Option(rs.getString("error"))
+            )
+          )
+        out.toList
+      finally ps.close()
+    }
 
   override def purgeStatements(olderThan: Instant): Int =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      val ps = c.prepareStatement("DELETE FROM qodstate_stmt_history WHERE ts < ?")
+      try
+        ps.setTimestamp(1, Timestamp.from(olderThan))
+        ps.executeUpdate()
+      finally ps.close()
+    }
 
   // --- Rollup stubs (implemented in Task 3) -------------------------------- //
 
