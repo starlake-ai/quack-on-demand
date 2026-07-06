@@ -135,7 +135,7 @@ The tenant admin scope is enforced server-side. A tenant admin requesting `?tena
 
 ## Retention
 
-The manager runs an hourly background purge that deletes rows older than `QOD_AUDIT_RETENTION_DAYS` (default `90`). The Postgres implementation batches deletes in loops of 10,000 rows to avoid long-lived locks.
+The manager runs an hourly background purge that deletes rows older than `QOD_AUDIT_RETENTION_DAYS` (default `90`). The purge runs hourly and deletes all rows older than the cutoff in one statement.
 
 To keep audit records for a longer period:
 
@@ -201,6 +201,6 @@ curl -sS -H "X-API-Key: $TOKEN" \
 | `from` | ISO-8601 instant; return only events at or after this time |
 | `to` | ISO-8601 instant; return only events before this time |
 | `limit` | Number of rows to return (default 50, max 500) |
-| `before` | Opaque keyset cursor from `nextBefore` in a prior response; used to page backwards through results |
+| `before` | Opaque keyset cursor from `nextBefore` in a prior response; used to fetch the next page of older results |
 
 Results are returned newest-first. The response includes a `nextBefore` cursor when there are more rows to fetch; it is absent on the last page.

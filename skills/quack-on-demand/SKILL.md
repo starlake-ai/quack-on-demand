@@ -438,6 +438,7 @@ Tenant admins see only their own tenant's rows. Superusers and static-key caller
 
 | Env var | Default | Effect |
 |---|---|---|
+| `QOD_TELEMETRY_JOURNAL_CAPACITY` | `8192` | Bounded in-process telemetry journal queue depth. Overflow drops events and increments `qod_journal_dropped_total`. Increase to buffer higher statement throughput under Postgres write latency spikes |
 | `QOD_AUDIT_RETENTION_DAYS` | `90` | Delete rows older than N days (hourly purge); set to `0` to keep forever |
 | `QOD_TELEMETRY_STORE` | `postgres` | `none` disables all recording, hides the Audit UI page, and keeps the drop counter at zero |
 
