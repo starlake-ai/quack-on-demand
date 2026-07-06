@@ -5,6 +5,7 @@ import ai.starlake.quack.ondemand.telemetry.{
   AuditQuery,
   AuditRow,
   RollupBucket,
+  RollupMath,
   RollupQuery,
   StatementEvent,
   StatementQuery,
@@ -149,60 +150,66 @@ class RecordingTelemetryStore extends TelemetryStore:
   override def advanceRollupWatermark(to: Instant): Unit = watermark = Some(to)
 
   override def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit =
-    // Collect raw statements in (fromExclusive, toInclusive]
-    var inRange = stmtRows.toList.map(_._2)
-    fromExclusive.foreach { from => inRange = inRange.filter(_.ts.isAfter(from)) }
-    inRange = inRange.filter(!_.ts.isAfter(toInclusive))
+    val oldestTs = stmtRows.toList.map(_._2.ts).minOption
+    RollupMath.hourWindow(fromExclusive, toInclusive, oldestTs) match
+      case None           => ()
+      case Some((lo, hi)) =>
+        val (dlo, dhi) = RollupMath.dayWindow((lo, hi))
 
-    // Remove existing buckets whose bucketStart falls in (fromExclusive, toInclusive]
-    rollupBuckets.filterInPlace { b =>
-      val afterFrom = fromExclusive.forall(b.bucketStart.isAfter)
-      val beforeTo  = !b.bucketStart.isAfter(toInclusive)
-      !(afterFrom && beforeTo)
-    }
+        // -- Hourly rollups: [lo, hi) on raw events, username = "" ------------ //
+        val hourInRange = stmtRows.toList.map(_._2).filter { e =>
+          !e.ts.isBefore(lo) && e.ts.isBefore(hi)
+        }
+        rollupBuckets.filterInPlace { b =>
+          b.granularity != "hour" || b.bucketStart.isBefore(lo) || !b.bucketStart.isBefore(hi)
+        }
+        val hourlyGroups = hourInRange.groupBy { e =>
+          (RollupMath.hourFloor(e.ts), e.tenant, e.pool)
+        }
+        hourlyGroups.foreach { case ((bucketStart, tenant, pool), evts) =>
+          val durations = evts.map(_.durationMs.toDouble).sorted.toIndexedSeq
+          rollupBuckets += RollupBucket(
+            bucketStart = bucketStart,
+            granularity = "hour",
+            tenant = tenant,
+            pool = pool,
+            username = "",
+            stmtCount = evts.size.toLong,
+            errorCount = evts.count(e => e.status != "ok" && e.status != "denied").toLong,
+            deniedCount = evts.count(_.status == "denied").toLong,
+            engineMsSum = evts.map(_.durationMs).sum,
+            p50Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.50)),
+            p95Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.95)),
+            p99Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.99))
+          )
+        }
 
-    // Hourly rollups: group by (truncated-to-hour, tenant, pool), username = ""
-    val hourlyGroups = inRange.groupBy { e =>
-      (e.ts.truncatedTo(ChronoUnit.HOURS), e.tenant, e.pool)
-    }
-    hourlyGroups.foreach { case ((bucketStart, tenant, pool), evts) =>
-      val durations = evts.map(_.durationMs.toDouble).sorted.toIndexedSeq
-      rollupBuckets += RollupBucket(
-        bucketStart = bucketStart,
-        granularity = "hour",
-        tenant = tenant,
-        pool = pool,
-        username = "",
-        stmtCount = evts.size.toLong,
-        errorCount = evts.count(e => e.status != "ok" && e.status != "denied").toLong,
-        deniedCount = evts.count(_.status == "denied").toLong,
-        engineMsSum = evts.map(_.durationMs).sum,
-        p50Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.50)),
-        p95Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.95)),
-        p99Ms = if durations.isEmpty then None else Some(percentileCont(durations, 0.99))
-      )
-    }
-
-    // Daily rollups: group by (truncated-to-day UTC, tenant, pool, username)
-    val dailyGroups = inRange.groupBy { e =>
-      (e.ts.truncatedTo(ChronoUnit.DAYS), e.tenant, e.pool, e.username)
-    }
-    dailyGroups.foreach { case ((bucketStart, tenant, pool, username), evts) =>
-      rollupBuckets += RollupBucket(
-        bucketStart = bucketStart,
-        granularity = "day",
-        tenant = tenant,
-        pool = pool,
-        username = username,
-        stmtCount = evts.size.toLong,
-        errorCount = evts.count(e => e.status != "ok" && e.status != "denied").toLong,
-        deniedCount = evts.count(_.status == "denied").toLong,
-        engineMsSum = evts.map(_.durationMs).sum,
-        p50Ms = None,
-        p95Ms = None,
-        p99Ms = None
-      )
-    }
+        // -- Daily rollups: [dlo, dhi) on raw events, per-user username ------- //
+        val dayInRange = stmtRows.toList.map(_._2).filter { e =>
+          !e.ts.isBefore(dlo) && e.ts.isBefore(dhi)
+        }
+        rollupBuckets.filterInPlace { b =>
+          b.granularity != "day" || b.bucketStart.isBefore(dlo) || !b.bucketStart.isBefore(dhi)
+        }
+        val dailyGroups = dayInRange.groupBy { e =>
+          (RollupMath.dayFloor(e.ts), e.tenant, e.pool, e.username)
+        }
+        dailyGroups.foreach { case ((bucketStart, tenant, pool, username), evts) =>
+          rollupBuckets += RollupBucket(
+            bucketStart = bucketStart,
+            granularity = "day",
+            tenant = tenant,
+            pool = pool,
+            username = username,
+            stmtCount = evts.size.toLong,
+            errorCount = evts.count(e => e.status != "ok" && e.status != "denied").toLong,
+            deniedCount = evts.count(_.status == "denied").toLong,
+            engineMsSum = evts.map(_.durationMs).sum,
+            p50Ms = None,
+            p95Ms = None,
+            p99Ms = None
+          )
+        }
 
   override def queryRollups(q: RollupQuery): List[RollupBucket] =
     var filtered = rollupBuckets.toList.filter(_.granularity == q.granularity)

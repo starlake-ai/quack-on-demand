@@ -289,21 +289,221 @@ final class PostgresTelemetryStore(
       finally ps.close()
     }
 
-  // --- Rollup stubs (implemented in Task 3) -------------------------------- //
+  // --- Rollup watermark ----------------------------------------------------- //
 
   override def rollupWatermark(): Option[Instant] =
-    throw new UnsupportedOperationException("implemented in a later task")
-
-  override def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      val ps = c.prepareStatement(
+        "SELECT last_rolled_ts FROM qodstate_rollup_watermark WHERE id = 1"
+      )
+      try
+        val rs = ps.executeQuery()
+        if rs.next() then Some(rs.getTimestamp(1).toInstant) else None
+      finally ps.close()
+    }
 
   override def advanceRollupWatermark(to: Instant): Unit =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      val ps = c.prepareStatement(
+        "INSERT INTO qodstate_rollup_watermark (id, last_rolled_ts) VALUES (1, ?)" +
+          " ON CONFLICT (id) DO UPDATE SET last_rolled_ts = EXCLUDED.last_rolled_ts"
+      )
+      try
+        ps.setTimestamp(1, Timestamp.from(to))
+        ps.executeUpdate()
+      finally ps.close()
+    }
+
+  // --- Rollup recompute ----------------------------------------------------- //
+
+  /** Fetch the minimum ts in qodstate_stmt_history, or None when the table is empty. Used as the
+    * `oldestRaw` by-name argument to [[RollupMath.hourWindow]] when no watermark is present.
+    */
+  private def fetchOldestRaw(): Option[Instant] =
+    withConn { c =>
+      val ps = c.prepareStatement("SELECT min(ts) FROM qodstate_stmt_history")
+      try
+        val rs = ps.executeQuery()
+        if rs.next() then
+          val ts = rs.getTimestamp(1)
+          if rs.wasNull() then None else Some(ts.toInstant)
+        else None
+      finally ps.close()
+    }
+
+  override def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit =
+    RollupMath.hourWindow(fromExclusive, toInclusive, fetchOldestRaw()) match
+      case None           => ()
+      case Some((lo, hi)) =>
+        val (dlo, dhi) = RollupMath.dayWindow((lo, hi))
+        withConn { c =>
+          c.setAutoCommit(false)
+          try
+            // -- Delete + insert hourly buckets -------------------------------- //
+            val delHour = c.prepareStatement(
+              "DELETE FROM qodstate_stmt_rollup" +
+                " WHERE granularity = 'hour' AND bucket_start >= ? AND bucket_start < ?"
+            )
+            try
+              delHour.setTimestamp(1, Timestamp.from(lo))
+              delHour.setTimestamp(2, Timestamp.from(hi))
+              delHour.executeUpdate()
+            finally delHour.close()
+
+            val insHour = c.prepareStatement(
+              "INSERT INTO qodstate_stmt_rollup" +
+                " (bucket_start, granularity, tenant, pool, username," +
+                "  stmt_count, error_count, denied_count, engine_ms_sum," +
+                "  p50_ms, p95_ms, p99_ms)" +
+                // date_trunc on a timestamptz truncates in the session timezone; the
+                // AT TIME ZONE 'UTC' round-trip pins truncation to UTC boundaries so
+                // bucket_start matches RollupMath.hourFloor regardless of server TZ.
+                " SELECT date_trunc('hour', ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'," +
+                "   'hour', tenant, pool, ''," +
+                "   count(*)," +
+                "   count(*) FILTER (WHERE status NOT IN ('ok', 'denied'))," +
+                "   count(*) FILTER (WHERE status = 'denied')," +
+                "   COALESCE(sum(duration_ms), 0)," +
+                "   percentile_cont(0.5)  WITHIN GROUP (ORDER BY duration_ms)," +
+                "   percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)," +
+                "   percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms)" +
+                " FROM qodstate_stmt_history" +
+                " WHERE ts >= ? AND ts < ?" +
+                " GROUP BY 1, tenant, pool"
+            )
+            try
+              insHour.setTimestamp(1, Timestamp.from(lo))
+              insHour.setTimestamp(2, Timestamp.from(hi))
+              insHour.executeUpdate()
+            finally insHour.close()
+
+            // -- Delete + insert daily buckets --------------------------------- //
+            val delDay = c.prepareStatement(
+              "DELETE FROM qodstate_stmt_rollup" +
+                " WHERE granularity = 'day' AND bucket_start >= ? AND bucket_start < ?"
+            )
+            try
+              delDay.setTimestamp(1, Timestamp.from(dlo))
+              delDay.setTimestamp(2, Timestamp.from(dhi))
+              delDay.executeUpdate()
+            finally delDay.close()
+
+            val insDay = c.prepareStatement(
+              "INSERT INTO qodstate_stmt_rollup" +
+                " (bucket_start, granularity, tenant, pool, username," +
+                "  stmt_count, error_count, denied_count, engine_ms_sum," +
+                "  p50_ms, p95_ms, p99_ms)" +
+                " SELECT date_trunc('day', ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'," +
+                "   'day', tenant, pool, username," +
+                "   count(*)," +
+                "   count(*) FILTER (WHERE status NOT IN ('ok', 'denied'))," +
+                "   count(*) FILTER (WHERE status = 'denied')," +
+                "   COALESCE(sum(duration_ms), 0)," +
+                "   NULL, NULL, NULL" +
+                " FROM qodstate_stmt_history" +
+                " WHERE ts >= ? AND ts < ?" +
+                " GROUP BY 1, tenant, pool, username"
+            )
+            try
+              insDay.setTimestamp(1, Timestamp.from(dlo))
+              insDay.setTimestamp(2, Timestamp.from(dhi))
+              insDay.executeUpdate()
+            finally insDay.close()
+
+            c.commit()
+          catch
+            case t: Throwable =>
+              try c.rollback()
+              catch case _: Throwable => ()
+              throw t
+          finally c.setAutoCommit(true)
+        }
+
+  // --- Rollup query --------------------------------------------------------- //
 
   override def queryRollups(q: RollupQuery): List[RollupBucket] =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      val parts = List.newBuilder[(String, (PreparedStatement, Int) => Int)]
+
+      parts += (("granularity = ?", (ps, i) => { ps.setString(i, q.granularity); i + 1 }))
+
+      q.tenants match
+        case Some(ts) if ts.isEmpty =>
+          parts += (("FALSE", (_, i) => i))
+        case Some(ts) =>
+          val tenantList   = ts.toList
+          val placeholders = tenantList.map(_ => "?").mkString(", ")
+          parts += ((
+            s"tenant IN ($placeholders)",
+            (ps, i) => {
+              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
+              i + tenantList.size
+            }
+          ))
+        case None => ()
+
+      q.pool.foreach { v =>
+        parts += (("pool = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
+      }
+      q.from.foreach { v =>
+        parts += ((
+          "bucket_start >= ?",
+          (ps, i) => { ps.setTimestamp(i, Timestamp.from(v)); i + 1 }
+        ))
+      }
+      q.to.foreach { v =>
+        parts += ((
+          "bucket_start < ?",
+          (ps, i) => { ps.setTimestamp(i, Timestamp.from(v)); i + 1 }
+        ))
+      }
+
+      val builtParts = parts.result()
+      val whereSql   = builtParts.map(_._1).mkString(" WHERE ", " AND ", "")
+      val sql        =
+        "SELECT bucket_start, granularity, tenant, pool, username," +
+          " stmt_count, error_count, denied_count, engine_ms_sum, p50_ms, p95_ms, p99_ms" +
+          s" FROM qodstate_stmt_rollup$whereSql" +
+          " ORDER BY bucket_start ASC, tenant ASC, pool ASC, username ASC"
+      val ps = c.prepareStatement(sql)
+      try
+        builtParts.foldLeft(1) { case (idx, (_, setter)) => setter(ps, idx) }
+        val rs  = ps.executeQuery()
+        val out = ListBuffer.empty[RollupBucket]
+        while rs.next() do
+          def optDouble(col: String): Option[Double] =
+            val v = rs.getDouble(col)
+            if rs.wasNull() then None else Some(v)
+          out += RollupBucket(
+            bucketStart = rs.getTimestamp("bucket_start").toInstant,
+            granularity = rs.getString("granularity"),
+            tenant = rs.getString("tenant"),
+            pool = rs.getString("pool"),
+            username = rs.getString("username"),
+            stmtCount = rs.getLong("stmt_count"),
+            errorCount = rs.getLong("error_count"),
+            deniedCount = rs.getLong("denied_count"),
+            engineMsSum = rs.getLong("engine_ms_sum"),
+            p50Ms = optDouble("p50_ms"),
+            p95Ms = optDouble("p95_ms"),
+            p99Ms = optDouble("p99_ms")
+          )
+        out.toList
+      finally ps.close()
+    }
+
+  // --- Rollup purge --------------------------------------------------------- //
 
   override def purgeRollups(granularity: String, olderThan: Instant): Int =
-    throw new UnsupportedOperationException("implemented in a later task")
+    withConn { c =>
+      val ps = c.prepareStatement(
+        "DELETE FROM qodstate_stmt_rollup WHERE granularity = ? AND bucket_start < ?"
+      )
+      try
+        ps.setString(1, granularity)
+        ps.setTimestamp(2, Timestamp.from(olderThan))
+        ps.executeUpdate()
+      finally ps.close()
+    }
 
   override def close(): Unit = if !dataSource.isClosed then dataSource.close()
