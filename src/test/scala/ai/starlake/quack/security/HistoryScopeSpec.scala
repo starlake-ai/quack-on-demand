@@ -100,11 +100,10 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
 
   private def addGlobex(
       store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-  ): Unit = {
+  ): Unit =
     store.upsertTenant(
       Tenant(id = GlobexTenantId, displayName = "globex", authProvider = "db")
     )
-  }
 
   private def seedAll(ts: RecordingTelemetryStore): Unit = {
     ts.appendStatements(List(S1, S2, S3, S4))

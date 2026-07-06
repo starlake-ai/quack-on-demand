@@ -1093,10 +1093,10 @@ object Dtos:
   given Codec[StatementHistoryResponse] = deriveCodec
 
   // History: trends and statement search
-  given Codec[TrendBucketEntry]           = deriveCodec
-  given Codec[TrendsResponse]             = deriveCodec
-  given Codec[StatementHistoryRowEntry]   = deriveCodec
-  given Codec[StatementSearchResponse]    = deriveCodec
+  given Codec[TrendBucketEntry]         = deriveCodec
+  given Codec[TrendsResponse]           = deriveCodec
+  given Codec[StatementHistoryRowEntry] = deriveCodec
+  given Codec[StatementSearchResponse]  = deriveCodec
 
   // Audit log
   given Codec[AuditEventEntry]   = deriveCodec
