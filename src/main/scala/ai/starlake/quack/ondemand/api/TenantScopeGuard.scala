@@ -27,7 +27,9 @@ object TenantScopeGuard:
   // on these routes; instead the handler silently falls back to the caller's
   // manageable-tenant set.
   private val QueryTenantExempt = Set(
-    "/api/audit/list"
+    "/api/audit/list",
+    "/api/history/trends",
+    "/api/history/statements"
   )
 
   /** Returns the request's tenant id (path or query), or `None` if no tenant is encoded in the URL

@@ -28,6 +28,10 @@ private given Schema[KillStatementRequest]     = Schema.derived
 private given Schema[KillStatementResponse]    = Schema.derived
 private given Schema[AuditEventEntry]          = Schema.derived
 private given Schema[AuditListResponse]        = Schema.derived
+private given Schema[TrendBucketEntry]         = Schema.derived
+private given Schema[TrendsResponse]           = Schema.derived
+private given Schema[StatementHistoryRowEntry] = Schema.derived
+private given Schema[StatementSearchResponse]  = Schema.derived
 
 object Endpoints:
 
@@ -559,6 +563,64 @@ object Endpoints:
       .in(query[Option[String]]("before"))
       .in(authToken)
       .out(jsonBody[AuditListResponse])
+
+  // Tenant-scoped rollup trends (hourly or daily aggregates). granularity is required ("hour" |
+  // "day"); invalid values return 400 invalid_granularity. from/to must be ISO-8601 instants.
+  val historyTrends: PublicEndpoint[
+    (
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String]
+    ),
+    (sttp.model.StatusCode, ErrorResponse),
+    TrendsResponse,
+    Any
+  ] =
+    base.get
+      .in("history" / "trends")
+      .in(query[Option[String]]("granularity"))
+      .in(query[Option[String]]("from"))
+      .in(query[Option[String]]("to"))
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("pool"))
+      .in(authToken)
+      .out(jsonBody[TrendsResponse])
+
+  // Tenant-scoped statement search with keyset pagination. `before` is an opaque cursor (last row
+  // id as a string from a prior response). `limit` defaults to 50, clamped to [1, 500].
+  val historyStatements: PublicEndpoint[
+    (
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[Int],
+        Option[String],
+        Option[String]
+    ),
+    (sttp.model.StatusCode, ErrorResponse),
+    StatementSearchResponse,
+    Any
+  ] =
+    base.get
+      .in("history" / "statements")
+      .in(query[Option[String]]("from"))
+      .in(query[Option[String]]("to"))
+      .in(query[Option[String]]("tenant"))
+      .in(query[Option[String]]("pool"))
+      .in(query[Option[String]]("user"))
+      .in(query[Option[String]]("status"))
+      .in(query[Option[String]]("q"))
+      .in(query[Option[Int]]("limit"))
+      .in(query[Option[String]]("before"))
+      .in(authToken)
+      .out(jsonBody[StatementSearchResponse])
 
   // ----- Federated sources -----
 

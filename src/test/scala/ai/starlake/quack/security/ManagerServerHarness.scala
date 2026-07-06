@@ -279,6 +279,7 @@ object ManagerServerHarness:
     val statementStore     = new StatementHistoryStore()
     val historyHandlers    = new StatementHistoryHandlers(statementStore, sup)
     val auditHandlers      = new AuditHandlers(telemetryStore)
+    val historyApiHandlers = new HistoryHandlers(telemetryStore)
     val activeRegistry     = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeRegistry,
@@ -334,7 +335,8 @@ object ManagerServerHarness:
       activeStmts = activeStmtHandlers,
       audit = audit,
       auditLimiter = auditLimiter,
-      auditHandlers = auditHandlers
+      auditHandlers = auditHandlers,
+      history = historyApiHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

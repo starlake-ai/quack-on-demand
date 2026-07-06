@@ -431,6 +431,41 @@ final case class StatementHistoryEntry(
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 
+// ----- History: trends and statement search ------------------------------
+
+final case class TrendBucketEntry(
+    bucketStart: String,
+    tenant: String,
+    pool: String,
+    username: String,
+    stmtCount: Long,
+    errorCount: Long,
+    deniedCount: Long,
+    engineMsSum: Long,
+    p50Ms: Option[Double],
+    p95Ms: Option[Double],
+    p99Ms: Option[Double]
+)
+final case class TrendsResponse(buckets: List[TrendBucketEntry])
+
+final case class StatementHistoryRowEntry(
+    id: String,
+    ts: String,
+    username: String,
+    tenant: String,
+    pool: String,
+    nodeId: String,
+    sql: String,
+    durationMs: Long,
+    prepareMs: Option[Long],
+    status: String,
+    error: Option[String]
+)
+final case class StatementSearchResponse(
+    statements: List[StatementHistoryRowEntry],
+    nextBefore: Option[String]
+)
+
 // ----- Audit log ---------------------------------------------------------
 
 final case class AuditEventEntry(
@@ -1056,6 +1091,12 @@ object Dtos:
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
+
+  // History: trends and statement search
+  given Codec[TrendBucketEntry]           = deriveCodec
+  given Codec[TrendsResponse]             = deriveCodec
+  given Codec[StatementHistoryRowEntry]   = deriveCodec
+  given Codec[StatementSearchResponse]    = deriveCodec
 
   // Audit log
   given Codec[AuditEventEntry]   = deriveCodec
