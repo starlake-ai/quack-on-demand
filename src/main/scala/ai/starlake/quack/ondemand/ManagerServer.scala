@@ -171,11 +171,18 @@ final class ManagerServer(
         Endpoints.listTablesEndpoint.serverLogicSuccess { case (tenant, tenantDb, schema) =>
           IO.blocking(h.listTables(tenant, tenantDb, schema))
         },
-        Endpoints.getTableEndpoint.serverLogic { case (tenant, tenantDb, schema, table) =>
-          IO.blocking(h.getTable(tenant, tenantDb, schema, table)).map {
+        Endpoints.getTableEndpoint.serverLogic { case (tenant, tenantDb, schema, table, asOf) =>
+          IO.blocking(h.getTable(tenant, tenantDb, schema, table, asOf)).map {
             case Some(d) => Right(d)
-            case None    => Left(s"table $schema.$table not found")
+            case None    =>
+              Left(
+                s"table $schema.$table not found" +
+                  asOf.fold("")(n => s" at snapshot $n")
+              )
           }
+        },
+        Endpoints.listSnapshotsEndpoint.serverLogicSuccess { case (tenant, tenantDb) =>
+          IO.blocking(h.listSnapshots(tenant, tenantDb))
         }
       )
     }

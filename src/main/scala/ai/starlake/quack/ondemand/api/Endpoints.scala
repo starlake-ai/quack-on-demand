@@ -763,8 +763,12 @@ object Endpoints:
       .out(jsonBody[List[CatalogTableEntry]])
       .description("List tables in a schema of the (tenant, tenantDb)'s catalog.")
 
-  val getTableEndpoint
-      : PublicEndpoint[(String, String, String, String), String, CatalogTableDetailResponse, Any] =
+  val getTableEndpoint: PublicEndpoint[
+    (String, String, String, String, Option[Long]),
+    String,
+    CatalogTableDetailResponse,
+    Any
+  ] =
     endpoint.get
       .in(
         "api" / "catalog" / "tenant" / path[String]("tenant") /
@@ -772,9 +776,22 @@ object Endpoints:
           "schemas" / path[String]("schema") /
           "tables" / path[String]("table")
       )
+      .in(query[Option[Long]]("asOf"))
       .out(jsonBody[CatalogTableDetailResponse])
       .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
-      .description("Get one table's columns + parquet data files.")
+      .description(
+        "Get one table's columns + parquet data files, optionally as of a DuckLake snapshot."
+      )
+
+  val listSnapshotsEndpoint
+      : PublicEndpoint[(String, String), Unit, List[CatalogSnapshotEntry], Any] =
+    endpoint.get
+      .in(
+        "api" / "catalog" / "tenant" / path[String]("tenant") /
+          "database" / path[String]("tenantDb") / "snapshots"
+      )
+      .out(jsonBody[List[CatalogSnapshotEntry]])
+      .description("List DuckLake snapshots of the (tenant, tenantDb), newest first.")
 
   val activeStatements: PublicEndpoint[
     Option[String],
