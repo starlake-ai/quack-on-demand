@@ -6,7 +6,6 @@ import cats.effect.IO
 import sttp.model.StatusCode
 
 import java.time.{Instant, ZoneOffset}
-import scala.util.Try
 
 /** REST handler for `GET /api/usage`: per-tenant / per-pool / per-user metering over the daily
   * rollup ledger.
@@ -31,24 +30,6 @@ final class UsageHandlers(store: TelemetryStore, now: () => Instant = () => Inst
       pool: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[UsageResponse] = IO.blocking {
-    def instant(
-        s: Option[String],
-        label: String
-    ): Either[(StatusCode, ErrorResponse), Option[Instant]] =
-      s match
-        case None    => Right(None)
-        case Some(v) =>
-          Try(Instant.parse(v)).toOption
-            .map(i => Right(Some(i)))
-            .getOrElse(
-              Left(
-                (
-                  StatusCode.BadRequest,
-                  ErrorResponse("invalid_time", s"$label must be ISO-8601 instant")
-                )
-              )
-            )
-
     val gb = groupBy.getOrElse("tenant")
     if gb != "tenant" && gb != "pool" && gb != "user" then
       Left(
@@ -71,8 +52,8 @@ final class UsageHandlers(store: TelemetryStore, now: () => Instant = () => Inst
           tenant.map(Set(_))
 
       for
-        f <- instant(from, "from")
-        t <- instant(to, "to")
+        f <- QueryParams.instant(from, "from")
+        t <- QueryParams.instant(to, "to")
       yield
         val monthStart =
           now().atZone(ZoneOffset.UTC).toLocalDate.withDayOfMonth(1)

@@ -5,9 +5,6 @@ import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditQuery, Telemetry
 import cats.effect.IO
 import sttp.model.StatusCode
 
-import java.time.Instant
-import scala.util.Try
-
 /** REST handler for `GET /api/audit/list`.
   *
   * Scoping rules:
@@ -39,24 +36,6 @@ final class AuditHandlers(store: TelemetryStore):
       noTenant: Option[Boolean],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[AuditListResponse] = IO.blocking {
-    def instant(
-        s: Option[String],
-        label: String
-    ): Either[(StatusCode, ErrorResponse), Option[Instant]] =
-      s match
-        case None    => Right(None)
-        case Some(v) =>
-          Try(Instant.parse(v)).toOption
-            .map(i => Right(Some(i)))
-            .getOrElse(
-              Left(
-                (
-                  StatusCode.BadRequest,
-                  ErrorResponse("invalid_time", s"$label must be ISO-8601 instant")
-                )
-              )
-            )
-
     val scoped                 = apiKey.flatMap(scopeOf)
     val (tenants, includeNull) = scoped match
       case Some(s) if !s.superuser =>
@@ -73,8 +52,8 @@ final class AuditHandlers(store: TelemetryStore):
         else (tenant.map(Set(_)), tenant.isEmpty)
 
     for
-      f <- instant(from, "from")
-      t <- instant(to, "to")
+      f <- QueryParams.instant(from, "from")
+      t <- QueryParams.instant(to, "to")
     yield
       val rows = store.listAudit(
         AuditQuery(
