@@ -57,7 +57,7 @@ Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-star
 | Table-level RBAC             | **No** | **No** | **No** | **Yes** | **Yes** |
 | Row-level security           | **No** | **No** | **No** | add-on | **Yes** |
 | Column security + masking    | **No** | **No** | **No** | add-on | **Yes** |
-| Audit log                    | **No** | **No** | **Partial** | add-on | **Yes** |
+| Audit log                    | **No** | **No** | **Partial** | via plugin | **Yes** |
 | Per-tenant usage metering    | **No** | **No** | **Yes** | add-on | **Yes** |
 | Active-active manager HA     | n/a | **No** | **Yes** | **Yes** | **Yes** |
 | Autoscaling node pools       | **No** | **No** | **Yes** | **Yes** | **Yes** |
