@@ -48,21 +48,25 @@ Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-star
 
 |                              | DuckDB<br/>embedded | OSS Flight SQL servers<br/>(GizmoSQL, sqlflite) | MotherDuck | Trino /<br/>Dremio | **Quack on<br/>Demand** |
 |------------------------------|:---:|:---:|:---:|:---:|:---:|
-| Embedded / in-process        | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Self-hosted                  | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Open source                  | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Fully managed SaaS (zero ops)| ❌ | ❌ | ✅ | vendor cloud | ❌ |
-| Multi-user serving           | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Table-level RBAC            | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Column security + masking    | ❌ | ❌ | ❌ | add-on | ✅ |
-| Autoscaling node pools       | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Distributed joins (TB-scale) | ❌ | ❌ | ❌ | ✅ | ❌ |
-| BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
-| DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
+| Embedded / in-process        | **Yes** | **No** | **No** | **No** | **No** |
+| Self-hosted                  | **Yes** | **Yes** | **No** | **Yes** | **Yes** |
+| Open source                  | **Yes** | **Yes** | **No** | **Yes** | **Yes** |
+| Fully managed SaaS (zero ops)| **No** | **No** | **Yes** | vendor cloud | **No** |
+| Multi-user serving           | **No** | **Yes** | **Yes** | **Yes** | **Yes** |
+| Multi-tenant isolation       | **No** | **No** | **Yes** | **Yes** | **Yes** |
+| Table-level RBAC             | **No** | **No** | **No** | **Yes** | **Yes** |
+| Row-level security           | **No** | **No** | **No** | add-on | **Yes** |
+| Column security + masking    | **No** | **No** | **No** | add-on | **Yes** |
+| Audit log                    | **No** | **No** | **Partial** | add-on | **Yes** |
+| Per-tenant usage metering    | **No** | **No** | **Yes** | add-on | **Yes** |
+| Active-active manager HA     | n/a | **No** | **Yes** | **Yes** | **Yes** |
+| Autoscaling node pools       | **No** | **No** | **Yes** | **Yes** | **Yes** |
+| Distributed joins (TB-scale) | **No** | **No** | **No** | **Yes** | **No** |
+| BI via JDBC / ODBC           | via files | **Yes** | **Yes** | **Yes** | **Yes** |
+| DuckLake-native catalog      | **Yes** | partial | **Yes** | **No** | **Yes** |
 | Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
 
-**Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth and table and column level RBAC, in open source, on infrastructure you control.
+**Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth, table / row / column level security, an audit trail, and per-tenant usage metering, in open source, on infrastructure you control.
 
 ---
 
@@ -76,12 +80,12 @@ LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-dema
 ```
 > **Windows: run inside WSL2** with `QOD_NATIVE_CLIENT=false LOAD_TPCH=1 ./scripts/run-docker-compose.sh`
 
-That brings up Postgres + the manager, bootstraps the `tpch` tenant with a `tpch1` tenant-db and a `sales` pool of 3 nodes, and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows). The admin UI is on `http://localhost:20900/ui/` (log in `admin` / `admin` - change both before exposing anything beyond `localhost`). The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=tpch` + `pool=sales`.
+That brings up Postgres + the manager, bootstraps the demo tenants `acme` (tenant-db `acme_tpch` with pools `bi` and `etl`) and `globex` (pool `bi`), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into `acme_tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/` (log in `admin` / `admin` - change both before exposing anything beyond `localhost`). The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=acme` + `pool=bi`.
 
 Connect a BI tool or JDBC client:
 
 ```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=tpch&pool=sales
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
 ```
 
 ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart)** and **[Connecting clients](https://starlake-ai.github.io/quack-on-demand/connecting/clients)**.

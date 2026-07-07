@@ -4,6 +4,7 @@
 
 ### Admin UI
 
+- **Statements/Usage chart polish and race fixes.** Recharts upgraded to v3. Statements page: a range or filter change now supersedes an in-flight load-more instead of being silently skipped, load-more pages stay inside the window the first page used, and a failed fetch clears stale charts and rows instead of leaving them under the error banner. Usage page: same stale-data clearing, no redundant fetch when switching to a custom range before both dates are picked, and the chart's aggregate bucket is labeled "(other)" so it cannot collide with a tenant named other.
 - **pool/list tenant filter fixed for display names.** Tenant admins of a tenant whose display name differs from its id (the demo's own `acme` / "Acme Corporation" included) previously got an empty `/api/pool/list`, which also blanked the pool selects on the Statements and Usage pages. The filter now compares tenant ids.
 - **Audit nav dropdown.** The Audit, History, and Usage tabs are grouped under a single "Audit" dropdown menu named Control Plane, Statements, and Usage; page headings follow. Paths are unchanged (`/audit`, `/history`, `/usage`).
 - **Admin UI guide refreshed.** `website/docs/operating/admin-ui.md` now covers the full current UI (running-statements kill, quarantine/restart, database edit form, pool scale modal and resource limits, connections recipes, catalog table detail, RBAC scopes, config filter and manifest import flow) with regenerated screenshots.
