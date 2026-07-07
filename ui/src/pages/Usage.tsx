@@ -94,10 +94,10 @@ function chartRows(groups: UsageGroupEntry[], groupBy: string, metric: Metric): 
     for (const d of g.days) add(label, d.day, metric === 'statements' ? d.statements : d.engineMs);
   }
   for (const g of rest) {
-    for (const d of g.days) add('other', d.day, metric === 'statements' ? d.statements : d.engineMs);
+    for (const d of g.days) add('(other)', d.day, metric === 'statements' ? d.statements : d.engineMs);
   }
   const labels = top.map(g => labelOf(g, groupBy));
-  if (rest.length > 0) labels.push('other');
+  if (rest.length > 0) labels.push('(other)');
   const rows = [...byDay.values()].sort((a, b) =>
     (a.tick as string).localeCompare(b.tick as string));
   return { rows, labels };
@@ -172,12 +172,20 @@ export default function Usage() {
         setResTo(res.to);
         setDataStart(res.dataStart);
       })
-      .catch(e => setErr(String(e)))
+      .catch(e => {
+        // Clear the previous result so a failed fetch cannot leave stale
+        // numbers rendered under the error banner.
+        setGroups([]);
+        setDataStart(null);
+        setErr(String(e));
+      })
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    if (telemetryEnabled) fetchUsage();
+    // In custom mode, wait until both dates are picked: firing on the mode
+    // switch alone would just re-issue the month query.
+    if (telemetryEnabled && (!custom || (fromDate !== '' && toDate !== ''))) fetchUsage();
   }, [telemetryEnabled, month, custom, fromDate, toDate, groupBy, tenant, pool, fetchUsage]);
 
   if (!telemetryEnabled) {
@@ -280,7 +288,7 @@ export default function Usage() {
                 dataKey={label}
                 name={label}
                 stackId="s"
-                fill={label === 'other' ? C_OTHER : PALETTE[i % PALETTE.length]}
+                fill={label === '(other)' ? C_OTHER : PALETTE[i % PALETTE.length]}
               />
             ))}
           </BarChart>
