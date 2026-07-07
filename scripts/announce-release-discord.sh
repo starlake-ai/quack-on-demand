@@ -33,7 +33,9 @@ section="$(awk -v v="$version" '
   found && /^## / { exit }
   found { print }
 ' "$REPO_DIR/CHANGELOG.md")"
-[[ -n "${section//[[:space:]]/}" ]] \
+# Non-blank check via grep, NOT ${section//[[:space:]]/}: macOS /bin/bash 3.2
+# evaluates that substitution quadratically (minutes of CPU on a ~20KB section).
+grep -q '[^[:space:]]' <<<"$section" \
   || { echo "ERROR: no '## $version' section in CHANGELOG.md." >&2; exit 1; }
 
 header="**quack-on-demand v${version} released**
@@ -57,7 +59,7 @@ while IFS= read -r line; do
   fi
   chunk+="$line"$'\n'
 done <<<"$section"
-if [[ -n "${chunk//[[:space:]]/}" ]]; then
+if grep -q '[^[:space:]]' <<<"$chunk"; then
   post "$chunk"
 fi
 
