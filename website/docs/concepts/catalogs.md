@@ -33,3 +33,14 @@ A DuckLake database is addressed by a catalog name (`dbName`) and a default sche
 The global default `dataPath` is a root; each tenant-db gets its own subdirectory under it. The supervisor derives the per-database path by replacing the last component of the global default with the composed `${tenant}_${tenantDb}` name. For example a global default of `/var/ducklake/tpch` yields `/var/ducklake/tpch_tpch1` for the `tpch/tpch1` database. Object-store URIs are handled string-wise (so the `//` after the scheme is preserved), because the path DuckLake records in the catalog must match the operator-supplied URI exactly or the next `ATTACH` is refused.
 
 Switching a database to object storage is therefore a matter of setting its `dataPath` to a bucket URI and supplying the S3 credentials; see [Docker deployment](/operating/deploy-docker) for the `QOD_S3_*` keys and the bundled object-store option.
+
+## Snapshots and time travel
+
+DuckLake versions the catalog: every committed transaction writes a snapshot, and all metadata rows (schemas, tables, columns, data files) carry `begin_snapshot` / `end_snapshot` ranges. Snapshots therefore accumulate with write traffic; an append-heavy database collects thousands in weeks. History is linear (no branches), so ordering by snapshot id is the lineage.
+
+The admin UI's catalog browser exposes this history: a per-database snapshots panel (id, commit time, change summary, rows and files added or removed, affected tables) and an "as of" view on each table that shows its schema and parquet files at any retained snapshot. See the [catalog browser](/operating/admin-ui#catalog-browser). Like the rest of the browser, these are metadata reads against the `ducklake_*` tables; they do not query table data and work even when the pool has no running nodes.
+
+Two details worth knowing:
+
+- Small DML can be inlined. DuckLake buffers small inserts and deletes in catalog tables and materializes parquet on the next flush, backdating the files to the snapshot where the change logically happened. AS OF views follow engine semantics, but the current-state row count (from DuckLake's stats) includes inlined rows that the AS OF computation (parquet rows minus delete rows) does not, so the two can briefly differ on a write-hot table.
+- Snapshots are retained until expired. Expiry is a DuckLake maintenance operation (`ducklake_expire_snapshots()` followed by `ducklake_cleanup_old_files()`), not something the manager runs automatically; the browser shows whatever history the catalog retains, and time travel reaches back only to the oldest retained snapshot.
