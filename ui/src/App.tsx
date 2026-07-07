@@ -96,9 +96,6 @@ function Shell() {
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
-        {role === 'admin' && isSuperuser && (
-          <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
-        )}
         {role === 'admin' && telemetryEnabled && (
           <NavLink to="/audit"     className={({ isActive }) => isActive ? 'active' : ''}>Audit</NavLink>
         )}
@@ -107,6 +104,9 @@ function Shell() {
         )}
         {role === 'admin' && telemetryEnabled && (
           <NavLink to="/usage"     className={({ isActive }) => isActive ? 'active' : ''}>Usage</NavLink>
+        )}
+        {role === 'admin' && isSuperuser && (
+          <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
         )}
         <span className="spacer" />
         {authEnabled ? (
