@@ -72,7 +72,7 @@ export default function Audit() {
   if (!telemetryEnabled) {
     return (
       <>
-        <h2>Audit</h2>
+        <h2>Control Plane</h2>
         <p>Telemetry is disabled (telemetry.store = none). No audit events are recorded.</p>
       </>
     );
@@ -80,7 +80,7 @@ export default function Audit() {
 
   return (
     <>
-      <h2>Audit</h2>
+      <h2>Control Plane</h2>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         <select value={family} onChange={e => setFamily(e.target.value)}>
           <option value="">all families</option>
