@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import type { CatalogTableDetailResponse } from '../api/types';
+import type { CatalogSnapshotEntry, CatalogTableDetailResponse } from '../api/types';
 import Breadcrumb from '../components/Breadcrumb';
 
 function fmtBytes(n: number): string {
@@ -15,15 +15,26 @@ export default function CatalogTableDetail() {
   const { tenant, tenantDb, schema, table } = useParams<{
     tenant: string; tenantDb: string; schema: string; table: string;
   }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const asOfRaw = searchParams.get('asOf');
+  const asOf = asOfRaw != null && /^\d+$/.test(asOfRaw) ? Number(asOfRaw) : undefined;
   const [detail, setDetail] = useState<CatalogTableDetailResponse | null>(null);
   const [error, setError]   = useState<string | null>(null);
+  const [snaps, setSnaps] = useState<CatalogSnapshotEntry[]>([]);
 
   useEffect(() => {
     if (!tenant || !tenantDb || !schema || !table) return;
-    api.getCatalogTable(tenant, tenantDb, schema, table)
+    setDetail(null);
+    setError(null);
+    api.getCatalogTable(tenant, tenantDb, schema, table, asOf)
       .then(setDetail)
       .catch(e => setError(String(e)));
-  }, [tenant, tenantDb, schema, table]);
+  }, [tenant, tenantDb, schema, table, asOf]);
+
+  useEffect(() => {
+    if (!tenant || !tenantDb) return;
+    api.listCatalogSnapshots(tenant, tenantDb).then(setSnaps).catch(() => setSnaps([]));
+  }, [tenant, tenantDb]);
 
   if (error)  return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (!detail) return <p>Loading…</p>;
@@ -44,6 +55,42 @@ export default function CatalogTableDetail() {
           { label: table! },
         ]}
       />
+
+      <div style={{ margin: '12px 0', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <label>
+          Snapshot&nbsp;
+          <select
+            value={asOf ?? ''}
+            onChange={e => {
+              const v = e.target.value;
+              if (v === '') { searchParams.delete('asOf'); } else { searchParams.set('asOf', v); }
+              setSearchParams(searchParams);
+            }}
+          >
+            <option value="">current</option>
+            {snaps.map(s => (
+              <option key={s.snapshotId} value={s.snapshotId}>
+                {s.snapshotId} ({new Date(s.committedAt).toLocaleString()})
+              </option>
+            ))}
+          </select>
+        </label>
+        {asOf != null && (
+          <span style={{ background: '#fff7e0', border: '1px solid #e0c860',
+                         borderRadius: 4, padding: '2px 8px', fontSize: '0.9rem' }}>
+            Viewing as of snapshot {asOf}
+            {(() => {
+              const s = snaps.find(x => x.snapshotId === asOf);
+              return s ? ` (${new Date(s.committedAt).toLocaleString()})` : '';
+            })()}
+            <a style={{ marginLeft: 8 }} href="#" onClick={e => {
+              e.preventDefault();
+              searchParams.delete('asOf');
+              setSearchParams(searchParams);
+            }}>back to current</a>
+          </span>
+        )}
+      </div>
 
       <div style={{ marginBottom: 16, fontSize: '0.9rem' }}>
         <Link to={`/tenant/${tEnc}`}>Open tenant {tenant} →</Link>
