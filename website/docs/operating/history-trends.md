@@ -14,7 +14,7 @@ Every statement that completes the FlightSQL execute path is recorded:
 | Field | Notes |
 |---|---|
 | `ts` | Statement completion time (UTC) |
-| `tenant` | Tenant display name |
+| `tenant` | Tenant id |
 | `pool` | Pool key |
 | `username` | The authenticated user |
 | `status` | `ok`, `denied`, `transient`, `permanent`, `no-node`, `no-pool`, `pin-lost` |
