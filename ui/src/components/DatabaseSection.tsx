@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { TenantDbKind, TenantDbResponse, UpdateTenantDbRequest } from '../api/types';
 import CatalogBrowser from './CatalogBrowser';
+import CatalogSnapshotsPanel from './CatalogSnapshotsPanel';
 import DataPathEditor, {
   buildObjectStore, parseExtras as parseStoreExtras,
   type StoreType,
@@ -215,6 +216,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           <button type="button" className="link-button" onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
         </div>
         <CatalogBrowser tenant={tenant} tenantDb={browsing} />
+        <CatalogSnapshotsPanel tenant={tenant} tenantDb={browsing} />
       </div>
     );
   }
