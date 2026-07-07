@@ -19,14 +19,15 @@ import java.time.Instant
   *   - e2: tenant = Some(t-globex01) (tenant-B)
   *   - e3: tenant = None, family = "auth" (system-level event)
   *
-  * Then pins seven invariants:
-  *   1. Superuser sees all 3 events newest-first.
-  *   2. Tenant-A admin sees only e1 (no globex, no null-tenant).
-  *   3. Tenant-A admin with `?tenant=t-globex01` is pinned back to acme (cross-tenant no-leak).
-  *   4. Static-key caller sees all 3 (superuser semantics).
-  *   5. Superuser with `?family=auth` sees only e3.
-  *   6. `limit=1` + `before=<nextBefore>` pages through without overlap.
-  *   7. Invalid `?from=not-a-date` returns 400 with code `invalid_time`.
+  * Pins the scoping invariants, among them:
+  *   - Superuser sees all 3 events newest-first; `?tenant=` returns only that tenant's rows;
+  *     `?noTenant=true` returns only the null-tenant rows and wins over `?tenant=`.
+  *   - Tenant-A admin sees only e1 (no globex, no null-tenant); `?tenant=t-globex01` and
+  *     `?noTenant=true` are pinned back to acme (cross-tenant no-leak).
+  *   - Static-key callers get superuser semantics, including `?noTenant=true`.
+  *   - `?family=` filtering, `limit=1` + `before=<nextBefore>` keyset paging without overlap.
+  *   - Invalid `?from=not-a-date` returns 400 `invalid_time`; `GET /api/audit/actions` serves the
+  *     sorted vocabulary behind the API-key perimeter.
   */
 class AuditListScopeSpec extends AnyFlatSpec with Matchers:
 
@@ -190,6 +191,21 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
       withClue(s"static-key body: ${resp.body()}") {
         resp.statusCode() shouldBe 200
         eventsOf(resp.body()) should have size 3
+      }
+    finally h.shutdown()
+  }
+
+  it should "return only null-tenant rows for a static-key call with ?noTenant=true" in {
+    val (h, _, _) = bootHarness(staticApiKey = Some("test-static-key"))
+    try
+      val resp = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/audit/list?noTenant=true",
+        apiKey = Some("test-static-key")
+      )
+      withClue(s"static-key noTenant body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        tenantsOf(resp.body()) shouldBe List(None)
       }
     finally h.shutdown()
   }
