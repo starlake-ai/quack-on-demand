@@ -33,6 +33,7 @@ import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
   CatalogTableDetailResponse,
+  CatalogSnapshotEntry,
   // RBAC
   UserResponse,
   UserCreateRequest,
@@ -367,9 +368,14 @@ export const api = {
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
         `/schemas/${encodeURIComponent(schema)}/tables`
     ),
-  getCatalogTable: (tenant: string, tenantDb: string, schema: string, table: string) =>
+  getCatalogTable: (tenant: string, tenantDb: string, schema: string, table: string, asOf?: number) =>
     get<CatalogTableDetailResponse>(
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
-        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}`
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}` +
+        (asOf != null ? `?asOf=${asOf}` : '')
+    ),
+  listCatalogSnapshots: (tenant: string, tenantDb: string) =>
+    get<CatalogSnapshotEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots`
     ),
 };

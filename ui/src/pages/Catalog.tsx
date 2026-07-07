@@ -6,6 +6,7 @@ import type {
   TenantDbResponse,
 } from '../api/types';
 import CatalogBrowser from '../components/CatalogBrowser';
+import CatalogSnapshotsPanel from '../components/CatalogSnapshotsPanel';
 
 export default function Catalog() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -77,7 +78,12 @@ export default function Catalog() {
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
 
       <div style={{ marginTop: '12px' }}>
-        {tenant && tenantDb && <CatalogBrowser tenant={tenant} tenantDb={tenantDb} />}
+        {tenant && tenantDb && (
+          <>
+            <CatalogBrowser tenant={tenant} tenantDb={tenantDb} />
+            <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} />
+          </>
+        )}
       </div>
     </div>
   );
