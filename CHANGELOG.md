@@ -2,6 +2,11 @@
 
 ## 0.3.6 (unreleased)
 
+### Admin UI
+
+- **Audit nav dropdown.** The Audit, History, and Usage tabs are grouped under a single "Audit" dropdown menu named Control Plane, Statements, and Usage; page headings follow. Paths are unchanged (`/audit`, `/history`, `/usage`).
+- **Admin UI guide refreshed.** `website/docs/operating/admin-ui.md` now covers the full current UI (running-statements kill, quarantine/restart, database edit form, pool scale modal and resource limits, connections recipes, catalog table detail, RBAC scopes, config filter and manifest import flow) with regenerated screenshots.
+
 ### Usage and accounting
 
 - **Per-tenant / per-pool / per-user metering with export.** `GET /api/usage` aggregates the daily rollup ledger over a period (defaults to the current calendar month, UTC) grouped by tenant, pool, or user; each group carries totals (`statements`, `errors`, `denied`, `engineMs`) plus per-day sub-totals. New "Usage" admin UI page: month or custom-range picker, stacked per-day bar chart (statements or engine-ms), totals table, client-side CSV export (`tenant,pool,user,statements,errors,denied,engine_ms`). Daily rollups are now retained for `QOD_USAGE_RETENTION_DAYS` (default 400) and purged by the hourly duty. Tenant admins are pinned to their tenant; the JSON API is the integration surface for external billing.
