@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.catalog
 
+import ai.starlake.quack.ondemand.api.CatalogTableRef
 import ai.starlake.quack.ondemand.state.testkit.PostgresFixture
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -51,4 +52,23 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
   "getTable" should "return None when the table doesn't exist" in
     withCatalog("tpch") { (reader, _) =>
       reader.getTable(schema = "tpch1", table = "does_not_exist") shouldBe None
+    }
+
+  "listSnapshots" should "list snapshots newest-first with change summaries and counts" in
+    withCatalog("tpch") { (reader, _) =>
+      val snaps = reader.listSnapshots()
+      snaps should not be empty
+      // newest first
+      snaps.map(_.snapshotId) shouldBe snaps.map(_.snapshotId).sortBy(-_)
+      // committedAt is ISO-8601 parseable
+      noException should be thrownBy java.time.Instant.parse(snaps.head.committedAt)
+      // the seed inserts 5 rows and flushes them to parquet: across all
+      // snapshots exactly 5 rows / at least 1 file were added, none removed
+      snaps.map(_.rowsAdded).sum shouldBe 5L
+      snaps.map(_.filesAdded).sum should be >= 1
+      snaps.map(_.filesRemoved).sum shouldBe 0
+      // snapshots that touched the region table resolve its name
+      val touching = snaps.filter(_.changes.contains("_table"))
+      touching should not be empty
+      touching.flatMap(_.affectedTables) should contain(CatalogTableRef("tpch1", "region"))
     }

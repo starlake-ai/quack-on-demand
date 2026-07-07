@@ -710,6 +710,22 @@ final case class CatalogTableDetailResponse(
     dataFiles: List[CatalogDataFileEntry]
 )
 
+final case class CatalogTableRef(
+    schema: String,
+    name: String
+)
+
+final case class CatalogSnapshotEntry(
+    snapshotId: Long,
+    committedAt: String, // ISO-8601, from ducklake_snapshot.snapshot_time
+    schemaVersion: Long,
+    changes: String, // raw ducklake_snapshot_changes.changes_made ('' when absent)
+    rowsAdded: Long,
+    filesAdded: Int,
+    filesRemoved: Int,
+    affectedTables: List[CatalogTableRef]
+)
+
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
@@ -1298,6 +1314,8 @@ object Dtos:
   given Codec[CatalogColumnEntry]         = deriveCodec
   given Codec[CatalogDataFileEntry]       = deriveCodec
   given Codec[CatalogTableDetailResponse] = deriveCodec
+  given Codec[CatalogTableRef]            = deriveCodec
+  given Codec[CatalogSnapshotEntry]       = deriveCodec
 
   // Federation
   // Hand-rolled decoder so omitted optional fields fall back to the
