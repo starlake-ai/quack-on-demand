@@ -10,15 +10,17 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb }: {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setSnaps(null);
     setError(null);
     api.listCatalogSnapshots(tenant, tenantDb)
-      .then(setSnaps)
-      .catch(e => setError(String(e)));
+      .then(r => { if (!cancelled) setSnaps(r); })
+      .catch(e => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
   }, [tenant, tenantDb]);
 
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
-  if (!snaps) return <p>Loading snapshots...</p>;
+  if (!snaps) return <p>Loading snapshots…</p>;
 
   return (
     <section style={{ marginTop: 24 }}>
@@ -38,28 +40,35 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb }: {
               </tr>
             </thead>
             <tbody>
-              {snaps.map(s => (
-                <tr key={s.snapshotId} style={{ borderTop: '1px solid #eee' }}>
-                  <td align="right">{s.snapshotId}</td>
-                  <td>{new Date(s.committedAt).toLocaleString()}</td>
-                  <td><code style={{ fontSize: '0.85em' }}>{s.changes || '--'}</code></td>
-                  <td align="right">{s.rowsAdded.toLocaleString()}</td>
-                  <td align="right">{s.filesAdded} / {s.filesRemoved}</td>
-                  <td>
-                    {s.affectedTables.map((t, i) => (
-                      <span key={`${t.schema}.${t.name}`}>
-                        {i > 0 && ', '}
-                        <Link
-                          to={`/catalog/${encodeURIComponent(tenant)}/${encodeURIComponent(tenantDb)}` +
-                              `/${encodeURIComponent(t.schema)}/${encodeURIComponent(t.name)}?asOf=${s.snapshotId}`}
-                        >
-                          {t.schema}.{t.name}
-                        </Link>
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              ))}
+              {snaps.map(s => {
+                // A drop snapshot's affected tables are the dropped ones; they are not
+                // visible AS OF snapshotId (end_snapshot <= snapshotId), so we link one
+                // snapshot earlier to show the table's last visible state.
+                const isDrop = s.changes?.includes('dropped_table');
+                const tableAsOf = isDrop ? s.snapshotId - 1 : s.snapshotId;
+                return (
+                  <tr key={s.snapshotId} style={{ borderTop: '1px solid #eee' }}>
+                    <td align="right">{s.snapshotId}</td>
+                    <td>{new Date(s.committedAt).toLocaleString()}</td>
+                    <td><code style={{ fontSize: '0.85em' }}>{s.changes || '--'}</code></td>
+                    <td align="right">{s.rowsAdded.toLocaleString()}</td>
+                    <td align="right">{s.filesAdded} / {s.filesRemoved}</td>
+                    <td>
+                      {s.affectedTables.map((t, i) => (
+                        <span key={`${t.schema}.${t.name}`}>
+                          {i > 0 && ', '}
+                          <Link
+                            to={`/catalog/${encodeURIComponent(tenant)}/${encodeURIComponent(tenantDb)}` +
+                                `/${encodeURIComponent(t.schema)}/${encodeURIComponent(t.name)}?asOf=${tableAsOf}`}
+                          >
+                            {t.schema}.{t.name}
+                          </Link>
+                        </span>
+                      ))}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
