@@ -4,8 +4,10 @@ import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
   CatalogDataFileEntry,
   CatalogSchemaEntry,
+  CatalogSnapshotEntry,
   CatalogTableDetailResponse,
-  CatalogTableEntry
+  CatalogTableEntry,
+  CatalogTableRef
 }
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
@@ -153,6 +155,128 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
         snapshotId = rs.getLong("begin_snapshot")
       )
     }
+
+  /** All snapshots, newest first. Counts are computed from `ducklake_data_file`: a file "added at"
+    * snapshot n has begin_snapshot = n, "removed at" n has end_snapshot = n. `affectedTables`
+    * resolves the table ids referenced by `changes_made` to (schema, table) names visible at that
+    * snapshot.
+    */
+  def listSnapshots(): List[CatalogSnapshotEntry] =
+    val snapSql =
+      """SELECT s.snapshot_id,
+        |       s.snapshot_time,
+        |       s.schema_version,
+        |       coalesce(c.changes_made, '')       AS changes_made,
+        |       coalesce(added.rows_added, 0)      AS rows_added,
+        |       coalesce(added.files_added, 0)     AS files_added,
+        |       coalesce(removed.files_removed, 0) AS files_removed
+        |  FROM ducklake_snapshot s
+        |  LEFT JOIN ducklake_snapshot_changes c ON c.snapshot_id = s.snapshot_id
+        |  LEFT JOIN (SELECT begin_snapshot   AS sid,
+        |                    sum(record_count) AS rows_added,
+        |                    count(*)          AS files_added
+        |               FROM ducklake_data_file
+        |              GROUP BY begin_snapshot) added ON added.sid = s.snapshot_id
+        |  LEFT JOIN (SELECT end_snapshot AS sid,
+        |                    count(*)     AS files_removed
+        |               FROM ducklake_data_file
+        |              WHERE end_snapshot IS NOT NULL
+        |              GROUP BY end_snapshot) removed ON removed.sid = s.snapshot_id
+        | ORDER BY s.snapshot_id DESC""".stripMargin
+    val rows = query(snapSql) { rs =>
+      (
+        rs.getLong("snapshot_id"),
+        rs.getTimestamp("snapshot_time").toInstant.toString,
+        rs.getLong("schema_version"),
+        rs.getString("changes_made"),
+        rs.getLong("rows_added"),
+        rs.getInt("files_added"),
+        rs.getInt("files_removed")
+      )
+    }
+    // Full (small) table-version history, resolved in memory per snapshot so
+    // the listing stays at two round trips instead of one per snapshot.
+    val history = query(
+      """SELECT t.table_id,
+        |       sch.schema_name,
+        |       t.table_name,
+        |       t.begin_snapshot,
+        |       t.end_snapshot
+        |  FROM ducklake_table t
+        |  JOIN ducklake_schema sch ON sch.schema_id = t.schema_id""".stripMargin
+    ) { rs =>
+      TableVersion(
+        rs.getLong("table_id"),
+        rs.getString("schema_name"),
+        rs.getString("table_name"),
+        rs.getLong("begin_snapshot"),
+        Option(rs.getObject("end_snapshot")).map(_ => rs.getLong("end_snapshot"))
+      )
+    }
+    rows.map { case (sid, at, ver, changes, rowsAdded, filesAdded, filesRemoved) =>
+      CatalogSnapshotEntry(
+        snapshotId = sid,
+        committedAt = at,
+        schemaVersion = ver,
+        changes = changes,
+        rowsAdded = rowsAdded,
+        filesAdded = filesAdded,
+        filesRemoved = filesRemoved,
+        affectedTables = affectedTables(sid, changes, history)
+      )
+    }
+
+  private case class TableVersion(
+      tableId: Long,
+      schema: String,
+      name: String,
+      begin: Long,
+      end: Option[Long]
+  )
+
+  /** Verbs in changes_made whose payload references a table. */
+  private val TableChangeVerbs = Set(
+    "created_table",
+    "dropped_table",
+    "altered_table",
+    "inserted_into_table",
+    "deleted_from_table",
+    "compacted_table"
+  )
+
+  /** Parses changes_made (comma-separated `verb:payload` entries) and resolves table references to
+    * names. Payloads are numeric table ids in older DuckLake versions and quoted qualified names
+    * ("schema"."table") in newer ones; both are handled. Unresolvable ids are skipped (the raw
+    * string still shows them).
+    */
+  private def affectedTables(
+      sid: Long,
+      changes: String,
+      history: List[TableVersion]
+  ): List[CatalogTableRef] =
+    val refs = changes.split(",").toList.map(_.trim).filter(_.nonEmpty).flatMap { entry =>
+      val sep = entry.indexOf(':')
+      if sep <= 0 then Nil
+      else
+        val verb    = entry.substring(0, sep)
+        val payload = entry.substring(sep + 1)
+        if !TableChangeVerbs.contains(verb) then Nil
+        else
+          payload.toLongOption match
+            case Some(id) =>
+              // Visible at sid; `end >= sid` (not `>`) so a table dropped AT
+              // sid still resolves for its own drop entry.
+              history
+                .find(v => v.tableId == id && v.begin <= sid && v.end.forall(_ >= sid))
+                .map(v => CatalogTableRef(v.schema, v.name))
+                .toList
+            case None =>
+              payload.split("\"\\.\"").toList match
+                case s :: t :: Nil =>
+                  List(CatalogTableRef(s.stripPrefix("\""), t.stripSuffix("\"")))
+                case _ => Nil
+    }
+    refs.distinct
 
   private def query[A](sql: String, params: Any*)(map: ResultSet => A): List[A] =
     val conn = ds.getConnection
