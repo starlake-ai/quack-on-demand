@@ -2,6 +2,10 @@
 
 ## 0.3.6 (unreleased)
 
+### Catalog snapshots and time travel
+
+- **DuckLake snapshot browser with AS OF views.** The catalog browser (the standalone `/ui/catalog` page and the inline browser opened from a tenant's Databases tab) gains a per-database **Snapshots** panel: snapshot id, commit time, raw change summary, computed rows and files added or removed, and the affected tables resolved to names, newest first with keyset pagination (`limit` default 200 clamped to 1..1000, `before` cursor; "Load older snapshots" in the UI). New `GET /api/catalog/tenant/{tenant}/database/{tenantDb}/snapshots`; the table endpoint gains an optional `?asOf=<snapshot id>` that re-renders the summary, column list, and parquet files as of that snapshot, and the table detail page gets a snapshot picker, an AS OF banner, and a back-to-current action with the choice encoded in the URL. Visibility predicates match DuckDB's `AT (VERSION => n)` semantics (verified against the engine, including flushed inlined DML whose files are backdated to the logical snapshot); the AS OF row count is computed as data-file rows minus delete-file rows, so it can briefly differ from the stats-based current count on unflushed inlined rows. Unknown snapshot ids and tables that did not yet exist at the snapshot return 404. Like the rest of the catalog browser these are metadata-only Postgres reads: no Quack node round trip, and they work with zero running nodes.
+
 ### Admin UI
 
 - **Statements/Usage chart polish and race fixes.** Recharts upgraded to v3. Statements page: a range or filter change now supersedes an in-flight load-more instead of being silently skipped, load-more pages stay inside the window the first page used, and a failed fetch clears stale charts and rows instead of leaving them under the error banner. Usage page: same stale-data clearing, no redundant fetch when switching to a custom range before both dates are picked, and the chart's aggregate bucket is labeled "(other)" so it cannot collide with a tenant named other.
