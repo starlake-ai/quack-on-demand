@@ -333,7 +333,7 @@ export default function History() {
   if (!telemetryEnabled) {
     return (
       <>
-        <h2>History</h2>
+        <h2>Statements</h2>
         <p>Telemetry is disabled (telemetry.store = none). No statement history is recorded.</p>
       </>
     );
@@ -349,7 +349,7 @@ export default function History() {
 
   return (
     <>
-      <h2>History</h2>
+      <h2>Statements</h2>
 
       {/* Shared chart + table filters */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
