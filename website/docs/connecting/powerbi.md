@@ -48,7 +48,7 @@ The connector ships as two artifacts:
 Three install paths follow.
 
 :::caution Using OAuth 2.0 / OIDC?
-The OAuth endpoints and client ID are **compiled into the `.mez`** (`OAuthConfig` in `QoD.pq`), so the generic released build cannot carry your identity provider. To use OAuth you must **build the connector from source** with `OAuthConfig` pointed at your IdP - see [Option 2 - Build with your own OAuth support](#option-2---build-with-your-own-oauth-support). The **Username / Password** and **Key (static JWT)** credential kinds work with the pre-built release in Option 1.
+The OAuth endpoints and client ID are **compiled into the `.mez`** (`OAuthConfig` in `QoD.pq`), so the generic released build cannot carry your identity provider. To use OAuth you must **build the connector from source** with `OAuthConfig` pointed at your IdP - see [Option 2 - Only if you need OAuth](#option-2---only-if-you-need-oauth). The **Username / Password** and **Key (static JWT)** credential kinds work with the pre-built release in Option 1.
 :::
 
 ### Option 1 - Unsigned `.mez` from GitHub Releases (Dev only)
