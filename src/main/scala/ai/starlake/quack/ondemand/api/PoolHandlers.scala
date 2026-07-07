@@ -333,16 +333,10 @@ final class PoolHandlers(
       case None                   => all // no session => static-key trusted admin
       case Some(s) if s.superuser => all
       case Some(s)                =>
-        // PoolResponse.tenant holds the display name. Resolve each manageable
-        // tenant id to a display name and filter by that set. Deleted tenants
-        // simply drop out.
-        val allowedDisplay = sup
-          .listTenants()
-          .collect {
-            case t if s.manageableTenants.contains(t.id) => t.displayName
-          }
-          .toSet
-        all.filter(p => allowedDisplay.contains(p.tenant))
+        // PoolResponse.tenant carries the tenant id (PoolKey.tenant), so filter
+        // directly against the manageable tenant-id set. Display names are
+        // free-form labels and may differ from the id.
+        all.filter(p => s.manageableTenants.contains(p.tenant))
     Right(PoolListResponse(filtered))
   }
 

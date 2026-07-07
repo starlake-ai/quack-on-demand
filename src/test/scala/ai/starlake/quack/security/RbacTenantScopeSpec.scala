@@ -48,6 +48,11 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
   private val CarolUser     = "carol"
   private val CarolPassword = "carolpw"
 
+  // Tenant-B ADMIN (unlike carol). Globex's displayName ("globex") differs from its id
+  // ("t-globex01"), which is exactly the case the pool/list tenant filter must survive.
+  private val DaveUser     = "dave"
+  private val DavePassword = "davepw"
+
   private def bcryptHash(s: String): String =
     BCrypt.withDefaults().hashToString(10, s.toCharArray)
 
@@ -130,6 +135,14 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
       passwordHash = bcryptHash(CarolPassword),
       role = "user"
     )
+    // dave -- globex tenant admin (mirrors alice in acme: admin role label + role membership).
+    val daveId = s.upsertUserWithHash(
+      tenant = Some(GlobexTenantId),
+      username = DaveUser,
+      passwordHash = bcryptHash(DavePassword),
+      role = "admin"
+    )
+    s.addUserRole(daveId, GlobexRoleId)
     carolId
 
   // ---------- HTTP helpers --------------------------------------------------
@@ -1029,11 +1042,25 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
         // the globex pool (tenant field = GlobexTenantId) is filtered out.
         resp.statusCode() shouldBe 200
         resp.body() should include(SecurityFixtures.TenantId)
-        // PoolResponse serializes the tenant field as its display name, not the id.
-        // GlobexTenantId ("t-globex01") never appears in the response; asserting on
-        // it is trivially true even if the cross-tenant filter regresses. Assert on
-        // the display name ("globex") that WOULD appear on a leak.
-        resp.body() should not include "globex"
+        // PoolResponse.tenant carries the tenant id (PoolKey.tenant), so a
+        // cross-tenant leak would surface GlobexTenantId ("t-globex01").
+        resp.body() should not include GlobexTenantId
+      }
+    finally h.shutdown()
+  }
+
+  it should "return the pools of a tenant whose display name differs from its id" in {
+    val (h, _, _) = bootWithTwoTenants()
+    try
+      // dave is a globex tenant admin; globex has id "t-globex01" but displayName
+      // "globex". The pool filter must compare tenant IDS (what PoolResponse.tenant
+      // carries), not display names, or dave sees zero pools.
+      val token = h.mintToken(DaveUser, DavePassword, Some(GlobexTenantId))
+      val resp  = getWithCookie(h.httpClient, s"${h.baseUrl}/api/pool/list", token)
+      withClue(s"globex admin (displayName != id) -> /api/pool/list: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+        resp.body() should include(GlobexTenantId)
+        resp.body() should not include SecurityFixtures.TenantId
       }
     finally h.shutdown()
   }
