@@ -128,6 +128,11 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
         )
       }
 
+  /** AS OF rowCount is computed as visible-data-file rows minus visible-delete-file rows, so it
+    * excludes inlined rows not yet flushed to parquet. The current-state path reads
+    * `ducklake_table_stats.record_count`, which includes them; on a write-hot table "current" and
+    * "as of the newest snapshot" can therefore briefly disagree until the next flush.
+    */
   private def tableHeaderAsOf(schema: String, table: String, n: Long): Option[CatalogTableEntry] =
     val (sPred, sArgs) = visible("s", Some(n))
     val (tPred, tArgs) = visible("t", Some(n))
