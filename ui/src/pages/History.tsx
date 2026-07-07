@@ -272,14 +272,30 @@ export default function History() {
     setErr('');
     api.historyTrends(params)
       .then(res => setBuckets(res.buckets))
-      .catch(e => setErr(String(e)))
+      .catch(e => {
+        // Clear the previous buckets so a failed fetch cannot leave stale
+        // charts rendered under the error banner.
+        setBuckets([]);
+        setErr(String(e));
+      })
       .finally(() => setLoading(false));
   }, []);
 
+  // Monotonic request generation for the statements table: a newer fetchStmts
+  // supersedes any in-flight request (including a load-more append), so a range
+  // or filter change during an in-flight load-more refetches instead of being
+  // silently skipped, and the stale response is discarded on arrival.
+  const stmtGenRef = useRef(0);
+  // The `from` bound of the current table window. Load-more reuses it so
+  // pagination stays inside the window the first page used instead of drifting
+  // to a newer rolling window at each click.
+  const stmtFromRef = useRef('');
+
   const fetchStmts = useCallback(() => {
-    if (stmtInFlightRef.current) return;
+    const gen = ++stmtGenRef.current;
     const { range: r, tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
     const from = new Date(Date.now() - rangeMs(r)).toISOString();
+    stmtFromRef.current = from;
     const params: Record<string, string> = { from };
     if (t)  params.tenant = t;
     if (p)  params.pool   = p;
@@ -291,19 +307,34 @@ export default function History() {
     setStmtErr('');
     api.historyStatements(params)
       .then(res => {
+        if (stmtGenRef.current !== gen) return; // superseded by a newer request
         setStmts(res.statements);
         setNextBefore(res.nextBefore);
         nextBeforeRef.current = res.nextBefore;
       })
-      .catch(e => setStmtErr(String(e)))
-      .finally(() => { setStmtLoading(false); stmtInFlightRef.current = false; });
+      .catch(e => {
+        if (stmtGenRef.current !== gen) return;
+        // Clear stale rows and the cursor: the table no longer reflects any
+        // successfully fetched window.
+        setStmts([]);
+        setNextBefore(null);
+        nextBeforeRef.current = null;
+        setStmtErr(String(e));
+      })
+      .finally(() => {
+        if (stmtGenRef.current === gen) {
+          setStmtLoading(false);
+          stmtInFlightRef.current = false;
+        }
+      });
   }, []);
 
   const loadMore = useCallback(() => {
     if (stmtInFlightRef.current || !nextBeforeRef.current) return;
-    const { range: r, tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
-    const from = new Date(Date.now() - rangeMs(r)).toISOString();
-    const params: Record<string, string> = { before: nextBeforeRef.current, from };
+    const gen = ++stmtGenRef.current;
+    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
+    const params: Record<string, string> = { before: nextBeforeRef.current };
+    if (stmtFromRef.current) params.from = stmtFromRef.current;
     if (t)  params.tenant = t;
     if (p)  params.pool   = p;
     if (u)  params.user   = u;
@@ -314,12 +345,21 @@ export default function History() {
     setStmtErr('');
     api.historyStatements(params)
       .then(res => {
+        if (stmtGenRef.current !== gen) return; // a newer refetch owns the table
         setStmts(prev => [...prev, ...res.statements]);
         setNextBefore(res.nextBefore);
         nextBeforeRef.current = res.nextBefore;
       })
-      .catch(e => setStmtErr(String(e)))
-      .finally(() => { setStmtLoading(false); stmtInFlightRef.current = false; });
+      .catch(e => {
+        // Keep the already-loaded rows: only the append failed.
+        if (stmtGenRef.current === gen) setStmtErr(String(e));
+      })
+      .finally(() => {
+        if (stmtGenRef.current === gen) {
+          setStmtLoading(false);
+          stmtInFlightRef.current = false;
+        }
+      });
   }, []);
 
   // Refetch charts AND table on range button click, tenant/pool selection, or initial load.
@@ -417,7 +457,7 @@ export default function History() {
               <LineChart data={errorRate} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <XAxis dataKey="tick" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} unit="%" />
-                <Tooltip formatter={(v: number) => `${v}%`} />
+                <Tooltip formatter={v => `${String(v ?? '')}%`} />
                 <Line type="monotone" dataKey="rate" name="error rate" stroke={C_RATE} dot={false} />
               </LineChart>
             </ResponsiveContainer>
