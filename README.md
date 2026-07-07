@@ -48,22 +48,22 @@ Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-star
 
 |                              | DuckDB<br/>embedded | OSS Flight SQL servers<br/>(GizmoSQL, sqlflite) | MotherDuck | Trino /<br/>Dremio | **Quack on<br/>Demand** |
 |------------------------------|:---:|:---:|:---:|:---:|:---:|
-| Embedded / in-process        | **Yes** | **No** | **No** | **No** | **No** |
-| Self-hosted                  | **Yes** | **Yes** | **No** | **Yes** | **Yes** |
-| Open source                  | **Yes** | **Yes** | **No** | **Yes** | **Yes** |
-| Fully managed SaaS (zero ops)| **No** | **No** | **Yes** | vendor cloud | **No** |
-| Multi-user serving           | **No** | **Yes** | **Yes** | **Yes** | **Yes** |
-| Multi-tenant isolation       | **No** | **No** | **Yes** | **Yes** | **Yes** |
-| Table-level RBAC             | **No** | **No** | **No** | **Yes** | **Yes** |
-| Row-level security           | **No** | **No** | **No** | add-on | **Yes** |
-| Column security + masking    | **No** | **No** | **No** | add-on | **Yes** |
-| Audit log                    | **No** | **No** | **Partial** | via plugin | **Yes** |
-| Per-tenant usage metering    | **No** | **No** | **Yes** | add-on | **Yes** |
-| Active-active manager HA     | n/a | **No** | **Yes** | **Yes** | **Yes** |
-| Autoscaling node pools       | **No** | **No** | **Yes** | **Yes** | **Yes** |
-| Distributed joins (TB-scale) | **No** | **No** | **No** | **Yes** | **No** |
-| BI via JDBC / ODBC           | via files | **Yes** | **Yes** | **Yes** | **Yes** |
-| DuckLake-native catalog      | **Yes** | partial | **Yes** | **No** | **Yes** |
+| Embedded / in-process        | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Self-hosted                  | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Open source                  | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Fully managed SaaS (zero ops)| ❌ | ❌ | ✅ | vendor cloud | ❌ |
+| Multi-user serving           | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Table-level RBAC             | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Row-level security           | ❌ | ❌ | ❌ | add-on | ✅ |
+| Column security + masking    | ❌ | ❌ | ❌ | add-on | ✅ |
+| Audit log                    | ❌ | ❌ | partial | via plugin | ✅ |
+| Per-tenant usage metering    | ❌ | ❌ | ✅ | add-on | ✅ |
+| Active-active manager HA     | n/a | ❌ | ✅ | ✅ | ✅ |
+| Autoscaling node pools       | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Distributed joins (TB-scale) | ❌ | ❌ | ❌ | ✅ | ❌ |
+| BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
+| DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
 | Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
 
 **Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth, table / row / column level security, an audit trail, and per-tenant usage metering, in open source, on infrastructure you control.
