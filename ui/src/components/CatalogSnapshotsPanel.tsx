@@ -20,6 +20,9 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb }: {
     setSnaps(null);
     setError(null);
     setHasMore(false);
+    // An in-flight loadMore's .finally is gen-gated and will skip its own
+    // reset after the switch, so clear the flag here or it sticks true.
+    setLoadingMore(false);
     api.listCatalogSnapshots(tenant, tenantDb, PAGE)
       .then(r => {
         if (!cancelled) {
