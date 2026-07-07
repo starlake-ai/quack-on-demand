@@ -19,10 +19,10 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     // a HikariDataSource - we pass null since none of the methods we
     // override touch it.
     val reader: DuckLakeCatalogReader = new DuckLakeCatalogReader(null):
-      override def listSchemas(): List[CatalogSchemaEntry] = schemas
+      override def listSchemas(): List[CatalogSchemaEntry]             = schemas
       override def listTables(schema: String): List[CatalogTableEntry] =
         if schema == "tpch1" then List(region) else Nil
-      override def getTable(schema: String, table: String) =
+      override def getTable(schema: String, table: String, asOf: Option[Long] = None) =
         if schema == "tpch1" && table == "region" then
           Some(CatalogTableDetailResponse(region, List(column), List(file)))
         else None
@@ -34,12 +34,12 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
   "listTables" should "filter by schema" in new Stubs:
     handlers.listTables("acme", "acme_default", "tpch1") shouldBe List(region)
-    handlers.listTables("acme", "acme_default", "main")  shouldBe Nil
+    handlers.listTables("acme", "acme_default", "main") shouldBe Nil
 
   "getTable" should "return Some when present" in new Stubs:
-    val detail = handlers.getTable("acme", "acme_default", "tpch1","region").value
+    val detail = handlers.getTable("acme", "acme_default", "tpch1", "region").value
     detail.columns shouldBe List(column)
     detail.dataFiles shouldBe List(file)
 
   "getTable" should "return None when missing" in new Stubs:
-    handlers.getTable("acme", "acme_default", "tpch1","ghost") shouldBe None
+    handlers.getTable("acme", "acme_default", "tpch1", "ghost") shouldBe None

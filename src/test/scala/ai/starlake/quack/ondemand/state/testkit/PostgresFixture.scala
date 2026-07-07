@@ -17,13 +17,15 @@ trait PostgresFixture:
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
   private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
 
-  def withCatalog[A](catalogPrefix: String)(test: (DuckLakeCatalogReader, Path) => A): A =
+  def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
+      test: (DuckLakeCatalogReader, Path) => A
+  ): A =
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
     try
       createDatabase(dbName)
       try
-        seedCatalog(dbName, dataPath)
+        seedCatalog(dbName, dataPath, extraSql)
         val meta = Map(
           "pgHost"     -> pgHost,
           "pgPort"     -> pgPort.toString,
@@ -56,7 +58,7 @@ trait PostgresFixture:
   private def dropDatabase(dbName: String): Unit =
     runPsql("postgres", s"""DROP DATABASE IF EXISTS "$dbName"""")
 
-  private def seedCatalog(dbName: String, dataPath: Path): Unit =
+  private def seedCatalog(dbName: String, dataPath: Path, extraSql: String): Unit =
     val sql =
       s"""INSTALL ducklake; LOAD ducklake;
          |INSTALL postgres; LOAD postgres;
@@ -82,6 +84,7 @@ trait PostgresFixture:
          |-- materialization so `ducklake_data_file` actually contains rows
          |-- (the catalog browser shows parquet files, not inlined batches).
          |CALL ducklake_flush_inlined_data('lake');
+         |$extraSql
          |""".stripMargin
     val tmp = Files.createTempFile("seed", ".sql")
     Files.writeString(tmp, sql)

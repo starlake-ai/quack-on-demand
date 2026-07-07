@@ -87,14 +87,93 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
       )
     }
 
-  def getTable(schema: String, table: String): Option[CatalogTableDetailResponse] =
-    listTables(schema).find(_.name == table).map { header =>
-      CatalogTableDetailResponse(
-        table = header,
-        columns = listColumns(schema, table),
-        dataFiles = listDataFiles(schema, table)
+  /** Snapshot-visibility predicate for one aliased versioned table. Without asOf this is the
+    * current-state filter (`end_snapshot IS NULL`); with asOf = n a row is visible when it began at
+    * or before n and had not been superseded by n.
+    *
+    * Delete files written by `ducklake_flush_inlined_data` are backdated: their `begin_snapshot` is
+    * the `inlined_delete` snapshot, not the later `deleted_from_table` flush snapshot. That
+    * backdating is deliberate (the delete is logically part of the table state at the DELETE
+    * snapshot) and the `<=` here matches the engine: `SELECT count(*) ... AT (VERSION => n)` in
+    * DuckDB already reflects the delete at the inlined-delete snapshot (verified empirically: 6
+    * rows at n-1, 4 rows at n, where n is the inlined_delete snapshot).
+    */
+  private def visible(alias: String, asOf: Option[Long]): (String, List[Any]) =
+    asOf match
+      case None    => (s"$alias.end_snapshot IS NULL", Nil)
+      case Some(n) =>
+        (
+          s"$alias.begin_snapshot <= ? AND ($alias.end_snapshot IS NULL OR $alias.end_snapshot > ?)",
+          List(n, n)
+        )
+
+  private def snapshotExists(id: Long): Boolean =
+    query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
+
+  def getTable(
+      schema: String,
+      table: String,
+      asOf: Option[Long] = None
+  ): Option[CatalogTableDetailResponse] =
+    if asOf.exists(n => !snapshotExists(n)) then None
+    else
+      val header = asOf match
+        case None    => listTables(schema).find(_.name == table)
+        case Some(n) => tableHeaderAsOf(schema, table, n)
+      header.map { h =>
+        CatalogTableDetailResponse(
+          table = h,
+          columns = listColumns(schema, table, asOf),
+          dataFiles = listDataFiles(schema, table, asOf)
+        )
+      }
+
+  private def tableHeaderAsOf(schema: String, table: String, n: Long): Option[CatalogTableEntry] =
+    val (sPred, sArgs) = visible("s", Some(n))
+    val (tPred, tArgs) = visible("t", Some(n))
+    val (dPred, dArgs) = visible("d", Some(n))
+    val sql            =
+      s"""SELECT s.schema_name,
+         |       t.table_name,
+         |       count(d.data_file_id)            AS data_file_count,
+         |       coalesce(sum(d.record_count), 0) AS rows_in_files,
+         |       NULLIF(
+         |         CASE WHEN NOT t.path_is_relative THEN t.path
+         |              WHEN NOT s.path_is_relative THEN s.path || t.path
+         |              ELSE coalesce(
+         |                     (SELECT value FROM ducklake_metadata
+         |                       WHERE key = 'data_path' LIMIT 1), ''
+         |                   ) || s.path || t.path
+         |         END
+         |       , '') AS folder
+         |  FROM ducklake_schema s
+         |  JOIN ducklake_table t ON t.schema_id = s.schema_id
+         |  LEFT JOIN ducklake_data_file d ON d.table_id = t.table_id AND $dPred
+         | WHERE s.schema_name = ? AND t.table_name = ?
+         |   AND $sPred AND $tPred
+         | GROUP BY s.schema_name, t.table_name,
+         |          t.path_is_relative, t.path, s.path_is_relative, s.path""".stripMargin
+    val (delFilePred, delFileArgs) = visible("del", Some(n))
+    val deletedSql                 =
+      s"""SELECT coalesce(sum(del.delete_count), 0) AS deleted
+         |  FROM ducklake_delete_file del
+         |  JOIN ducklake_table t   ON t.table_id  = del.table_id
+         |  JOIN ducklake_schema s  ON s.schema_id = t.schema_id
+         | WHERE s.schema_name = ? AND t.table_name = ?
+         |   AND $sPred AND $tPred AND $delFilePred""".stripMargin
+    val deleted = query(
+      deletedSql,
+      (List(schema, table) ++ sArgs ++ tArgs ++ delFileArgs)*
+    )(_.getLong("deleted")).headOption.getOrElse(0L)
+    query(sql, (dArgs ++ List(schema, table) ++ sArgs ++ tArgs)*) { rs =>
+      CatalogTableEntry(
+        schema = rs.getString("schema_name"),
+        name = rs.getString("table_name"),
+        rowCount = rs.getLong("rows_in_files") - deleted,
+        dataFileCount = rs.getInt("data_file_count"),
+        folder = Option(rs.getString("folder"))
       )
-    }
+    }.headOption
 
   /** Returns just the column names for (schema, table), in declaration order. Used by the
     * column-level-security rewriter to expand `SELECT *`. Reuses the same metadata query as
@@ -103,26 +182,31 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
   def columnNames(schema: String, table: String): List[String] =
     listColumns(schema, table).map(_.name)
 
-  def listColumns(schema: String, table: String): List[CatalogColumnEntry] =
+  def listColumns(
+      schema: String,
+      table: String,
+      asOf: Option[Long] = None
+  ): List[CatalogColumnEntry] =
     // DuckLake (as of v0.3, DuckDB 1.5.x) doesn't ship a
     // `ducklake_table_constraint` table - PRIMARY KEY / UNIQUE constraints
     // are rejected at CREATE TABLE time. Until the metadata schema gains a
     // way to mark primary keys, we always return isPrimaryKey = false.
-    val sql =
-      """SELECT c.column_order,
-        |       c.column_name,
-        |       c.column_type,
-        |       c.nulls_allowed
-        |  FROM ducklake_schema s
-        |  JOIN ducklake_table   t  ON t.schema_id  = s.schema_id
-        |  JOIN ducklake_column  c  ON c.table_id   = t.table_id
-        | WHERE s.schema_name = ?
-        |   AND t.table_name  = ?
-        |   AND s.end_snapshot IS NULL
-        |   AND t.end_snapshot IS NULL
-        |   AND c.end_snapshot IS NULL
-        | ORDER BY c.column_order""".stripMargin
-    query(sql, schema, table) { rs =>
+    val (sPred, sArgs) = visible("s", asOf)
+    val (tPred, tArgs) = visible("t", asOf)
+    val (cPred, cArgs) = visible("c", asOf)
+    val sql            =
+      s"""SELECT c.column_order,
+         |       c.column_name,
+         |       c.column_type,
+         |       c.nulls_allowed
+         |  FROM ducklake_schema s
+         |  JOIN ducklake_table   t  ON t.schema_id = s.schema_id
+         |  JOIN ducklake_column  c  ON c.table_id  = t.table_id
+         | WHERE s.schema_name = ?
+         |   AND t.table_name  = ?
+         |   AND $sPred AND $tPred AND $cPred
+         | ORDER BY c.column_order""".stripMargin
+    query(sql, (List(schema, table) ++ sArgs ++ tArgs ++ cArgs)*) { rs =>
       CatalogColumnEntry(
         ordinal = rs.getInt("column_order"),
         name = rs.getString("column_name"),
@@ -132,22 +216,27 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
       )
     }
 
-  private def listDataFiles(schema: String, table: String): List[CatalogDataFileEntry] =
-    val sql =
-      """SELECT d.path,
-        |       d.file_size_bytes,
-        |       d.record_count,
-        |       d.begin_snapshot
-        |  FROM ducklake_schema s
-        |  JOIN ducklake_table   t  ON t.schema_id = s.schema_id
-        |  JOIN ducklake_data_file d ON d.table_id = t.table_id
-        | WHERE s.schema_name = ?
-        |   AND t.table_name  = ?
-        |   AND s.end_snapshot IS NULL
-        |   AND t.end_snapshot IS NULL
-        |   AND d.end_snapshot IS NULL
-        | ORDER BY d.path""".stripMargin
-    query(sql, schema, table) { rs =>
+  private def listDataFiles(
+      schema: String,
+      table: String,
+      asOf: Option[Long] = None
+  ): List[CatalogDataFileEntry] =
+    val (sPred, sArgs) = visible("s", asOf)
+    val (tPred, tArgs) = visible("t", asOf)
+    val (dPred, dArgs) = visible("d", asOf)
+    val sql            =
+      s"""SELECT d.path,
+         |       d.file_size_bytes,
+         |       d.record_count,
+         |       d.begin_snapshot
+         |  FROM ducklake_schema s
+         |  JOIN ducklake_table   t  ON t.schema_id = s.schema_id
+         |  JOIN ducklake_data_file d ON d.table_id = t.table_id
+         | WHERE s.schema_name = ?
+         |   AND t.table_name  = ?
+         |   AND $sPred AND $tPred AND $dPred
+         | ORDER BY d.path""".stripMargin
+    query(sql, (List(schema, table) ++ sArgs ++ tArgs ++ dArgs)*) { rs =>
       CatalogDataFileEntry(
         path = rs.getString("path"),
         sizeBytes = rs.getLong("file_size_bytes"),

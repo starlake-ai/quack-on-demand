@@ -72,3 +72,62 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
       touching should not be empty
       touching.flatMap(_.affectedTables) should contain(CatalogTableRef("tpch1", "region"))
     }
+
+  // Evolves the seeded catalog: schema change, second insert (new parquet
+  // file), then a delete (delete file, not a data-file removal). Each
+  // statement commits its own snapshot.
+  // Note: DuckLake (this version) inlines small DELETEs; the extra
+  // ducklake_flush_inlined_data call materialises the inline delete into a
+  // parquet delete file so 'deleted_from_table' appears in changes_made and
+  // ducklake_delete_file gets a row we can count.
+  private val evolutionSql =
+    """ALTER TABLE lake.tpch1.region ADD COLUMN r_flag BOOLEAN;
+      |INSERT INTO lake.tpch1.region VALUES (5, 'ANTARCTICA', 'f', true);
+      |CALL ducklake_flush_inlined_data('lake');
+      |DELETE FROM lake.tpch1.region WHERE r_regionkey <= 1;
+      |CALL ducklake_flush_inlined_data('lake');
+      |""".stripMargin
+
+  "getTable with asOf" should "show the column set as of a pre-ALTER snapshot" in
+    withCatalog("tpch", evolutionSql) { (reader, _) =>
+      val snaps     = reader.listSnapshots()
+      val alterSnap = snaps.find(_.changes.contains("altered_table")).value.snapshotId
+      val before    = reader.getTable("tpch1", "region", asOf = Some(alterSnap - 1)).value
+      before.columns.map(_.name) should not contain "r_flag"
+      val after = reader.getTable("tpch1", "region", asOf = Some(alterSnap)).value
+      after.columns.map(_.name) should contain("r_flag")
+    }
+
+  it should "show the parquet file list as of each insert snapshot" in
+    withCatalog("tpch", evolutionSql) { (reader, _) =>
+      val inserts = reader.listSnapshots().filter(_.filesAdded > 0).sortBy(_.snapshotId)
+      inserts should have size 2
+      val atFirst = reader.getTable("tpch1", "region", asOf = Some(inserts.head.snapshotId)).value
+      atFirst.dataFiles should have size 1
+      val current = reader.getTable("tpch1", "region").value
+      current.dataFiles should have size 2
+    }
+
+  it should "compute the AS OF row count net of deletes" in
+    withCatalog("tpch", evolutionSql) { (reader, _) =>
+      val snaps = reader.listSnapshots()
+      // The logical delete is the `inlined_delete` snapshot: the flushed
+      // delete file is backdated to it (begin_snapshot), and DuckDB's own
+      // `AT (VERSION => n)` reads 4 rows there, 6 rows one before. The
+      // later `deleted_from_table` flush snapshot only materialises the
+      // parquet delete file.
+      val delSnap = snaps.find(_.changes.contains("inlined_delete")).value.snapshotId
+      reader.getTable("tpch1", "region", asOf = Some(delSnap - 1)).value.table.rowCount shouldBe 6L
+      reader.getTable("tpch1", "region", asOf = Some(delSnap)).value.table.rowCount shouldBe 4L
+    }
+
+  it should "return None for a nonexistent snapshot id" in
+    withCatalog("tpch") { (reader, _) =>
+      reader.getTable("tpch1", "region", asOf = Some(999999L)) shouldBe None
+    }
+
+  it should "return None when the table did not exist yet at the snapshot" in
+    withCatalog("tpch") { (reader, _) =>
+      // snapshot 0 is DuckLake's initial empty snapshot
+      reader.getTable("tpch1", "region", asOf = Some(0L)) shouldBe None
+    }
