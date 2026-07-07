@@ -69,6 +69,7 @@ import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
 import Users from './pages/Users';
 import Config from './pages/Config';
+import NavDropdown from './components/NavDropdown';
 
 function Shell() {
   const { username, role, tenant, logout, authEnabled } = useAuth();
@@ -97,13 +98,14 @@ function Shell() {
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
         {role === 'admin' && telemetryEnabled && (
-          <NavLink to="/audit"     className={({ isActive }) => isActive ? 'active' : ''}>Audit</NavLink>
-        )}
-        {role === 'admin' && telemetryEnabled && (
-          <NavLink to="/history"   className={({ isActive }) => isActive ? 'active' : ''}>History</NavLink>
-        )}
-        {role === 'admin' && telemetryEnabled && (
-          <NavLink to="/usage"     className={({ isActive }) => isActive ? 'active' : ''}>Usage</NavLink>
+          <NavDropdown
+            label="Audit"
+            items={[
+              { to: '/audit', label: 'Control Plane' },
+              { to: '/history', label: 'Statements' },
+              { to: '/usage', label: 'Usage' },
+            ]}
+          />
         )}
         {role === 'admin' && isSuperuser && (
           <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>

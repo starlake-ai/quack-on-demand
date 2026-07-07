@@ -197,7 +197,7 @@ button.copy-btn {
 }
 button.copy-btn:hover { color: var(--text); border-color: var(--text-mute); }
 
-/* ----- Dropdown menu (used by Pool detail "Delete pool ▾") ----- */
+/* ----- Dropdown menu (nav Audit menu) ----- */
 .dropdown-menu {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -221,6 +221,35 @@ button.dropdown-item {
 button.dropdown-item:hover { background: var(--bg-elev); }
 button.dropdown-item.danger { color: var(--bad); }
 button.dropdown-item.danger:hover { background: rgba(248,113,113,.1); }
+
+.nav-dropdown { position: relative; }
+.app-nav .nav-dropdown > button {
+  background: transparent;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  color: var(--text-soft);
+  padding: .25rem .6rem;
+  border-radius: 6px;
+}
+.app-nav .nav-dropdown > button.active,
+.app-nav .nav-dropdown > button:hover { background: var(--bg-card); color: var(--text); }
+.nav-dropdown .dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 160px;
+  z-index: 30;
+}
+a.dropdown-item {
+  color: var(--text);
+  border-radius: 4px;
+  padding: .45rem .75rem;
+  font-weight: 500;
+  text-align: left;
+}
+a.dropdown-item:hover { background: var(--bg-elev); text-decoration: none; }
+a.dropdown-item.active { color: var(--accent); }
 
 /* ----- Forms ----- */
 label { display: block; margin-bottom: .75rem; color: var(--text-soft); }
