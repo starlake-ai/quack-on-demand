@@ -19,7 +19,9 @@ export default function NavDropdown({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const location = useLocation();
 
-  const active = items.some(i => location.pathname.startsWith(i.to));
+  const active = items.some(
+    i => location.pathname === i.to || location.pathname.startsWith(`${i.to}/`),
+  );
 
   useEffect(() => {
     if (!open) return;

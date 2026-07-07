@@ -241,15 +241,15 @@ button.dropdown-item.danger:hover { background: rgba(248,113,113,.1); }
   min-width: 160px;
   z-index: 30;
 }
-a.dropdown-item {
+.nav-dropdown a.dropdown-item {
   color: var(--text);
   border-radius: 4px;
   padding: .45rem .75rem;
   font-weight: 500;
   text-align: left;
 }
-a.dropdown-item:hover { background: var(--bg-elev); text-decoration: none; }
-a.dropdown-item.active { color: var(--accent); }
+.nav-dropdown a.dropdown-item:hover { background: var(--bg-elev); text-decoration: none; }
+.nav-dropdown a.dropdown-item.active { color: var(--accent); }
 
 /* ----- Forms ----- */
 label { display: block; margin-bottom: .75rem; color: var(--text-soft); }
