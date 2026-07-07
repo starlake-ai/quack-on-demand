@@ -374,8 +374,13 @@ export const api = {
         `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}` +
         (asOf != null ? `?asOf=${asOf}` : '')
     ),
-  listCatalogSnapshots: (tenant: string, tenantDb: string) =>
-    get<CatalogSnapshotEntry[]>(
-      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots`
-    ),
+  listCatalogSnapshots: (tenant: string, tenantDb: string, limit?: number, before?: number) => {
+    const qs = new URLSearchParams();
+    if (limit != null) qs.set('limit', String(limit));
+    if (before != null) qs.set('before', String(before));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<CatalogSnapshotEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots${q}`
+    );
+  },
 };

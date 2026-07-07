@@ -131,3 +131,16 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
       // snapshot 0 is DuckLake's initial empty snapshot
       reader.getTable("tpch1", "region", asOf = Some(0L)) shouldBe None
     }
+
+  "listSnapshots" should "honor limit and keyset-paginate via before" in
+    withCatalog("tpch") { (reader, _) =>
+      val all = reader.listSnapshots()
+      all.size should be > 3
+      val firstPage = reader.listSnapshots(limit = 3)
+      firstPage shouldBe all.take(3)
+      val nextPage = reader.listSnapshots(limit = 3, before = Some(firstPage.last.snapshotId))
+      nextPage shouldBe all.slice(3, 6)
+      // pages are disjoint and ordered newest first
+      (firstPage.map(_.snapshotId) ++ nextPage.map(_.snapshotId)) shouldBe
+        (firstPage.map(_.snapshotId) ++ nextPage.map(_.snapshotId)).sortBy(-_)
+    }

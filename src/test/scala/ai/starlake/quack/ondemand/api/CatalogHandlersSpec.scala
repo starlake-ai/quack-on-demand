@@ -24,7 +24,9 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
       filesRemoved = 0,
       affectedTables = List(CatalogTableRef("tpch1", "region"))
     )
-    var seenAsOf: Option[Long] = None
+    var seenAsOf: Option[Long]   = None
+    var seenLimit: Option[Int]   = None
+    var seenBefore: Option[Long] = None
 
     // Subclass `DuckLakeCatalogReader` for the stub. The base class wants
     // a HikariDataSource - we pass null since none of the methods we
@@ -33,7 +35,13 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
       override def listSchemas(): List[CatalogSchemaEntry]             = schemas
       override def listTables(schema: String): List[CatalogTableEntry] =
         if schema == "tpch1" then List(region) else Nil
-      override def listSnapshots(): List[CatalogSnapshotEntry] = List(snapshot)
+      override def listSnapshots(
+          limit: Int = 200,
+          before: Option[Long] = None
+      ): List[CatalogSnapshotEntry] =
+        seenLimit = Some(limit)
+        seenBefore = before
+        List(snapshot)
       override def getTable(schema: String, table: String, asOf: Option[Long] = None) =
         seenAsOf = asOf
         if schema == "tpch1" && table == "region" then
@@ -64,6 +72,24 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     import ai.starlake.quack.model.TenantDbKind
     val gated = new CatalogHandlers((_, _) => reader, (_, _) => Some(TenantDbKind.InMemory))
     gated.listSnapshots("acme", "acme_default") shouldBe Nil
+
+  "listSnapshots" should "default limit to 200 when None" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", limit = None, before = None)
+    seenLimit shouldBe Some(200)
+    seenBefore shouldBe None
+
+  "listSnapshots" should "clamp limit 5000 to 1000" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", limit = Some(5000), before = None)
+    seenLimit shouldBe Some(1000)
+
+  "listSnapshots" should "clamp limit 0 to 1" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", limit = Some(0), before = None)
+    seenLimit shouldBe Some(1)
+
+  "listSnapshots" should "pass before through unchanged" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", limit = Some(10), before = Some(42L))
+    seenLimit shouldBe Some(10)
+    seenBefore shouldBe Some(42L)
 
   "getTable" should "pass asOf through to the reader" in new Stubs:
     handlers.getTable("acme", "acme_default", "tpch1", "region", Some(3L))
