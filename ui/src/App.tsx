@@ -97,6 +97,7 @@ function Shell() {
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
+        <NavLink to="/catalog"     className={({ isActive }) => isActive ? 'active' : ''}>Catalog</NavLink>
         {role === 'admin' && telemetryEnabled && (
           <NavDropdown
             label="Audit"
