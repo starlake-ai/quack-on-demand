@@ -11,7 +11,12 @@ import {
   Legend,
 } from 'recharts';
 import { api } from '../api/client';
-import type { TrendBucketEntry, StatementHistoryRowEntry } from '../api/types';
+import type {
+  TrendBucketEntry,
+  StatementHistoryRowEntry,
+  TenantResponse,
+  PoolResponse,
+} from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import SqlHighlight from '../components/SqlHighlight';
 
@@ -242,6 +247,20 @@ export default function History() {
       .catch(() => setTelemetryEnabled(false));
   }, []);
 
+  // Filter select options (mirrors the Usage page).
+  const [tenantOptions, setTenantOptions] = useState<TenantResponse[]>([]);
+  const [poolOptions, setPoolOptions] = useState<PoolResponse[]>([]);
+
+  useEffect(() => {
+    api.listPools().then(r => setPoolOptions(r.pools)).catch(() => setPoolOptions([]));
+  }, []);
+
+  useEffect(() => {
+    if (superuser) {
+      api.listTenants().then(r => setTenantOptions(r.tenants)).catch(() => setTenantOptions([]));
+    }
+  }, [superuser]);
+
   const fetch = useCallback(() => {
     const { range: r, tenant: t, pool: p } = filterRef.current;
     const from = new Date(Date.now() - rangeMs(r)).toISOString();
@@ -303,13 +322,13 @@ export default function History() {
       .finally(() => { setStmtLoading(false); stmtInFlightRef.current = false; });
   }, []);
 
-  // Refetch charts AND table on range button click or initial load.
+  // Refetch charts AND table on range button click, tenant/pool selection, or initial load.
   useEffect(() => {
     if (telemetryEnabled) {
       fetch();
       fetchStmts();
     }
-  }, [telemetryEnabled, range, fetch, fetchStmts]);
+  }, [telemetryEnabled, range, tenant, pool, fetch, fetchStmts]);
 
   if (!telemetryEnabled) {
     return (
@@ -323,6 +342,10 @@ export default function History() {
   const gran = granularity(range);
   const agg  = aggregate(buckets, gran);
   const { throughput, errorRate, latency } = toChartData(agg);
+
+  const poolNames = [...new Set(
+    poolOptions.filter(p => !tenant || p.tenant === tenant).map(p => p.pool),
+  )].sort();
 
   return (
     <>
@@ -342,19 +365,19 @@ export default function History() {
           </button>
         ))}
         {superuser && (
-          <input
-            placeholder="tenant"
-            value={tenant}
-            style={{ width: 140 }}
-            onChange={e => setTenant(e.target.value)}
-          />
+          <select value={tenant} onChange={e => { setTenant(e.target.value); setPool(''); }}>
+            <option value="">all tenants</option>
+            {tenantOptions.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+              </option>
+            ))}
+          </select>
         )}
-        <input
-          placeholder="pool"
-          value={pool}
-          style={{ width: 140 }}
-          onChange={e => setPool(e.target.value)}
-        />
+        <select value={pool} onChange={e => setPool(e.target.value)}>
+          <option value="">all pools</option>
+          {poolNames.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
         <button
           type="button"
           className="copy-btn"
