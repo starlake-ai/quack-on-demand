@@ -79,8 +79,8 @@ export default function CatalogTableDetail() {
           </select>
         </label>
         {asOf != null && (
-          <span style={{ background: '#fff7e0', border: '1px solid #e0c860',
-                         borderRadius: 4, padding: '2px 8px', fontSize: '0.9rem' }}>
+          <span style={{ background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
+                         color: 'var(--warn)', borderRadius: 4, padding: '2px 8px', fontSize: '0.9rem' }}>
             Viewing as of snapshot {asOf}
             {(() => {
               const s = snaps.find(x => x.snapshotId === asOf);
@@ -89,7 +89,7 @@ export default function CatalogTableDetail() {
             <button
               type="button"
               style={{
-                marginLeft: 8, background: 'none', border: 'none', color: '#646cff',
+                marginLeft: 8, background: 'none', border: 'none', color: 'var(--text)',
                 cursor: 'pointer', padding: 0, font: 'inherit', textDecoration: 'underline',
               }}
               onClick={() => {
