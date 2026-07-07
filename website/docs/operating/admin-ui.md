@@ -132,6 +132,14 @@ The catalog browser lists the schemas and tables of a database (the DuckLake cat
 
 Clicking a table opens its detail page, with breadcrumbs back to the catalog and links to the owning tenant and its live nodes. It shows a summary (row count, data-file count, total parquet size, folder), the column list (name, type, nullability, primary-key flag), and the table's parquet files with per-file size, row count, and snapshot id.
 
+### Snapshots and time travel
+
+Below the table list, a **Snapshots** panel shows the database's DuckLake snapshot history, newest first: snapshot id, commit time, the raw change summary (`created_table:...`, `inserted_into_table:...`), rows added, files added / removed, and the affected tables. Each affected table links to its detail page as of that snapshot. The panel loads 200 snapshots at a time; **Load older snapshots** fetches the next page (keyset pagination, so new commits do not shift the window while you browse).
+
+On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use). Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
+
+Snapshot semantics (linear history, inlined DML, retention and expiry) are covered in [DuckLake catalogs](/concepts/catalogs#snapshots-and-time-travel).
+
 ## Control Plane
 
 The **Control Plane** page (`/audit`, the first entry of the Audit menu) shows a tenant-scoped, newest-first table of administrative and data-plane events. It is available to superusers and tenant admins. When `QOD_TELEMETRY_STORE=none`, a deep link shows an empty state with a "telemetry is disabled" message.
