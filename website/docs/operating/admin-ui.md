@@ -126,7 +126,7 @@ The model these screens edit (the EffectiveSet, verbs, wildcards, the two gates)
 
 ## Catalog browser
 
-The catalog browser lists the schemas and tables of a database (the DuckLake catalog). It is reachable at `/ui/catalog` with tenant and database selectors (both preserved in the URL), and contextually from the table-count links on the Databases tab. Use it to confirm what a pool actually exposes, including federated catalogs attached to the database.
+The catalog browser lists the schemas and tables of a database (the DuckLake catalog). It is reachable from the **Catalog** entry in the top nav (`/ui/catalog`) with tenant and database selectors (both preserved in the URL), and contextually from the table-count links on the Databases tab. Use it to confirm what a pool actually exposes, including federated catalogs attached to the database.
 
 ![The catalog browser with a schema's tables listed](/img/ui/catalog.png)
 
