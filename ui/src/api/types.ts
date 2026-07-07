@@ -576,6 +576,22 @@ export interface CatalogTableDetailResponse {
   dataFiles: CatalogDataFileEntry[];
 }
 
+export interface CatalogTableRef {
+  schema: string;
+  name: string;
+}
+
+export interface CatalogSnapshotEntry {
+  snapshotId: number;
+  committedAt: string;     // ISO-8601
+  schemaVersion: number;
+  changes: string;         // raw DuckLake changes_made string
+  rowsAdded: number;
+  filesAdded: number;
+  filesRemoved: number;
+  affectedTables: CatalogTableRef[];
+}
+
 // ----- Federation -----
 
 export interface FederatedSourceCreateRequest {
