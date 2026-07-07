@@ -29,11 +29,16 @@ class CatalogHandlers(
     if !isDuckLake(tenant, tenantDb) then Nil
     else resolveReader(tenant, tenantDb).listTables(schema)
 
+  def listSnapshots(tenant: String, tenantDb: String): List[CatalogSnapshotEntry] =
+    if !isDuckLake(tenant, tenantDb) then Nil
+    else resolveReader(tenant, tenantDb).listSnapshots()
+
   def getTable(
       tenant: String,
       tenantDb: String,
       schema: String,
-      table: String
+      table: String,
+      asOf: Option[Long] = None
   ): Option[CatalogTableDetailResponse] =
     if !isDuckLake(tenant, tenantDb) then None
-    else resolveReader(tenant, tenantDb).getTable(schema, table)
+    else resolveReader(tenant, tenantDb).getTable(schema, table, asOf)
