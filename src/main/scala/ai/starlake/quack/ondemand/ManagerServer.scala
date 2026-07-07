@@ -181,8 +181,9 @@ final class ManagerServer(
               )
           }
         },
-        Endpoints.listSnapshotsEndpoint.serverLogicSuccess { case (tenant, tenantDb) =>
-          IO.blocking(h.listSnapshots(tenant, tenantDb))
+        Endpoints.listSnapshotsEndpoint.serverLogicSuccess {
+          case (tenant, tenantDb, limit, before) =>
+            IO.blocking(h.listSnapshots(tenant, tenantDb, limit, before))
         }
       )
     }

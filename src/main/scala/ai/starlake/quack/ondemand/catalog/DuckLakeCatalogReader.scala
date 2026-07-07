@@ -249,30 +249,38 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
     * snapshot n has begin_snapshot = n, "removed at" n has end_snapshot = n. `affectedTables`
     * resolves the table ids referenced by `changes_made` to (schema, table) names visible at that
     * snapshot.
+    *
+    * `limit` is the page size (caller is responsible for clamping). `before` is the exclusive
+    * keyset cursor: only snapshots with snapshot_id strictly less than `before` are returned.
     */
-  def listSnapshots(): List[CatalogSnapshotEntry] =
+  def listSnapshots(limit: Int = 200, before: Option[Long] = None): List[CatalogSnapshotEntry] =
+    val (whereClause, whereParams) = before match
+      case None    => ("", Nil)
+      case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
     val snapSql =
-      """SELECT s.snapshot_id,
-        |       s.snapshot_time,
-        |       s.schema_version,
-        |       coalesce(c.changes_made, '')       AS changes_made,
-        |       coalesce(added.rows_added, 0)      AS rows_added,
-        |       coalesce(added.files_added, 0)     AS files_added,
-        |       coalesce(removed.files_removed, 0) AS files_removed
-        |  FROM ducklake_snapshot s
-        |  LEFT JOIN ducklake_snapshot_changes c ON c.snapshot_id = s.snapshot_id
-        |  LEFT JOIN (SELECT begin_snapshot   AS sid,
-        |                    sum(record_count) AS rows_added,
-        |                    count(*)          AS files_added
-        |               FROM ducklake_data_file
-        |              GROUP BY begin_snapshot) added ON added.sid = s.snapshot_id
-        |  LEFT JOIN (SELECT end_snapshot AS sid,
-        |                    count(*)     AS files_removed
-        |               FROM ducklake_data_file
-        |              WHERE end_snapshot IS NOT NULL
-        |              GROUP BY end_snapshot) removed ON removed.sid = s.snapshot_id
-        | ORDER BY s.snapshot_id DESC""".stripMargin
-    val rows = query(snapSql) { rs =>
+      s"""SELECT s.snapshot_id,
+         |       s.snapshot_time,
+         |       s.schema_version,
+         |       coalesce(c.changes_made, '')       AS changes_made,
+         |       coalesce(added.rows_added, 0)      AS rows_added,
+         |       coalesce(added.files_added, 0)     AS files_added,
+         |       coalesce(removed.files_removed, 0) AS files_removed
+         |  FROM ducklake_snapshot s
+         |  LEFT JOIN ducklake_snapshot_changes c ON c.snapshot_id = s.snapshot_id
+         |  LEFT JOIN (SELECT begin_snapshot   AS sid,
+         |                    sum(record_count) AS rows_added,
+         |                    count(*)          AS files_added
+         |               FROM ducklake_data_file
+         |              GROUP BY begin_snapshot) added ON added.sid = s.snapshot_id
+         |  LEFT JOIN (SELECT end_snapshot AS sid,
+         |                    count(*)     AS files_removed
+         |               FROM ducklake_data_file
+         |              WHERE end_snapshot IS NOT NULL
+         |              GROUP BY end_snapshot) removed ON removed.sid = s.snapshot_id$whereClause
+         | ORDER BY s.snapshot_id DESC
+         | LIMIT ?""".stripMargin
+    val snapParams = whereParams :+ limit
+    val rows       = query(snapSql, snapParams*) { rs =>
       (
         rs.getLong("snapshot_id"),
         rs.getTimestamp("snapshot_time").toInstant.toString,

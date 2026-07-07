@@ -783,15 +783,20 @@ object Endpoints:
         "Get one table's columns + parquet data files, optionally as of a DuckLake snapshot."
       )
 
-  val listSnapshotsEndpoint
-      : PublicEndpoint[(String, String), Unit, List[CatalogSnapshotEntry], Any] =
+  val listSnapshotsEndpoint: PublicEndpoint[(String, String, Option[Int], Option[Long]), Unit, List[
+    CatalogSnapshotEntry
+  ], Any] =
     endpoint.get
       .in(
         "api" / "catalog" / "tenant" / path[String]("tenant") /
           "database" / path[String]("tenantDb") / "snapshots"
       )
+      .in(query[Option[Int]]("limit"))
+      .in(query[Option[Long]]("before"))
       .out(jsonBody[List[CatalogSnapshotEntry]])
-      .description("List DuckLake snapshots of the (tenant, tenantDb), newest first.")
+      .description(
+        "List DuckLake snapshots of the (tenant, tenantDb), newest first; keyset pagination via limit + before=snapshotId."
+      )
 
   val activeStatements: PublicEndpoint[
     Option[String],

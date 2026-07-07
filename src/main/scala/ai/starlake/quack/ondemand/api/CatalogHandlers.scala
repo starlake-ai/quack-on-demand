@@ -29,9 +29,16 @@ class CatalogHandlers(
     if !isDuckLake(tenant, tenantDb) then Nil
     else resolveReader(tenant, tenantDb).listTables(schema)
 
-  def listSnapshots(tenant: String, tenantDb: String): List[CatalogSnapshotEntry] =
+  def listSnapshots(
+      tenant: String,
+      tenantDb: String,
+      limit: Option[Int] = None,
+      before: Option[Long] = None
+  ): List[CatalogSnapshotEntry] =
     if !isDuckLake(tenant, tenantDb) then Nil
-    else resolveReader(tenant, tenantDb).listSnapshots()
+    else
+      val effectiveLimit = limit.getOrElse(200).max(1).min(1000)
+      resolveReader(tenant, tenantDb).listSnapshots(effectiveLimit, before)
 
   def getTable(
       tenant: String,
