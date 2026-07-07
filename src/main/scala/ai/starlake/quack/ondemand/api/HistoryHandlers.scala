@@ -5,9 +5,6 @@ import ai.starlake.quack.ondemand.telemetry.{RollupQuery, StatementQuery, Teleme
 import cats.effect.IO
 import sttp.model.StatusCode
 
-import java.time.Instant
-import scala.util.Try
-
 /** REST handler for `GET /api/history/trends` and `GET /api/history/statements`.
   *
   * Scoping rules (identical to AuditHandlers):
@@ -33,24 +30,6 @@ final class HistoryHandlers(store: TelemetryStore):
       pool: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[TrendsResponse] = IO.blocking {
-    def instant(
-        s: Option[String],
-        label: String
-    ): Either[(StatusCode, ErrorResponse), Option[Instant]] =
-      s match
-        case None    => Right(None)
-        case Some(v) =>
-          Try(Instant.parse(v)).toOption
-            .map(i => Right(Some(i)))
-            .getOrElse(
-              Left(
-                (
-                  StatusCode.BadRequest,
-                  ErrorResponse("invalid_time", s"$label must be ISO-8601 instant")
-                )
-              )
-            )
-
     val gran = granularity.getOrElse("")
     if gran != "hour" && gran != "day" then
       Left(
@@ -73,8 +52,8 @@ final class HistoryHandlers(store: TelemetryStore):
           tenant.map(Set(_))
 
       for
-        f <- instant(from, "from")
-        t <- instant(to, "to")
+        f <- QueryParams.instant(from, "from")
+        t <- QueryParams.instant(to, "to")
       yield
         val buckets = store.queryRollups(
           RollupQuery(
@@ -116,24 +95,6 @@ final class HistoryHandlers(store: TelemetryStore):
       before: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[StatementSearchResponse] = IO.blocking {
-    def instant(
-        s: Option[String],
-        label: String
-    ): Either[(StatusCode, ErrorResponse), Option[Instant]] =
-      s match
-        case None    => Right(None)
-        case Some(v) =>
-          Try(Instant.parse(v)).toOption
-            .map(i => Right(Some(i)))
-            .getOrElse(
-              Left(
-                (
-                  StatusCode.BadRequest,
-                  ErrorResponse("invalid_time", s"$label must be ISO-8601 instant")
-                )
-              )
-            )
-
     val scoped  = apiKey.flatMap(scopeOf)
     val tenants = scoped match
       case Some(s) if !s.superuser =>
@@ -147,8 +108,8 @@ final class HistoryHandlers(store: TelemetryStore):
         tenant.map(Set(_))
 
     for
-      f <- instant(from, "from")
-      t <- instant(to, "to")
+      f <- QueryParams.instant(from, "from")
+      t <- QueryParams.instant(to, "to")
     yield
       val rows = store.searchStatements(
         StatementQuery(
