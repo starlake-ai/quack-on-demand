@@ -136,7 +136,11 @@ Clicking a table opens its detail page, with breadcrumbs back to the catalog and
 
 Below the table list, a **Snapshots** panel shows the database's DuckLake snapshot history, newest first: snapshot id, commit time, the raw change summary (`created_table:...`, `inserted_into_table:...`), rows added, files added / removed, and the affected tables. Each affected table links to its detail page as of that snapshot. The panel loads 200 snapshots at a time; **Load older snapshots** fetches the next page (keyset pagination, so new commits do not shift the window while you browse).
 
+![The snapshots panel with the demo database's history](/img/ui/snapshots.png)
+
 On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use). Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
+
+![A table viewed as of a snapshot, with the AS OF banner](/img/ui/catalog-asof.png)
 
 Snapshot semantics (linear history, inlined DML, retention and expiry) are covered in [DuckLake catalogs](/concepts/catalogs#snapshots-and-time-travel).
 
