@@ -185,4 +185,15 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
       val files = reader.filesReferencedAt(s)
       // At least one delete file must be present alongside the data files.
       files.exists(f => f.contains("delete") || f.contains("DELETE")) shouldBe true
+      // Naming-independent: the referenced-file set must be larger after the delete
+      // operation than before it. Compare at the delete snapshot against a snapshot
+      // before any delete operation (find the last snapshot with only inserts/flushes).
+      val sorted = snaps.sortBy(_.snapshotId)
+      // Skip all snapshots after inlined_delete (which includes the delete operation)
+      val sBeforeDelete = sorted
+        .takeWhile(snap => !snap.changes.contains("inlined_delete"))
+        .lastOption
+        .value
+        .snapshotId
+      reader.filesReferencedAt(s).size should be > reader.filesReferencedAt(sBeforeDelete).size
     }
