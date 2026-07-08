@@ -146,3 +146,19 @@ class TagHandlersSpec extends AnyFlatSpec with Matchers:
     h.resolveAsOf("acme", tenantDbName, Some(42L), None) shouldBe Right(Some(42L))
     h.resolveAsOf("acme", tenantDbName, None, None) shouldBe Right(None)
   }
+
+  it should "resolve a tag when the tenant-db name is passed in a mixed-case form" in {
+    // createTenantDb("acme", "db1") composes and lowercases the name to "acme_db1".
+    // Before the fix, resolveAsOf passed the raw caller string to the store; after the fix
+    // it uses td.name (the canonical lowercase form) returned by findTenantDb.
+    // Passing "ACME_DB1" exercises that normalization path.
+    val (h, _) = setup()
+    create(h, "v2").isRight shouldBe true
+    h.resolveAsOf("acme", "ACME_DB1", None, Some("v2")) shouldBe Right(Some(42L))
+  }
+
+  it should "return 404 for an unknown tenant-db in resolveAsOf" in {
+    val (h, _) = setup()
+    h.resolveAsOf("acme", "no-such-db", None, Some("v1")).left.toOption.get._1 shouldBe
+      StatusCode.NotFound
+  }

@@ -142,7 +142,12 @@ final class TagHandlers(
   ): Out[CatalogTagEntry] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
-        audit.rest(apiKey, "control-plane", AuditActions.TagHoldCreate, "denied")
+        audit.rest(
+          apiKey,
+          "control-plane",
+          if req.isProtected then AuditActions.TagHoldCreate else AuditActions.TagHoldRemove,
+          "denied"
+        )
         Left(e)
       case Right((tid, db)) =>
         store.setSnapshotTagProtected(tid, db, req.name.trim, req.isProtected) match
@@ -190,7 +195,11 @@ final class TagHandlers(
         Left((StatusCode.BadRequest, "supply either asOf or asOfTag, not both"))
       case (None, Some(tag)) =>
         val tid = resolveTenantId(rawTenant).getOrElse(rawTenant)
-        store.findSnapshotTag(tid, tenantDb, tag.trim) match
-          case Some(t) => Right(Some(t.snapshotId))
-          case None    => Left((StatusCode.NotFound, s"tag '$tag' not found"))
+        sup.findTenantDb(tid, tenantDb) match
+          case None =>
+            Left((StatusCode.NotFound, s"tenant-db '$tenantDb' not found"))
+          case Some(td) =>
+            store.findSnapshotTag(tid, td.name, tag.trim) match
+              case Some(t) => Right(Some(t.snapshotId))
+              case None    => Left((StatusCode.NotFound, s"tag '$tag' not found"))
       case (some, None) => Right(some)

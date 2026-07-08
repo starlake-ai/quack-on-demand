@@ -749,8 +749,6 @@ final case class TagCreateRequest(
 )
 
 final case class TagDeleteRequest(tenant: String, tenantDb: String, name: String)
-object TagDeleteRequest:
-  given Codec[TagDeleteRequest] = io.circe.generic.semiauto.deriveCodec
 
 final case class TagProtectRequest(
     tenant: String,
@@ -1421,6 +1419,7 @@ object Dtos:
       )
     }
   )
+  given Codec[TagDeleteRequest]  = deriveCodec
   given Codec[TagProtectRequest] = Codec.from(
     Decoder.instance { c =>
       for
