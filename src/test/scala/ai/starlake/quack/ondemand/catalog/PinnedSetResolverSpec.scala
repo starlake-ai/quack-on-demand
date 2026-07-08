@@ -27,7 +27,7 @@ class PinnedSetResolverSpec extends AnyFlatSpec with Matchers with PostgresFixtu
     withCatalog("tpch") { (reader, _) =>
       val store = new InMemoryControlPlaneStore()
       val snaps = reader.listSnapshots().map(_.snapshotId).sorted
-      val s     = snaps.max
+      val s     = snaps.lastOption.getOrElse(fail("tpch fixture produced no snapshots"))
       store.createSnapshotTag(tag("acme", "acme_db", "keep", s, prot = true))
       val resolver = new PinnedSetResolver(store, (_, _) => reader)
       resolver.pinnedFiles("acme", "acme_db") shouldBe reader.filesReferencedAt(s)
