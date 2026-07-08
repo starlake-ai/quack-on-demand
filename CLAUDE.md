@@ -21,6 +21,15 @@ BUILD=1 ./scripts/run-jar.sh   # sbt assembly first
 ./scripts/stop-jar.sh            # SIGTERM → wait → SIGKILL
 ```
 
+On **Windows** the manager runs natively (no WSL/Docker) via PowerShell twins:
+`scripts/run-jar.ps1` / `scripts/stop-jar.ps1`, and nodes spawn through
+`scripts/spawn-quack-node.ps1` (a mirror of the bash spawn script; keeps DuckDB
+alive by holding stdin open instead of a FIFO). Teardown uses `taskkill /T` so
+the `duckdb.exe` grandchild dies with its wrapper. The native `quackwire.dll` is
+an opt-in classifier (`QOD_WITH_WINDOWS_NATIVE=true`); without it, run the
+embedded client with `QOD_NATIVE_CLIENT=false`. See guides/RUNNING.md
+"Path 1 on Windows".
+
 UI dev loop (proxies `/api/*` to `localhost:20900`):
 
 ```bash
@@ -39,7 +48,7 @@ The process is a single uber-jar that exposes **three** sockets:
 
 1. **Manager REST + React UI** on `:20900` ([ManagerServer.scala](src/main/scala/ai/starlake/quack/ondemand/ManagerServer.scala), Tapir + HTTP4s Ember). Endpoints live under `ondemand/api/*Handlers.scala`. The React SPA at `/ui/*` is served from `src/main/resources/ui` (built by the resourceGenerator above).
 2. **Arrow FlightSQL edge** on `:31338` ([FlightEdgeServer.scala](src/main/scala/ai/starlake/quack/edge/FlightEdgeServer.scala) → [FlightProducerImpl.scala](src/main/scala/ai/starlake/quack/edge/FlightProducerImpl.scala) → [FlightSqlRouter.scala](src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala)). TLS is on by default, cert auto-generated at `certs/server-{cert,key}.pem` if missing.
-3. **Quack nodes** on `:21900–22500` - child processes spawned by [scripts/spawn-quack-node.sh](scripts/spawn-quack-node.sh) (local mode) or pods ([KubernetesQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/KubernetesQuackBackend.scala)). Each node runs DuckDB Quack with a metastore env-var contract: `pgHost / pgPort / pgUser / pgPassword / dbName / schemaName / dataPath`. **`spawn-quack-node.sh` is invoked by [LocalQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/LocalQuackBackend.scala) - don't run it directly.**
+3. **Quack nodes** on `:21900–22500` - child processes spawned by [scripts/spawn-quack-node.sh](scripts/spawn-quack-node.sh) (local mode) or pods ([KubernetesQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/KubernetesQuackBackend.scala)). Each node runs DuckDB Quack with a metastore env-var contract: `pgHost / pgPort / pgUser / pgPassword / dbName / schemaName / dataPath`. **`spawn-quack-node.sh` (or `spawn-quack-node.ps1` on Windows) is invoked by [LocalQuackBackend.scala](src/main/scala/ai/starlake/quack/ondemand/runtime/LocalQuackBackend.scala) - don't run it directly.** `LocalQuackBackend.defaultCommand` picks the script by OS: bash on Unix, `powershell.exe -File spawn-quack-node.ps1` on Windows (path from `spawnScriptWindows` / `QOD_SPAWN_SCRIPT_WINDOWS`).
 
 A FlightSQL request flows: `client → FlightProducerImpl → AuthenticationService → FlightSqlRouter.execute → StatementValidator (ACL) → StatementClassifier (READ/WRITE/DDL) → Router.pick(snapshot, kind) → QuackHttpAdapter → child node's /quack HTTP endpoint → Arrow stream back through Flight`. Tests for the routing core ([RouterSpec.scala](src/test/scala/ai/starlake/quack/route/RouterSpec.scala), [StatementClassifierSpec.scala](src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala), [FlightSqlRouterSpec.scala](src/test/scala/ai/starlake/quack/edge/FlightSqlRouterSpec.scala)) exercise this without the Flight wire.
 

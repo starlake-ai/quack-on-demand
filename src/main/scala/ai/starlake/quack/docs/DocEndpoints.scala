@@ -1,16 +1,17 @@
 package ai.starlake.quack.docs
 
-import ai.starlake.quack.ondemand.api.{Endpoints, RbacEndpoints}
+import ai.starlake.quack.ondemand.api.EndpointModules
 import sttp.tapir.AnyEndpoint
 
 /** Collects every public Tapir endpoint val from the endpoint-definition objects via reflection, so
   * a newly added endpoint is picked up by the OpenAPI generator with no extra wiring. Only public
   * zero-arg members whose runtime return type is a `sttp.tapir.Endpoint` are included; the private
-  * `base` and `fedBase` builders are excluded because `getMethods` returns public members only.
+  * `base` and `fedBase` builders are excluded because `getMethods` returns public members only. The
+  * holder objects come from [[EndpointModules.all]] - register new endpoint objects there.
   */
 object DocEndpoints:
 
-  private val holders: List[AnyRef] = List(Endpoints, RbacEndpoints)
+  private val holders: List[AnyRef] = EndpointModules.all
 
   /** All documented endpoints, de-duplicated by (method, path), in a stable order. */
   lazy val all: List[AnyEndpoint] =

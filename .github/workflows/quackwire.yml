@@ -175,6 +175,85 @@ jobs:
           retention-days: 30
 
   # -----------------------------------------------------------------------
+  # 1b. Windows native build (MSVC) -> quackwire.dll
+  # -----------------------------------------------------------------------
+  # Separate job (not a matrix row) because the toolchain is MSVC + a
+  # hand-assembled DUCKDB_HOME rather than a system package. Produces the
+  # un-prefixed `quackwire.dll` (System.mapLibraryName has no "lib" prefix on
+  # Windows), uploaded as quackwire-windows-x86_64 so the publish job's
+  # `quackwire-*` glob picks it up alongside the four Unix artifacts.
+  build-windows:
+    name: build windows-x86_64
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (with duckdb-quack submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21 (for jni.h / jni_md.h win32)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Assemble DUCKDB_HOME the way CMakeLists.txt expects: duckdb.lib + the
+      # FULL duckdb/ include tree. The release zip ships only the amalgamated
+      # duckdb.{h,hpp}; the duckdb-quack message layer also pulls internal
+      # headers (duckdb/common/serializer/binary_serializer.hpp), grabbed from a
+      # shallow clone at the same v1.5.4 tag. Runs in git-bash for parity with
+      # the Linux step.
+      - name: Install libduckdb v1.5.4 (Windows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib"
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/libduckdb.zip" \
+            "https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-windows-amd64.zip"
+          unzip -o "$tmp/libduckdb.zip" -d "$tmp/dl"
+          cp "$tmp/dl/duckdb.h"   "$home/include/duckdb.h"
+          cp "$tmp/dl/duckdb.hpp" "$home/include/duckdb.hpp"
+          cp "$tmp/dl/duckdb.lib" "$home/lib/duckdb.lib"
+          cp "$tmp/dl/duckdb.dll" "$home/lib/duckdb.dll"
+          git clone --depth 1 --branch v1.5.4 https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/duckdb" "$home/include/"
+          ls "$home/lib/duckdb.lib" "$home/include/duckdb.hpp"
+          ls "$home/include/duckdb/common/serializer/binary_serializer.hpp"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+
+      - name: CMake configure (Visual Studio 2022)
+        working-directory: native/quackwire
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DDUCKDB_HOME="$env:DUCKDB_HOME"
+
+      - name: CMake build (Release)
+        working-directory: native/quackwire
+        run: cmake --build build --config Release
+
+      - name: Verify artifact
+        working-directory: native/quackwire/build/Release
+        run: |
+          Get-ChildItem quackwire.dll
+          # Best-effort export check: dumpbin is only on PATH inside an MSVC dev
+          # shell, so a missing tool must not fail the build.
+          $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
+          if ($dumpbin) {
+            & $dumpbin /exports quackwire.dll | Select-String -Pattern 'smokeAnswer' -SimpleMatch
+          } else {
+            Write-Host "dumpbin not on PATH; skipping export check"
+          }
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quackwire-windows-x86_64
+          path: native/quackwire/build/Release/quackwire.dll
+          if-no-files-found: error
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
   # 2. Publish per-platform classifier jars to Sonatype Central snapshots
   # -----------------------------------------------------------------------
   # Runs on push-to-main and on manual workflow_dispatch from main.
@@ -189,7 +268,7 @@ jobs:
   #   SONATYPE_PASSWORD    Central Portal user token secret
   publish-central:
     name: publish libquackwire to Sonatype Central snapshots
-    needs: build
+    needs: [build, build-windows]
     if: >-
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -216,13 +295,17 @@ jobs:
           for d in artifacts/quackwire-*; do
             platform=$(basename "$d" | sed 's/^quackwire-//')
             mkdir -p "libquackwire/binaries/$platform"
-            # Each artifact dir contains exactly one libquackwire.{so,dylib}.
-            cp "$d"/libquackwire.* "libquackwire/binaries/$platform/"
+            # Unix artifacts carry libquackwire.{so,dylib}; the Windows artifact
+            # carries the un-prefixed quackwire.dll. Copy whichever is present.
+            cp "$d"/libquackwire.* "libquackwire/binaries/$platform/" 2>/dev/null || true
+            cp "$d"/quackwire.dll  "libquackwire/binaries/$platform/" 2>/dev/null || true
           done
           find libquackwire/binaries -type f -ls
 
       - name: Publish to Sonatype Central snapshots
         env:
+          # Include the 5th (Windows) classifier in this publish.
+          QOD_WITH_WINDOWS_NATIVE: 'true'
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
         run: sbt --no-colors --batch "libquackwire/publish"

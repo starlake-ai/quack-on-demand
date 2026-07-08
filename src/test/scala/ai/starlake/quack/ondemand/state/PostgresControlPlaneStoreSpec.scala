@@ -507,3 +507,54 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
         else fail("Expected notifications, got null")
       finally listener.close()
   }
+
+  // ---------- snapshot tags ----------
+
+  private def tagFixture(name: String = "pre-migration", prot: Boolean = false) =
+    ai.starlake.quack.model.SnapshotTag(
+      id = ai.starlake.quack.model.Names.newSurrogateId("stag"),
+      tenant = "tenant-1",
+      tenantDb = "tenant-1_db1",
+      name = name,
+      snapshotId = 42L,
+      isProtected = prot,
+      createdBy = Some("root"),
+      createdAt = None
+    )
+
+  "snapshot tags" should "round-trip create, find, list" in withStore { store =>
+    val created = store.createSnapshotTag(tagFixture()).toOption.get
+    created.createdAt should not be empty
+    store.findSnapshotTag("tenant-1", "tenant-1_db1", "pre-migration").map(_.snapshotId) shouldBe
+      Some(42L)
+    store.listSnapshotTags("tenant-1", "tenant-1_db1").map(_.name) shouldBe List("pre-migration")
+  }
+
+  it should "reject a duplicate name in the same scope" in withStore { store =>
+    store.createSnapshotTag(tagFixture()).isRight shouldBe true
+    store.createSnapshotTag(tagFixture()) shouldBe Left("duplicate")
+  }
+
+  it should "allow the same name in a different tenant-db" in withStore { store =>
+    store.createSnapshotTag(tagFixture()).isRight shouldBe true
+    store
+      .createSnapshotTag(
+        tagFixture().copy(
+          id = ai.starlake.quack.model.Names.newSurrogateId("stag"),
+          tenantDb = "tenant-1_db2"
+        )
+      )
+      .isRight shouldBe true
+  }
+
+  it should "toggle protection and delete" in withStore { store =>
+    store.createSnapshotTag(tagFixture()).isRight shouldBe true
+    store
+      .setSnapshotTagProtected("tenant-1", "tenant-1_db1", "pre-migration", true)
+      .map(_.isProtected) shouldBe Some(true)
+    store
+      .deleteSnapshotTag("tenant-1", "tenant-1_db1", "pre-migration")
+      .map(_.isProtected) shouldBe Some(true)
+    store.listSnapshotTags("tenant-1", "tenant-1_db1") shouldBe Nil
+    store.deleteSnapshotTag("tenant-1", "tenant-1_db1", "pre-migration") shouldBe None
+  }

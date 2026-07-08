@@ -43,3 +43,5 @@ databaseChangeLog:
       file: db/changelog/0018-audit.yaml
   - include:
       file: db/changelog/0019-stmt-history.yaml
+  - include:
+      file: db/changelog/0020-snapshot-tag.yaml

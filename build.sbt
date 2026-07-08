@@ -76,7 +76,25 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
+//
+// ALSO revisit native/quackwire/src/win_duckdb_compat.cpp: it hard-codes a few
+// DuckDB internal leaf symbols (SerializationCompatibility default version index,
+// etc.) copied from the pinned DuckDB source. A DuckDB bump can change those
+// values or introduce new unresolved symbols on the Windows link. See that
+// file's header for how to re-derive them.
 val libquackwireVersion = "1.5.4-40de7badae41-4-SNAPSHOT"
+
+// Opt-in Windows native classifier. Default OFF so existing Linux/macOS/CI
+// `sbt assembly` / `sbt test` never try to resolve a windows-x86_64 classifier
+// that isn't on Central yet. Set QOD_WITH_WINDOWS_NATIVE=true (CI's Windows
+// build/publish job, or after a local `sbt libquackwire/publishLocal` that
+// staged quackwire.dll) to bundle native/windows-x86_64/quackwire.dll.
+val withWindowsNative: Boolean =
+  sys.env.get("QOD_WITH_WINDOWS_NATIVE").exists(v => v == "true" || v == "1")
+val windowsNativeDep: Seq[ModuleID] =
+  if (withWindowsNative)
+    Seq("ai.starlake" % "libquackwire" % libquackwireVersion classifier "windows-x86_64")
+  else Seq.empty
 
 lazy val libquackwire = (project in file("libquackwire"))
   .settings(
@@ -201,6 +219,12 @@ lazy val root = (project in file("."))
       "ai.starlake" % "libquackwire" % libquackwireVersion classifier "linux-aarch64",
       "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-x86_64",
       "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-aarch64",
+      // The 5th classifier (Windows) is opt-in via QOD_WITH_WINDOWS_NATIVE so
+      // existing Linux/macOS/CI builds don't fail resolving an artifact that
+      // isn't on Central yet. Turn it on once the windows-x86_64 classifier is
+      // published (CI's quackwire.yml Windows job, or a local publishLocal) to
+      // bundle native/windows-x86_64/quackwire.dll into the assembly. See the
+      // `windowsNativeDep` def below.
       Dependencies.micrometerCore,
       Dependencies.micrometerPrometheus,
       Dependencies.micrometerCloudwatch,
@@ -210,7 +234,7 @@ lazy val root = (project in file("."))
       Dependencies.scalaTest,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test
-    ),
+    ) ++ windowsNativeDep,
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "versions", "9", "module-info.class") => MergeStrategy.discard
       case PathList("META-INF", xs @ _*) =>

@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, RunningNode, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, RunningNode, SnapshotTag, Tenant, TenantDb}
 
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
@@ -314,6 +314,35 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def listRowPolicies(roleId: String): List[RoleRowPolicy] =
     rowPolicies.values.filter(_.roleId == roleId).toList.sortBy(_.id)
+
+  // ---------------- Snapshot tags ----------------
+  private val snapshotTags = TrieMap.empty[(String, String, String), SnapshotTag]
+
+  def createSnapshotTag(t: SnapshotTag): Either[String, SnapshotTag] =
+    val key       = (t.tenant, t.tenantDb, t.name)
+    val populated = t.copy(createdAt = t.createdAt.orElse(Some(Instant.now())))
+    if snapshotTags.putIfAbsent(key, populated).isDefined then Left("duplicate")
+    else Right(populated)
+
+  def deleteSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
+    snapshotTags.remove((tenant, tenantDb, name))
+
+  def setSnapshotTagProtected(
+      tenant: String,
+      tenantDb: String,
+      name: String,
+      isProtected: Boolean
+  ): Option[SnapshotTag] =
+    snapshotTags.updateWith((tenant, tenantDb, name))(_.map(_.copy(isProtected = isProtected)))
+
+  def listSnapshotTags(tenant: String, tenantDb: String): List[SnapshotTag] =
+    snapshotTags.values
+      .filter(t => t.tenant == tenant && t.tenantDb == tenantDb)
+      .toList
+      .sortBy(_.name)
+
+  def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
+    snapshotTags.get((tenant, tenantDb, name))
 
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants = listTenants(),

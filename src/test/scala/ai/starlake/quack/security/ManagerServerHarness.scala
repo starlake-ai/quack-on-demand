@@ -57,6 +57,7 @@ object ManagerServerHarness:
     stampWrites = true,
     nodeDisableSsl = true,
     spawnScript = "",
+    spawnScriptWindows = "",
     drainTimeoutSec = 5,
     healthCheckIntervalSec = 30,
     reconcileIntervalSec = 0,
@@ -245,7 +246,15 @@ object ManagerServerHarness:
       enableProviders: Boolean = true,
       audit: AuditRecorder = AuditRecorder.noop,
       auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
-      telemetryStore: TelemetryStore = NoopTelemetryStore
+      telemetryStore: TelemetryStore = NoopTelemetryStore,
+      // Snapshot existence for TagHandlers. Defaults say "no snapshot
+      // exists": authz specs never get past the scope/kind gates, and
+      // tag-CRUD specs override these to whitelist their fixture ids.
+      tagSnapshotExists: (String, String, Long) => Boolean = (_, _, _) => false,
+      tagSnapshotsExist: (String, String, Set[Long]) => Set[Long] = (_, _, _) => Set.empty,
+      // Catalog browser handlers; specs exercising the /api/catalog GETs
+      // (e.g. asOfTag resolution) pass a stub-reader-backed instance.
+      catalog: Option[CatalogHandlers] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -302,6 +311,14 @@ object ManagerServerHarness:
     val tenantDbs = new TenantDbHandlers(sup, federatedStore = None, catalog = None)
     val health    = new HealthHandler(sup)
 
+    val tagHandlers = new TagHandlers(
+      sup,
+      store,
+      snapshotExists = tagSnapshotExists,
+      snapshotsExist = tagSnapshotsExist,
+      audit = audit
+    )
+
     val liveConfig    = ConfigFactory.load()
     val configEntries = ConfigRegistry.collect(List.empty) // empty: no annotations to reflect
     val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
@@ -327,7 +344,8 @@ object ManagerServerHarness:
       sessions,
       authEnabled = enableProviders,
       historyHandlers,
-      catalog = None,
+      catalog = catalog,
+      tags = Some(tagHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,
