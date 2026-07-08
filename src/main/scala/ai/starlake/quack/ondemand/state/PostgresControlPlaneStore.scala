@@ -1,6 +1,8 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.{
+  MaintenancePolicy,
+  MaintenanceRun,
   NodePlacement,
   NodeToleration,
   Pool,
@@ -8,6 +10,7 @@ import ai.starlake.quack.model.{
   PoolKey,
   Role,
   RoleDistribution,
+  RunCounters,
   RunningNode,
   SnapshotTag,
   Tenant,
@@ -1537,6 +1540,352 @@ final class PostgresControlPlaneStore(
         finally rs.close()
       finally ps.close()
     }
+
+  // ---- maintenance (EPIC Spec 09) ----
+
+  private def readMaintenancePolicy(rs: ResultSet): MaintenancePolicy =
+    def optInt(col: String): Option[Int] =
+      Option(rs.getObject(col)).map(_.asInstanceOf[Number].intValue)
+    def optDouble(col: String): Option[Double] =
+      Option(rs.getObject(col)).map(_.asInstanceOf[Number].doubleValue)
+    MaintenancePolicy(
+      id = rs.getString("id"),
+      tenant = rs.getString("tenant"),
+      tenantDb = rs.getString("tenant_db"),
+      scopeKind = rs.getString("scope_kind"),
+      scopeSchema = Option(rs.getString("scope_schema")),
+      scopeTable = Option(rs.getString("scope_table")),
+      enabled = Option(rs.getObject("enabled")).map(_.asInstanceOf[Boolean]),
+      retentionDays = optInt("retention_days"),
+      compactionEnabled = Option(rs.getObject("compaction_enabled")).map(_.asInstanceOf[Boolean]),
+      targetFileSize = Option(rs.getString("target_file_size")),
+      smallFileMinCount = optInt("small_file_min_count"),
+      rewriteDeleteThreshold = optDouble("rewrite_delete_threshold"),
+      cleanupGraceDays = optInt("cleanup_grace_days"),
+      orphanMinAgeDays = optInt("orphan_min_age_days"),
+      cron = Option(rs.getString("cron")),
+      updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
+    )
+
+  private def setNullableInt(ps: PreparedStatement, idx: Int, v: Option[Int]): Unit =
+    v match
+      case Some(i) => ps.setInt(idx, i)
+      case None    => ps.setNull(idx, Types.INTEGER)
+
+  private def setNullableBoolean(ps: PreparedStatement, idx: Int, v: Option[Boolean]): Unit =
+    v match
+      case Some(b) => ps.setBoolean(idx, b)
+      case None    => ps.setNull(idx, Types.BOOLEAN)
+
+  private def setNullableDouble(ps: PreparedStatement, idx: Int, v: Option[Double]): Unit =
+    v match
+      case Some(d) => ps.setDouble(idx, d)
+      case None    => ps.setNull(idx, Types.DOUBLE)
+
+  /** Upsert on the (tenant, tenantDb, scopeKind, scopeSchema, scopeTable) scope tuple. The
+    * expression index (`COALESCE(scope_schema, '')`) isn't usable in `ON CONFLICT`, so this is a
+    * manual delete-then-insert in one transaction rather than a native upsert.
+    */
+  def upsertMaintenancePolicy(p: MaintenancePolicy): MaintenancePolicy = withConn { c =>
+    c.setAutoCommit(false)
+    try
+      val del = c.prepareStatement(
+        """DELETE FROM qodstate_maintenance_policy
+          |WHERE tenant = ? AND tenant_db = ? AND scope_kind = ?
+          |  AND COALESCE(scope_schema, '') = ? AND COALESCE(scope_table, '') = ?""".stripMargin
+      )
+      try
+        del.setString(1, p.tenant)
+        del.setString(2, p.tenantDb)
+        del.setString(3, p.scopeKind)
+        del.setString(4, p.scopeSchema.getOrElse(""))
+        del.setString(5, p.scopeTable.getOrElse(""))
+        del.executeUpdate()
+      finally del.close()
+
+      val ins = c.prepareStatement(
+        """INSERT INTO qodstate_maintenance_policy
+          |  (id, tenant, tenant_db, scope_kind, scope_schema, scope_table, enabled,
+          |   retention_days, compaction_enabled, target_file_size, small_file_min_count,
+          |   rewrite_delete_threshold, cleanup_grace_days, orphan_min_age_days, cron)
+          |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          |RETURNING updated_at""".stripMargin
+      )
+      try
+        ins.setString(1, p.id)
+        ins.setString(2, p.tenant)
+        ins.setString(3, p.tenantDb)
+        ins.setString(4, p.scopeKind)
+        setNullable(ins, 5, p.scopeSchema)
+        setNullable(ins, 6, p.scopeTable)
+        setNullableBoolean(ins, 7, p.enabled)
+        setNullableInt(ins, 8, p.retentionDays)
+        setNullableBoolean(ins, 9, p.compactionEnabled)
+        setNullable(ins, 10, p.targetFileSize)
+        setNullableInt(ins, 11, p.smallFileMinCount)
+        setNullableDouble(ins, 12, p.rewriteDeleteThreshold)
+        setNullableInt(ins, 13, p.cleanupGraceDays)
+        setNullableInt(ins, 14, p.orphanMinAgeDays)
+        setNullable(ins, 15, p.cron)
+        val rs = ins.executeQuery()
+        try
+          rs.next()
+          val updated = p.copy(updatedAt = Some(rs.getTimestamp(1).toInstant))
+          c.commit()
+          updated
+        finally rs.close()
+      finally ins.close()
+    catch
+      case e: Throwable =>
+        c.rollback()
+        throw e
+    finally c.setAutoCommit(true)
+  }
+
+  def deleteMaintenancePolicy(id: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_maintenance_policy WHERE id = ?")
+    try
+      ps.setString(1, id)
+      ps.executeUpdate() > 0
+    finally ps.close()
+  }
+
+  def findMaintenancePolicy(id: String): Option[MaintenancePolicy] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db, scope_kind, scope_schema, scope_table, enabled,
+        |       retention_days, compaction_enabled, target_file_size, small_file_min_count,
+        |       rewrite_delete_threshold, cleanup_grace_days, orphan_min_age_days, cron, updated_at
+        |FROM qodstate_maintenance_policy WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readMaintenancePolicy(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listMaintenancePolicies(tenant: String, tenantDb: String): List[MaintenancePolicy] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """SELECT id, tenant, tenant_db, scope_kind, scope_schema, scope_table, enabled,
+          |       retention_days, compaction_enabled, target_file_size, small_file_min_count,
+          |       rewrite_delete_threshold, cleanup_grace_days, orphan_min_age_days, cron, updated_at
+          |FROM qodstate_maintenance_policy
+          |WHERE tenant = ? AND tenant_db = ?
+          |ORDER BY scope_kind, scope_schema, scope_table""".stripMargin
+      )
+      try
+        ps.setString(1, tenant)
+        ps.setString(2, tenantDb)
+        val rs = ps.executeQuery()
+        try drain(rs)(readMaintenancePolicy)
+        finally rs.close()
+      finally ps.close()
+    }
+
+  private val maintenanceRunColumns =
+    """id, tenant, tenant_db, scope, trigger, operations, status, queued_at, started_at,
+      |finished_at, heartbeat_at, node_id, snapshots_expired, snapshots_skipped_pinned,
+      |files_merged, files_rewritten, files_cleaned, orphans_deleted, bytes_reclaimed,
+      |error""".stripMargin
+
+  private def readMaintenanceRun(rs: ResultSet): MaintenanceRun =
+    MaintenanceRun(
+      id = rs.getLong("id"),
+      tenant = rs.getString("tenant"),
+      tenantDb = rs.getString("tenant_db"),
+      scope = rs.getString("scope"),
+      trigger = rs.getString("trigger"),
+      operations = Option(rs.getString("operations")),
+      status = rs.getString("status"),
+      queuedAt = rs.getTimestamp("queued_at").toInstant,
+      startedAt = Option(rs.getTimestamp("started_at")).map(_.toInstant),
+      finishedAt = Option(rs.getTimestamp("finished_at")).map(_.toInstant),
+      heartbeatAt = Option(rs.getTimestamp("heartbeat_at")).map(_.toInstant),
+      nodeId = Option(rs.getString("node_id")),
+      counters = RunCounters(
+        snapshotsExpired = rs.getInt("snapshots_expired"),
+        snapshotsSkippedPinned = rs.getInt("snapshots_skipped_pinned"),
+        filesMerged = rs.getInt("files_merged"),
+        filesRewritten = rs.getInt("files_rewritten"),
+        filesCleaned = rs.getInt("files_cleaned"),
+        orphansDeleted = rs.getInt("orphans_deleted"),
+        bytesReclaimed = rs.getLong("bytes_reclaimed")
+      ),
+      error = Option(rs.getString("error"))
+    )
+
+  def enqueueMaintenanceRun(
+      tenant: String,
+      tenantDb: String,
+      scope: String,
+      trigger: String,
+      operations: Option[String]
+  ): MaintenanceRun = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""INSERT INTO qodstate_maintenance_run (tenant, tenant_db, scope, trigger, operations, status)
+        |VALUES (?, ?, ?, ?, ?, 'queued')
+        |RETURNING $maintenanceRunColumns""".stripMargin
+    )
+    try
+      ps.setString(1, tenant)
+      ps.setString(2, tenantDb)
+      ps.setString(3, scope)
+      ps.setString(4, trigger)
+      setNullable(ps, 5, operations)
+      val rs = ps.executeQuery()
+      try
+        rs.next()
+        readMaintenanceRun(rs)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def claimQueuedMaintenanceRun(): Option[MaintenanceRun] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""UPDATE qodstate_maintenance_run
+        |SET status = 'running', started_at = NOW(), heartbeat_at = NOW()
+        |WHERE id = (
+        |  SELECT id FROM qodstate_maintenance_run
+        |  WHERE status = 'queued'
+        |  ORDER BY id
+        |  FOR UPDATE SKIP LOCKED
+        |  LIMIT 1
+        |)
+        |RETURNING $maintenanceRunColumns""".stripMargin
+    )
+    try
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readMaintenanceRun(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_maintenance_run
+        |SET heartbeat_at = NOW(), snapshots_expired = ?, snapshots_skipped_pinned = ?,
+        |    files_merged = ?, files_rewritten = ?, files_cleaned = ?, orphans_deleted = ?,
+        |    bytes_reclaimed = ?
+        |WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setInt(1, counters.snapshotsExpired)
+      ps.setInt(2, counters.snapshotsSkippedPinned)
+      ps.setInt(3, counters.filesMerged)
+      ps.setInt(4, counters.filesRewritten)
+      ps.setInt(5, counters.filesCleaned)
+      ps.setInt(6, counters.orphansDeleted)
+      ps.setLong(7, counters.bytesReclaimed)
+      ps.setLong(8, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def finishMaintenanceRun(
+      id: Long,
+      status: String,
+      counters: RunCounters,
+      error: Option[String]
+  ): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_maintenance_run
+        |SET status = ?, finished_at = NOW(), snapshots_expired = ?, snapshots_skipped_pinned = ?,
+        |    files_merged = ?, files_rewritten = ?, files_cleaned = ?, orphans_deleted = ?,
+        |    bytes_reclaimed = ?, error = ?
+        |WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, status)
+      ps.setInt(2, counters.snapshotsExpired)
+      ps.setInt(3, counters.snapshotsSkippedPinned)
+      ps.setInt(4, counters.filesMerged)
+      ps.setInt(5, counters.filesRewritten)
+      ps.setInt(6, counters.filesCleaned)
+      ps.setInt(7, counters.orphansDeleted)
+      ps.setLong(8, counters.bytesReclaimed)
+      setNullable(ps, 9, error)
+      ps.setLong(10, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def listMaintenanceRuns(
+      tenant: String,
+      tenantDb: String,
+      limit: Int,
+      before: Option[Long]
+  ): List[MaintenanceRun] = withConn { c =>
+    val sql = before match
+      case Some(_) =>
+        s"""SELECT $maintenanceRunColumns FROM qodstate_maintenance_run
+          |WHERE tenant = ? AND tenant_db = ? AND id < ?
+          |ORDER BY id DESC LIMIT ?""".stripMargin
+      case None =>
+        s"""SELECT $maintenanceRunColumns FROM qodstate_maintenance_run
+          |WHERE tenant = ? AND tenant_db = ?
+          |ORDER BY id DESC LIMIT ?""".stripMargin
+    val ps = c.prepareStatement(sql)
+    try
+      ps.setString(1, tenant)
+      ps.setString(2, tenantDb)
+      before match
+        case Some(cursor) =>
+          ps.setLong(3, cursor)
+          ps.setInt(4, limit)
+        case None =>
+          ps.setInt(3, limit)
+      val rs = ps.executeQuery()
+      try drain(rs)(readMaintenanceRun)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def hasActiveMaintenanceRun(tenant: String, tenantDb: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT 1 FROM qodstate_maintenance_run
+        |WHERE tenant = ? AND tenant_db = ? AND status IN ('queued', 'running') LIMIT 1""".stripMargin
+    )
+    try
+      ps.setString(1, tenant)
+      ps.setString(2, tenantDb)
+      val rs = ps.executeQuery()
+      try rs.next()
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def lastNonManualMaintenanceRunAt(tenant: String, tenantDb: String): Option[java.time.Instant] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """SELECT max(queued_at) FROM qodstate_maintenance_run
+          |WHERE tenant = ? AND tenant_db = ? AND trigger <> 'manual'""".stripMargin
+      )
+      try
+        ps.setString(1, tenant)
+        ps.setString(2, tenantDb)
+        val rs = ps.executeQuery()
+        try
+          rs.next()
+          Option(rs.getTimestamp(1)).map(_.toInstant)
+        finally rs.close()
+      finally ps.close()
+    }
+
+  def sweepStaleMaintenanceRuns(heartbeatOlderThan: java.time.Instant): Int = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_maintenance_run
+        |SET status = 'failed', finished_at = NOW(), error = 'stale: heartbeat timeout'
+        |WHERE status = 'running' AND heartbeat_at < ?""".stripMargin
+    )
+    try
+      ps.setTimestamp(1, Timestamp.from(heartbeatOlderThan))
+      ps.executeUpdate()
+    finally ps.close()
+  }
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
     val buf = ListBuffer.empty[A]

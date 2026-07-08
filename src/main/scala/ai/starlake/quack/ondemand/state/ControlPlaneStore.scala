@@ -1,6 +1,15 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, RunningNode, SnapshotTag, Tenant, TenantDb}
+import ai.starlake.quack.model.{
+  MaintenancePolicy,
+  MaintenanceRun,
+  Pool,
+  RunCounters,
+  RunningNode,
+  SnapshotTag,
+  Tenant,
+  TenantDb
+}
 
 /** Per-entity persistence for the normalized control plane (`qodstate_tenant`,
   * `qodstate_tenant_db`, `qodstate_pool`, `qodstate_node`) plus the RBAC graph (`qodstate_user`,
@@ -228,6 +237,60 @@ trait ControlPlaneStore:
   def listSnapshotTags(tenant: String, tenantDb: String): List[SnapshotTag]
 
   def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag]
+
+  // ----- Maintenance (EPIC Spec 09) -----
+
+  /** Insert/replace the policy row for the scope tuple carried by `p` (tenant, tenantDb, scopeKind,
+    * scopeSchema, scopeTable). At most one row per scope tuple.
+    */
+  def upsertMaintenancePolicy(p: MaintenancePolicy): MaintenancePolicy
+
+  def deleteMaintenancePolicy(id: String): Boolean
+
+  def findMaintenancePolicy(id: String): Option[MaintenancePolicy]
+
+  def listMaintenancePolicies(tenant: String, tenantDb: String): List[MaintenancePolicy]
+
+  /** Enqueue a new run row in `"queued"` status. */
+  def enqueueMaintenanceRun(
+      tenant: String,
+      tenantDb: String,
+      scope: String,
+      trigger: String,
+      operations: Option[String]
+  ): MaintenanceRun
+
+  /** Atomically transition the oldest `"queued"` row to `"running"` and return it. `None` when
+    * nothing is queued. Exactly one caller wins the race across concurrent nodes/replicas.
+    */
+  def claimQueuedMaintenanceRun(): Option[MaintenanceRun]
+
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Unit
+
+  def finishMaintenanceRun(
+      id: Long,
+      status: String,
+      counters: RunCounters,
+      error: Option[String]
+  ): Unit
+
+  /** Keyset pagination ordered by descending id; `before` excludes ids >= the given cursor. */
+  def listMaintenanceRuns(
+      tenant: String,
+      tenantDb: String,
+      limit: Int,
+      before: Option[Long]
+  ): List[MaintenanceRun]
+
+  def hasActiveMaintenanceRun(tenant: String, tenantDb: String): Boolean
+
+  /** Most recent `queuedAt` among runs not triggered manually -- feeds cadence scheduling. */
+  def lastNonManualMaintenanceRunAt(tenant: String, tenantDb: String): Option[java.time.Instant]
+
+  /** Fail any `"running"` row whose heartbeat is older than `heartbeatOlderThan` (a worker died
+    * mid-run). Returns the number of rows swept.
+    */
+  def sweepStaleMaintenanceRuns(heartbeatOlderThan: java.time.Instant): Int
 
   /** Release any pooled connections / heap resources. Default impl is a no-op (in-memory stores
     * hold no I/O resources); [[PostgresControlPlaneStore.close]] drains the Hikari pool. Called

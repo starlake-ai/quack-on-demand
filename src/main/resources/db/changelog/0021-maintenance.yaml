@@ -1,0 +1,63 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0021-maintenance-policy
+      author: qod
+      changes:
+        - createTable:
+            tableName: qodstate_maintenance_policy
+            columns:
+              - column: { name: id, type: TEXT, constraints: { primaryKey: true } }
+              - column: { name: tenant, type: TEXT, constraints: { nullable: false } }
+              - column: { name: tenant_db, type: TEXT, constraints: { nullable: false } }
+              - column: { name: scope_kind, type: TEXT, constraints: { nullable: false } }
+              - column: { name: scope_schema, type: TEXT }
+              - column: { name: scope_table, type: TEXT }
+              - column: { name: enabled, type: BOOLEAN }
+              - column: { name: retention_days, type: INT }
+              - column: { name: compaction_enabled, type: BOOLEAN }
+              - column: { name: target_file_size, type: TEXT }
+              - column: { name: small_file_min_count, type: INT }
+              - column: { name: rewrite_delete_threshold, type: DOUBLE PRECISION }
+              - column: { name: cleanup_grace_days, type: INT }
+              - column: { name: orphan_min_age_days, type: INT }
+              - column: { name: cron, type: TEXT }
+              - column: { name: updated_at, type: TIMESTAMPTZ, defaultValueComputed: NOW(), constraints: { nullable: false } }
+        - sql:
+            sql: >-
+              CREATE UNIQUE INDEX uq_qodstate_maintenance_policy_scope
+              ON qodstate_maintenance_policy
+              (tenant, tenant_db, scope_kind, COALESCE(scope_schema, ''), COALESCE(scope_table, ''))
+  - changeSet:
+      id: 0021-maintenance-run
+      author: qod
+      changes:
+        - createTable:
+            tableName: qodstate_maintenance_run
+            columns:
+              - column: { name: id, type: BIGSERIAL, constraints: { primaryKey: true } }
+              - column: { name: tenant, type: TEXT, constraints: { nullable: false } }
+              - column: { name: tenant_db, type: TEXT, constraints: { nullable: false } }
+              - column: { name: scope, type: TEXT, constraints: { nullable: false } }
+              - column: { name: trigger, type: TEXT, constraints: { nullable: false } }
+              - column: { name: operations, type: TEXT }
+              - column: { name: status, type: TEXT, constraints: { nullable: false } }
+              - column: { name: queued_at, type: TIMESTAMPTZ, defaultValueComputed: NOW(), constraints: { nullable: false } }
+              - column: { name: started_at, type: TIMESTAMPTZ }
+              - column: { name: finished_at, type: TIMESTAMPTZ }
+              - column: { name: heartbeat_at, type: TIMESTAMPTZ }
+              - column: { name: node_id, type: TEXT }
+              - column: { name: snapshots_expired, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: snapshots_skipped_pinned, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: files_merged, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: files_rewritten, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: files_cleaned, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: orphans_deleted, type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: bytes_reclaimed, type: BIGINT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: error, type: TEXT }
+        - createIndex:
+            tableName: qodstate_maintenance_run
+            indexName: ix_qodstate_maintenance_run_scope
+            columns:
+              - column: { name: tenant }
+              - column: { name: tenant_db }
+              - column: { name: id }
