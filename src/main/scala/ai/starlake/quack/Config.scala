@@ -338,6 +338,13 @@ final case class ManagerConfig(
     )
     nativeClient: Boolean,
     @field @ConfigField(
+      envVar = "QOD_STAMP_WRITES",
+      description =
+        "Stamp DuckLake snapshots created by FlightSQL DML/DDL with author and commit message " +
+          "(native wire bracket; fail-open). Off = writes are never bracketed."
+    )
+    stampWrites: Boolean,
+    @field @ConfigField(
       envVar = "QOD_NODE_DISABLE_SSL",
       description =
         "Disable TLS on the embedded path's quack_query() call. Ignored on the native path."

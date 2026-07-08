@@ -54,6 +54,7 @@ object ManagerServerHarness:
     maxPort = 41000,
     maxNodesTotal = 0,
     nativeClient = false,
+    stampWrites = true,
     nodeDisableSsl = true,
     spawnScript = "",
     drainTimeoutSec = 5,
