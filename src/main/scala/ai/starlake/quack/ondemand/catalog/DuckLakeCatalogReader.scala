@@ -120,6 +120,49 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
         ids.toList*
       )(_.getLong("snapshot_id")).toSet
 
+  /** Expiry candidates: snapshots strictly older than `cutoff`, never including the latest snapshot
+    * (the current state must always survive a maintenance run). Ascending.
+    */
+  def snapshotsOlderThan(cutoff: java.time.Instant): List[Long] =
+    query(
+      """SELECT snapshot_id FROM ducklake_snapshot
+        |WHERE snapshot_time < ?
+        |  AND snapshot_id <> (SELECT max(snapshot_id) FROM ducklake_snapshot)
+        |ORDER BY snapshot_id""".stripMargin,
+      java.sql.Timestamp.from(cutoff)
+    )(_.getLong(1))
+
+  /** Per-(schema, table) count of CURRENT data files smaller than `maxBytes` - the threshold
+    * trigger's input (spec section 4). Metadata-only Postgres read; no node involved.
+    */
+  def smallFileCounts(maxBytes: Long): Map[(String, String), Int] =
+    query(
+      """SELECT s.schema_name, t.table_name, count(*)
+        |FROM ducklake_data_file f
+        |JOIN ducklake_table t ON t.table_id = f.table_id
+        |JOIN ducklake_schema s ON s.schema_id = t.schema_id
+        |WHERE f.end_snapshot IS NULL AND f.file_size_bytes < ?
+        |GROUP BY 1, 2""".stripMargin,
+      maxBytes
+    )(rs => ((rs.getString(1), rs.getString(2)), rs.getInt(3))).toMap
+
+  /** Paths pending physical deletion (scheduled by expire/merge, not yet cleaned). Feeds the
+    * pinned-file fail-safe guard. No sizes: unrecoverable from the catalog post-schedule on this
+    * DuckLake version (byte accounting uses totalDataFileBytes deltas instead).
+    */
+  def filesScheduledForDeletion(): List[String] =
+    query(
+      "SELECT path FROM ducklake_files_scheduled_for_deletion"
+    )(_.getString(1))
+
+  /** Total bytes of all catalog-referenced data files. The maintenance runner samples this before
+    * and after a chain run; the delta is the run's bytesReclaimed (catalog bytes released).
+    */
+  def totalDataFileBytes(): Long =
+    query(
+      "SELECT COALESCE(sum(file_size_bytes), 0) FROM ducklake_data_file"
+    )(_.getLong(1)).headOption.getOrElse(0L)
+
   /** Every file path the given snapshot references: data files AND delete files visible at
     * `snapshotId` under the same predicate the AS OF browser uses. This is the file-level pin-set
     * for EPIC P2: a maintenance run must not delete any of these while the snapshot is pinned.
