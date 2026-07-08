@@ -2,6 +2,20 @@
 
 ## 0.3.7 (unreleased)
 
+### Governance
+
+- **Named and protected snapshot tags with reference pinning (EPIC P2 / Spec 06).** Any DuckLake
+  snapshot can carry human-readable tags (`pre-migration`, `2026-Q2-release`) scoped per tenant-db,
+  managed from the snapshot browser (chips, create modal, retention-hold toggle, pinned summary) or
+  via gated REST endpoints (`POST /api/catalog/tag/create|delete|protect`,
+  `GET /api/catalog/tenant/{tenant}/database/{tenantDb}/tags`). A `protected` tag pins its snapshot
+  and every referenced file: the new `PinnedSetResolver` is the pin-set the managed-maintenance
+  service will consult before expiring anything. The catalog table view accepts `asOfTag=<name>`
+  wherever `asOf=<id>` works (both at once is a 400; unknown or dangling tags 404). Tag mutations
+  are tenant-scoped, audited (`tag.create`/`tag.delete`, and dedicated `tag.hold.create`/
+  `tag.hold.remove` so removing a retention hold is distinctly visible), and tag names can never be
+  all digits, so they stay unambiguous next to snapshot ids.
+
 ### Audit
 
 - **FlightSQL writes stamp DuckLake snapshots with the authenticated principal (EPIC P1).** Every
