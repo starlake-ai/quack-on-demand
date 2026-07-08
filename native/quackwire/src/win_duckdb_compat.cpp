@@ -1,12 +1,32 @@
 // Windows-only DuckDB internal-symbol shims.
 //
-// The vendored duckdb serializer sources we compile on Windows (see
-// CMakeLists.txt) reference a few DuckDB internals that the prebuilt duckdb.dll
-// does not export and whose real source files (src/main/config.cpp,
-// src/common/value_operations/comparison_operations.cpp) would drag in most of
-// DuckDB if compiled. We replicate their exact leaf semantics from
-// duckdb @ 14eca11bd9 (the pin behind libduckdb v1.5.4). Kept WIN32-only via
-// CMakeLists.txt; on Linux/macOS libduckdb already provides these.
+// ============================================================================
+//  !! VERSION-PINNED FILE - REVISIT ON EVERY DUCKDB / duckdb-quack BUMP !!
+//
+//  Pinned to: duckdb @ 14eca11bd9  (libduckdb v1.5.4, build.sbt
+//             libquackwireVersion "1.5.4-40de7badae41-*").
+//
+//  The values below are COPIED from that exact DuckDB source. When you bump the
+//  duckdb-quack submodule / libduckdb ABI in build.sbt, re-derive them or the
+//  Windows quackwire.dll will link against stale constants (silent wire-format
+//  mismatch with the node), or fail to link with a fresh batch of unresolved
+//  externals. To re-derive at the new pin <SHA>:
+//    * SerializationCompatibility::{Default,FromIndex,Compare}
+//        src/main/config.cpp
+//    * the serialization_version index for Default()'s version string
+//        src/storage/storage_info.cpp  (version -> index table)
+//    * ValueOperations::NotDistinctFrom
+//        src/common/value_operations/comparison_operations.cpp
+//  If the Windows link surfaces NEW unresolved duckdb symbols, add their leaf
+//  definitions here the same way (or compile their source if self-contained).
+// ============================================================================
+//
+// Why this file exists: the vendored duckdb serializer sources we compile on
+// Windows (see CMakeLists.txt) reference a few DuckDB internals that the
+// prebuilt duckdb.dll does not export and whose real source files
+// (src/main/config.cpp, comparison_operations.cpp) would drag in most of DuckDB
+// if compiled. Kept WIN32-only via CMakeLists.txt; on Linux/macOS libduckdb
+// already provides these.
 //
 // DUCKDB_STATIC_BUILD is defined for the whole Windows build, so DUCKDB_API is
 // empty here and these definitions have plain linkage matching the callers.

@@ -76,6 +76,12 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
+//
+// ALSO revisit native/quackwire/src/win_duckdb_compat.cpp: it hard-codes a few
+// DuckDB internal leaf symbols (SerializationCompatibility default version index,
+// etc.) copied from the pinned DuckDB source. A DuckDB bump can change those
+// values or introduce new unresolved symbols on the Windows link. See that
+// file's header for how to re-derive them.
 val libquackwireVersion = "1.5.4-40de7badae41-4-SNAPSHOT"
 
 // Opt-in Windows native classifier. Default OFF so existing Linux/macOS/CI
