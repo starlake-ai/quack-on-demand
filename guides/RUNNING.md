@@ -131,8 +131,9 @@ has PowerShell twins and the node-spawn path is a PowerShell mirror of
 - Windows PowerShell 5+ (ships with Windows) — used to spawn Quack nodes
 - A reachable **PostgreSQL 16+** (native Windows install, a container, or a
   network host). `psql` is *optional* — the manager provisions its own
-  control-plane and tenant DBs; when `psql` is present `run-jar.ps1` also runs
-  a reachability probe.
+  control-plane and tenant DBs; when `psql` is present `run-jar.ps1` additionally
+  runs a reachability probe, enforces the PG16+ version gate, creates the
+  control-plane DB up-front, and enables the `NUKE=1` / `LOAD_*` flows.
 - DuckDB is **self-installed** by `run-jar.ps1` (CLI + `duckdb.dll`, v1.5.4,
   `windows-amd64`) into `.duckdb\<version>\` and prepended to `PATH`. A
   system `duckdb` on `PATH` is ignored — an ABI/feature mismatch (e.g. the
@@ -141,9 +142,13 @@ has PowerShell twins and the node-spawn path is a PowerShell mirror of
 **Run** (from a PowerShell prompt at the repo root):
 
 ```powershell
-# Uses the newest distrib\quack-on-demand-assembly-*.jar (or `sbt assembly`
-# when none is present / $env:BUILD='1'). Override knobs with the same QOD_*
-# env vars as the bash path.
+# run-jar.ps1 is at parity with run-jar.sh: it resolves the jar from Maven
+# Central (QOD_VERSION, default latest release; 'latest-snapshot' for the newest
+# snapshot), caches it under %USERPROFILE%\.cache\quack-on-demand\ (sha1-checked),
+# and falls back to the newest distrib\quack-on-demand-assembly-*.jar or
+# `sbt assembly` (bootstrapping sbt into .sbt-bootstrap\ if missing). $env:BUILD='1'
+# forces a local build. It runs a PG16 gate, creates the control-plane DB, and
+# does a port preflight before booting. Same QOD_* / PROXY_* env vars as bash.
 $env:QOD_PG_HOST     = 'localhost'
 $env:QOD_PG_PASSWORD = 'hunter2'
 $env:QOD_ADMIN_PASSWORD = 'change-me'
@@ -151,6 +156,19 @@ $env:QOD_ADMIN_PASSWORD = 'change-me'
 ```
 
 Stop with `.\scripts\stop-jar.ps1`.
+
+**Demo seeds** work the same as the bash path — `run-jar.ps1` runs the PowerShell
+loaders (`load-{tpch,tpcds,ssb}-dbgen.ps1`) in the background before the JVM:
+
+```powershell
+$env:LOAD_TPCH = '1'; .\scripts\run-jar.ps1                    # TPC-H SF=1 into acme/acme_tpch
+$env:NUKE = '1'; $env:LOAD_TPC = '1'; .\scripts\run-jar.ps1    # wipe state, then reseed all three
+```
+
+`LOAD_TPCDS=N`, `LOAD_SSB=N`, and the `LOAD_TPC=N` shortcut behave as on Unix;
+`NUKE=1` drops the control-plane + demo tenant-db databases and wipes `ducklake\`,
+`state\`, `certs\` first (requires `psql`). Each loader also runs standalone
+(`$env:SF=10; .\scripts\load-tpch-dbgen.ps1`).
 
 **Client path.** Two ways the manager talks to the Quack nodes:
 - **Native wire (default, fastest)** — needs `native\windows-x86_64\quackwire.dll`
