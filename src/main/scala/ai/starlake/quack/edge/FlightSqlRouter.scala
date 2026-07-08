@@ -3,7 +3,7 @@ package ai.starlake.quack.edge
 import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext}
-import ai.starlake.quack.model.{PoolKey, StatementKind}
+import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
@@ -45,7 +45,8 @@ final class FlightSqlRouter(
     val rowPolicyRewriter: ai.starlake.quack.edge.rls.RowPolicyRewriter =
       new ai.starlake.quack.edge.rls.RowPolicyRewriter(),
     val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
-    val journal: EventJournal = EventJournal.noop
+    val journal: EventJournal = EventJournal.noop,
+    val stampWrites: Boolean = false
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -139,6 +140,36 @@ final class FlightSqlRouter(
           Map("sql" -> sql.take(500), "durationMs" -> durationMs.toString)
         )
       )
+
+  /** Build the stamping prelude (EPIC P1) for a write, or None when stamping does not apply.
+    * Applies to DML / DDL on ducklake pools outside a client-opened transaction, when the pool
+    * advertises a dbName. The prelude runs as the first PREPARE of the wire bracket
+    * ([[ai.starlake.quack.edge.adapter.QuackHttpClient.queryStamped]]); the statement itself
+    * follows unmodified, so its result reaches the client byte-identical to the unstamped path.
+    *
+    * author = tenant:<pool tenant>/user:<session user> (spec-01 section 9). All values are
+    * interpolated as escaped DuckDB literals: the username is client-controlled input.
+    */
+  private[edge] def stampPrelude(
+      kind: StatementKind,
+      kindWire: String,
+      poolMeta: Map[String, String],
+      txOpen: Boolean,
+      user: String,
+      tenant: String,
+      sql: String
+  ): Option[String] =
+    val isWrite = kind == StatementKind.Dml || kind == StatementKind.Ddl
+    if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
+    else
+      poolMeta.get("dbName").filter(_.nonEmpty).map { db =>
+        val author = s"tenant:$tenant/user:$user"
+        val verb   = sql.trim.takeWhile(c => !c.isWhitespace).toLowerCase
+        s"BEGIN; CALL ducklake_set_commit_message(" +
+          s"${SqlLiterals.duckdbLiteral(db)}, " +
+          s"${SqlLiterals.duckdbLiteral(author)}, " +
+          s"${SqlLiterals.duckdbLiteral(s"flightsql $verb")})"
+      }
 
   def session(connectionId: String) = sessions.get(connectionId)
 
@@ -344,6 +375,8 @@ final class FlightSqlRouter(
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
         // initial schema) when the pool's metastore advertises a dbName.
         val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
+        val prelude    =
+          stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
             maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
@@ -371,7 +404,13 @@ final class FlightSqlRouter(
                     Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
                   else None
                 adapter
-                  .send(node, wrappedSql, session = None, recordLoad = recordExecution)
+                  .send(
+                    node,
+                    wrappedSql,
+                    session = None,
+                    recordLoad = recordExecution,
+                    stampPrelude = prelude
+                  )
                   .flatMap {
                     case QuackResponse.Ok(reader, latency, close) =>
                       // Idempotent close: an admin kill fires the same close the Flight
@@ -409,7 +448,8 @@ final class FlightSqlRouter(
                           kind,
                           finalSql,
                           exclude = nodeId,
-                          recordLoad = recordExecution
+                          recordLoad = recordExecution,
+                          prelude = prelude
                         )
 
                     case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
@@ -457,7 +497,8 @@ final class FlightSqlRouter(
       kind: StatementKind,
       sql: String,
       exclude: String,
-      recordLoad: Boolean = true
+      recordLoad: Boolean = true,
+      prelude: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
@@ -468,35 +509,37 @@ final class FlightSqlRouter(
             snap.nodes.find(_.nodeId == nodeId) match
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
-                adapter.send(n, wrapped, None, recordLoad = recordLoad).map {
-                  case QuackResponse.Ok(reader, latency, close) =>
-                    // Mirror the primary path: register the statement so it appears in
-                    // the active-statement view and is killable. Registration is gated on
-                    // the same recordLoad flag used by the primary path.
-                    val stmtId =
-                      if recordLoad then
-                        Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
-                      else None
-                    val closedOnce            = new java.util.concurrent.atomic.AtomicBoolean(false)
-                    val closeOnce: () => Unit =
-                      () => if closedOnce.compareAndSet(false, true) then close()
-                    stmtId.foreach(registry.attachCancel(_, closeOnce))
-                    val closeAndDeregister: () => Unit = () => {
-                      stmtId.foreach(registry.deregister)
-                      closeOnce()
-                    }
-                    // Pin the session on the retry node so a follow-up
-                    // COMMIT/ROLLBACK lands on the same Quack instance.
-                    // Without this, a BEGIN that retried onto node B
-                    // would have its COMMIT routed by load and likely
-                    // hit node A - breaking transaction consistency.
-                    sessions.onStatement(connectionId, kind, nodeId)
-                    Right(QueryResult(reader, closeAndDeregister, nodeId, latency))
-                  case QuackResponse.Failed(QuackError.Transient(m), _) =>
-                    Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
-                  case QuackResponse.Failed(QuackError.Permanent(m), _) =>
-                    Left(classifyPermanent(s"retry failed: $m"))
-                }
+                adapter
+                  .send(n, wrapped, None, recordLoad = recordLoad, stampPrelude = prelude)
+                  .map {
+                    case QuackResponse.Ok(reader, latency, close) =>
+                      // Mirror the primary path: register the statement so it appears in
+                      // the active-statement view and is killable. Registration is gated on
+                      // the same recordLoad flag used by the primary path.
+                      val stmtId =
+                        if recordLoad then
+                          Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
+                        else None
+                      val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
+                      val closeOnce: () => Unit =
+                        () => if closedOnce.compareAndSet(false, true) then close()
+                      stmtId.foreach(registry.attachCancel(_, closeOnce))
+                      val closeAndDeregister: () => Unit = () => {
+                        stmtId.foreach(registry.deregister)
+                        closeOnce()
+                      }
+                      // Pin the session on the retry node so a follow-up
+                      // COMMIT/ROLLBACK lands on the same Quack instance.
+                      // Without this, a BEGIN that retried onto node B
+                      // would have its COMMIT routed by load and likely
+                      // hit node A - breaking transaction consistency.
+                      sessions.onStatement(connectionId, kind, nodeId)
+                      Right(QueryResult(reader, closeAndDeregister, nodeId, latency))
+                    case QuackResponse.Failed(QuackError.Transient(m), _) =>
+                      Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
+                    case QuackResponse.Failed(QuackError.Permanent(m), _) =>
+                      Left(classifyPermanent(s"retry failed: $m"))
+                  }
               case None =>
                 IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
           case _ =>
