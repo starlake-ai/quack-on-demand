@@ -23,6 +23,15 @@ final class MaintenanceScheduler(
 
   private val TargetBytesForSmall = 32L * 1024 * 1024 // "small" = under 32MB in v1
 
+  /** A schema/table name unsafe to embed in a `table:<schema>.<table>` scope string: a quote or
+    * semicolon could break out of the eventual SQL literal on the node session, a backslash is an
+    * escape smuggling vector, and a dot would itself break the scope grammar (the scope parser
+    * splits on the first dot only). Catalog-sourced names failing this check are dropped from this
+    * tick rather than enqueued -- the next tick re-evaluates once/if the catalog is clean.
+    */
+  private def isUnsafeIdentifier(s: String): Boolean =
+    s.contains('\'') || s.contains(';') || s.contains('\\') || s.contains('.')
+
   def tickOnce(now: Instant): Unit =
     store.sweepStaleMaintenanceRuns(now.minusSeconds(runTimeoutMinutes * 60L))
     store.listTenants().foreach { t =>
@@ -43,6 +52,15 @@ final class MaintenanceScheduler(
             val hot = smallFileCountsOf(t.id, td.name, TargetBytesForSmall)
               .filter { case ((s, tb), n) =>
                 n >= PolicyMath.effective(rows, Some(s), Some(tb)).smallFileMinCount
+              }
+              .filterNot { case ((s, tb), _) =>
+                val unsafe = isUnsafeIdentifier(s) || isUnsafeIdentifier(tb)
+                if unsafe then
+                  logger.warn(
+                    s"skipping threshold run for ${t.id}/${td.name}: unsafe identifier " +
+                      s"in schema='$s' table='$tb'"
+                  )
+                unsafe
               }
             hot.keys.headOption.foreach { case (s, tb) =>
               // one table per tick per lake: the run itself compacts; the next tick

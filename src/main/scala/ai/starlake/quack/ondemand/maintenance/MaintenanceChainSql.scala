@@ -16,27 +16,39 @@ package ai.starlake.quack.ondemand.maintenance
   */
 object MaintenanceChainSql:
 
+  /** Escape a raw identifier/value for interpolation into a single-quoted SQL literal: doubles
+    * embedded single quotes so `s.t'); anything--`-style scope values can't break out of the
+    * literal and reach the privileged node session. Every interpolated string argument in this
+    * object (alias, schema, table) must be routed through this helper.
+    */
+  private def esc(raw: String): String = raw.replace("'", "''")
+
   def flush(alias: String): String =
-    s"CALL ducklake_flush_inlined_data('$alias')"
+    s"CALL ducklake_flush_inlined_data('${esc(alias)}')"
 
   /** Explicit-version expiry; caller has already subtracted the pin-set and the latest snapshot.
     * Never called with an empty list (the runner skips the step instead).
     */
   def expireVersions(alias: String, versions: List[Long]): String =
-    s"CALL ducklake_expire_snapshots('$alias', versions => [${versions.mkString(", ")}])"
+    s"CALL ducklake_expire_snapshots('${esc(alias)}', versions => [${versions.mkString(", ")}])"
 
   def mergeAdjacent(alias: String): String =
-    s"CALL ducklake_merge_adjacent_files('$alias')"
+    s"CALL ducklake_merge_adjacent_files('${esc(alias)}')"
 
   def rewriteTable(alias: String, schema: String, table: String): String =
-    s"CALL ducklake_rewrite_data_files('$alias', '$table', schema => '$schema')"
+    s"CALL ducklake_rewrite_data_files('${esc(alias)}', '${esc(table)}', schema => '${esc(schema)}')"
 
   def cleanupOldFiles(alias: String, graceDays: Int): String =
-    if graceDays <= 0 then s"CALL ducklake_cleanup_old_files('$alias', cleanup_all => true)"
+    if graceDays <= 0 then s"CALL ducklake_cleanup_old_files('${esc(alias)}', cleanup_all => true)"
     else
-      s"CALL ducklake_cleanup_old_files('$alias', older_than => now() - INTERVAL '$graceDays days')"
+      s"CALL ducklake_cleanup_old_files('${esc(
+          alias
+        )}', older_than => now() - INTERVAL '$graceDays days')"
 
   def deleteOrphans(alias: String, minAgeDays: Int): String =
-    if minAgeDays <= 0 then s"CALL ducklake_delete_orphaned_files('$alias', cleanup_all => true)"
+    if minAgeDays <= 0 then
+      s"CALL ducklake_delete_orphaned_files('${esc(alias)}', cleanup_all => true)"
     else
-      s"CALL ducklake_delete_orphaned_files('$alias', older_than => now() - INTERVAL '$minAgeDays days')"
+      s"CALL ducklake_delete_orphaned_files('${esc(
+          alias
+        )}', older_than => now() - INTERVAL '$minAgeDays days')"

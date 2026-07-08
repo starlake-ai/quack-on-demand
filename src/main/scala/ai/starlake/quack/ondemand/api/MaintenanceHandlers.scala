@@ -55,12 +55,25 @@ final class MaintenanceHandlers(
                 )
               case Some(td) => Right((tid, td.name))
 
+  /** Characters that must never reach an interpolated SQL string on the node session: quote (breaks
+    * out of a literal), semicolon/backslash (statement/escape injection), any whitespace or control
+    * char (also closes T7: interior whitespace in a scope part is cosmetic garbage at best and a
+    * smuggled separator at worst).
+    */
+  private def hasUnsafeChars(s: String): Boolean =
+    s.exists(c => c == '\'' || c == ';' || c == '\\' || c.isWhitespace || c.isControl)
+
   /** Validate the scope fields + numeric/cron/operations rules pinned by the spec. Returns the
     * first violation as (errorCode, message), or None when the request is well-formed.
     */
   private def validateUpsert(
       req: MaintenancePolicyUpsertRequest
   ): Option[(String, String)] =
+    // scopeKind=tenantdb carries no schema/table scope; normalize away any stray values a
+    // caller might have sent instead of silently accepting a mismatched (kind, schema/table)
+    // tuple into storage.
+    val normalizedSchema = if req.scopeKind == "tenantdb" then None else req.scopeSchema
+    val normalizedTable  = if req.scopeKind == "tenantdb" then None else req.scopeTable
     if !ValidScopeKinds.contains(req.scopeKind) then
       Some(
         (
@@ -68,10 +81,12 @@ final class MaintenanceHandlers(
           s"scopeKind must be one of ${ValidScopeKinds.mkString(", ")}, got '${req.scopeKind}'"
         )
       )
-    else if req.scopeKind == "schema" && req.scopeSchema.forall(_.trim.isEmpty) then
+    else if normalizedSchema.exists(hasUnsafeChars) || normalizedTable.exists(hasUnsafeChars) then
+      Some(("invalid_scope", "scopeSchema/scopeTable must not contain quotes or whitespace"))
+    else if req.scopeKind == "schema" && normalizedSchema.forall(_.trim.isEmpty) then
       Some(("invalid_scope", "scopeKind=schema requires scopeSchema"))
     else if req.scopeKind == "table" &&
-      (req.scopeSchema.forall(_.trim.isEmpty) || req.scopeTable.forall(_.trim.isEmpty))
+      (normalizedSchema.forall(_.trim.isEmpty) || normalizedTable.forall(_.trim.isEmpty))
     then Some(("invalid_scope", "scopeKind=table requires scopeSchema and scopeTable"))
     else if req.retentionDays.exists(_ < 1) then
       Some(("invalid_value", "retentionDays must be >= 1"))
@@ -104,6 +119,12 @@ final class MaintenanceHandlers(
     * schema and table and exactly one dot. Anything else is rejected, because the runner's
     * parseScope treats an unrecognized scope as tenantdb and a typo like "table:noDot" would
     * silently escalate to a lake-wide expiry/cleanup.
+    *
+    * Schema and table parts are additionally rejected if they contain a quote, semicolon,
+    * backslash, or any whitespace/control char (interior or otherwise) -- these values are
+    * interpolated verbatim into SQL run on a privileged node session by
+    * [[MaintenanceChainSql.rewriteTable]], so a value like `s.t'); drop--` must never reach
+    * validation as a well-formed scope.
     */
   private def validateRunScope(scope: Option[String]): Option[String] =
     scope.flatMap { raw =>
@@ -111,11 +132,16 @@ final class MaintenanceHandlers(
       if s == "tenantdb" then None
       else if s.startsWith("table:") then
         s.drop(6).split("\\.", -1) match
-          case Array(schema, table) if schema.nonEmpty && table.nonEmpty => None
-          case _                                                         =>
+          case Array(schema, table)
+              if schema.trim.nonEmpty && table.trim.nonEmpty &&
+                schema == schema.trim && table == table.trim &&
+                !hasUnsafeChars(schema) && !hasUnsafeChars(table) =>
+            None
+          case _ =>
             Some(
               s"invalid scope '$raw': table scope must be 'table:<schema>.<table>' with " +
-                "non-empty schema and table and exactly one dot"
+                "non-empty schema and table, exactly one dot, no interior whitespace, and no " +
+                "quotes/semicolons/backslashes"
             )
       else
         Some(

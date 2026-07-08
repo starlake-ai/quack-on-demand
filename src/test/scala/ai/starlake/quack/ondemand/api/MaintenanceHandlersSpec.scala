@@ -263,6 +263,29 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "reject a scope carrying a quote/SQL-injection payload (F1)" in {
+    val (h, _) = setup()
+    val out    = h
+      .triggerRun(
+        MaintenanceRunRequest("acme", tenantDbName, Some("table:s.t'); drop--"), None),
+        None
+      )(_ => None)
+      .unsafeRunSync()
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_scope"
+  }
+
+  it should "reject a scope with interior whitespace (T7)" in {
+    val (h, _) = setup()
+    val out    = h
+      .triggerRun(MaintenanceRunRequest("acme", tenantDbName, Some("table: a.b"), None), None)(_ =>
+        None
+      )
+      .unsafeRunSync()
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_scope"
+  }
+
   it should "accept the tenantdb and table:<schema>.<table> scope forms" in {
     val (h, store) = setup()
     List("tenantdb", "table:tpch1.region").foreach { scope =>
