@@ -204,6 +204,19 @@ final class Connection private[adapter] (
           )
     }
 
+  /** Run `sql` on this connection and throw away the result. Used by the stamped-write bracket
+    * (EPIC P1) for its BEGIN/CALL prelude and COMMIT epilogue, whose results are empty Success
+    * shells the caller never streams. Drains through the normal reader so multi-batch responses
+    * release their native chunks, then closes the reader WITHOUT the DISCONNECT cascade
+    * (`closeReadSource = false`) so the connection stays usable for the next PREPARE. Wire errors
+    * surface exactly like [[execute]] ([[QuackWireError]]).
+    */
+  def executeDiscard(sql: String)(using runtime: IORuntime): IO[Unit] =
+    execute(sql).map { reader =>
+      try while reader.loadNextBatch() do ()
+      finally reader.close(false)
+    }
+
   /** Best-effort DISCONNECT_MESSAGE. A half-dead node must not crash the caller's `IO`, so we
     * swallow any transport exception. The server-side `connectionId` will be cleaned up by the
     * node's own connection reaper anyway.
