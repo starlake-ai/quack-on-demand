@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.3.6 (unreleased)
+## 0.3.7 (unreleased)
+
+### Audit
+
+- **FlightSQL writes stamp DuckLake snapshots with the authenticated principal (EPIC P1).** Every
+  INSERT / UPDATE / DELETE / DDL routed through the FlightSQL edge now sets `author =
+  tenant:<tenant>/user:<user>` and `commit_message = flightsql <verb>` on the DuckLake snapshot it
+  creates. The bracket is a three-PREPARE sequence on one wire connection so the exact DML row count
+  is preserved. Stamping is fail-open: a prelude failure lands the write unstamped rather than
+  blocking it. Knob: `quack-on-demand.stampWrites` / `QOD_STAMP_WRITES` (default on, native client
+  path only). Pre-existing snapshots keep `author: null` (rendered "unknown" in the UI).
+
+## 0.3.6
 
 ### Catalog snapshots and time travel
 

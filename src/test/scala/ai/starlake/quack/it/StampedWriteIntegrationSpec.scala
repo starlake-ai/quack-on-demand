@@ -63,7 +63,7 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
       up shouldBe true
 
   override def afterAll(): Unit =
-    // destroyForcibly (SIGKILL) ensures the process and its .shell child are gone on macOS/Linux.
+    // destroy() sends SIGTERM; the quack server and its .shell child exit on the signal.
     if server != null then server.destroy()
     allocator.close()
     if dir != null then
