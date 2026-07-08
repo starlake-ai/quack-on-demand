@@ -53,6 +53,18 @@ class DuckLakeCatalogReaderMaintenanceSpec extends AnyFlatSpec with Matchers wit
       reader.filesScheduledForDeletion() shouldBe empty
     }
 
+  "rewriteTable" should "succeed against the live fixture (pins the positional signature, F5)" in
+    withCatalog("mreader", extraSql = extra) { (_, _) =>
+      // A plain no-throw execution assertion: ducklake_rewrite_data_files has no table_name
+      // named parameter on the pinned DuckDB/DuckLake version, only positional
+      // (catalog, table, delete_threshold, schema) -- this pins that against the live engine
+      // instead of only against the SQL-string builder.
+      noException should be thrownBy runSqlOnCatalog(
+        ai.starlake.quack.ondemand.maintenance.MaintenanceChainSql
+          .rewriteTable("lake", "tpch1", "region")
+      )
+    }
+
   "totalDataFileBytes" should "shrink once the chain releases superseded files" in
     withCatalog("mreader", extraSql = extra) { (reader, _) =>
       val before = reader.totalDataFileBytes()
