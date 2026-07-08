@@ -85,6 +85,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
           "qodstate_role_permission",
           "qodstate_role_row_policy",
           "qodstate_rollup_watermark",
+          "qodstate_snapshot_tag",
           "qodstate_stmt_history",
           "qodstate_stmt_rollup",
           "qodstate_tenant",
@@ -118,8 +119,9 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
       // 1 session/auth table (revoked_jti, Liquibase 0014) +
       // 1 telemetry table (audit, Liquibase 0018) +
       // 3 statement-history/rollup tables (stmt_history, stmt_rollup,
-      // rollup_watermark, Liquibase 0019).
+      // rollup_watermark, Liquibase 0019) +
+      // 1 snapshot-tag table (snapshot_tag, Liquibase 0020).
       // qodstate_tenant_identity is gone -- auth provider is a tenant attribute now.
-      rs.getInt(1) shouldBe 21
+      rs.getInt(1) shouldBe 22
     finally c.close()
   }
