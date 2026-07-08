@@ -259,7 +259,7 @@ object DuckLakeInitializer extends LazyLogging:
 
   /** DuckDB SQL string literal: wrap in single quotes, double any embedded `'`. */
   private[ondemand] def duckdbLiteral(v: String): String =
-    "'" + v.replace("'", "''") + "'"
+    ai.starlake.quack.model.SqlLiterals.duckdbLiteral(v)
 
   /** Identifier quote: wrap in `"`, double any embedded `"`. */
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
