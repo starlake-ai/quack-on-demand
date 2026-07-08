@@ -46,15 +46,65 @@ target_include_directories(quackwire PRIVATE
 # Task 8 (CI matrix) will likely switch CI to FetchContent on the v1.5.4
 # release artifact for reproducibility, but for local dev the system
 # package is the fastest path to a working link.
-find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /opt/homebrew/include /usr/local/include /usr/include)
-find_library(DUCKDB_LIB duckdb HINTS /opt/homebrew/lib /usr/local/lib /usr/lib)
+# DUCKDB_HOME (env var or -DDUCKDB_HOME=) points at an unpacked libduckdb dir.
+# It is required on Windows (there is no system package): unzip
+# libduckdb-windows-amd64.zip and populate it with duckdb.lib + the FULL duckdb/
+# include tree. The release zip ships only the amalgamated duckdb.{h,hpp}; the
+# duckdb-quack message layer also pulls internal headers such as
+# duckdb/common/serializer/binary_serializer.hpp, so a shallow `git clone
+# --branch v1.5.4` of duckdb/src/include/duckdb must be copied alongside them
+# (see .github/workflows/quackwire.yml for the exact staging). On macOS/Linux the
+# system package hints below still apply, so DUCKDB_HOME is optional there.
+find_path(DUCKDB_INCLUDE_DIR duckdb.hpp
+  HINTS
+    $ENV{DUCKDB_HOME} $ENV{DUCKDB_HOME}/include
+    ${DUCKDB_HOME} ${DUCKDB_HOME}/include
+    /opt/homebrew/include /usr/local/include /usr/include)
+find_library(DUCKDB_LIB duckdb
+  HINTS
+    $ENV{DUCKDB_HOME} $ENV{DUCKDB_HOME}/lib
+    ${DUCKDB_HOME} ${DUCKDB_HOME}/lib
+    /opt/homebrew/lib /usr/local/lib /usr/lib)
 if(NOT DUCKDB_INCLUDE_DIR OR NOT DUCKDB_LIB)
-  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS) or 'apt install libduckdb-dev' (Linux), or wire up FetchContent against the v1.5.4 release artifact.")
+  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS), 'apt install libduckdb-dev' (Linux), or unpack libduckdb-windows-amd64.zip and set DUCKDB_HOME to it (Windows). See .github/workflows/quackwire.yml for the exact layout.")
 endif()
 message(STATUS "quackwire: using libduckdb headers at ${DUCKDB_INCLUDE_DIR}")
 message(STATUS "quackwire: linking libduckdb at ${DUCKDB_LIB}")
 target_include_directories(quackwire PRIVATE ${DUCKDB_INCLUDE_DIR})
 target_link_libraries(quackwire PRIVATE ${DUCKDB_LIB})
+
+if(WIN32)
+  # The prebuilt duckdb.dll exports only its DUCKDB_API surface. The DuckDB C++
+  # serializer internals the duckdb-quack message layer relies on
+  # (BinarySerializer / BinaryDeserializer / MemoryStream /
+  # SerializationCompatibility) are NOT in that export table, so on Windows they
+  # surface as `unresolved external symbol` at link time - they resolve for free
+  # on Linux/macOS only because shared objects export every symbol by default.
+  #
+  # Fix: compile those four sources straight from the vendored duckdb submodule
+  # into the shim, and define DUCKDB_STATIC_BUILD so winapi.hpp expands DUCKDB_API
+  # to empty. Without it the headers declare the serializer as __declspec(dllimport),
+  # so callers emit __imp_ references the local definitions would never satisfy;
+  # with it every DUCKDB_API symbol uses plain linkage - the locally compiled
+  # serializer resolves directly, and the remaining duckdb symbols resolve through
+  # duckdb.lib's function import thunks.
+  #
+  # WIN32-only on purpose: on Linux/macOS libduckdb already defines these, so
+  # compiling them here too would be a duplicate-symbol (multiple definition) error.
+  target_compile_definitions(quackwire PRIVATE DUCKDB_STATIC_BUILD)
+  set(DUCKDB_SERIALIZER_DIR ${DUCKDB_QUACK_DIR}/duckdb/src/common/serializer)
+  target_sources(quackwire PRIVATE
+    ${DUCKDB_SERIALIZER_DIR}/binary_serializer.cpp
+    ${DUCKDB_SERIALIZER_DIR}/binary_deserializer.cpp
+    ${DUCKDB_SERIALIZER_DIR}/memory_stream.cpp
+    ${DUCKDB_SERIALIZER_DIR}/serializer.cpp
+    # A couple of leaf symbols the serializer references
+    # (SerializationCompatibility, ValueOperations::NotDistinctFrom) live in
+    # heavy translation units (config.cpp, comparison_operations.cpp); replicate
+    # just those here instead of compiling all of DuckDB.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/win_duckdb_compat.cpp
+  )
+endif()
 
 if(APPLE)
   set_target_properties(quackwire PROPERTIES SUFFIX ".dylib")

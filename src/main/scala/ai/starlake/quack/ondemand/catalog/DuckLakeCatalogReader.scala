@@ -107,8 +107,35 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
           List(n, n)
         )
 
-  private def snapshotExists(id: Long): Boolean =
+  def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
+
+  /** Subset of `ids` that exist in the catalog. One round-trip; used to flag dangling tags. */
+  def snapshotsExist(ids: Set[Long]): Set[Long] =
+    if ids.isEmpty then Set.empty
+    else
+      val placeholders = List.fill(ids.size)("?").mkString(",")
+      query(
+        s"SELECT snapshot_id FROM ducklake_snapshot WHERE snapshot_id IN ($placeholders)",
+        ids.toList*
+      )(_.getLong("snapshot_id")).toSet
+
+  /** Every file path the given snapshot references: data files AND delete files visible at
+    * `snapshotId` under the same predicate the AS OF browser uses. This is the file-level pin-set
+    * for EPIC P2: a maintenance run must not delete any of these while the snapshot is pinned.
+    */
+  def filesReferencedAt(snapshotId: Long): Set[String] =
+    val (dPred, dArgs) = visible("d", Some(snapshotId))
+    val dataFiles      = query(
+      s"SELECT d.path FROM ducklake_data_file d WHERE $dPred",
+      dArgs*
+    )(_.getString("path"))
+    val (delPred, delArgs) = visible("del", Some(snapshotId))
+    val deleteFiles        = query(
+      s"SELECT del.path FROM ducklake_delete_file del WHERE $delPred",
+      delArgs*
+    )(_.getString("path"))
+    (dataFiles ++ deleteFiles).toSet
 
   def getTable(
       schema: String,

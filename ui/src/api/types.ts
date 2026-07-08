@@ -592,6 +592,15 @@ export interface CatalogSnapshotEntry {
   affectedTables: CatalogTableRef[];
 }
 
+export interface CatalogTagEntry {
+  name: string;
+  snapshotId: number;
+  protected: boolean;
+  createdBy: string | null;
+  createdAt: string | null; // ISO-8601
+  exists: boolean;          // false = dangling (snapshot expired/vacuumed)
+}
+
 // ----- Federation -----
 
 export interface FederatedSourceCreateRequest {

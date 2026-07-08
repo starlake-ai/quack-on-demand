@@ -120,6 +120,67 @@ Every scalar in `application.conf` has a matching `QOD_*` /
 | Seed TPC-H at boot | `LOAD_TPCH` | unset (positive int = scale factor) |
 | TPC-H schema name | `QOD_BOOTSTRAP_TPCH_SCHEMA` | `tpch1` |
 
+### Path 1 on Windows (native, PowerShell)
+
+The manager runs natively on Windows — no WSL, no Docker. The bash launcher
+has PowerShell twins and the node-spawn path is a PowerShell mirror of
+`spawn-quack-node.sh`.
+
+**Prerequisites**
+- JDK 21+ (`java` on `PATH`, or `JAVA_HOME` set)
+- Windows PowerShell 5+ (ships with Windows) — used to spawn Quack nodes
+- A reachable **PostgreSQL 16+** (native Windows install, a container, or a
+  network host). `psql` is *optional* — the manager provisions its own
+  control-plane and tenant DBs; when `psql` is present `run-jar.ps1` also runs
+  a reachability probe.
+- DuckDB is **self-installed** by `run-jar.ps1` (CLI + `duckdb.dll`, v1.5.4,
+  `windows-amd64`) into `.duckdb\<version>\` and prepended to `PATH`. A
+  system `duckdb` on `PATH` is ignored — an ABI/feature mismatch (e.g. the
+  winget 0.10.x build) would fail node spawn.
+
+**Run** (from a PowerShell prompt at the repo root):
+
+```powershell
+# Uses the newest distrib\quack-on-demand-assembly-*.jar (or `sbt assembly`
+# when none is present / $env:BUILD='1'). Override knobs with the same QOD_*
+# env vars as the bash path.
+$env:QOD_PG_HOST     = 'localhost'
+$env:QOD_PG_PASSWORD = 'hunter2'
+$env:QOD_ADMIN_PASSWORD = 'change-me'
+.\scripts\run-jar.ps1
+```
+
+Stop with `.\scripts\stop-jar.ps1`.
+
+**Client path.** Two ways the manager talks to the Quack nodes:
+- **Native wire (default, fastest)** — needs `native\windows-x86_64\quackwire.dll`
+  bundled in the assembly. That classifier is produced by the CI Windows job (or
+  a local build, below) and is opt-in at build time via
+  `QOD_WITH_WINDOWS_NATIVE=true`. A jar built without it has no Windows native,
+  so use the fallback:
+- **Embedded DuckDB (JDBC), no native build** — set
+  `$env:QOD_NATIVE_CLIENT = 'false'`. The DuckDB JDBC driver ships its own
+  Windows native, so this works with any assembly jar out of the box (slower;
+  serialized). Good for a first run before wiring up the `.dll`.
+
+**Building the Windows native (`quackwire.dll`), optional.** Requires MSVC
+(Visual Studio Build Tools) + CMake + `sbt`:
+
+```powershell
+# 1. Assemble a DUCKDB_HOME with duckdb.lib + the full duckdb/ include tree
+#    (see .github/workflows/quackwire.yml "Install libduckdb v1.5.4 (Windows)").
+$env:DUCKDB_HOME = 'C:\path\to\duckdb-home'
+cmake -S native\quackwire -B native\quackwire\build -DCMAKE_BUILD_TYPE=Release -DDUCKDB_HOME="$env:DUCKDB_HOME"
+cmake --build native\quackwire\build --config Release
+# 2. Stage the dll where the classifier packager expects it and publish locally.
+New-Item -ItemType Directory -Force libquackwire\binaries\windows-x86_64 | Out-Null
+Copy-Item native\quackwire\build\Release\quackwire.dll libquackwire\binaries\windows-x86_64\
+$env:QOD_WITH_WINDOWS_NATIVE = 'true'
+sbt libquackwire/publishLocal
+sbt assembly            # bundles native/windows-x86_64/quackwire.dll
+.\scripts\run-jar.ps1   # now the default native client works on Windows
+```
+
 ---
 
 ## Path 2 - Docker container, against an external Postgres

@@ -94,17 +94,24 @@ ci_run_id=$(gh run list --workflow=quackwire.yml --branch=main --status=success 
             --limit=1 --json databaseId --jq '.[0].databaseId')
 [[ -n "$ci_run_id" && "$ci_run_id" != "null" ]] \
   || die "no successful quackwire native build run on main yet. Push a libquackwire change and wait for CI."
-echo "downloading 4-platform artifacts from CI run $ci_run_id..."
+echo "downloading platform artifacts from CI run $ci_run_id..."
 tmp_artifacts=$(mktemp -d)
 gh run download "$ci_run_id" --dir "$tmp_artifacts" --pattern 'quackwire-*'
 for d in "$tmp_artifacts"/quackwire-*; do
   plat=$(basename "$d" | sed 's/^quackwire-//')
   [[ "$plat" == "$host_platform" ]] && continue
   mkdir -p "libquackwire/binaries/$plat"
-  cp "$d"/libquackwire.* "libquackwire/binaries/$plat/"
+  # Unix artifacts carry libquackwire.{so,dylib}; the Windows artifact carries
+  # the un-prefixed quackwire.dll. Copy whichever is present.
+  cp "$d"/libquackwire.* "libquackwire/binaries/$plat/" 2>/dev/null || true
+  cp "$d"/quackwire.dll  "libquackwire/binaries/$plat/" 2>/dev/null || true
 done
 rm -rf "$tmp_artifacts"
 echo "staged platforms:"; ls libquackwire/binaries/*/
+
+# Include the Windows classifier (native/windows-x86_64/quackwire.dll) in the
+# release bundle now that it's staged from the CI run above.
+export QOD_WITH_WINDOWS_NATIVE=true
 
 # 5. publishSigned + sonatypeBundleRelease for the libquackwire subproject.
 #    `project libquackwire` first: sonatypeBundleRelease checks the ACTIVE

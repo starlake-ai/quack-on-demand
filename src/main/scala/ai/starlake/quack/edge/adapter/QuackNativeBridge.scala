@@ -118,6 +118,7 @@ private object NativeLoader:
     val osTag =
       if os.contains("mac") then "osx"
       else if os.contains("linux") then "linux"
+      else if os.contains("win") then "windows"
       else sys.error(s"unsupported OS for libquackwire: $os")
     val archTag = arch match
       case "x86_64" | "amd64"  => "x86_64"

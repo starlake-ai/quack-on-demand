@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, RunningNode, Tenant, TenantDb}
+import ai.starlake.quack.model.{Pool, RunningNode, SnapshotTag, Tenant, TenantDb}
 
 /** Per-entity persistence for the normalized control plane (`qodstate_tenant`,
   * `qodstate_tenant_db`, `qodstate_pool`, `qodstate_node`) plus the RBAC graph (`qodstate_user`,
@@ -209,6 +209,25 @@ trait ControlPlaneStore:
     * answer effective_pools / effective_roles without per-request joins.
     */
   def snapshot(): ControlPlaneSnapshot
+
+  // ---- snapshot tags (EPIC P2 / Spec 06) ----
+
+  /** Insert a tag; Left("duplicate") when (tenant, tenantDb, name) already exists. */
+  def createSnapshotTag(t: SnapshotTag): Either[String, SnapshotTag]
+
+  /** Delete by scope+name; returns the deleted row so callers can audit its protected flag. */
+  def deleteSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag]
+
+  def setSnapshotTagProtected(
+      tenant: String,
+      tenantDb: String,
+      name: String,
+      isProtected: Boolean
+  ): Option[SnapshotTag]
+
+  def listSnapshotTags(tenant: String, tenantDb: String): List[SnapshotTag]
+
+  def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag]
 
   /** Release any pooled connections / heap resources. Default impl is a no-op (in-memory stores
     * hold no I/O resources); [[PostgresControlPlaneStore.close]] drains the Hikari pool. Called

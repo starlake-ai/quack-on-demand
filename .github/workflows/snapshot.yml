@@ -26,11 +26,14 @@ on:
   push:
     branches: [main]
   # Auto-rebuild after every successful `quackwire native build`. libquackwire's
-  # 4 classifier jars are bundled into the manager assembly at build time, so
-  # a republished -SNAPSHOT (same coord, new content) only reaches users once
-  # we rebuild the assembly + docker image. workflow_run handles content-only
-  # republishes; an actual libquackwire version bump touches build.sbt and
-  # would re-trigger via the push event anyway.
+  # 5 classifier jars (linux x2, macOS x2, windows-x86_64) are bundled into the
+  # manager assembly at build time, so a republished -SNAPSHOT (same coord, new
+  # content) only reaches users once we rebuild the assembly + docker image.
+  # workflow_run handles content-only republishes; an actual libquackwire
+  # version bump touches build.sbt and would re-trigger via the push event
+  # anyway. The windows-x86_64 classifier is produced by that same quackwire
+  # workflow, so chasing it here guarantees it exists before this assembly
+  # resolves it (QOD_WITH_WINDOWS_NATIVE=true below).
   workflow_run:
     workflows: ["quackwire native build"]
     types: [completed]
@@ -93,6 +96,12 @@ jobs:
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
           # Keep memory tight on GH runners; UI build + assembly is the heavy bit.
           SBT_OPTS: "-Xss8M -Xmx5g -XX:+UseG1GC"
+          # Bundle the 5th (Windows) libquackwire classifier so the ONE
+          # published uber-jar runs the native client on Windows AND Linux/macOS.
+          # The windows-x86_64 classifier is resolved from Central snapshots,
+          # published by the `quackwire native build` workflow's publish-central
+          # job (which this workflow chases via the workflow_run trigger above).
+          QOD_WITH_WINDOWS_NATIVE: 'true'
         run: sbt -no-colors update clean publish
 
   # -----------------------------------------------------------------------

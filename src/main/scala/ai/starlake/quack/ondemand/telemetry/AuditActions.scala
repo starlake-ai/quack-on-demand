@@ -62,6 +62,11 @@ object AuditActions:
   val FederationSourceDelete = "federation.source.delete"
   val FederationSecretUpsert = "federation.secret.upsert"
   val FederationSecretDelete = "federation.secret.delete"
+  // snapshot tags
+  val TagCreate     = "tag.create"
+  val TagDelete     = "tag.delete"
+  val TagHoldCreate = "tag.hold.create"
+  val TagHoldRemove = "tag.hold.remove"
   // data plane (FlightSQL)
   val SqlDenied = "sql.denied"
   val SqlWrite  = "sql.write"
@@ -120,7 +125,11 @@ object AuditActions:
     FederationSecretDelete,
     SqlDenied,
     SqlWrite,
-    SqlDdl
+    SqlDdl,
+    TagCreate,
+    TagDelete,
+    TagHoldCreate,
+    TagHoldRemove
   ).sorted
 
   require(all.distinct.size == all.size, "duplicate audit action in AuditActions.all")

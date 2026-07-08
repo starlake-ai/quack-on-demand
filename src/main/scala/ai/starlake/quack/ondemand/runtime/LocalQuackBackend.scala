@@ -65,19 +65,25 @@ final class LocalQuackBackend(
   def stop(nodeId: String): IO[Unit] = IO.blocking {
     processes.remove(nodeId) match
       case Some(p) =>
-        p.destroy()
-        if !p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then p.destroyForcibly()
+        LocalQuackBackend.terminate(p.pid(), force = false)
+        if !p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) then
+          LocalQuackBackend.terminate(p.pid(), force = true)
       case None =>
         // Adopted (from `reconcile`): no Process handle, but we kept the
-        // pid. Fall back to ProcessHandle so SIGTERM still lands.
+        // pid. Fall back to pid-based teardown so the whole node tree still
+        // dies (SIGTERM on Unix, `taskkill /T` on Windows).
         adoptedPids.remove(nodeId).foreach { pid =>
-          Option(java.lang.ProcessHandle.of(pid))
+          LocalQuackBackend.terminate(pid, force = false)
+          val handle = Option(java.lang.ProcessHandle.of(pid))
             .flatMap(o => if o.isPresent then Some(o.get()) else None)
-            .foreach { h =>
-              h.destroy()
-              try h.onExit().get(5, java.util.concurrent.TimeUnit.SECONDS)
-              catch case _: Throwable => h.destroyForcibly()
-            }
+          val exited = handle match
+            case Some(h) =>
+              try
+                h.onExit().get(5, java.util.concurrent.TimeUnit.SECONDS)
+                true
+              catch case _: Throwable => false
+            case None => true // already gone
+          if !exited then LocalQuackBackend.terminate(pid, force = true)
         }
     tokens.remove(nodeId)
     nodePorts.remove(nodeId).foreach(ports.release)
@@ -118,15 +124,16 @@ final class LocalQuackBackend(
     */
   def cleanup(): IO[Unit] = IO.blocking {
     val procs = processes.toList
-    // First pass: SIGTERM everyone in parallel.
-    procs.foreach { case (_, p) => p.destroy() }
+    // First pass: SIGTERM everyone in parallel (`taskkill /T` on Windows so
+    // the duckdb.exe grandchild of each spawn wrapper goes down too).
+    procs.foreach { case (_, p) => LocalQuackBackend.terminate(p.pid(), force = false) }
     // Second pass: bounded wait, then SIGKILL stragglers.
     procs.foreach { case (_, p) =>
       if !p.waitFor(
           LocalQuackBackend.ShutdownGracePerProcessSec,
           java.util.concurrent.TimeUnit.SECONDS
         )
-      then p.destroyForcibly()
+      then LocalQuackBackend.terminate(p.pid(), force = true)
     }
     processes.clear()
     tokens.clear()
@@ -147,11 +154,69 @@ object LocalQuackBackend:
     */
   val DefaultSpawnScript: String = "./scripts/spawn-quack-node.sh"
 
+  /** In-repo Windows fallback spawn script (a PowerShell mirror of
+    * `spawn-quack-node.sh`). Production passes `mgrCfg.spawnScriptWindows`
+    * (HOCON `quack-on-demand.spawnScriptWindows`, env `QOD_SPAWN_SCRIPT_WINDOWS`).
+    */
+  val DefaultSpawnScriptWindows: String = "./scripts/spawn-quack-node.ps1"
+
+  /** True when the manager runs on Windows. Drives spawn-command shape (PowerShell wrapper vs bash
+    * script) and process teardown (`taskkill /T` vs POSIX signals).
+    */
+  private[runtime] val isWindows: Boolean =
+    sys.props.getOrElse("os.name", "").toLowerCase.contains("win")
+
   /** Default command. Invokes `script` (the bundled spawn script in production), which starts
     * DuckDB, attaches the DuckLake catalog, and calls `quack_serve(...)`.
     */
   def defaultCommand(script: String): (NodeSpec, Int, String) => List[String] =
     (_, port, token) => List(script, port.toString, token)
+
+  /** OS-aware default command. On Windows the child is
+    * `powershell.exe -File <winScript> <port> <token>` (the wrapper process the manager holds a
+    * `Process` handle for; its `duckdb.exe` grandchild is reaped via `taskkill /T`). On Unix it is
+    * the bash `<unixScript> <port> <token>` invocation, byte-identical to [[defaultCommand]].
+    */
+  def defaultCommand(
+      unixScript: String,
+      winScript: String
+  ): (NodeSpec, Int, String) => List[String] =
+    if isWindows then
+      (_, port, token) =>
+        List(
+          "powershell.exe",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          winScript,
+          port.toString,
+          token
+        )
+    else (_, port, token) => List(unixScript, port.toString, token)
+
+  /** Terminate a spawned node by pid. On Windows uses `taskkill /PID <pid> /T` (`/F` when
+    * `force`) so the whole process tree — the PowerShell wrapper and its `duckdb.exe` child — is
+    * killed; `Process.destroy()` alone would leave the grandchild orphaned. On Unix routes through
+    * `ProcessHandle` so behavior matches the prior `destroy()` / `destroyForcibly()` path.
+    */
+  private[runtime] def terminate(pid: Long, force: Boolean): Unit =
+    if isWindows then
+      val cmd =
+        if force then List("taskkill", "/PID", pid.toString, "/T", "/F")
+        else List("taskkill", "/PID", pid.toString, "/T")
+      try
+        val p = new java.lang.ProcessBuilder(cmd*).redirectOutput(
+          java.lang.ProcessBuilder.Redirect.DISCARD
+        ).redirectError(java.lang.ProcessBuilder.Redirect.DISCARD).start()
+        p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        ()
+      catch case _: Throwable => ()
+    else
+      Option(java.lang.ProcessHandle.of(pid))
+        .flatMap(o => if o.isPresent then Some(o.get()) else None)
+        .foreach(h => if force then h.destroyForcibly() else h.destroy())
 
   private val rnd           = new SecureRandom()
   def randomToken(): String =
