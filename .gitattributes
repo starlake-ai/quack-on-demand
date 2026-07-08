@@ -1,0 +1,30 @@
+# Canonical line endings, independent of each contributor's core.autocrlf.
+# Text is normalized to LF in the repo (this project is developed on
+# macOS/Linux); Windows-only scripts stay CRLF; binaries are never touched.
+
+* text=auto eol=lf
+
+# Windows scripts want CRLF.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf
+
+# Binaries: no EOL conversion, no diff.
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.gz binary
+*.zip binary
+*.pdf binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.duckdb binary
+*.parquet binary
