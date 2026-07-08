@@ -863,3 +863,92 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .execute("c-s8", "alice", poolKey, "INSERT INTO t VALUES (1)", recordExecution = false)
       .unsafeRunSync()
     calls.head._1 shouldBe None
+
+  it should "derive the commit-message verb from comment-stripped SQL" in:
+    val (router, _, _, calls) = stampedSetup()
+    router
+      .execute("c-s9", "alice", poolKey, "/* hint */ INSERT INTO t VALUES (1)")
+      .unsafeRunSync()
+    calls.head._1.get should include("'flightsql insert'")
+
+  it should "carry the stamping prelude through to the retry node on transient failure" in:
+    // Two-node stamped pool; first call fails transiently; retry succeeds.
+    // Both recorded calls must carry Some(prelude) to prove the prelude threads through retryOnce.
+    val callCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    val calls     = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
+
+    val backend = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          27000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tracker = new NodeLoadTracker
+    val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
+      def createDatabase(name: String): Either[String, Unit] = Right(())
+      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore(), dbAdmin = admin)
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.DuckLake,
+        Map(
+          "pgHost"     -> "127.0.0.1",
+          "pgPort"     -> "0",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "dbName"     -> "ignored",
+          "schemaName" -> "main"
+        ),
+        "/tmp/qod-stamp-retry-test"
+      )
+      .unsafeRunSync()
+    // Two dual-role nodes so retryOnce has a fallback.
+    sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
+
+    val client =
+      new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+          IO { calls += ((None, sql)); TestArrow.okResponse() }
+        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+          IO {
+            calls += ((Some(prelude), sql))
+            if callCount.getAndIncrement() == 0 then
+              QuackResponse.Failed(QuackError.Transient("boom"), 1L)
+            else TestArrow.okResponse()
+          }
+
+    val adapter  = new QuackHttpAdapter(client, tracker)
+    val sessions = new SessionRegistry
+    val router   = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      stampWrites = true
+    )
+
+    val result =
+      router.execute("c-s10", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    result shouldBe a[Right[?, ?]]
+    calls.size shouldBe 2
+    calls.map(_._1).forall(_.isDefined) shouldBe true

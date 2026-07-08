@@ -8,6 +8,7 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
 import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
+import ai.starlake.sql.SqlCommentStripper
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
@@ -163,8 +164,9 @@ final class FlightSqlRouter(
     if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
     else
       poolMeta.get("dbName").filter(_.nonEmpty).map { db =>
-        val author = s"tenant:$tenant/user:$user"
-        val verb   = sql.trim.takeWhile(c => !c.isWhitespace).toLowerCase
+        val author   = s"tenant:$tenant/user:$user"
+        val stripped = SqlCommentStripper.stripComments(sql)
+        val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase
         s"BEGIN; CALL ducklake_set_commit_message(" +
           s"${SqlLiterals.duckdbLiteral(db)}, " +
           s"${SqlLiterals.duckdbLiteral(author)}, " +
