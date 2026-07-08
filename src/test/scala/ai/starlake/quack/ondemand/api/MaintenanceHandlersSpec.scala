@@ -250,6 +250,33 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "reject malformed scopes with 400 invalid_scope" in {
+    val (h, _) = setup()
+    List("table:noDot", "schema:sales", "table:a.b.c").foreach { scope =>
+      val out = h
+        .triggerRun(MaintenanceRunRequest("acme", tenantDbName, Some(scope), None), None)(_ => None)
+        .unsafeRunSync()
+      withClue(s"scope=$scope") {
+        out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+        out.left.toOption.get._2.error shouldBe "invalid_scope"
+      }
+    }
+  }
+
+  it should "accept the tenantdb and table:<schema>.<table> scope forms" in {
+    val (h, store) = setup()
+    List("tenantdb", "table:tpch1.region").foreach { scope =>
+      val out = h
+        .triggerRun(MaintenanceRunRequest("acme", tenantDbName, Some(scope), None), None)(_ => None)
+        .unsafeRunSync()
+      withClue(s"scope=$scope")(out.isRight shouldBe true)
+    }
+    store
+      .listMaintenanceRuns("acme", tenantDbName, 10, None)
+      .map(_.scope)
+      .toSet shouldBe Set("tenantdb", "table:tpch1.region")
+  }
+
   it should "400 a non-ducklake tenant-db (invalid_kind, matching TagHandlers)" in {
     val (h, _) = setup()
     val out    = h
@@ -300,4 +327,25 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
       .toOption
       .get
       ._1 shouldBe StatusCode.NotFound
+  }
+
+  it should "clamp the limit to [1, 500]" in {
+    val (h, _) = setup()
+    (1 to 3).foreach { _ =>
+      h.triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
+        .unsafeRunSync()
+        .isRight shouldBe true
+    }
+    // limit=0 clamps up to 1: exactly one row comes back, not zero and not all three.
+    h.listRuns("acme", tenantDbName, Some(0), None, None)(_ => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .size shouldBe 1
+    // limit=9999 clamps down to 500; with only 3 rows this returns all 3 (and would cap at 500).
+    h.listRuns("acme", tenantDbName, Some(9999), None, None)(_ => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .size shouldBe 3
   }

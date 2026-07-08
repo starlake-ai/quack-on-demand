@@ -100,6 +100,30 @@ final class MaintenanceHandlers(
       else None
     }
 
+  /** Manual-run scope: absent, exactly "tenantdb", or `table:<schema>.<table>` with non-empty
+    * schema and table and exactly one dot. Anything else is rejected, because the runner's
+    * parseScope treats an unrecognized scope as tenantdb and a typo like "table:noDot" would
+    * silently escalate to a lake-wide expiry/cleanup.
+    */
+  private def validateRunScope(scope: Option[String]): Option[String] =
+    scope.flatMap { raw =>
+      val s = raw.trim
+      if s == "tenantdb" then None
+      else if s.startsWith("table:") then
+        s.drop(6).split("\\.", -1) match
+          case Array(schema, table) if schema.nonEmpty && table.nonEmpty => None
+          case _                                                         =>
+            Some(
+              s"invalid scope '$raw': table scope must be 'table:<schema>.<table>' with " +
+                "non-empty schema and table and exactly one dot"
+            )
+      else
+        Some(
+          s"invalid scope '$raw': accepted forms are 'tenantdb' (or omit the field) and " +
+            "'table:<schema>.<table>'"
+        )
+    }
+
   private def toEntry(p: MaintenancePolicy): MaintenancePolicyEntry =
     MaintenancePolicyEntry(
       id = p.id,
@@ -219,7 +243,7 @@ final class MaintenanceHandlers(
   ): Out[List[MaintenanceRunEntry]] = IO.blocking {
     gate(rawTenant, tenantDb, apiKey)(scopeOf).map { case (tid, db) =>
       store
-        .listMaintenanceRuns(tid, db, limit.getOrElse(50), before)
+        .listMaintenanceRuns(tid, db, limit.getOrElse(50).max(1).min(500), before)
         .map { r =>
           MaintenanceRunEntry(
             id = r.id,
@@ -255,24 +279,27 @@ final class MaintenanceHandlers(
         audit.rest(apiKey, "control-plane", AuditActions.MaintenanceRunManual, "denied")
         Left(e)
       case Right((tid, db)) =>
-        validateOperations(req.operations) match
-          case Some(msg) => err(StatusCode.BadRequest, "invalid_operations", msg)
+        validateRunScope(req.scope) match
+          case Some(msg) => err(StatusCode.BadRequest, "invalid_scope", msg)
           case None      =>
-            val run = store.enqueueMaintenanceRun(
-              tid,
-              db,
-              req.scope.getOrElse("tenantdb"),
-              "manual",
-              req.operations
-            )
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MaintenanceRunManual,
-              "ok",
-              tenant = Some(tid),
-              target = Some(s"$db/${run.scope}"),
-              detail = Map("operations" -> req.operations.getOrElse("all"))
-            )
-            Right(MaintenanceRunResponse(run.id))
+            validateOperations(req.operations) match
+              case Some(msg) => err(StatusCode.BadRequest, "invalid_operations", msg)
+              case None      =>
+                val run = store.enqueueMaintenanceRun(
+                  tid,
+                  db,
+                  req.scope.map(_.trim).getOrElse("tenantdb"),
+                  "manual",
+                  req.operations
+                )
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.MaintenanceRunManual,
+                  "ok",
+                  tenant = Some(tid),
+                  target = Some(s"$db/${run.scope}"),
+                  detail = Map("operations" -> req.operations.getOrElse("all"))
+                )
+                Right(MaintenanceRunResponse(run.id))
   }
