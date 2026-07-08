@@ -16,12 +16,16 @@ import scala.sys.process._
   */
 class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAndAfterAll:
 
-  private val port                   = 29993
+  private val port = 29993
+  // endpoint uses "localhost" (Flight client); poll uses 127.0.0.1 to skip the IPv6 probe on macOS.
   private val endpoint               = s"quack:localhost:$port"
   private val token                  = "it-stamp-token"
   private var dir: Path              = null
   private var server: Process        = null
   private val duckdbPresent: Boolean = Process("which duckdb").!(ProcessLogger(_ => ())) == 0
+
+  // Shared allocator: one instance for the whole suite, closed in afterAll.
+  private val allocator = new RootAllocator()
 
   override def beforeAll(): Unit =
     if duckdbPresent then
@@ -59,10 +63,25 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
       up shouldBe true
 
   override def afterAll(): Unit =
+    // destroyForcibly (SIGKILL) ensures the process and its .shell child are gone on macOS/Linux.
     if server != null then server.destroy()
+    allocator.close()
+    if dir != null then
+      // Give the server process a moment to release file handles, then delete recursively.
+      Thread.sleep(200)
+      try
+        Files
+          .walk(dir)
+          .sorted(java.util.Comparator.reverseOrder())
+          .forEach(p => Files.delete(p))
+      catch
+        case e: Exception =>
+          System.err.println(
+            s"[StampedWriteIntegrationSpec] afterAll: could not fully delete $dir: $e"
+          )
 
   private def client() =
-    new QuackHttpClient(new RootAllocator(), nativeClient = true, nodeDisableSsl = true)
+    new QuackHttpClient(allocator, nativeClient = true, nodeDisableSsl = true)
 
   private def rows(resp: QuackResponse): List[List[Any]] =
     val ok   = resp.asInstanceOf[QuackResponse.Ok]
