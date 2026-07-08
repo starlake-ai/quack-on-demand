@@ -16,7 +16,9 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       pinnedFiles: Set[String] = Set.empty,
       scheduled: List[String] = Nil,
       totalBytes: List[Long] = List(100L, 100L), // sampled before/after the chain
-      failOn: Option[String] = None              // substring of a chain statement that should fail
+      failOn: Option[String] = None,             // substring of a chain statement that should fail
+      policyOf: (String, String, Option[String], Option[String]) => EffectivePolicy =
+        (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true)
   ):
     val store    = new InMemoryControlPlaneStore()
     var executed = List.empty[String]
@@ -52,7 +54,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
         val it = Iterator.from(0)
         (_, _) => totalBytes(math.min(it.next(), totalBytes.size - 1))
       },
-      effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      effectivePolicyOf = policyOf,
       catalogAlias = (_, _) => "acme_db",
       audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
     )
@@ -141,4 +143,12 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     )
     runner.executeRun(r.copy(status = "running")).unsafeRunSync()
     store.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
+  }
+
+  it should "stop the node and mark the run failed when a prelude lookup throws" in {
+    val f   = new Fixture(policyOf = (_, _, _, _) => sys.error("policy lookup boom"))
+    val fin = f.enqueueAndRun()
+    fin.status shouldBe "failed"
+    fin.error.getOrElse("") should include("policy lookup boom")
+    f.stopped shouldBe List("maint-n1")
   }

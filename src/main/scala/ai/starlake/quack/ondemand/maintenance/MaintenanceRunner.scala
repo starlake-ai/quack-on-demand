@@ -49,10 +49,19 @@ final class MaintenanceRunner(
         ) *> auditRun(run, "failed", RunCounters())
       case Some(node) =>
         IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters())) *>
-          chain(run, node).guarantee(stop(node.nodeId).handleErrorWith(_ => IO.unit))
+          chain(run, node)
+            .guarantee(stop(node.nodeId).handleErrorWith(_ => IO.unit))
+            .handleErrorWith { t =>
+              // Defensive: a synchronous throw from an injected lookup escapes the
+              // step-level Left handling; still record + audit the finished run.
+              val msg = Option(t.getMessage).getOrElse(t.toString)
+              IO.blocking(
+                store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
+              ).handleErrorWith(_ => IO.unit) *> auditRun(run, "failed", RunCounters())
+            }
     }
 
-  private def chain(run: MaintenanceRun, node: RunningNode): IO[Unit] =
+  private def chain(run: MaintenanceRun, node: RunningNode): IO[Unit] = IO.defer {
     for
       alias      <- IO.pure(catalogAlias(run.tenant, run.tenantDb))
       tableScope <- IO.pure(parseScope(run.scope))
@@ -104,9 +113,10 @@ final class MaintenanceRunner(
             statusRef.set("failed") *> errorRef.set(Some(s"$name: $msg")).as(false)
         }
 
-      flushIO =
+      flushIO = IO.defer {
         if wants(run, "flush") then step("flush", MaintenanceChainSql.flush(alias), identity)
         else IO.pure(true)
+      }
 
       expireIO = IO.defer {
         if tableScope.isDefined || toExpire.isEmpty || !wants(run, "expire") then IO.pure(true)
@@ -191,6 +201,7 @@ final class MaintenanceRunner(
       _        <- IO.blocking(store.finishMaintenanceRun(run.id, status, counters, error))
       _        <- auditRun(run, status, counters)
     yield ()
+  }
 
   private def auditRun(run: MaintenanceRun, status: String, c: RunCounters): IO[Unit] =
     IO.blocking(
