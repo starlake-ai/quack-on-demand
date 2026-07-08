@@ -151,7 +151,9 @@ object QuackProtocol:
   * completion (or close it), then `close()`. Reusing a `Connection` across two `execute` calls is
   * not supported because the wire's `result_uuid` is bound to the connection by PREPARE_RESPONSE; a
   * second PREPARE on the same connection would overwrite that UUID and confuse any half-drained
-  * chained reader still holding the old one.
+  * chained reader still holding the old one. Sequential statements via [[executeDiscard]] +
+  * [[execute]] on the same connection ARE supported (the stamped-write bracket pattern): the
+  * prohibition is on overlapping half-drained readers, not on fully-drained sequential PREPAREs.
   */
 final class Connection private[adapter] (
     transport: QuackTransport,

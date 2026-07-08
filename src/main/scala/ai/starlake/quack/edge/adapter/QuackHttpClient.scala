@@ -8,6 +8,7 @@ import org.apache.arrow.vector.ipc.ArrowReader
 import org.duckdb.{DuckDBConnection, DuckDBResultSet}
 
 import java.sql.{DriverManager, PreparedStatement, SQLException}
+import scala.concurrent.duration.FiniteDuration
 
 /** Forwards SQL to a Quack node, either through an embedded DuckDB (the historical default) or
   * through the JNI-backed [[QuackProtocol]] wire driver introduced by Tasks 0-6 of the
@@ -183,19 +184,79 @@ open class QuackHttpClient(
             // `conn.close()` here.
             QuackResponse.Ok(reader, elapsedMs, () => reader.close())
           }
-        case Left(t) =>
-          IO.monotonic.map { endNanos =>
-            val elapsedMs = (endNanos - startNanos).toMillis
-            val err       = t match
-              case e: QuackWireError.Transient => QuackError.Transient(e.msg)
-              case e: QuackWireError.Permanent => QuackError.Permanent(e.msg)
-              case other                       =>
-                QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
-            logger.debug(s"queryNative failed: ${t.getMessage}")
-            QuackResponse.Failed(err, elapsedMs)
-          }
+        case Left(t) => mapNativeFailure(t, startNanos)
       }
     }
+
+  /** Map a native-path failure to a [[QuackResponse.Failed]] with elapsed time. */
+  private def mapNativeFailure(t: Throwable, startNanos: FiniteDuration): IO[QuackResponse] =
+    IO.monotonic.map { endNanos =>
+      val err = t match
+        case e: QuackWireError.Transient => QuackError.Transient(e.msg)
+        case e: QuackWireError.Permanent => QuackError.Permanent(e.msg)
+        case other                       =>
+          QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
+      logger.debug(s"native query failed: ${t.getMessage}")
+      QuackResponse.Failed(err, (endNanos - startNanos).toMillis)
+    }
+
+  /** Stamped-write bracket (EPIC P1). Runs `prelude` (BEGIN + ducklake_set_commit_message), then
+    * `sql`, as separate PREPAREs on ONE wire connection (= one server-side DuckDB session), so
+    * `sql`'s result reaches the caller byte-identical to the plain path; COMMIT fires through
+    * [[StampedCommitArrowReader]] once that result is consumed.
+    *
+    * Fail-open: a prelude failure never blocks the write. The bracket connection is dropped
+    * (server-side session teardown rolls the BEGIN back) and the statement is re-sent unstamped on
+    * a fresh plain connection, with a warning.
+    *
+    * Only meaningful on the native path: the embedded path multiplexes one cached server session
+    * across all callers, where a BEGIN would poison unrelated statements, so it routes straight to
+    * the plain path.
+    */
+  def queryStamped(
+      endpoint: String,
+      token: String,
+      prelude: String,
+      sql: String
+  ): IO[QuackResponse] =
+    if !nativeClient then query(endpoint, token, sql, None)
+    else
+      IO.monotonic.flatMap { startNanos =>
+        given IORuntime = IORuntime.global
+        nativeProtocol.open(endpoint, token).attempt.flatMap {
+          case Left(t)     => mapNativeFailure(t, startNanos)
+          case Right(conn) =>
+            conn.executeDiscard(prelude).attempt.flatMap {
+              case Left(t) =>
+                logger.warn(
+                  s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
+                )
+                conn.close() *> queryNative(endpoint, token, sql)
+              case Right(()) =>
+                conn.execute(sql).attempt.flatMap {
+                  case Left(t) =>
+                    // DISCONNECT tears the server session down, rolling the open BEGIN back;
+                    // no explicit ROLLBACK round-trip needed.
+                    conn.close() *> mapNativeFailure(t, startNanos)
+                  case Right(reader) =>
+                    IO.monotonic.map { endNanos =>
+                      val committed = new java.util.concurrent.atomic.AtomicBoolean(false)
+                      val commitSync: () => Unit = () =>
+                        if committed.compareAndSet(false, true) then
+                          conn.executeDiscard("COMMIT").unsafeRunSync()
+                      val stamped = new StampedCommitArrowReader(allocator, reader, commitSync)
+                      // DISCONNECT-owner rule: stamped.close() delegates to reader.close(),
+                      // which cascades Connection.close(); no separate conn.close() here.
+                      QuackResponse.Ok(
+                        stamped,
+                        (endNanos - startNanos).toMillis,
+                        () => stamped.close()
+                      )
+                    }
+                }
+            }
+        }
+      }
 
   /** Lazily-constructed [[QuackProtocol]]. The transport defaults to
     * [[QuackProtocol.JdkHttpTransport]] over a fresh JDK [[java.net.http.HttpClient]]; tests pass a
