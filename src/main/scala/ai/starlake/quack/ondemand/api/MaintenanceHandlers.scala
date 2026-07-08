@@ -310,7 +310,14 @@ final class MaintenanceHandlers(
           case None      =>
             validateOperations(req.operations) match
               case Some(msg) => err(StatusCode.BadRequest, "invalid_operations", msg)
-              case None      =>
+              case None if store.hasActiveMaintenanceRun(tid, db) =>
+                audit.rest(apiKey, "control-plane", AuditActions.MaintenanceRunManual, "denied")
+                err(
+                  StatusCode.Conflict,
+                  "run_active",
+                  "a maintenance run is already queued or running for this database"
+                )
+              case None =>
                 val run = store.enqueueMaintenanceRun(
                   tid,
                   db,

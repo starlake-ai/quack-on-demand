@@ -83,6 +83,17 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     val handlers = new MaintenanceHandlers(sup, store)
     (handlers, store)
 
+  /** Claims and finishes whatever run is currently queued/running for acme/tenantDbName, so a
+    * subsequent `triggerRun` in the same test doesn't 409 `run_active` (F3). Tests that fire
+    * several manual runs back-to-back use this to simulate them completing in sequence rather than
+    * piling up concurrently.
+    */
+  private def drainActiveRun(store: InMemoryControlPlaneStore): Unit =
+    store.claimQueuedMaintenanceRun().foreach { r =>
+      store.finishMaintenanceRun(r.id, "succeeded", ai.starlake.quack.model.RunCounters(), None)
+      ()
+    }
+
   private def upsertReq(
       name: String = tenantDbName,
       scopeKind: String = "tenantdb",
@@ -241,12 +252,15 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "accept every csv operation individually" in {
-    val (h, _) = setup()
+    val (h, store) = setup()
     List("flush", "expire", "merge", "rewrite", "cleanup", "orphans").foreach { op =>
       val out = h
         .triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, Some(op)), None)(_ => None)
         .unsafeRunSync()
       withClue(s"operation=$op")(out.isRight shouldBe true)
+      // Drain the run so the next trigger doesn't 409 run_active (F3): each iteration in this
+      // loop is a fresh manual trigger, not a concurrent one.
+      drainActiveRun(store)
     }
   }
 
@@ -286,6 +300,20 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._2.error shouldBe "invalid_scope"
   }
 
+  "triggerRun" should "409 run_active when a run is already queued or running" in {
+    val (h, _) = setup()
+    val first  =
+      h.triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
+        .unsafeRunSync()
+    first.isRight shouldBe true
+
+    val second =
+      h.triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
+        .unsafeRunSync()
+    second.left.toOption.get._1 shouldBe StatusCode.Conflict
+    second.left.toOption.get._2.error shouldBe "run_active"
+  }
+
   it should "accept the tenantdb and table:<schema>.<table> scope forms" in {
     val (h, store) = setup()
     List("tenantdb", "table:tpch1.region").foreach { scope =>
@@ -293,6 +321,7 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
         .triggerRun(MaintenanceRunRequest("acme", tenantDbName, Some(scope), None), None)(_ => None)
         .unsafeRunSync()
       withClue(s"scope=$scope")(out.isRight shouldBe true)
+      drainActiveRun(store)
     }
     store
       .listMaintenanceRuns("acme", tenantDbName, 10, None)
@@ -320,13 +349,16 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   "listRuns" should "page newest-first with the before cursor" in {
-    val (h, _) = setup()
-    val ids    = (1 to 5).map { _ =>
-      h.triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
+    val (h, store) = setup()
+    val ids        = (1 to 5).map { _ =>
+      val id = h
+        .triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
         .unsafeRunSync()
         .toOption
         .get
         .id
+      drainActiveRun(store)
+      id
     }
 
     val page1 = h.listRuns("acme", tenantDbName, Some(2), None, None)(_ => None).unsafeRunSync()
@@ -353,11 +385,12 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "clamp the limit to [1, 500]" in {
-    val (h, _) = setup()
+    val (h, store) = setup()
     (1 to 3).foreach { _ =>
       h.triggerRun(MaintenanceRunRequest("acme", tenantDbName, None, None), None)(_ => None)
         .unsafeRunSync()
         .isRight shouldBe true
+      drainActiveRun(store)
     }
     // limit=0 clamps up to 1: exactly one row comes back, not zero and not all three.
     h.listRuns("acme", tenantDbName, Some(0), None, None)(_ => None)
