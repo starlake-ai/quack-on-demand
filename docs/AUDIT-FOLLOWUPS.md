@@ -42,7 +42,7 @@ Generated 2026-06-12 from a multi-pass audit of `src/main/scala/ai/starlake/quac
 
 - [ ] **Stop error-classification by `startsWith("...")`/`contains("...")`** in ~12 handler sites (e.g. `TenantHandlers.scala:107, 121, 137`, `RoleHandlers.scala:38`, `MembershipHandlers.scala:18`). Replace supervisor `Left(String)` with a typed `enum SupervisorError`.
 
-- [ ] **Endpoint signature drift.** `listTenantDbs`, `statementHistory`, and 4 catalog endpoints don't plumb `X-API-Key` while ~40 siblings do (`api/Endpoints.scala:250-252, 277-283, 357-388`). Side-effect: those handlers can't reject by session scope and rely entirely on URL-path guard. Make signatures uniform.
+- [ ] **Endpoint signature drift.** `TenantEndpoints.listTenantDbs`, `NodeEndpoints.statementHistory`, and the 4 `CatalogEndpoints` browser GETs don't plumb `X-API-Key` while ~40 siblings do. Side-effect: those handlers can't reject by session scope and rely entirely on URL-path guard. Make signatures uniform. (The snapshot-tag surface in `TagEndpoints` deliberately does NOT mirror this drift.)
 
 - [ ] **`UserHandlers.listUsers` `__forbidden__` sentinel** (`api/UserHandlers.scala:121`). Replace with a typed predicate.
 

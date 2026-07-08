@@ -28,7 +28,7 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
       .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
 
   private val allEndpoints: List[(String, AnyEndpoint)] =
-    endpointsOf(Endpoints) ++ endpointsOf(RbacEndpoints)
+    EndpointModules.all.flatMap(endpointsOf)
 
   private val CaptureRe = "\\{([^}]+)\\}".r
 
