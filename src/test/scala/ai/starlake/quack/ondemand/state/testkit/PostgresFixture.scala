@@ -1,9 +1,12 @@
 package ai.starlake.quack.ondemand.state.testkit
 
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import org.scalatest.Assertions
 
 import java.nio.file.{Files, Path}
+import java.sql.DriverManager
 import scala.sys.process._
+import scala.util.Try
 
 /** Spins up a Postgres-backed DuckLake catalog for one test. Reuses the developer's local Postgres
   * (postgres@localhost:5432, password `azizam`)
@@ -24,9 +27,24 @@ trait PostgresFixture:
   protected var currentDbName: Option[String] = None
   protected var currentDataPath: Option[Path] = None
 
+  Class.forName("org.postgresql.Driver")
+
+  private def adminUrl: String = s"jdbc:postgresql://$pgHost:$pgPort/postgres"
+
+  private lazy val pgReachable: Boolean =
+    Try {
+      val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
+      try c.isValid(2)
+      finally c.close()
+    }.getOrElse(false)
+
   def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
       test: (DuckLakeCatalogReader, Path) => A
   ): A =
+    if !pgReachable then
+      Assertions.cancel(
+        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
+      )
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
     try
