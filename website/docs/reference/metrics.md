@@ -18,6 +18,18 @@ The manager registers these series through Micrometer. They are emitted to which
 | `node_in_flight` | gauge | `tenant`, `pool`, `node_id`, `role` | Statements currently executing on the node. |
 | `node_ewma_latency_seconds` | gauge | `tenant`, `pool`, `node_id`, `role` | EWMA of completed-statement latency, the signal the router uses to pick the least-loaded node. |
 
+## Maintenance metrics
+
+Emitted per finished [managed-maintenance](/operating/maintenance) run. These series carry the `qod_` prefix; the legacy series above predate the prefix convention.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `qod_maint_runs_total` | counter | `tenant`, `tenant_db`, `result` | Maintenance runs by outcome (`succeeded`, `failed`, `partial`). A rising `partial` count usually means the pinned-file guard is firing. |
+| `qod_maint_bytes_reclaimed_total` | counter | `tenant`, `tenant_db` | Catalog bytes released by runs (physical deletion lags by the cleanup grace window). |
+| `qod_maint_files_compacted_total` | counter | `tenant`, `tenant_db` | Files touched by the merge and rewrite steps. |
+| `qod_maint_snapshots_expired_total` | counter | `tenant`, `tenant_db` | Snapshots expired (pinned snapshots are skipped, never counted here). |
+| `qod_maint_duration_seconds` | timer | `tenant`, `tenant_db` | End-to-end run duration, including maintenance-node spawn time. |
+
 ## DuckDB engine metrics
 
 Scraped from each node's DuckDB engine (`duckdb_memory()`, `duckdb_temporary_files()`) by the background health probe, one extra round-trip per node per `QOD_HEALTH_CHECK_INTERVAL_SEC` tick. A node that has never been scraped successfully publishes no row (rather than a misleading zero); a failed scrape keeps the previous sample until the next tick.

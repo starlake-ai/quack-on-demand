@@ -102,6 +102,17 @@ When you create a pool, the **New pool** form has a **Node placement** section. 
 
 ![The New pool form with the cohort placement editor open](/img/ui/placement.png)
 
+### Maintenance
+
+The tenant page's **Maintenance** tab manages [managed DuckLake maintenance](/operating/maintenance) per database. Pick one of the tenant's DuckLake databases to get its panel:
+
+- **Policy form**, bound to the database-level scope: the enable toggle, retention days (annotated as the bound on time-travel, undrop, and history horizons), compaction knobs (target file size, small-file threshold, rewrite threshold), cleanup grace and orphan age, and the cadence cron. Unset fields show the effective defaults as placeholders; the first save creates the policy row.
+- **Overrides table** listing schema- and table-scope policy rows with their overriding fields; rows can be deleted here (creating overrides is REST-only for now).
+- **Run history**, newest first with load-more: trigger (cadence, threshold, or manual), scope, status (`succeeded` / `failed` / `partial`), per-step counters, bytes reclaimed, and duration.
+- **Run maintenance now** under an advanced disclosure, the manual escape hatch. It is refused with a conflict while a run is already queued or running for the database.
+
+Maintenance is double-opt-in: the service runs by default but every database starts disabled, and the first enable expires all unpinned snapshots older than the retention window on the next tick. Protect snapshots with tags first (see [Snapshots and time travel](#snapshots-and-time-travel)).
+
 ## Users and access control
 
 `Users` is the RBAC console, titled **Users & access control**. A tenant selector at the top scopes the view; besides the concrete tenants it offers two synthetic scopes, **(all)** (every user, superusers included) and **(superusers)** (only rows with `tenant IS NULL`). When a concrete tenant is selected, its configured auth provider and settings are shown next to the selector. Three tabs cover the graph:
@@ -138,7 +149,9 @@ Below the table list, a **Snapshots** panel shows the database's DuckLake snapsh
 
 ![The snapshots panel with the demo database's history](/img/ui/snapshots.png)
 
-On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use). Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
+Each snapshot row also carries its **tags**: named handles (chips) you create with the row's **+ tag** button, optionally with a retention hold ("protect this snapshot"). Protected tags show a `hold` badge and pin their snapshot against [maintenance expiry](/operating/maintenance#retention-holds); deleting one asks for confirmation since it releases the pin. A tag whose snapshot has since been expired renders dimmed with a `missing` badge. When holds exist, a summary line above the table counts the pinned snapshots. Tag names are per-database, 1 to 128 characters, and never all digits, so they stay unambiguous next to snapshot ids.
+
+On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use); the selector lists named tags first, so you can time-travel by name, and API callers can use `?asOfTag=<name>` as an alias (supplying both is rejected). Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
 
 ![A table viewed as of a snapshot, with the AS OF banner](/img/ui/catalog-asof.png)
 
