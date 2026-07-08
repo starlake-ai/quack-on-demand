@@ -34,6 +34,7 @@ final class ManagerServer(
     authEnabled: Boolean,
     statementHistory: StatementHistoryHandlers,
     catalog: Option[CatalogHandlers],
+    tags: Option[TagHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -184,6 +185,27 @@ final class ManagerServer(
         Endpoints.listSnapshotsEndpoint.serverLogicSuccess {
           case (tenant, tenantDb, limit, before) =>
             IO.blocking(h.listSnapshots(tenant, tenantDb, limit, before))
+        }
+      )
+    }
+
+    // Snapshot tags (EPIC P2 / Spec 06). Session-gated per request via
+    // TenantScopeCheck inside the handlers - not part of catalogEndpoints
+    // on purpose, so the tag surface never inherits the browser GETs'
+    // ungated PublicEndpoint shape.
+    val tagEndpoints: List[ServerEndpoint[Any, IO]] = tags.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        TagEndpoints.listTagsEndpoint.serverLogic { case (tenant, tenantDb, token) =>
+          h.list(tenant, tenantDb, token)(sessions.scopeOf)
+        },
+        TagEndpoints.createTagEndpoint.serverLogic { case (req, token) =>
+          h.create(req, token)(sessions.scopeOf)
+        },
+        TagEndpoints.deleteTagEndpoint.serverLogic { case (req, token) =>
+          h.delete(req, token)(sessions.scopeOf)
+        },
+        TagEndpoints.protectTagEndpoint.serverLogic { case (req, token) =>
+          h.protect(req, token)(sessions.scopeOf)
         }
       )
     }
@@ -459,7 +481,7 @@ final class ManagerServer(
       Endpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

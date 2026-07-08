@@ -375,15 +375,15 @@ object Main extends IOApp with LazyLogging:
     // Hikari on every request. The resolver reads the effective metastore
     // (default <- tenant overrides) the same way PoolSupervisor does for
     // spawn-node.
+    def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
+      catalogReaderCache.computeIfAbsent(
+        (tenant, tenantDb),
+        { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
+      )
     val catalogHandlers: Option[CatalogHandlers] =
-      def reader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
-        catalogReaderCache.computeIfAbsent(
-          (tenant, tenantDb),
-          { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
-        )
       def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
-      Some(new CatalogHandlers(reader, kindOf))
+      Some(new CatalogHandlers(catalogReader, kindOf))
 
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
@@ -445,6 +445,19 @@ object Main extends IOApp with LazyLogging:
       manifestFedStore,
       catalog = catalogHandlers,
       audit = auditRecorder
+    )
+
+    // Snapshot-tag CRUD (EPIC P2 / Spec 06). Snapshot existence resolves
+    // through the same cached per-tenant-db DuckLake reader as the catalog
+    // browser; tag rows live in the control-plane store.
+    val tagHandlers: Option[ai.starlake.quack.ondemand.api.TagHandlers] = Some(
+      new ai.starlake.quack.ondemand.api.TagHandlers(
+        sup,
+        store,
+        snapshotExists = (t, td, id) => catalogReader(t, td).snapshotExists(id),
+        snapshotsExist = (t, td, ids) => catalogReader(t, td).snapshotsExist(ids),
+        audit = auditRecorder
+      )
     )
 
     val stmtHistory        = new ai.starlake.quack.edge.StatementHistoryStore()
@@ -975,6 +988,7 @@ object Main extends IOApp with LazyLogging:
         authService.hasProviders,
         historyHandlers,
         catalogHandlers,
+        tagHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,
