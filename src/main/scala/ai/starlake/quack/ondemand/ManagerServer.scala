@@ -173,15 +173,34 @@ final class ManagerServer(
           IO.blocking(h.listTables(tenant, tenantDb, schema))
         },
         CatalogEndpoints.getTableEndpoint.serverLogic {
-          case (tenant, tenantDb, schema, table, asOf) =>
-            IO.blocking(h.getTable(tenant, tenantDb, schema, table, asOf)).map {
-              case Some(d) => Right(d)
-              case None    =>
+          case (tenant, tenantDb, schema, table, asOf, asOfTag) =>
+            // Spec 06: at most one of asOf / asOfTag; a tag resolves to its
+            // snapshot id and reuses the AS OF read path. A dangling tag
+            // (snapshot vacuumed) falls through to the table-not-found 404.
+            val resolved: Either[(sttp.model.StatusCode, String), Option[Long]] = tags match
+              case Some(t)                   => t.resolveAsOf(tenant, tenantDb, asOf, asOfTag)
+              case None if asOfTag.isDefined =>
                 Left(
-                  s"table $schema.$table not found" +
-                    asOf.fold("")(n => s" at snapshot $n")
+                  (
+                    sttp.model.StatusCode.BadRequest,
+                    "asOfTag is not supported on this manager (no tag handler wired)"
+                  )
                 )
-            }
+              case None => Right(asOf)
+            resolved match
+              case Left(e)     => IO.pure(Left(e))
+              case Right(snap) =>
+                IO.blocking(h.getTable(tenant, tenantDb, schema, table, snap)).map {
+                  case Some(d) => Right(d)
+                  case None    =>
+                    Left(
+                      (
+                        sttp.model.StatusCode.NotFound,
+                        s"table $schema.$table not found" +
+                          snap.fold("")(n => s" at snapshot $n")
+                      )
+                    )
+                }
         },
         CatalogEndpoints.listSnapshotsEndpoint.serverLogicSuccess {
           case (tenant, tenantDb, limit, before) =>

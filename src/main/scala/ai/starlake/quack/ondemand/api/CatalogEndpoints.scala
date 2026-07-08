@@ -37,8 +37,8 @@ object CatalogEndpoints:
       .description("List tables in a schema of the (tenant, tenantDb)'s catalog.")
 
   val getTableEndpoint: PublicEndpoint[
-    (String, String, String, String, Option[Long]),
-    String,
+    (String, String, String, String, Option[Long], Option[String]),
+    (sttp.model.StatusCode, String),
     CatalogTableDetailResponse,
     Any
   ] =
@@ -50,10 +50,12 @@ object CatalogEndpoints:
           "tables" / path[String]("table")
       )
       .in(query[Option[Long]]("asOf"))
+      .in(query[Option[String]]("asOfTag"))
       .out(jsonBody[CatalogTableDetailResponse])
-      .errorOut(statusCode(sttp.model.StatusCode.NotFound).and(stringBody))
+      .errorOut(statusCode.and(stringBody))
       .description(
-        "Get one table's columns + parquet data files, optionally as of a DuckLake snapshot."
+        "Get one table's columns + parquet data files, optionally as of a DuckLake snapshot " +
+          "(asOf=<id>) or a snapshot tag (asOfTag=<name>); supplying both is a 400."
       )
 
   val listSnapshotsEndpoint: PublicEndpoint[(String, String, Option[Int], Option[Long]), Unit, List[

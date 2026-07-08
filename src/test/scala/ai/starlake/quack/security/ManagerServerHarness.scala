@@ -251,7 +251,10 @@ object ManagerServerHarness:
       // exists": authz specs never get past the scope/kind gates, and
       // tag-CRUD specs override these to whitelist their fixture ids.
       tagSnapshotExists: (String, String, Long) => Boolean = (_, _, _) => false,
-      tagSnapshotsExist: (String, String, Set[Long]) => Set[Long] = (_, _, _) => Set.empty
+      tagSnapshotsExist: (String, String, Set[Long]) => Set[Long] = (_, _, _) => Set.empty,
+      // Catalog browser handlers; specs exercising the /api/catalog GETs
+      // (e.g. asOfTag resolution) pass a stub-reader-backed instance.
+      catalog: Option[CatalogHandlers] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -341,7 +344,7 @@ object ManagerServerHarness:
       sessions,
       authEnabled = enableProviders,
       historyHandlers,
-      catalog = None,
+      catalog = catalog,
       tags = Some(tagHandlers),
       metricsEndpoint,
       userHandlers,
