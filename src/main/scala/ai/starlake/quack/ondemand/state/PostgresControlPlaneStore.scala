@@ -9,6 +9,7 @@ import ai.starlake.quack.model.{
   Role,
   RoleDistribution,
   RunningNode,
+  SnapshotTag,
   Tenant,
   TenantDb,
   TenantDbKind
@@ -1434,6 +1435,108 @@ final class PostgresControlPlaneStore(
       try drain(rs)(read)
       finally rs.close()
     finally ps.close()
+
+  // ---- snapshot tags ----
+
+  private def readSnapshotTag(rs: java.sql.ResultSet): SnapshotTag =
+    SnapshotTag(
+      id = rs.getString("id"),
+      tenant = rs.getString("tenant"),
+      tenantDb = rs.getString("tenant_db"),
+      name = rs.getString("name"),
+      snapshotId = rs.getLong("snapshot_id"),
+      isProtected = rs.getBoolean("protected"),
+      createdBy = Option(rs.getString("created_by")),
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+    )
+
+  def createSnapshotTag(t: SnapshotTag): Either[String, SnapshotTag] = withConn { c =>
+    // ON CONFLICT DO NOTHING + RETURNING: zero rows back means the unique
+    // (tenant, tenant_db, name) constraint fired -- race-free duplicate detection.
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_snapshot_tag
+        |  (id, tenant, tenant_db, name, snapshot_id, protected, created_by)
+        |VALUES (?, ?, ?, ?, ?, ?, ?)
+        |ON CONFLICT (tenant, tenant_db, name) DO NOTHING
+        |RETURNING created_at""".stripMargin
+    )
+    try
+      ps.setString(1, t.id)
+      ps.setString(2, t.tenant)
+      ps.setString(3, t.tenantDb)
+      ps.setString(4, t.name)
+      ps.setLong(5, t.snapshotId)
+      ps.setBoolean(6, t.isProtected)
+      setNullable(ps, 7, t.createdBy)
+      val rs = ps.executeQuery()
+      try
+        if rs.next() then Right(t.copy(createdAt = Some(rs.getTimestamp(1).toInstant)))
+        else Left("duplicate")
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def deleteSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """DELETE FROM qodstate_snapshot_tag
+          |WHERE tenant = ? AND tenant_db = ? AND name = ?
+          |RETURNING id, tenant, tenant_db, name, snapshot_id, protected, created_by, created_at""".stripMargin
+      )
+      try
+        ps.setString(1, tenant); ps.setString(2, tenantDb); ps.setString(3, name)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(readSnapshotTag(rs)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  def setSnapshotTagProtected(
+      tenant: String,
+      tenantDb: String,
+      name: String,
+      isProtected: Boolean
+  ): Option[SnapshotTag] = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_snapshot_tag SET protected = ?
+        |WHERE tenant = ? AND tenant_db = ? AND name = ?
+        |RETURNING id, tenant, tenant_db, name, snapshot_id, protected, created_by, created_at""".stripMargin
+    )
+    try
+      ps.setBoolean(1, isProtected)
+      ps.setString(2, tenant); ps.setString(3, tenantDb); ps.setString(4, name)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readSnapshotTag(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listSnapshotTags(tenant: String, tenantDb: String): List[SnapshotTag] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db, name, snapshot_id, protected, created_by, created_at
+        |FROM qodstate_snapshot_tag WHERE tenant = ? AND tenant_db = ? ORDER BY name""".stripMargin
+    )
+    try
+      ps.setString(1, tenant); ps.setString(2, tenantDb)
+      val rs = ps.executeQuery()
+      try drain(rs)(readSnapshotTag)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """SELECT id, tenant, tenant_db, name, snapshot_id, protected, created_by, created_at
+          |FROM qodstate_snapshot_tag WHERE tenant = ? AND tenant_db = ? AND name = ?""".stripMargin
+      )
+      try
+        ps.setString(1, tenant); ps.setString(2, tenantDb); ps.setString(3, name)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(readSnapshotTag(rs)) else None
+        finally rs.close()
+      finally ps.close()
+    }
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
     val buf = ListBuffer.empty[A]
