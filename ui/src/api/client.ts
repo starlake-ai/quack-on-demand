@@ -35,6 +35,13 @@ import type {
   CatalogTableDetailResponse,
   CatalogSnapshotEntry,
   CatalogTagEntry,
+  // Managed maintenance
+  MaintenancePolicyUpsertRequest,
+  MaintenancePolicyEntry,
+  MaintenancePolicyListResponse,
+  MaintenanceRunEntry,
+  MaintenanceRunRequest,
+  MaintenanceRunResponse,
   // RBAC
   UserResponse,
   UserCreateRequest,
@@ -384,6 +391,26 @@ export const api = {
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots${q}`
     );
   },
+
+  // Managed maintenance (session-gated; GETs take tenant/tenantDb as query params)
+  getMaintenancePolicy: (tenant: string, tenantDb: string) =>
+    get<MaintenancePolicyListResponse>(
+      `/maintenance/policy?tenant=${encodeURIComponent(tenant)}&tenantDb=${encodeURIComponent(tenantDb)}`
+    ),
+  upsertMaintenancePolicy: (req: MaintenancePolicyUpsertRequest) =>
+    post<MaintenancePolicyEntry>('/maintenance/policy/upsert', req),
+  deleteMaintenancePolicy: (id: string) =>
+    post<void>('/maintenance/policy/delete', { id }),
+  listMaintenanceRuns: (tenant: string, tenantDb: string, limit?: number, before?: number) => {
+    const qs = new URLSearchParams();
+    qs.set('tenant', tenant);
+    qs.set('tenantDb', tenantDb);
+    if (limit != null) qs.set('limit', String(limit));
+    if (before != null) qs.set('before', String(before));
+    return get<MaintenanceRunEntry[]>(`/maintenance/runs?${qs.toString()}`);
+  },
+  triggerMaintenanceRun: (req: MaintenanceRunRequest) =>
+    post<MaintenanceRunResponse>('/maintenance/run', req),
 
   // Snapshot tags (session-gated, unlike the catalog browser GETs above)
   listCatalogTags: (tenant: string, tenantDb: string) =>

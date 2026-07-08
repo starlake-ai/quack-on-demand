@@ -26,6 +26,7 @@ import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.model.Names
 import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import ai.starlake.quack.observability.metrics.{
+  MaintenanceMetrics,
   MetricsBindings,
   MetricsConfig,
   MetricsConfigCodec,
@@ -1244,7 +1245,8 @@ object Main extends IOApp with LazyLogging:
                   ai.starlake.quack.ondemand.maintenance.PolicyMath
                     .effective(store.listMaintenancePolicies(t, td), s, tb),
                 catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
-                audit = auditRecorder
+                audit = auditRecorder,
+                metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
               )
 
               val maintenanceSchedulerFiber =
