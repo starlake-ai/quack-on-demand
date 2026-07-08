@@ -683,19 +683,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "register the retried statement in the registry and deregister on close" in:
     // Arrange: first adapter call returns a transient failure; the second (retry on the
     // fallback node) succeeds. We need two nodes so retryOnce has a fallback.
-    val callCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    val callCount                 = new java.util.concurrent.atomic.AtomicInteger(0)
     val stub: () => QuackResponse = () =>
       if callCount.getAndIncrement() == 0 then
         QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
-      else
-        TestArrow.okResponse()
+      else TestArrow.okResponse()
 
     val bknd = new QuackBackend:
-      private val n = TrieMap.empty[String, RunningNode]
+      private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
         val r = RunningNode(
-          s.nodeId, s.poolKey, s.role, "127.0.0.1", 26000 + n.size, "tok",
-          Some(1L), None, Instant.EPOCH, maxConcurrent = s.maxConcurrent
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          26000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
         )
         n.put(s.nodeId, r); r
       }
@@ -708,12 +715,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup2 = new PoolSupervisor(bknd, tkr, new InMemoryControlPlaneStore())
     val pk2  = PoolKey("acme", "acme_default", "sales")
     sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
-    sup2.createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup2
+      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
 
-    val client2 = new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
-        IO.pure(stub())
+    val client2 =
+      new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+          IO.pure(stub())
     val adapter2  = new QuackHttpAdapter(client2, tkr)
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
@@ -726,3 +736,123 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     result.toOption.get.close()
     // After close the entry must be gone.
     registry2.list() shouldBe Nil
+
+  // ---------- EPIC P1: author stamping ----------
+
+  /** Like setup() but the pool is DuckLake-kind (kindWire "ducklake" + metastore dbName), the
+    * client records (prelude, sql) pairs, and stampWrites is on. DuckLake pre-init inside
+    * createTenantDb fails fast against pgPort 0 and is swallowed with a warning by design.
+    */
+  private def stampedSetup(stampWrites: Boolean = true) =
+    val backend = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          22000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tracker = new NodeLoadTracker
+    val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
+      def createDatabase(name: String): Either[String, Unit] = Right(())
+      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    val sup = new PoolSupervisor(
+      backend,
+      tracker,
+      new InMemoryControlPlaneStore(),
+      dbAdmin = admin
+    )
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.DuckLake,
+        Map(
+          "pgHost"     -> "127.0.0.1",
+          "pgPort"     -> "0",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "dbName"     -> "ignored",
+          "schemaName" -> "main"
+        ),
+        "/tmp/qod-stamp-test"
+      )
+      .unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    val calls  = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
+    val client =
+      new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+          IO { calls += ((None, sql)); TestArrow.okResponse() }
+        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+          IO { calls += ((Some(prelude), sql)); TestArrow.okResponse() }
+    val adapter  = new QuackHttpAdapter(client, tracker)
+    val sessions = new SessionRegistry
+    val router   = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      stampWrites = stampWrites
+    )
+    (router, sessions, sup, calls)
+
+  it should "stamp a DML statement on a ducklake pool with author tenant:<t>/user:<u>" in:
+    val (router, _, sup, calls) = stampedSetup()
+    router.execute("c-s1", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    val (prelude, sql) = calls.head
+    prelude should not be empty
+    val db = sup.get(poolKey).get.metastore("dbName")
+    prelude.get shouldBe
+      s"BEGIN; CALL ducklake_set_commit_message('$db', 'tenant:acme/user:alice', 'flightsql insert')"
+    sql should include("INSERT INTO t VALUES (1)")
+
+  it should "stamp DDL with the verb in the commit message" in:
+    val (router, _, _, calls) = stampedSetup()
+    router.execute("c-s2", "alice", poolKey, "CREATE TABLE t2 (i INT)").unsafeRunSync()
+    calls.head._1.get should include("'flightsql create'")
+
+  it should "escape a single quote in the user name (injection guard)" in:
+    val (router, _, _, calls) = stampedSetup()
+    router.execute("c-s3", "o'brien", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    calls.head._1.get should include("'tenant:acme/user:o''brien'")
+
+  it should "not stamp a SELECT" in:
+    val (router, _, _, calls) = stampedSetup()
+    router.execute("c-s4", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    calls.head._1 shouldBe None
+
+  it should "not stamp inside a client-opened transaction" in:
+    val (router, _, _, calls) = stampedSetup()
+    router.execute("c-s5", "alice", poolKey, "BEGIN").unsafeRunSync()
+    router.execute("c-s5", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    calls.map(_._1).toList shouldBe List(None, None)
+
+  it should "not stamp on a memory pool" in:
+    val (router, _, _) = setup() // the existing InMemory setup routes through query only
+    // covered implicitly: setup()'s client has no queryStamped override, so a stamped call
+    // would hit the real native path and fail loudly. Execute a DML and expect Ok.
+    val out = router.execute("c-s6", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+
+  it should "not stamp when stampWrites is off" in:
+    val (router, _, _, calls) = stampedSetup(stampWrites = false)
+    router.execute("c-s7", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
+    calls.head._1 shouldBe None
