@@ -17,6 +17,13 @@ trait PostgresFixture:
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
   private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
 
+  /** The temp database name and DATA_PATH of the catalog currently open under `withCatalog`, set
+    * right after seeding so a test body can rebuild its own ATTACH (e.g. a second `duckdb` CLI
+    * session driving the maintenance chain). `None` outside the `withCatalog` call.
+    */
+  protected var currentDbName: Option[String] = None
+  protected var currentDataPath: Option[Path] = None
+
   def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
       test: (DuckLakeCatalogReader, Path) => A
   ): A =
@@ -26,6 +33,8 @@ trait PostgresFixture:
       createDatabase(dbName)
       try
         seedCatalog(dbName, dataPath, extraSql)
+        currentDbName = Some(dbName)
+        currentDataPath = Some(dataPath)
         val meta = Map(
           "pgHost"     -> pgHost,
           "pgPort"     -> pgPort.toString,
@@ -40,6 +49,8 @@ trait PostgresFixture:
         finally quietly(reader.close())
       finally quietly(dropDatabase(dbName))
     finally
+      currentDbName = None
+      currentDataPath = None
       quietly {
         if Files.exists(dataPath) then
           Files
