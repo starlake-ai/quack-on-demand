@@ -144,3 +144,45 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
       (firstPage.map(_.snapshotId) ++ nextPage.map(_.snapshotId)) shouldBe
         (firstPage.map(_.snapshotId) ++ nextPage.map(_.snapshotId)).sortBy(-_)
     }
+
+  // Extra SQL for snapshot-tags tests: a second insert (new parquet file) and a
+  // delete (delete file), each followed by a flush so both are materialised into
+  // ducklake_data_file / ducklake_delete_file.
+  private val snapshotTagsSql =
+    """INSERT INTO lake.tpch1.region VALUES (7, 'ATLANTIS', 'x');
+      |CALL ducklake_flush_inlined_data('lake');
+      |DELETE FROM lake.tpch1.region WHERE r_regionkey = 0;
+      |CALL ducklake_flush_inlined_data('lake');
+      |""".stripMargin
+
+  "snapshotsExist" should "return exactly the subset of ids that exist" in
+    withCatalog("tpch") { (reader, _) =>
+      val ids = reader.listSnapshots().map(_.snapshotId).toSet
+      ids should not be empty
+      reader.snapshotsExist(ids + 999999L) shouldBe ids
+      reader.snapshotsExist(Set(999999L)) shouldBe empty
+    }
+
+  "filesReferencedAt" should "return the data files visible at a snapshot, frozen against later writes" in
+    withCatalog("tpch", snapshotTagsSql) { (reader, _) =>
+      // inserts.head is the first flush (seed data); inserts.last is the second flush (extra row)
+      val inserts = reader.listSnapshots().filter(_.filesAdded > 0).sortBy(_.snapshotId)
+      inserts.size should be >= 2
+      val before   = inserts.head.snapshotId
+      val after    = inserts.last.snapshotId
+      val atBefore = reader.filesReferencedAt(before)
+      val atAfter  = reader.filesReferencedAt(after)
+      atBefore should not be empty
+      // The pinned set at the earlier snapshot must not include files added later.
+      atAfter.size should be > atBefore.size
+    }
+
+  it should "include delete files visible at the snapshot" in
+    withCatalog("tpch", snapshotTagsSql) { (reader, _) =>
+      // The delete snapshot: the flush of the inlined delete materialises the delete file.
+      val snaps = reader.listSnapshots()
+      val s     = snaps.find(_.changes.contains("deleted_from_table")).value.snapshotId
+      val files = reader.filesReferencedAt(s)
+      // At least one delete file must be present alongside the data files.
+      files.exists(f => f.contains("delete") || f.contains("DELETE")) shouldBe true
+    }
