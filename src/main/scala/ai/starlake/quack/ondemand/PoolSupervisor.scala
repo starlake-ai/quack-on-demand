@@ -348,6 +348,35 @@ final class PoolSupervisor(
       podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
     )
 
+  /** NodeSpec for an ephemeral Spec 09 maintenance node. Never registered in the Router or
+    * NodeLoadTracker; the caller owns the full lifecycle (start -> chain -> stop). Borrows the
+    * resolved config (metastore, s3, kindWire, init SQL) of any existing serving pool of the
+    * tenant-db so the maintenance node ATTACHes the same catalog the same way; falls back to the
+    * effective metastore with empty s3/federation when the tenant-db has no pool yet. The pool
+    * key's pool segment is the reserved name `__maint` so node ids can never collide with a serving
+    * pool's ids.
+    */
+  def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
+    findTenantDb(tenantName, tenantDbName).map { td =>
+      val key    = PoolKey(tenantName, td.name, "__maint")
+      val nodeId = s"maint-${td.name}-${System.nanoTime()}"
+      // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
+      val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
+      NodeSpec(
+        poolKey = key,
+        nodeId = nodeId,
+        role = Role.Dual,
+        metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name)),
+        s3 = donor.map(_.s3).getOrElse(Map.empty),
+        maxConcurrent = 1,
+        kindWire = donor.map(_.kindWire).getOrElse("ducklake"),
+        extraSetupSql = donor
+          .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
+          .getOrElse(""),
+        dbInitSql = donor.map(_.dbInitSql).getOrElse("")
+      )
+    }
+
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.nodes.isEmpty && state.distribution.total > 0 then
       // Pool persisted with zero running nodes. Happens after a fresh

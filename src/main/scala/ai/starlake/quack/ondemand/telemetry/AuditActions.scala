@@ -67,6 +67,11 @@ object AuditActions:
   val TagDelete     = "tag.delete"
   val TagHoldCreate = "tag.hold.create"
   val TagHoldRemove = "tag.hold.remove"
+  // managed maintenance (Spec 09)
+  val MaintenanceRun          = "maintenance.run"
+  val MaintenancePolicyUpsert = "maintenance.policy.upsert"
+  val MaintenancePolicyDelete = "maintenance.policy.delete"
+  val MaintenanceRunManual    = "maintenance.run.manual"
   // data plane (FlightSQL)
   val SqlDenied = "sql.denied"
   val SqlWrite  = "sql.write"
@@ -129,7 +134,11 @@ object AuditActions:
     TagCreate,
     TagDelete,
     TagHoldCreate,
-    TagHoldRemove
+    TagHoldRemove,
+    MaintenanceRun,
+    MaintenancePolicyUpsert,
+    MaintenancePolicyDelete,
+    MaintenanceRunManual
   ).sorted
 
   require(all.distinct.size == all.size, "duplicate audit action in AuditActions.all")
