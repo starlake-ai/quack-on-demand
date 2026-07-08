@@ -73,6 +73,34 @@ message(STATUS "quackwire: linking libduckdb at ${DUCKDB_LIB}")
 target_include_directories(quackwire PRIVATE ${DUCKDB_INCLUDE_DIR})
 target_link_libraries(quackwire PRIVATE ${DUCKDB_LIB})
 
+if(WIN32)
+  # The prebuilt duckdb.dll exports only its DUCKDB_API surface. The DuckDB C++
+  # serializer internals the duckdb-quack message layer relies on
+  # (BinarySerializer / BinaryDeserializer / MemoryStream /
+  # SerializationCompatibility) are NOT in that export table, so on Windows they
+  # surface as `unresolved external symbol` at link time - they resolve for free
+  # on Linux/macOS only because shared objects export every symbol by default.
+  #
+  # Fix: compile those four sources straight from the vendored duckdb submodule
+  # into the shim, and define DUCKDB_STATIC_BUILD so winapi.hpp expands DUCKDB_API
+  # to empty. Without it the headers declare the serializer as __declspec(dllimport),
+  # so callers emit __imp_ references the local definitions would never satisfy;
+  # with it every DUCKDB_API symbol uses plain linkage - the locally compiled
+  # serializer resolves directly, and the remaining duckdb symbols resolve through
+  # duckdb.lib's function import thunks.
+  #
+  # WIN32-only on purpose: on Linux/macOS libduckdb already defines these, so
+  # compiling them here too would be a duplicate-symbol (multiple definition) error.
+  target_compile_definitions(quackwire PRIVATE DUCKDB_STATIC_BUILD)
+  set(DUCKDB_SERIALIZER_DIR ${DUCKDB_QUACK_DIR}/duckdb/src/common/serializer)
+  target_sources(quackwire PRIVATE
+    ${DUCKDB_SERIALIZER_DIR}/binary_serializer.cpp
+    ${DUCKDB_SERIALIZER_DIR}/binary_deserializer.cpp
+    ${DUCKDB_SERIALIZER_DIR}/memory_stream.cpp
+    ${DUCKDB_SERIALIZER_DIR}/serializer.cpp
+  )
+endif()
+
 if(APPLE)
   set_target_properties(quackwire PROPERTIES SUFFIX ".dylib")
 endif()
