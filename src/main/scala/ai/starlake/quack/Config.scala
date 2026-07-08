@@ -233,6 +233,42 @@ final case class HaConfig(
     topologyRefreshSec: Int = 30
 )
 
+/** Managed-maintenance scheduler + runner (EPIC Spec 09). */
+final case class MaintenanceConfig(
+    @field @ConfigField(
+      envVar = "QOD_MAINT_ENABLED",
+      description = "Enable the maintenance scheduler + drain-loop fibers."
+    )
+    enabled: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_TICK_SEC",
+      description = "Seconds between maintenance scheduler ticks (cadence + threshold checks)."
+    )
+    tickSec: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_MAX_CONCURRENT",
+      description = "Max maintenance runs executing concurrently across the manager."
+    )
+    maxConcurrent: Int = 2,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_MIN_INTERVAL_MIN",
+      description = "Minimum minutes between non-manual maintenance runs of the same tenant-db."
+    )
+    minIntervalMin: Int = 30,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_RUN_TIMEOUT_MIN",
+      description =
+        "Minutes without a heartbeat before a running maintenance run is swept as failed."
+    )
+    runTimeoutMin: Int = 60
+)
+
+// runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/
+// orphans): the sweep only checks time-since-last-heartbeat, and a heartbeat is only written
+// between steps, not during one. A step that legitimately runs longer than runTimeoutMin gets
+// swept out from under a still-healthy run, racing MaintenanceRunner's own finishMaintenanceRun
+// call (see the "AND status = 'running'" guard on both UPDATEs in PostgresControlPlaneStore).
+
 final case class TelemetryConfig(
     @field
     @ConfigField(
@@ -381,6 +417,7 @@ final case class ManagerConfig(
     reconcileIntervalSec: Int,
     ha: HaConfig = HaConfig(),
     telemetry: TelemetryConfig = TelemetryConfig(),
+    maintenance: MaintenanceConfig = MaintenanceConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =

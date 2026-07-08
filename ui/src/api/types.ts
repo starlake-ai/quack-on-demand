@@ -601,6 +601,97 @@ export interface CatalogTagEntry {
   exists: boolean;          // false = dangling (snapshot expired/vacuumed)
 }
 
+// ----- Managed maintenance (EPIC Spec 09) -----
+// Mirrors the Scala DTOs in ondemand/api/Dtos.scala; field names must match
+// the circe codecs exactly. Absent optionals serialize as null on responses.
+
+export interface MaintenancePolicyUpsertRequest {
+  tenant: string;
+  tenantDb: string;
+  scopeKind: string;            // "tenantdb" | "schema" | "table"
+  scopeSchema?: string;
+  scopeTable?: string;
+  enabled?: boolean;
+  retentionDays?: number;
+  compactionEnabled?: boolean;
+  targetFileSize?: string;
+  smallFileMinCount?: number;
+  rewriteDeleteThreshold?: number;
+  cleanupGraceDays?: number;
+  orphanMinAgeDays?: number;
+  cron?: string;
+}
+
+export interface MaintenancePolicyEntry {
+  id: string;
+  tenant: string;
+  tenantDb: string;
+  scopeKind: string;            // "tenantdb" | "schema" | "table"
+  scopeSchema: string | null;
+  scopeTable: string | null;
+  enabled: boolean | null;
+  retentionDays: number | null;
+  compactionEnabled: boolean | null;
+  targetFileSize: string | null;
+  smallFileMinCount: number | null;
+  rewriteDeleteThreshold: number | null;
+  cleanupGraceDays: number | null;
+  orphanMinAgeDays: number | null;
+  cron: string | null;
+  updatedAt: string | null;     // ISO-8601
+}
+
+export interface MaintenanceEffectiveEntry {
+  enabled: boolean;
+  retentionDays: number;
+  compactionEnabled: boolean;
+  targetFileSize: string;
+  smallFileMinCount: number;
+  rewriteDeleteThreshold: number;
+  cleanupGraceDays: number;
+  orphanMinAgeDays: number;
+  cron: string;
+}
+
+export interface MaintenancePolicyListResponse {
+  rows: MaintenancePolicyEntry[];
+  effective: MaintenanceEffectiveEntry;
+}
+
+export interface MaintenanceRunEntry {
+  id: number;                   // bigserial, keyset cursor for `before`
+  tenant: string;
+  tenantDb: string;
+  scope: string;                // "tenantdb" | "table:<schema>.<table>"
+  trigger: string;              // "cadence" | "threshold" | "manual"
+  operations: string | null;    // csv subset for manual runs; null = full chain
+  status: string;               // "queued" | "running" | "succeeded" | "failed" | "partial"
+  queuedAt: string;             // ISO-8601
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  nodeId: string | null;
+  snapshotsExpired: number;
+  snapshotsSkippedPinned: number;
+  filesMerged: number;
+  filesRewritten: number;
+  filesCleaned: number;
+  orphansDeleted: number;
+  bytesReclaimed: number;
+  error: string | null;
+}
+
+export interface MaintenanceRunRequest {
+  tenant: string;
+  tenantDb: string;
+  scope?: string;               // "tenantdb" (default) | "table:<schema>.<table>"
+  operations?: string;          // csv subset of flush,expire,merge,rewrite,cleanup,orphans
+}
+
+export interface MaintenanceRunResponse {
+  id: number;
+}
+
 // ----- Federation -----
 
 export interface FederatedSourceCreateRequest {

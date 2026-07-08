@@ -1,9 +1,12 @@
 package ai.starlake.quack.ondemand.state.testkit
 
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import org.scalatest.Assertions
 
 import java.nio.file.{Files, Path}
+import java.sql.DriverManager
 import scala.sys.process._
+import scala.util.Try
 
 /** Spins up a Postgres-backed DuckLake catalog for one test. Reuses the developer's local Postgres
   * (postgres@localhost:5432, password `azizam`)
@@ -17,15 +20,39 @@ trait PostgresFixture:
   private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
   private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
 
+  /** The temp database name and DATA_PATH of the catalog currently open under `withCatalog`, set
+    * right after seeding so a test body can rebuild its own ATTACH (e.g. a second `duckdb` CLI
+    * session driving the maintenance chain). `None` outside the `withCatalog` call.
+    */
+  protected var currentDbName: Option[String] = None
+  protected var currentDataPath: Option[Path] = None
+
+  Class.forName("org.postgresql.Driver")
+
+  private def adminUrl: String = s"jdbc:postgresql://$pgHost:$pgPort/postgres"
+
+  private lazy val pgReachable: Boolean =
+    Try {
+      val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
+      try c.isValid(2)
+      finally c.close()
+    }.getOrElse(false)
+
   def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
       test: (DuckLakeCatalogReader, Path) => A
   ): A =
+    if !pgReachable then
+      Assertions.cancel(
+        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
+      )
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
     try
       createDatabase(dbName)
       try
         seedCatalog(dbName, dataPath, extraSql)
+        currentDbName = Some(dbName)
+        currentDataPath = Some(dataPath)
         val meta = Map(
           "pgHost"     -> pgHost,
           "pgPort"     -> pgPort.toString,
@@ -40,6 +67,8 @@ trait PostgresFixture:
         finally quietly(reader.close())
       finally quietly(dropDatabase(dbName))
     finally
+      currentDbName = None
+      currentDataPath = None
       quietly {
         if Files.exists(dataPath) then
           Files
@@ -47,6 +76,26 @@ trait PostgresFixture:
             .sorted(java.util.Comparator.reverseOrder())
             .forEach(p => Files.deleteIfExists(p))
       }
+
+  /** Run SQL against the catalog currently open under `withCatalog`, in a fresh duckdb CLI session
+    * (same mechanism the fixture's own seeder uses). The ATTACH alias is always `lake`. Fails the
+    * test on a non-zero exit. Must be called from within a `withCatalog` block.
+    */
+  protected def runSqlOnCatalog(body: String): Unit =
+    val dbName   = currentDbName.getOrElse(Assertions.fail("runSqlOnCatalog outside withCatalog"))
+    val dataPath = currentDataPath.getOrElse(Assertions.fail("runSqlOnCatalog outside withCatalog"))
+    val attach   =
+      s"""INSTALL ducklake; LOAD ducklake; INSTALL postgres; LOAD postgres;
+         |ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPass' AS lake
+         |  (DATA_PATH '$dataPath');
+         |$body
+         |""".stripMargin
+    val tmp = Files.createTempFile("chain", ".sql")
+    Files.writeString(tmp, attach)
+    try
+      val rc = (s"duckdb" #< tmp.toFile).!
+      assert(rc == 0, s"duckdb chain exit=$rc")
+    finally Files.deleteIfExists(tmp)
 
   private def quietly(op: => Unit): Unit =
     try op

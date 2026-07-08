@@ -16,6 +16,24 @@
   `tag.hold.remove` so removing a retention hold is distinctly visible), and tag names can never be
   all digits, so they stay unambiguous next to snapshot ids.
 
+### Operations
+
+- **Managed DuckLake maintenance: auto-compaction, snapshot expiry, cleanup (EPIC Spec 09).**
+  A policy-driven background service keeps every DuckLake tenant-db healthy and storage bounded:
+  a leader-gated scheduler triggers runs on small-file thresholds and a per-lake cadence
+  (default daily 03:00 UTC, staggered), and each run executes the full DuckLake chain (flush,
+  expiry, compaction, delete-rewrite, cleanup with a grace window, orphan deletion) on an
+  ephemeral dedicated node, never on serving nodes. Retention holds are enforced: expiry always
+  uses explicit snapshot versions minus the P2 pin-set, and a fail-safe guard skips cleanup if a
+  pinned file ever appears in the deletion schedule. Policies are hierarchical
+  (table > schema > tenant-db; retention default 7 days = the time-travel horizon) via
+  `POST /api/maintenance/policy/upsert`; run history is the audit trail
+  (`GET /api/maintenance/runs`, `maintenance.run` audit entries with bytes reclaimed) and a
+  manual `POST /api/maintenance/run` remains as an escape hatch. New Maintenance tab on the
+  tenant page; `qod_maint_*` Prometheus metrics; `QOD_MAINT_*` knobs. The
+  Postgres-external-catalog cleanup landmine is pinned by an integration test that proves files
+  are physically deleted (and that compaction alone reclaims nothing).
+
 ### Audit
 
 - **FlightSQL writes stamp DuckLake snapshots with the authenticated principal (EPIC P1).** Every

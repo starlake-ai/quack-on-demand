@@ -757,6 +757,95 @@ final case class TagProtectRequest(
     isProtected: Boolean
 )
 
+// ----- Managed maintenance (EPIC Spec 09) -----
+
+final case class MaintenancePolicyUpsertRequest(
+    tenant: String,
+    tenantDb: String,
+    scopeKind: String, // "tenantdb" | "schema" | "table"
+    scopeSchema: Option[String] = None,
+    scopeTable: Option[String] = None,
+    enabled: Option[Boolean] = None,
+    retentionDays: Option[Int] = None,
+    compactionEnabled: Option[Boolean] = None,
+    targetFileSize: Option[String] = None,
+    smallFileMinCount: Option[Int] = None,
+    rewriteDeleteThreshold: Option[Double] = None,
+    cleanupGraceDays: Option[Int] = None,
+    orphanMinAgeDays: Option[Int] = None,
+    cron: Option[String] = None
+)
+
+final case class MaintenancePolicyDeleteRequest(id: String)
+
+final case class MaintenancePolicyEntry(
+    id: String,
+    tenant: String,
+    tenantDb: String,
+    scopeKind: String,
+    scopeSchema: Option[String],
+    scopeTable: Option[String],
+    enabled: Option[Boolean],
+    retentionDays: Option[Int],
+    compactionEnabled: Option[Boolean],
+    targetFileSize: Option[String],
+    smallFileMinCount: Option[Int],
+    rewriteDeleteThreshold: Option[Double],
+    cleanupGraceDays: Option[Int],
+    orphanMinAgeDays: Option[Int],
+    cron: Option[String],
+    updatedAt: Option[java.time.Instant]
+)
+
+final case class MaintenanceEffectiveEntry(
+    enabled: Boolean,
+    retentionDays: Int,
+    compactionEnabled: Boolean,
+    targetFileSize: String,
+    smallFileMinCount: Int,
+    rewriteDeleteThreshold: Double,
+    cleanupGraceDays: Int,
+    orphanMinAgeDays: Int,
+    cron: String
+)
+
+final case class MaintenancePolicyListResponse(
+    rows: List[MaintenancePolicyEntry],
+    effective: MaintenanceEffectiveEntry
+)
+
+final case class MaintenanceRunEntry(
+    id: Long,
+    tenant: String,
+    tenantDb: String,
+    scope: String,
+    trigger: String,
+    operations: Option[String],
+    status: String,
+    queuedAt: java.time.Instant,
+    startedAt: Option[java.time.Instant],
+    finishedAt: Option[java.time.Instant],
+    heartbeatAt: Option[java.time.Instant],
+    nodeId: Option[String],
+    snapshotsExpired: Int,
+    snapshotsSkippedPinned: Int,
+    filesMerged: Int,
+    filesRewritten: Int,
+    filesCleaned: Int,
+    orphansDeleted: Int,
+    bytesReclaimed: Long,
+    error: Option[String]
+)
+
+final case class MaintenanceRunRequest(
+    tenant: String,
+    tenantDb: String,
+    scope: Option[String] = None,
+    operations: Option[String] = None
+)
+
+final case class MaintenanceRunResponse(id: Long)
+
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
@@ -1438,3 +1527,85 @@ object Dtos:
       )
     }
   )
+
+  // Managed maintenance (EPIC Spec 09). Hand-rolled decoder for the upsert request so every
+  // optional field defaults to None when absent from the wire JSON (deriveCodec ignores Scala 3
+  // defaults and treats every field as required).
+  given Codec[MaintenancePolicyUpsertRequest] = Codec.from(
+    Decoder.instance { c =>
+      for
+        tenant                 <- c.get[String]("tenant")
+        tenantDb               <- c.get[String]("tenantDb")
+        scopeKind              <- c.get[String]("scopeKind")
+        scopeSchema            <- c.getOrElse[Option[String]]("scopeSchema")(None)
+        scopeTable             <- c.getOrElse[Option[String]]("scopeTable")(None)
+        enabled                <- c.getOrElse[Option[Boolean]]("enabled")(None)
+        retentionDays          <- c.getOrElse[Option[Int]]("retentionDays")(None)
+        compactionEnabled      <- c.getOrElse[Option[Boolean]]("compactionEnabled")(None)
+        targetFileSize         <- c.getOrElse[Option[String]]("targetFileSize")(None)
+        smallFileMinCount      <- c.getOrElse[Option[Int]]("smallFileMinCount")(None)
+        rewriteDeleteThreshold <- c.getOrElse[Option[Double]]("rewriteDeleteThreshold")(None)
+        cleanupGraceDays       <- c.getOrElse[Option[Int]]("cleanupGraceDays")(None)
+        orphanMinAgeDays       <- c.getOrElse[Option[Int]]("orphanMinAgeDays")(None)
+        cron                   <- c.getOrElse[Option[String]]("cron")(None)
+      yield MaintenancePolicyUpsertRequest(
+        tenant,
+        tenantDb,
+        scopeKind,
+        scopeSchema,
+        scopeTable,
+        enabled,
+        retentionDays,
+        compactionEnabled,
+        targetFileSize,
+        smallFileMinCount,
+        rewriteDeleteThreshold,
+        cleanupGraceDays,
+        orphanMinAgeDays,
+        cron
+      )
+    },
+    Encoder.instance { r =>
+      Json.obj(
+        "tenant"                 -> r.tenant.asJson,
+        "tenantDb"               -> r.tenantDb.asJson,
+        "scopeKind"              -> r.scopeKind.asJson,
+        "scopeSchema"            -> r.scopeSchema.asJson,
+        "scopeTable"             -> r.scopeTable.asJson,
+        "enabled"                -> r.enabled.asJson,
+        "retentionDays"          -> r.retentionDays.asJson,
+        "compactionEnabled"      -> r.compactionEnabled.asJson,
+        "targetFileSize"         -> r.targetFileSize.asJson,
+        "smallFileMinCount"      -> r.smallFileMinCount.asJson,
+        "rewriteDeleteThreshold" -> r.rewriteDeleteThreshold.asJson,
+        "cleanupGraceDays"       -> r.cleanupGraceDays.asJson,
+        "orphanMinAgeDays"       -> r.orphanMinAgeDays.asJson,
+        "cron"                   -> r.cron.asJson
+      )
+    }
+  )
+  given Codec[MaintenancePolicyDeleteRequest] = deriveCodec
+  given Codec[MaintenancePolicyEntry]         = deriveCodec
+  given Codec[MaintenanceEffectiveEntry]      = deriveCodec
+  given Codec[MaintenancePolicyListResponse]  = deriveCodec
+  given Codec[MaintenanceRunEntry]            = deriveCodec
+  // Hand-rolled so scope/operations default to None when absent from the wire JSON.
+  given Codec[MaintenanceRunRequest] = Codec.from(
+    Decoder.instance { c =>
+      for
+        tenant     <- c.get[String]("tenant")
+        tenantDb   <- c.get[String]("tenantDb")
+        scope      <- c.getOrElse[Option[String]]("scope")(None)
+        operations <- c.getOrElse[Option[String]]("operations")(None)
+      yield MaintenanceRunRequest(tenant, tenantDb, scope, operations)
+    },
+    Encoder.instance { r =>
+      Json.obj(
+        "tenant"     -> r.tenant.asJson,
+        "tenantDb"   -> r.tenantDb.asJson,
+        "scope"      -> r.scope.asJson,
+        "operations" -> r.operations.asJson
+      )
+    }
+  )
+  given Codec[MaintenanceRunResponse] = deriveCodec

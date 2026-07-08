@@ -1,8 +1,18 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{Pool, RunningNode, SnapshotTag, Tenant, TenantDb}
+import ai.starlake.quack.model.{
+  MaintenancePolicy,
+  MaintenanceRun,
+  Pool,
+  RunCounters,
+  RunningNode,
+  SnapshotTag,
+  Tenant,
+  TenantDb
+}
 
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
 
 /** Process-local fixture for unit tests that exercise the supervisor or handlers without standing
@@ -343,6 +353,148 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
     snapshotTags.get((tenant, tenantDb, name))
+
+  // ---------------- Maintenance (EPIC Spec 09) ----------------
+  private val maintenancePolicies = TrieMap.empty[String, MaintenancePolicy]
+  private val maintenanceRuns     = TrieMap.empty[Long, MaintenanceRun]
+  private val maintenanceRunSeq   = new AtomicLong(0L)
+
+  private def maintenancePolicyScopeKey(p: MaintenancePolicy) =
+    (p.tenant, p.tenantDb, p.scopeKind, p.scopeSchema.getOrElse(""), p.scopeTable.getOrElse(""))
+
+  def upsertMaintenancePolicy(p: MaintenancePolicy): MaintenancePolicy =
+    val key = maintenancePolicyScopeKey(p)
+    maintenancePolicies.values.find(existing => maintenancePolicyScopeKey(existing) == key).foreach {
+      existing => maintenancePolicies.remove(existing.id)
+    }
+    val populated = p.copy(updatedAt = Some(Instant.now()))
+    maintenancePolicies.put(populated.id, populated)
+    populated
+
+  def deleteMaintenancePolicy(id: String): Boolean =
+    maintenancePolicies.remove(id).isDefined
+
+  def findMaintenancePolicy(id: String): Option[MaintenancePolicy] =
+    maintenancePolicies.get(id)
+
+  def listMaintenancePolicies(tenant: String, tenantDb: String): List[MaintenancePolicy] =
+    maintenancePolicies.values
+      .filter(p => p.tenant == tenant && p.tenantDb == tenantDb)
+      .toList
+      .sortBy(p => (p.scopeKind, p.scopeSchema.getOrElse(""), p.scopeTable.getOrElse("")))
+
+  def enqueueMaintenanceRun(
+      tenant: String,
+      tenantDb: String,
+      scope: String,
+      trigger: String,
+      operations: Option[String]
+  ): MaintenanceRun =
+    val run = MaintenanceRun(
+      id = maintenanceRunSeq.incrementAndGet(),
+      tenant = tenant,
+      tenantDb = tenantDb,
+      scope = scope,
+      trigger = trigger,
+      operations = operations,
+      status = "queued",
+      queuedAt = Instant.now(),
+      startedAt = None,
+      finishedAt = None,
+      heartbeatAt = None,
+      nodeId = None,
+      counters = RunCounters(),
+      error = None
+    )
+    maintenanceRuns.put(run.id, run)
+    run
+
+  def claimQueuedMaintenanceRun(): Option[MaintenanceRun] =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.values.filter(_.status == "queued").toList.sortBy(_.id).headOption.map {
+        run =>
+          val claimed =
+            run.copy(
+              status = "running",
+              startedAt = Some(Instant.now()),
+              heartbeatAt = Some(Instant.now())
+            )
+          maintenanceRuns.put(claimed.id, claimed)
+          claimed
+      }
+    }
+
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(r.id, r.copy(heartbeatAt = Some(Instant.now()), counters = counters))
+          true
+        case _ => false
+    }
+
+  def finishMaintenanceRun(
+      id: Long,
+      status: String,
+      counters: RunCounters,
+      error: Option[String]
+  ): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(
+            r.id,
+            r.copy(
+              status = status,
+              finishedAt = Some(Instant.now()),
+              counters = counters,
+              error = error
+            )
+          )
+          true
+        case _ => false
+    }
+
+  def listMaintenanceRuns(
+      tenant: String,
+      tenantDb: String,
+      limit: Int,
+      before: Option[Long]
+  ): List[MaintenanceRun] =
+    maintenanceRuns.values
+      .filter { r =>
+        r.tenant == tenant && r.tenantDb == tenantDb && before.forall(cursor => r.id < cursor)
+      }
+      .toList
+      .sortBy(_.id)(using Ordering[Long].reverse)
+      .take(limit)
+
+  def hasActiveMaintenanceRun(tenant: String, tenantDb: String): Boolean =
+    maintenanceRuns.values.exists { r =>
+      r.tenant == tenant && r.tenantDb == tenantDb && (r.status == "queued" || r.status == "running")
+    }
+
+  def lastNonManualMaintenanceRunAt(tenant: String, tenantDb: String): Option[Instant] =
+    maintenanceRuns.values
+      .filter(r => r.tenant == tenant && r.tenantDb == tenantDb && r.trigger != "manual")
+      .map(_.queuedAt)
+      .maxOption
+
+  def sweepStaleMaintenanceRuns(heartbeatOlderThan: Instant): Int =
+    val stale = maintenanceRuns.values.filter { r =>
+      r.status == "running" && r.heartbeatAt.exists(_.isBefore(heartbeatOlderThan))
+    }.toList
+    stale.foreach { r =>
+      maintenanceRuns.put(
+        r.id,
+        r.copy(
+          status = "failed",
+          finishedAt = Some(Instant.now()),
+          error = Some("stale: heartbeat timeout")
+        )
+      )
+    }
+    stale.size
 
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants = listTenants(),
