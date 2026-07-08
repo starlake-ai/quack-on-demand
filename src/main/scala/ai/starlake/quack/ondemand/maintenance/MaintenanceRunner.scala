@@ -93,16 +93,6 @@ final class MaintenanceRunner(
         toExpire = partitioned._1
         skipped  = partitioned._2
 
-        // Pinned-file fail-safe guard before cleanup (spec section 4 step 5).
-        pinnedHit <-
-          IO.pure {
-            if tableScope.isDefined then Nil
-            else
-              val pf = pinnedFilesOf(run.tenant, run.tenantDb)
-              if pf.isEmpty then Nil
-              else scheduledForDeletion(run.tenant, run.tenantDb).filter(pf.contains)
-          }
-
         countersRef <- Ref.of[IO, RunCounters](RunCounters(snapshotsSkippedPinned = skipped.size))
         statusRef   <- Ref.of[IO, String]("succeeded")
         errorRef    <- Ref.of[IO, Option[String]](None)
@@ -156,23 +146,31 @@ final class MaintenanceRunner(
 
         cleanupIO = IO.defer {
           if tableScope.isDefined || !wants(run, "cleanup") then IO.pure(true)
-          else if pinnedHit.nonEmpty then
-            statusRef.set("partial") *>
-              errorRef
-                .set(
-                  Some(
-                    s"cleanup skipped: pinned files scheduled for deletion: " +
-                      s"${pinnedHit.take(5).mkString(", ")}"
-                  )
-                )
-                .as(true)
           else
-            val reclaimable = scheduledForDeletion(run.tenant, run.tenantDb).size
-            step(
-              "cleanup",
-              MaintenanceChainSql.cleanupOldFiles(alias, pol.cleanupGraceDays),
-              c => c.copy(filesCleaned = reclaimable)
-            )
+            // Pinned-file fail-safe guard, read immediately before issuing cleanup (spec
+            // section 4 step 5): this run's own expire+merge steps can newly schedule files
+            // for deletion, so the guard must see the post-chain state, not a prelude snapshot.
+            // One read of scheduledForDeletion is reused for both the guard and the
+            // reclaimable count below.
+            val scheduled = scheduledForDeletion(run.tenant, run.tenantDb)
+            val pf        = pinnedFilesOf(run.tenant, run.tenantDb)
+            val pinnedHit = if pf.isEmpty then Nil else scheduled.filter(pf.contains)
+            if pinnedHit.nonEmpty then
+              statusRef.set("partial") *>
+                errorRef
+                  .set(
+                    Some(
+                      s"cleanup skipped: pinned files scheduled for deletion: " +
+                        s"${pinnedHit.take(5).mkString(", ")}"
+                    )
+                  )
+                  .as(true)
+            else
+              step(
+                "cleanup",
+                MaintenanceChainSql.cleanupOldFiles(alias, pol.cleanupGraceDays),
+                c => c.copy(filesCleaned = scheduled.size)
+              )
         }
 
         orphanIO = IO.defer {

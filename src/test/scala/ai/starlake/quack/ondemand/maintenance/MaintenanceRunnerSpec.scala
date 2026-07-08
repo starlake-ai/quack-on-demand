@@ -18,13 +18,20 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       totalBytes: List[Long] = List(100L, 100L), // sampled before/after the chain
       failOn: Option[String] = None,             // substring of a chain statement that should fail
       policyOf: (String, String, Option[String], Option[String]) => EffectivePolicy =
-        (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true)
+        (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+      // When true, `scheduled` is only visible to scheduledForDeletion once a chain step
+      // (merge_adjacent_files) has actually executed -- simulates THIS run's own expire+merge
+      // being what schedules the pinned file for deletion in the first place, so a test can
+      // prove the guard's read happens after that step, not in the prelude (F2).
+      scheduledVisibleAfterMerge: Boolean = false
   ):
-    val store    = new InMemoryControlPlaneStore()
-    var executed = List.empty[String]
-    var stopped  = List.empty[String]
-    var started  = 0
-    val node     = RunningNode(
+    val store              = new InMemoryControlPlaneStore()
+    var executed           = List.empty[String]
+    var stopped            = List.empty[String]
+    var started            = 0
+    var scheduledCallCount = 0
+    var mergeRan           = false
+    val node               = RunningNode(
       "maint-n1",
       PoolKey("acme", "acme_db", "__maint"),
       Role.Dual,
@@ -44,12 +51,16 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       exec = (_, sql) =>
         IO {
           executed = executed :+ sql
+          if sql.contains("merge_adjacent_files") then mergeRan = true
           if failOn.exists(sql.contains) then Left("boom") else Right(())
         },
       snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L), // 4 candidates
       pinnedSnapshotsOf = (_, _) => pinnedSnaps,
       pinnedFilesOf = (_, _) => pinnedFiles,
-      scheduledForDeletion = (_, _) => scheduled,
+      scheduledForDeletion = (_, _) =>
+        scheduledCallCount += 1
+        if scheduledVisibleAfterMerge && !mergeRan then Nil else scheduled
+      ,
       totalBytesOf = {
         val it = Iterator.from(0)
         (_, _) => totalBytes(math.min(it.next(), totalBytes.size - 1))
@@ -104,6 +115,29 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     f.executed.exists(_.contains("cleanup_old_files")) shouldBe false
     fin.error.getOrElse("") should include("pinned")
   }
+
+  it should "catch a pinned/scheduled intersection created by THIS run's own expire+merge " +
+    "(F2: guard reads scheduledForDeletion at cleanup time, not in the chain prelude)" in {
+      // scheduledForDeletion only reveals the pinned-intersecting file once merge has actually
+      // executed -- standing in for "this run's own expire+merge is what schedules the file for
+      // deletion in the first place". If the guard were still computed in the chain prelude
+      // (before flush/expire/merge run any exec calls), merge would not have run yet, the stub
+      // would answer Nil, and cleanup would wrongly proceed. Reading it lazily inside cleanupIO
+      // -- strictly after merge -- is what lets the guard see and catch the hit.
+      val f = new Fixture(
+        pinnedFiles = Set("s3://lake/x.parquet"),
+        scheduled = List("s3://lake/x.parquet"),
+        scheduledVisibleAfterMerge = true
+      )
+      val fin = f.enqueueAndRun()
+      f.mergeRan shouldBe true
+      fin.status shouldBe "partial"
+      f.executed.exists(_.contains("cleanup_old_files")) shouldBe false
+      fin.error.getOrElse("") should include("pinned")
+      // Exactly one read of scheduledForDeletion per run: reused for both the guard and the
+      // reclaimable count, as the finding requires.
+      f.scheduledCallCount shouldBe 1
+    }
 
   it should "abort the chain on a step failure, mark failed, still stop the node" in {
     val f   = new Fixture(failOn = Some("merge_adjacent_files"))
