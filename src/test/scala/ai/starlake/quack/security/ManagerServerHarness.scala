@@ -319,6 +319,8 @@ object ManagerServerHarness:
       audit = audit
     )
 
+    val maintenanceHandlers = new MaintenanceHandlers(sup, store, audit = audit)
+
     val liveConfig    = ConfigFactory.load()
     val configEntries = ConfigRegistry.collect(List.empty) // empty: no annotations to reflect
     val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
@@ -346,6 +348,7 @@ object ManagerServerHarness:
       historyHandlers,
       catalog = catalog,
       tags = Some(tagHandlers),
+      maintenance = Some(maintenanceHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,

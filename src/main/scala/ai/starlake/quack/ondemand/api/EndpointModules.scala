@@ -17,5 +17,6 @@ object EndpointModules:
     FederatedSourceEndpoints,
     CatalogEndpoints,
     TagEndpoints,
+    MaintenanceEndpoints,
     RbacEndpoints
   )

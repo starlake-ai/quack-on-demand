@@ -102,6 +102,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
+  given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -121,6 +122,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]               = deriveReader[HaConfig]
   given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
+  given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -456,6 +458,16 @@ object Main extends IOApp with LazyLogging:
         store,
         snapshotExists = (t, td, id) => catalogReader(t, td).snapshotExists(id),
         snapshotsExist = (t, td, ids) => catalogReader(t, td).snapshotsExist(ids),
+        audit = auditRecorder
+      )
+    )
+
+    // Managed maintenance (EPIC Spec 09). REST surface only; the scheduler + drain-loop
+    // fibers are started later, alongside the other duty fibers, once mgrCfg is in scope there.
+    val maintenanceHandlers: Option[ai.starlake.quack.ondemand.api.MaintenanceHandlers] = Some(
+      new ai.starlake.quack.ondemand.api.MaintenanceHandlers(
+        sup,
+        store,
         audit = auditRecorder
       )
     )
@@ -989,6 +1001,7 @@ object Main extends IOApp with LazyLogging:
         historyHandlers,
         catalogHandlers,
         tagHandlers,
+        maintenanceHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,
@@ -1189,6 +1202,96 @@ object Main extends IOApp with LazyLogging:
                   logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
                   IO.unit.start
 
+              // Managed maintenance (EPIC Spec 09): leader-gated cadence/threshold enqueue
+              // (scheduler) + the drain loop that claims queued runs and executes them under a
+              // per-tenant-db advisory lock (runner). Both are no-ops when the config flag is off.
+              val maintenanceScheduler =
+                new ai.starlake.quack.ondemand.maintenance.MaintenanceScheduler(
+                  store = store,
+                  smallFileCountsOf = (t, td, bytes) =>
+                    try catalogReader(t, td).smallFileCounts(bytes)
+                    catch case _: Exception => Map.empty,
+                  minIntervalMinutes = mgrCfg.maintenance.minIntervalMin,
+                  runTimeoutMinutes = mgrCfg.maintenance.runTimeoutMin,
+                  staggerOf = ai.starlake.quack.ondemand.maintenance.PolicyMath.staggerMinutes,
+                  tickSeconds = mgrCfg.maintenance.tickSec,
+                  isLeader = () => coordinator.forall(_.isLeader)
+                )
+              val pinnedSetResolver =
+                new ai.starlake.quack.ondemand.catalog.PinnedSetResolver(store, catalogReader)
+              val maintenanceRunner = new ai.starlake.quack.ondemand.maintenance.MaintenanceRunner(
+                store = store,
+                spawn = (t, td) =>
+                  sup.maintenanceNodeSpec(t, td) match
+                    case Some(spec) =>
+                      backend.start(spec).map(Some(_)).handleErrorWith(_ => IO.pure(None))
+                    case None => IO.pure(None),
+                stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
+                exec = (node, sql) =>
+                  adapter.send(node, sql, session = None, recordLoad = false).map {
+                    case ai.starlake.quack.edge.adapter.QuackResponse.Ok(r, _, close) =>
+                      close(); Right(())
+                    case ai.starlake.quack.edge.adapter.QuackResponse.Failed(e, _) =>
+                      Left(e.toString)
+                  },
+                snapshotsOlderThan =
+                  (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
+                pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
+                pinnedFilesOf = pinnedSetResolver.pinnedFiles,
+                scheduledForDeletion = (t, td) => catalogReader(t, td).filesScheduledForDeletion(),
+                totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
+                effectivePolicyOf = (t, td, s, tb) =>
+                  ai.starlake.quack.ondemand.maintenance.PolicyMath
+                    .effective(store.listMaintenancePolicies(t, td), s, tb),
+                catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+                audit = auditRecorder
+              )
+
+              val maintenanceSchedulerFiber =
+                if mgrCfg.maintenance.enabled then maintenanceScheduler.start
+                else IO.unit.start
+
+              // Drain loop: while leader and below maxConcurrent in-flight, claim queued runs
+              // and fork each execution under the tenant-db's __maint advisory lock so two
+              // replicas (or a replica and a stray retry) never run the same lake at once.
+              // The tick keeps claiming until the queue is empty or capacity is reached, so
+              // tickSec only spaces empty polls.
+              val maintenanceInFlight            = new java.util.concurrent.atomic.AtomicInteger(0)
+              def maintenanceDrainTick: IO[Unit] =
+                if !coordinator.forall(_.isLeader) then IO.unit
+                else if maintenanceInFlight.get() >= mgrCfg.maintenance.maxConcurrent then IO.unit
+                else
+                  IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
+                    case None      => IO.unit
+                    case Some(run) =>
+                      maintenanceInFlight.incrementAndGet()
+                      poolLocks
+                        .withLock(
+                          ai.starlake.quack.model.PoolKey(run.tenant, run.tenantDb, "__maint")
+                        ) {
+                          maintenanceRunner.executeRun(run)
+                        }
+                        .guarantee(IO.delay(maintenanceInFlight.decrementAndGet()).void)
+                        .handleErrorWith(t =>
+                          IO.delay(
+                            logger.error(
+                              s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
+                            )
+                          )
+                        )
+                        .start *> maintenanceDrainTick
+                  }
+              val maintenanceDrainFiber =
+                if mgrCfg.maintenance.enabled then
+                  (maintenanceDrainTick
+                    .handleErrorWith(e =>
+                      IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
+                    )
+                    *> IO.sleep(
+                      scala.concurrent.duration.DurationInt(mgrCfg.maintenance.tickSec).seconds
+                    )).foreverM.void.start
+                else IO.unit.start
+
               // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
               val coordinatorFiber = coordinator match
                 case Some(c) => c.loop.start
@@ -1293,12 +1396,17 @@ object Main extends IOApp with LazyLogging:
                       journalFiber.flatMap { jFiber =>
                         auditPurgeFiber.flatMap { pFiber =>
                           rollupFiber.flatMap { rlFiber =>
-                            IO.never[Unit]
-                              .guarantee(
-                                fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                  hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                  rlFiber.cancel *> gracefulShutdown
-                              )
+                            maintenanceSchedulerFiber.flatMap { msFiber =>
+                              maintenanceDrainFiber.flatMap { mdFiber =>
+                                IO.never[Unit]
+                                  .guarantee(
+                                    fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                      hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                      rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
+                                      gracefulShutdown
+                                  )
+                              }
+                            }
                           }
                         }
                       }

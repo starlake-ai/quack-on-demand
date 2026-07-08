@@ -35,6 +35,7 @@ final class ManagerServer(
     statementHistory: StatementHistoryHandlers,
     catalog: Option[CatalogHandlers],
     tags: Option[TagHandlers],
+    maintenance: Option[MaintenanceHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -226,6 +227,29 @@ final class ManagerServer(
         },
         TagEndpoints.protectTagEndpoint.serverLogic { case (req, token) =>
           h.protect(req, token)(sessions.scopeOf)
+        }
+      )
+    }
+
+    // Managed maintenance (EPIC Spec 09). Session-gated per request via
+    // TenantScopeCheck inside the handlers, same shape as tagEndpoints.
+    val maintenanceEndpoints: List[ServerEndpoint[Any, IO]] = maintenance.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        MaintenanceEndpoints.upsertPolicyEndpoint.serverLogic { case (req, token) =>
+          h.upsertPolicy(req, token)(sessions.scopeOf)
+        },
+        MaintenanceEndpoints.deletePolicyEndpoint.serverLogic { case (req, token) =>
+          h.deletePolicy(req, token)(sessions.scopeOf)
+        },
+        MaintenanceEndpoints.listPoliciesEndpoint.serverLogic { case (tenant, tenantDb, token) =>
+          h.listPolicies(tenant, tenantDb, token)(sessions.scopeOf)
+        },
+        MaintenanceEndpoints.listRunsEndpoint.serverLogic {
+          case (tenant, tenantDb, limit, before, token) =>
+            h.listRuns(tenant, tenantDb, limit, before, token)(sessions.scopeOf)
+        },
+        MaintenanceEndpoints.triggerRunEndpoint.serverLogic { case (req, token) =>
+          h.triggerRun(req, token)(sessions.scopeOf)
         }
       )
     }
@@ -511,7 +535,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 
