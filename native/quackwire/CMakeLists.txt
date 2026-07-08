@@ -98,6 +98,11 @@ if(WIN32)
     ${DUCKDB_SERIALIZER_DIR}/binary_deserializer.cpp
     ${DUCKDB_SERIALIZER_DIR}/memory_stream.cpp
     ${DUCKDB_SERIALIZER_DIR}/serializer.cpp
+    # A couple of leaf symbols the serializer references
+    # (SerializationCompatibility, ValueOperations::NotDistinctFrom) live in
+    # heavy translation units (config.cpp, comparison_operations.cpp); replicate
+    # just those here instead of compiling all of DuckDB.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/win_duckdb_compat.cpp
   )
 endif()
 
