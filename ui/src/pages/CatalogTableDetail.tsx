@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import type { CatalogSnapshotEntry, CatalogTableDetailResponse } from '../api/types';
+import type { CatalogSnapshotEntry, CatalogTableDetailResponse, CatalogTagEntry } from '../api/types';
 import Breadcrumb from '../components/Breadcrumb';
 
 function fmtBytes(n: number): string {
@@ -21,6 +21,7 @@ export default function CatalogTableDetail() {
   const [detail, setDetail] = useState<CatalogTableDetailResponse | null>(null);
   const [error, setError]   = useState<string | null>(null);
   const [snaps, setSnaps] = useState<CatalogSnapshotEntry[]>([]);
+  const [tags, setTags] = useState<CatalogTagEntry[]>([]);
 
   useEffect(() => {
     if (!tenant || !tenantDb || !schema || !table) return;
@@ -39,6 +40,9 @@ export default function CatalogTableDetail() {
     api.listCatalogSnapshots(tenant, tenantDb)
       .then(r => { if (!cancelled) setSnaps(r); })
       .catch(() => { if (!cancelled) setSnaps([]); });
+    api.listCatalogTags(tenant, tenantDb)
+      .then(r => { if (!cancelled) setTags(r); })
+      .catch(() => { if (!cancelled) setTags([]); });
     return () => { cancelled = true; };
   }, [tenant, tenantDb]);
 
@@ -71,6 +75,13 @@ export default function CatalogTableDetail() {
             }}
           >
             <option value="">current</option>
+            {/* Named tags first; each encodes its snapshot id, so the URL
+                keeps ?asOf=<id> (asOfTag stays an API-level alias). */}
+            {tags.filter(t => t.exists).map(t => (
+              <option key={`tag-${t.name}`} value={t.snapshotId}>
+                {t.name} ({t.snapshotId}{t.protected ? ', hold' : ''})
+              </option>
+            ))}
             {snaps.map(s => (
               <option key={s.snapshotId} value={s.snapshotId}>
                 {s.snapshotId} ({new Date(s.committedAt).toLocaleString()})

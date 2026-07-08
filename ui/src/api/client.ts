@@ -34,6 +34,7 @@ import type {
   CatalogTableEntry,
   CatalogTableDetailResponse,
   CatalogSnapshotEntry,
+  CatalogTagEntry,
   // RBAC
   UserResponse,
   UserCreateRequest,
@@ -383,4 +384,16 @@ export const api = {
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots${q}`
     );
   },
+
+  // Snapshot tags (session-gated, unlike the catalog browser GETs above)
+  listCatalogTags: (tenant: string, tenantDb: string) =>
+    get<CatalogTagEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/tags`
+    ),
+  createCatalogTag: (req: { tenant: string; tenantDb: string; name: string; snapshotId: number; protected: boolean }) =>
+    post<CatalogTagEntry>('/catalog/tag/create', req),
+  deleteCatalogTag: (req: { tenant: string; tenantDb: string; name: string }) =>
+    post<void>('/catalog/tag/delete', req),
+  protectCatalogTag: (req: { tenant: string; tenantDb: string; name: string; protected: boolean }) =>
+    post<CatalogTagEntry>('/catalog/tag/protect', req),
 };
