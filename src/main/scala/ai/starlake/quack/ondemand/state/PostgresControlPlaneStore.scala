@@ -1762,13 +1762,13 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
-  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Unit = withConn { c =>
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean = withConn { c =>
     val ps = c.prepareStatement(
       """UPDATE qodstate_maintenance_run
         |SET heartbeat_at = NOW(), snapshots_expired = ?, snapshots_skipped_pinned = ?,
         |    files_merged = ?, files_rewritten = ?, files_cleaned = ?, orphans_deleted = ?,
         |    bytes_reclaimed = ?
-        |WHERE id = ?""".stripMargin
+        |WHERE id = ? AND status = 'running'""".stripMargin
     )
     try
       ps.setInt(1, counters.snapshotsExpired)
@@ -1779,23 +1779,25 @@ final class PostgresControlPlaneStore(
       ps.setInt(6, counters.orphansDeleted)
       ps.setLong(7, counters.bytesReclaimed)
       ps.setLong(8, id)
-      ps.executeUpdate()
-      ()
+      ps.executeUpdate() > 0
     finally ps.close()
   }
 
+  /** Returns `false` (without writing) when the row was no longer `"running"` -- a concurrent sweep
+    * already failed it out from under this caller; see the trait doc.
+    */
   def finishMaintenanceRun(
       id: Long,
       status: String,
       counters: RunCounters,
       error: Option[String]
-  ): Unit = withConn { c =>
+  ): Boolean = withConn { c =>
     val ps = c.prepareStatement(
       """UPDATE qodstate_maintenance_run
         |SET status = ?, finished_at = NOW(), snapshots_expired = ?, snapshots_skipped_pinned = ?,
         |    files_merged = ?, files_rewritten = ?, files_cleaned = ?, orphans_deleted = ?,
         |    bytes_reclaimed = ?, error = ?
-        |WHERE id = ?""".stripMargin
+        |WHERE id = ? AND status = 'running'""".stripMargin
     )
     try
       ps.setString(1, status)
@@ -1808,8 +1810,7 @@ final class PostgresControlPlaneStore(
       ps.setLong(8, counters.bytesReclaimed)
       setNullable(ps, 9, error)
       ps.setLong(10, id)
-      ps.executeUpdate()
-      ()
+      ps.executeUpdate() > 0
     finally ps.close()
   }
 

@@ -265,14 +265,23 @@ trait ControlPlaneStore:
     */
   def claimQueuedMaintenanceRun(): Option[MaintenanceRun]
 
-  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Unit
+  /** Returns `true` when the row was still `"running"` and got its heartbeat bumped; `false` when a
+    * concurrent sweep already failed the row out from under this caller (the run should stop
+    * treating itself as live, but callers that only log/ignore the old `Unit` result are
+    * unaffected).
+    */
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean
 
+  /** Returns `true` when the row was still `"running"` and this call transitioned it to its final
+    * status; `false` when a concurrent sweep already marked it `"failed"` (stale heartbeat) --
+    * callers must not overwrite that outcome (e.g. re-record success audit) in that case.
+    */
   def finishMaintenanceRun(
       id: Long,
       status: String,
       counters: RunCounters,
       error: Option[String]
-  ): Unit
+  ): Boolean
 
   /** Keyset pagination ordered by descending id; `before` excludes ids >= the given cursor. */
   def listMaintenanceRuns(

@@ -80,13 +80,13 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
       claimed.map(_.id) shouldBe Some(r.id)
       claimed.map(_.status) shouldBe Some("running")
       s.claimQueuedMaintenanceRun() shouldBe None // nothing else queued
-      s.heartbeatMaintenanceRun(r.id, RunCounters(filesMerged = 3))
+      s.heartbeatMaintenanceRun(r.id, RunCounters(filesMerged = 3)) shouldBe true
       s.finishMaintenanceRun(
         r.id,
         "succeeded",
         RunCounters(filesMerged = 3, bytesReclaimed = 42L),
         None
-      )
+      ) shouldBe true
       s.hasActiveMaintenanceRun("acme", "acme_db") shouldBe false
       val listed = s.listMaintenanceRuns("acme", "acme_db", limit = 10, before = None)
       listed.map(_.status) shouldBe List("succeeded")
@@ -101,6 +101,26 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
     s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
     s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
   }
+
+  it should "refuse to overwrite a run already swept to failed (finish loses the race)" in
+    withStore { s =>
+      val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)
+      s.claimQueuedMaintenanceRun()
+      s.sweepStaleMaintenanceRuns(java.time.Instant.now().plusSeconds(3600)) shouldBe 1
+      s.listMaintenanceRuns("acme", "acme_db", 10, None).head.status shouldBe "failed"
+
+      // The runner, unaware it was swept, tries to record its own (successful) finish.
+      s.finishMaintenanceRun(
+        r.id,
+        "succeeded",
+        RunCounters(filesMerged = 1),
+        None
+      ) shouldBe false
+      // The sweep's outcome is not clobbered by the late finish.
+      val after = s.listMaintenanceRuns("acme", "acme_db", 10, None).head
+      after.status shouldBe "failed"
+      after.error shouldBe Some("stale: heartbeat timeout")
+    }
 
   it should "paginate runs by keyset" in withStore { s =>
     (1 to 3).foreach(_ => s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None))

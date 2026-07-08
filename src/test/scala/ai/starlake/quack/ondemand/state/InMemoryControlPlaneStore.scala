@@ -424,29 +424,36 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       }
     }
 
-  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Unit =
-    maintenanceRuns.updateWith(id)(
-      _.map(_.copy(heartbeatAt = Some(Instant.now()), counters = counters))
-    )
-    ()
+  def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(r.id, r.copy(heartbeatAt = Some(Instant.now()), counters = counters))
+          true
+        case _ => false
+    }
 
   def finishMaintenanceRun(
       id: Long,
       status: String,
       counters: RunCounters,
       error: Option[String]
-  ): Unit =
-    maintenanceRuns.updateWith(id)(
-      _.map(
-        _.copy(
-          status = status,
-          finishedAt = Some(Instant.now()),
-          counters = counters,
-          error = error
-        )
-      )
-    )
-    ()
+  ): Boolean =
+    maintenanceRuns.synchronized {
+      maintenanceRuns.get(id) match
+        case Some(r) if r.status == "running" =>
+          maintenanceRuns.put(
+            r.id,
+            r.copy(
+              status = status,
+              finishedAt = Some(Instant.now()),
+              counters = counters,
+              error = error
+            )
+          )
+          true
+        case _ => false
+    }
 
   def listMaintenanceRuns(
       tenant: String,

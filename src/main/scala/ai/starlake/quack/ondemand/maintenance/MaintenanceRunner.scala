@@ -49,7 +49,7 @@ final class MaintenanceRunner(
         case None =>
           IO.blocking(
             store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some("node spawn failed"))
-          ) *> finish(run, "failed", RunCounters(), startedAt)
+          ).flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
         case Some(node) =>
           IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters())) *>
             chain(run, node, startedAt)
@@ -60,10 +60,32 @@ final class MaintenanceRunner(
                 val msg = Option(t.getMessage).getOrElse(t.toString)
                 IO.blocking(
                   store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
-                ).handleErrorWith(_ => IO.unit) *> finish(run, "failed", RunCounters(), startedAt)
+                ).handleErrorWith(_ => IO.pure(false))
+                  .flatMap(finishIfNotSwept(run, "failed", RunCounters(), startedAt))
               }
       }
     }
+
+  /** [[finish]] records the audit trail + metrics for a run's terminal state -- but only when this
+    * caller actually won the transition to that state. A `false` from `store.finishMaintenanceRun`
+    * means a concurrent sweep already failed the row (stale heartbeat) between this run's last
+    * liveness check and now; overwriting that with a success audit would misreport what happened,
+    * so this path only logs and skips.
+    */
+  private def finishIfNotSwept(
+      run: MaintenanceRun,
+      status: String,
+      counters: RunCounters,
+      startedAt: Instant
+  )(won: Boolean): IO[Unit] =
+    if won then finish(run, status, counters, startedAt)
+    else
+      IO.delay(
+        logger.warn(
+          s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) was already swept as " +
+            "stale before this run could record its own finish; skipping duplicate finish/audit"
+        )
+      )
 
   private def chain(run: MaintenanceRun, node: RunningNode, startedAt: Instant): IO[Unit] =
     IO.defer {
@@ -201,8 +223,8 @@ final class MaintenanceRunner(
           _.copy(bytesReclaimed = math.max(0L, bytesBefore - bytesAfter))
         )
         counters <- countersRef.get
-        _        <- IO.blocking(store.finishMaintenanceRun(run.id, status, counters, error))
-        _        <- finish(run, status, counters, startedAt)
+        won      <- IO.blocking(store.finishMaintenanceRun(run.id, status, counters, error))
+        _        <- finishIfNotSwept(run, status, counters, startedAt)(won)
       yield ()
     }
 

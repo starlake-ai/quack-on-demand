@@ -263,6 +263,12 @@ final case class MaintenanceConfig(
     runTimeoutMin: Int = 60
 )
 
+// runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/
+// orphans): the sweep only checks time-since-last-heartbeat, and a heartbeat is only written
+// between steps, not during one. A step that legitimately runs longer than runTimeoutMin gets
+// swept out from under a still-healthy run, racing MaintenanceRunner's own finishMaintenanceRun
+// call (see the "AND status = 'running'" guard on both UPDATEs in PostgresControlPlaneStore).
+
 final case class TelemetryConfig(
     @field
     @ConfigField(
