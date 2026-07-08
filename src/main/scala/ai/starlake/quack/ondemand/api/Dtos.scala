@@ -726,6 +726,39 @@ final case class CatalogSnapshotEntry(
     affectedTables: List[CatalogTableRef]
 )
 
+// ----- Snapshot tags (EPIC P2 / Spec 06) -----
+
+/** Wire representation of a snapshot tag. The `isProtected` Scala field maps to `"protected"` on
+  * the wire (hand-rolled codec avoids the Scala keyword collision).
+  */
+final case class CatalogTagEntry(
+    name: String,
+    snapshotId: Long,
+    isProtected: Boolean,
+    createdBy: Option[String],
+    createdAt: Option[java.time.Instant],
+    exists: Boolean
+)
+
+final case class TagCreateRequest(
+    tenant: String,
+    tenantDb: String,
+    name: String,
+    snapshotId: Long,
+    isProtected: Boolean = false
+)
+
+final case class TagDeleteRequest(tenant: String, tenantDb: String, name: String)
+object TagDeleteRequest:
+  given Codec[TagDeleteRequest] = io.circe.generic.semiauto.deriveCodec
+
+final case class TagProtectRequest(
+    tenant: String,
+    tenantDb: String,
+    name: String,
+    isProtected: Boolean
+)
+
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
@@ -1344,3 +1377,65 @@ object Dtos:
   given Codec[ActiveStatementsResponse] = deriveCodec
   given Codec[KillStatementRequest]     = deriveCodec
   given Codec[KillStatementResponse]    = deriveCodec
+
+  // Snapshot tags: hand-rolled codecs because the wire field is "protected" (a Scala keyword).
+  given Codec[CatalogTagEntry] = Codec.from(
+    Decoder.instance { c =>
+      for
+        name        <- c.get[String]("name")
+        snapshotId  <- c.get[Long]("snapshotId")
+        isProtected <- c.getOrElse[Boolean]("protected")(false)
+        createdBy   <- c.get[Option[String]]("createdBy")
+        createdAt   <- c.get[Option[java.time.Instant]]("createdAt")
+        exists      <- c.getOrElse[Boolean]("exists")(true)
+      yield CatalogTagEntry(name, snapshotId, isProtected, createdBy, createdAt, exists)
+    },
+    Encoder.instance { t =>
+      Json.obj(
+        "name"       -> Json.fromString(t.name),
+        "snapshotId" -> Json.fromLong(t.snapshotId),
+        "protected"  -> Json.fromBoolean(t.isProtected),
+        "createdBy"  -> t.createdBy.fold(Json.Null)(Json.fromString),
+        "createdAt"  -> t.createdAt.fold(Json.Null)(i => Json.fromString(i.toString)),
+        "exists"     -> Json.fromBoolean(t.exists)
+      )
+    }
+  )
+  given Codec[TagCreateRequest] = Codec.from(
+    Decoder.instance { c =>
+      for
+        tenant      <- c.get[String]("tenant")
+        tenantDb    <- c.get[String]("tenantDb")
+        name        <- c.get[String]("name")
+        snapshotId  <- c.get[Long]("snapshotId")
+        isProtected <- c.getOrElse[Boolean]("protected")(false)
+      yield TagCreateRequest(tenant, tenantDb, name, snapshotId, isProtected)
+    },
+    Encoder.instance { r =>
+      Json.obj(
+        "tenant"     -> Json.fromString(r.tenant),
+        "tenantDb"   -> Json.fromString(r.tenantDb),
+        "name"       -> Json.fromString(r.name),
+        "snapshotId" -> Json.fromLong(r.snapshotId),
+        "protected"  -> Json.fromBoolean(r.isProtected)
+      )
+    }
+  )
+  given Codec[TagProtectRequest] = Codec.from(
+    Decoder.instance { c =>
+      for
+        tenant      <- c.get[String]("tenant")
+        tenantDb    <- c.get[String]("tenantDb")
+        name        <- c.get[String]("name")
+        isProtected <- c.get[Boolean]("protected")
+      yield TagProtectRequest(tenant, tenantDb, name, isProtected)
+    },
+    Encoder.instance { r =>
+      Json.obj(
+        "tenant"    -> Json.fromString(r.tenant),
+        "tenantDb"  -> Json.fromString(r.tenantDb),
+        "name"      -> Json.fromString(r.name),
+        "protected" -> Json.fromBoolean(r.isProtected)
+      )
+    }
+  )
