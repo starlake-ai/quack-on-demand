@@ -15,18 +15,26 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) 
     * the internal schema-probe round-trip is invisible to the per-node load/latency stats surfaced
     * on the UI dashboard (Total Served, QPS, p50/p95/p99). Mirrors [[probe]]'s policy: a controlled
     * internal call shouldn't bookkeep against capacity or trip the health flag.
+    *
+    * `stampPrelude` when supplied routes to [[QuackHttpClient.queryStamped]] to run the prelude and
+    * sql as two PREPARE statements on one wire connection; when None, routes to
+    * [[QuackHttpClient.query]].
     */
   def send(
       node: RunningNode,
       sql: String,
       session: Option[String],
-      recordLoad: Boolean = true
+      recordLoad: Boolean = true,
+      stampPrelude: Option[String] = None
   ): IO[QuackResponse] =
     // Quack's URI scheme; DuckDB's `quack_query` parses it.
     val endpoint = s"quack:${node.host}:${node.port}"
     val onStart  = if recordLoad then IO.delay(tracker.onStart(node.nodeId)) else IO.unit
+    val call     = stampPrelude match
+      case Some(p) => client.queryStamped(endpoint, node.token, p, sql)
+      case None    => client.query(endpoint, node.token, sql, session)
     onStart *>
-      client.query(endpoint, node.token, sql, session).flatMap { resp =>
+      call.flatMap { resp =>
         IO.delay {
           if recordLoad then
             val latency = resp match

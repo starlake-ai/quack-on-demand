@@ -105,6 +105,52 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     adapter.probe(node("p3")).unsafeRunSync() shouldBe false
     tracker.snapshot("p3").totalServed shouldBe 0L
 
+  "send with stampPrelude" should "route to queryStamped when supplied and to query when not" in:
+    val recorded = scala.collection.mutable.ListBuffer.empty[String]
+    val client   =
+      new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String]
+        ) =
+          IO { recorded += s"plain:$sql"; TestArrow.okResponse() }
+        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+          IO { recorded += s"stamped:$prelude|$sql"; TestArrow.okResponse() }
+    val tracker  = new NodeLoadTracker
+    val adapter  = new QuackHttpAdapter(client, tracker)
+    val testNode = RunningNode(
+      "n1",
+      PoolKey("t", "t_db", "p"),
+      Role.Dual,
+      "127.0.0.1",
+      21901,
+      "tok",
+      Some(1L),
+      None,
+      Instant.EPOCH,
+      maxConcurrent = 4
+    )
+    adapter
+      .send(
+        testNode,
+        "INSERT INTO t VALUES (1)",
+        None,
+        recordLoad = false,
+        stampPrelude = Some("BEGIN; CALL stamp()")
+      )
+      .unsafeRunSync() match
+      case QuackResponse.Ok(_, _, close) => close()
+      case _                             => ()
+    adapter.send(testNode, "SELECT 1", None, recordLoad = false).unsafeRunSync() match
+      case QuackResponse.Ok(_, _, close) => close()
+      case _                             => ()
+    recorded.toList shouldBe List(
+      "stamped:BEGIN; CALL stamp()|INSERT INTO t VALUES (1)",
+      "plain:SELECT 1"
+    )
+
   "send with recordLoad=false" should "leave tracker counters and percentiles untouched" in:
     // FlightSQL Prepare-time LIMIT-0 probe contract: the probe must be invisible to the UI's
     // per-node Total Served / QPS / avg latency / p50,p95,p99 -- those should reflect only
