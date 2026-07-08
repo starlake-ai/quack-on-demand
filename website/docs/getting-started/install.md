@@ -73,7 +73,7 @@ The manager runs natively on Windows - no WSL, no Docker. The bash launchers hav
 
 - **JDK 21+** (`java` on `PATH`, or `JAVA_HOME` set).
 - **Windows PowerShell 5+** (ships with Windows) - used to spawn Quack nodes.
-- **PostgreSQL 16+** reachable from the host (native install, a container, or a network host). `psql` is *optional* - the manager provisions its own control-plane and tenant databases; when `psql` is present `run-jar.ps1` also runs a reachability probe.
+- **PostgreSQL 16+** reachable from the host (native install, a container, or a network host). `psql` is *optional* - the manager provisions its own control-plane and tenant databases; when `psql` is present `run-jar.ps1` additionally runs a reachability probe, enforces the PG16+ version gate, creates the control-plane database up-front, and enables the `NUKE=1` / `LOAD_*` flows below.
 - **DuckDB is self-installed** by `run-jar.ps1` (CLI + `duckdb.dll`, v1.5.4, `windows-amd64`) into `.duckdb\<version>\` and prepended to `PATH`. A system `duckdb` on `PATH` is ignored - an ABI/feature mismatch (for example a `winget` 0.10.x build) would fail node spawn.
 
 **Run** (from a PowerShell prompt at the repo root):
@@ -85,7 +85,16 @@ $env:QOD_ADMIN_PASSWORD = 'change-me'
 .\scripts\run-jar.ps1
 ```
 
-`run-jar.ps1` uses the newest `distrib\quack-on-demand-assembly-*.jar` (or runs `sbt assembly` when none is present or `$env:BUILD='1'`). All the same `QOD_*` / `PROXY_*` environment variables apply. Stop with `.\scripts\stop-jar.ps1`.
+`run-jar.ps1` is at feature parity with the bash `run-jar.sh`. By default it resolves the jar from Maven Central (`QOD_VERSION`, default latest release; `latest-snapshot` for the newest snapshot), caches it under `%USERPROFILE%\.cache\quack-on-demand\` with a sha1 check, and falls back to the newest `distrib\quack-on-demand-assembly-*.jar` or `sbt assembly` (bootstrapping `sbt` into `.sbt-bootstrap\` if it isn't on `PATH`) when nothing is published. Set `$env:BUILD='1'` to force a local `sbt assembly`. Before starting the JVM it runs a Postgres reachability probe + PG16 gate, creates the control-plane database if missing, and does a port preflight (aborting if the REST/FlightSQL ports are held or a stale Quack node is squatting the node-port range). All the same `QOD_*` / `PROXY_*` environment variables apply. Stop with `.\scripts\stop-jar.ps1`.
+
+**Seeding the demo datasets.** The same seed flags as the bash path work on Windows - `run-jar.ps1` runs the PowerShell demo loaders (`load-{tpch,tpcds,ssb}-dbgen.ps1`) in the background before the JVM starts:
+
+```powershell
+$env:LOAD_TPCH = '1'; .\scripts\run-jar.ps1                       # TPC-H SF=1 into acme/acme_tpch
+$env:NUKE = '1'; $env:LOAD_TPCH = '1'; .\scripts\run-jar.ps1      # wipe state, then fresh boot + seed
+```
+
+`LOAD_TPCDS=N` (globex/globex_tpcds) and `LOAD_SSB=N` (acme, schema `ssb1`) behave the same; `LOAD_TPC=N` is the legacy shortcut for all three. `NUKE=1` drops the control-plane and demo tenant-db databases and wipes `ducklake\`, `state\`, and `certs\` before booting (irreversible; requires `psql`). Each loader can also be run standalone (e.g. `$env:SF=10; .\scripts\load-tpch-dbgen.ps1`).
 
 **Client path.** Two ways the manager talks to the Quack nodes:
 

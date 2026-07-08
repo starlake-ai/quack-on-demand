@@ -34,6 +34,16 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
+# The results block uses U+2500 box-drawing separators. On Windows the console
+# defaults to cp1252, which cannot encode them, so a fully successful run would
+# still die with UnicodeEncodeError at print time. Force UTF-8 on our streams
+# (no-op where they already are, e.g. Linux/macOS or PYTHONUTF8=1).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        pass
+
 
 # Default workload: a curated TPCH-H subset. These are the canonical
 # benchmark queries (Q1, Q3, Q5, Q6, Q10, Q12, Q14) with the standard

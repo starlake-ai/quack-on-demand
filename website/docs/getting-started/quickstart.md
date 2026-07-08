@@ -132,6 +132,10 @@ python3 ./scripts/tpch-load-test/tpch-load-test.py \
 
 `--tenant` and `--pool` are required (or set `LT_TENANT` / `LT_POOL`); the demo bootstrap creates tenants `acme` and `globex`, each with a pool named `bi`. The `--insecure` flag skips certificate verification for the auto-generated self-signed cert. The `--superuser` flag adds the `superuser=true` gRPC header so the bootstrap `admin` user (which lives in `qodstate_user` with `tenant IS NULL`) authenticates against the system realm; drop it when running as a tenant-scoped user.
 
+:::note Windows
+Run the Python ADBC client from a neutral working directory (e.g. your home folder), **not** the repository root. Windows includes the current directory in the DLL search path, so a native `arrow`/`duckdb` DLL sitting in the checkout can get loaded into the client process ahead of the one shipped with `adbc_driver_flightsql` and crash it. The runner itself already forces UTF-8 output so the results table renders in a `cp1252` console.
+:::
+
 To switch workload, pass `--workload tpcds` (or set `LT_WORKLOAD=tpcds`). The runner ships two curated benchmarks:
 
 | Workload | Default schema | Default tenant/pool wiring | Tables touched |
