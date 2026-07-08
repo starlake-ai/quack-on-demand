@@ -11,13 +11,17 @@ object UiBuild {
       val log = streams.value.log
       val base = baseDirectory.value
       val uiDir = base / "ui"
+      // On Windows the npm launcher is `npm.cmd`; scala.sys.process resolves
+      // executables via CreateProcess, which won't find the bare `npm` shim.
+      val npm =
+        if (sys.props.getOrElse("os.name", "").toLowerCase.contains("win")) "npm.cmd" else "npm"
       if (!(uiDir / "node_modules").exists()) {
         log.info("ui: running npm ci")
-        val rc = Process("npm" :: "ci" :: Nil, uiDir).!
+        val rc = Process(npm :: "ci" :: Nil, uiDir).!
         if (rc != 0) sys.error("npm ci failed")
       }
       log.info("ui: running npm run build")
-      val rc = Process("npm" :: "run" :: "build" :: Nil, uiDir).!
+      val rc = Process(npm :: "run" :: "build" :: Nil, uiDir).!
       if (rc != 0) sys.error("npm run build failed")
     },
     Compile / resourceGenerators += Def.task {

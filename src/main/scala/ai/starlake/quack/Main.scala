@@ -212,7 +212,8 @@ object Main extends IOApp with LazyLogging:
           mgrCfg.minPort,
           mgrCfg.maxPort,
           mgrCfg.defaultMetastore.asMap,
-          commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript)
+          commandFor =
+            LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
         )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()

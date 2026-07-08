@@ -352,9 +352,16 @@ final case class ManagerConfig(
     nodeDisableSsl: Boolean,
     @field @ConfigField(
       envVar = "QOD_SPAWN_SCRIPT",
-      description = "Path to spawn-quack-node.sh invoked by LocalQuackBackend."
+      description = "Path to spawn-quack-node.sh invoked by LocalQuackBackend on Unix."
     )
     spawnScript: String,
+    @field @ConfigField(
+      envVar = "QOD_SPAWN_SCRIPT_WINDOWS",
+      description =
+        "Path to the PowerShell spawn script (spawn-quack-node.ps1) invoked by LocalQuackBackend " +
+          "on Windows."
+    )
+    spawnScriptWindows: String,
     @field @ConfigField(
       envVar = "QOD_DRAIN_TIMEOUT_SEC",
       description = "Seconds to wait for in-flight statements during graceful pool shutdown."

@@ -33,15 +33,32 @@ import sbt.io.IO
   */
 object LibquackwireArtifacts {
 
-  private final case class PlatformSpec(classifier: String, ext: String) {
-    def libFile: String = s"libquackwire.$ext"
+  private final case class PlatformSpec(
+    classifier: String,
+    ext: String,
+    libFileName: Option[String] = None
+  ) {
+    // Windows uses the un-prefixed `quackwire.dll` (System.mapLibraryName has
+    // no "lib" prefix there); Unix keeps `libquackwire.{so,dylib}`.
+    def libFile: String = libFileName.getOrElse(s"libquackwire.$ext")
   }
+
+  /** Opt-in flag for the Windows native pipeline. Default OFF keeps every
+    * existing publish / publishLocal byte-identical (4 Unix classifiers only).
+    * CI's Windows build job and Windows devs set `QOD_WITH_WINDOWS_NATIVE=true`
+    * to also package `native/windows-x86_64/quackwire.dll`.
+    */
+  private val withWindows: Boolean =
+    sys.env.get("QOD_WITH_WINDOWS_NATIVE").exists(v => v == "true" || v == "1")
 
   private val Platforms = Seq(
     PlatformSpec("linux-x86_64",  "so"),
     PlatformSpec("linux-aarch64", "so"),
     PlatformSpec("osx-x86_64",    "dylib"),
     PlatformSpec("osx-aarch64",   "dylib")
+  ) ++ (
+    if (withWindows) Seq(PlatformSpec("windows-x86_64", "dll", Some("quackwire.dll")))
+    else Seq.empty
   )
 
   /** Settings the `libquackwire` subproject mixes in. Returns one

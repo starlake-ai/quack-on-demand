@@ -39,6 +39,8 @@ If you have JDK 21+ and a reachable Postgres:
 
 On first run the script downloads the latest release jar from Maven Central, probes Postgres, creates the control-plane database (`qod`), then starts the JVM. When Postgres is unreachable the script warns and aborts; start Postgres first or use the Docker Compose path above. Stop it with `./scripts/stop-jar.sh` (SIGTERM, then SIGKILL after 10 seconds).
 
+On **Windows**, run the PowerShell twins instead - `.\scripts\run-jar.ps1` and `.\scripts\stop-jar.ps1`. See [Run on Windows](/getting-started/install#run-on-windows-native) for the native-Windows details.
+
 ### What comes up
 
 Either path brings up the same surface:

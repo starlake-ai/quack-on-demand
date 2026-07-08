@@ -85,6 +85,12 @@ else
 fi
 
 # ---- 3. publishSigned + sonatypeBundleRelease (idempotent) ---------------
+# Bundle the Windows classifier so the released uber-jar runs the native client
+# on Windows AND Linux/macOS (matches the snapshot workflow). Requires the
+# windows-x86_64 libquackwire classifier to already be on Maven Central -
+# release-libquackwire.sh publishes it (its CI-artifact stage now includes
+# quackwire.dll).
+export QOD_WITH_WINDOWS_NATIVE=true
 if manager_on_central "$release_version"; then
   echo "manager ${release_version} already on Maven Central; skipping publish."
 else

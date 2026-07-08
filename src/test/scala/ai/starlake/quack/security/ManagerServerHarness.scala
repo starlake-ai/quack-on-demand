@@ -57,6 +57,7 @@ object ManagerServerHarness:
     stampWrites = true,
     nodeDisableSsl = true,
     spawnScript = "",
+    spawnScriptWindows = "",
     drainTimeoutSec = 5,
     healthCheckIntervalSec = 30,
     reconcileIntervalSec = 0,

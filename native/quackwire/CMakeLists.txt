@@ -46,10 +46,27 @@ target_include_directories(quackwire PRIVATE
 # Task 8 (CI matrix) will likely switch CI to FetchContent on the v1.5.4
 # release artifact for reproducibility, but for local dev the system
 # package is the fastest path to a working link.
-find_path(DUCKDB_INCLUDE_DIR duckdb.hpp HINTS /opt/homebrew/include /usr/local/include /usr/include)
-find_library(DUCKDB_LIB duckdb HINTS /opt/homebrew/lib /usr/local/lib /usr/lib)
+# DUCKDB_HOME (env var or -DDUCKDB_HOME=) points at an unpacked libduckdb dir.
+# It is required on Windows (there is no system package): unzip
+# libduckdb-windows-amd64.zip and populate it with duckdb.lib + the FULL duckdb/
+# include tree. The release zip ships only the amalgamated duckdb.{h,hpp}; the
+# duckdb-quack message layer also pulls internal headers such as
+# duckdb/common/serializer/binary_serializer.hpp, so a shallow `git clone
+# --branch v1.5.4` of duckdb/src/include/duckdb must be copied alongside them
+# (see .github/workflows/quackwire.yml for the exact staging). On macOS/Linux the
+# system package hints below still apply, so DUCKDB_HOME is optional there.
+find_path(DUCKDB_INCLUDE_DIR duckdb.hpp
+  HINTS
+    $ENV{DUCKDB_HOME} $ENV{DUCKDB_HOME}/include
+    ${DUCKDB_HOME} ${DUCKDB_HOME}/include
+    /opt/homebrew/include /usr/local/include /usr/include)
+find_library(DUCKDB_LIB duckdb
+  HINTS
+    $ENV{DUCKDB_HOME} $ENV{DUCKDB_HOME}/lib
+    ${DUCKDB_HOME} ${DUCKDB_HOME}/lib
+    /opt/homebrew/lib /usr/local/lib /usr/lib)
 if(NOT DUCKDB_INCLUDE_DIR OR NOT DUCKDB_LIB)
-  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS) or 'apt install libduckdb-dev' (Linux), or wire up FetchContent against the v1.5.4 release artifact.")
+  message(FATAL_ERROR "libduckdb not found. Install via 'brew install duckdb' (macOS), 'apt install libduckdb-dev' (Linux), or unpack libduckdb-windows-amd64.zip and set DUCKDB_HOME to it (Windows). See .github/workflows/quackwire.yml for the exact layout.")
 endif()
 message(STATUS "quackwire: using libduckdb headers at ${DUCKDB_INCLUDE_DIR}")
 message(STATUS "quackwire: linking libduckdb at ${DUCKDB_LIB}")
