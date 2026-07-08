@@ -260,3 +260,59 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
         QuackNativeBridge.parseMessageType(body) shouldBe MessageType.DisconnectMessage.wireOrdinal
       finally allocator.close()
     }
+
+  describe("executeDiscard"):
+    it("drains a single-batch result and does NOT send DISCONNECT") {
+      val uuid      = java.math.BigInteger.valueOf(7L)
+      val transport = FakeTransport(
+        Iterator(
+          QuackTestFixtures.serializeSampleConnectionResponse(connId),
+          QuackTestFixtures.serializeSamplePrepareResponse(uuid, false, true)
+        )
+      )
+      val allocator = new RootAllocator()
+      try
+        val protocol = new QuackProtocol(transport, allocator)
+        val conn     = protocol.open(endpoint, token).unsafeRunSync()
+        conn.executeDiscard("BEGIN; CALL something()").unsafeRunSync()
+        // CONNECTION_REQUEST + PREPARE_REQUEST only; a DISCONNECT would be a third POST.
+        transport.postCount.get() shouldBe 2
+      finally allocator.close()
+    }
+
+    it("drains a multi-batch result through the FETCH loop") {
+      val uuid      = java.math.BigInteger.valueOf(8L)
+      val transport = FakeTransport(
+        Iterator(
+          QuackTestFixtures.serializeSampleConnectionResponse(connId),
+          QuackTestFixtures.serializeSamplePrepareResponse(uuid, true, true),
+          QuackTestFixtures.serializeSampleFetchResponse(false)
+        )
+      )
+      val allocator = new RootAllocator()
+      try
+        val protocol = new QuackProtocol(transport, allocator)
+        val conn     = protocol.open(endpoint, token).unsafeRunSync()
+        conn.executeDiscard("COMMIT").unsafeRunSync()
+        // CONNECTION + PREPARE + one FETCH; still no DISCONNECT.
+        transport.postCount.get() shouldBe 3
+      finally allocator.close()
+    }
+
+    it("surfaces an ERROR_RESPONSE as QuackWireError.Permanent") {
+      val transport = FakeTransport(
+        Iterator(
+          QuackTestFixtures.serializeSampleConnectionResponse(connId),
+          QuackTestFixtures.serializeSampleErrorResponse("no such function")
+        )
+      )
+      val allocator = new RootAllocator()
+      try
+        val protocol = new QuackProtocol(transport, allocator)
+        val conn     = protocol.open(endpoint, token).unsafeRunSync()
+        val err      = intercept[QuackWireError.Permanent] {
+          conn.executeDiscard("BEGIN; CALL nope()").unsafeRunSync()
+        }
+        err.msg should include("no such function")
+      finally allocator.close()
+    }
