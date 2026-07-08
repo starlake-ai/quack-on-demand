@@ -856,3 +856,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val (router, _, _, calls) = stampedSetup(stampWrites = false)
     router.execute("c-s7", "alice", poolKey, "INSERT INTO t VALUES (1)").unsafeRunSync()
     calls.head._1 shouldBe None
+
+  it should "not stamp when recordExecution is false (internal probe)" in:
+    val (router, _, _, calls) = stampedSetup()
+    router
+      .execute("c-s8", "alice", poolKey, "INSERT INTO t VALUES (1)", recordExecution = false)
+      .unsafeRunSync()
+    calls.head._1 shouldBe None

@@ -375,8 +375,12 @@ final class FlightSqlRouter(
         // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
         // initial schema) when the pool's metastore advertises a dbName.
         val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
-        val prelude    =
-          stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
+        // Internal probes (recordExecution=false) never stamp: they must not open
+        // transactions on the node even if a future probe shape classifies as a write.
+        val prelude =
+          if recordExecution then
+            stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
+          else None
         Router.pick(snap, kind, pinned) match
           case RoutingDecision.Unavailable(reason) =>
             maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
