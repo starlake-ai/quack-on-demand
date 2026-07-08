@@ -833,7 +833,8 @@ object Main extends IOApp with LazyLogging:
         columnPolicyRewriter,
         rowPolicyRewriter,
         activeStatements,
-        eventJournal
+        eventJournal,
+        stampWrites = mgrCfg.stampWrites
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
