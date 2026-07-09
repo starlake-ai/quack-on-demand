@@ -21,14 +21,24 @@ import scala.sys.process._
 /** Spec 00 Task 8: live end-to-end proof that a catalog preview's rows equal a direct duckdb-CLI
   * `AT (VERSION => n)` query against the same DuckLake catalog.
   *
-  * Runs the EXACT production pipeline: [[CatalogPreviewHandlers.buildSql]]'s output (reproduced
-  * here verbatim -- `SELECT * FROM "schema"."table" AT (VERSION => n) LIMIT k`) is executed through
-  * a real [[FlightSqlRouter.execute]] (`recordExecution = false`, mirroring the real executor
-  * adapter in `Main.scala`) against a REAL spawned quack node ([[LocalQuackBackend]], the same
-  * backend `PoolSupervisor.createPool` uses in production, never invoked as a raw script directly),
-  * then decoded through the real [[ArrowRowsDecoder]]. The decoded rows are compared, after
-  * deterministic ordering on both sides, against a direct `duckdb` CLI query of the same catalog at
-  * the same snapshot.
+  * Runs the production ROUTING AND DECODE pipeline: [[CatalogPreviewHandlers.buildSql]]'s output
+  * (reproduced here verbatim -- `SELECT * FROM "schema"."table" AT (VERSION => n) LIMIT k`) is
+  * executed through a real [[FlightSqlRouter.execute]] (`recordExecution = false`, mirroring the
+  * real executor adapter in `Main.scala`) against a REAL spawned quack node ([[LocalQuackBackend]],
+  * the same backend `PoolSupervisor.createPool` uses in production, never invoked as a raw script
+  * directly), then decoded through the real [[ArrowRowsDecoder]].
+  *
+  * NOT exercised here: the ACL/RLS/CLS half. The router is constructed with the default
+  * `StatementValidator.allowAll` and `effectiveSet = None`, so this spec proves SQL shape, routing,
+  * node execution, Arrow decode, and truncation -- NOT authorization (which `PreviewAuthzSpec` and
+  * `CatalogPreviewHandlersSpec` pin at the handler layer, and which under the REAL
+  * `PostgresAclValidator` would fail-safe DENY a `None` effective set; the "superuser" user string
+  * has no bypass meaning to the validator).
+  *
+  * The decoded rows are compared against a direct `duckdb` CLI query of the same catalog at the
+  * same snapshot; comparison is unordered-set equality via an identical lexicographic re-sort of
+  * both sides' rendered rows (the fixture data is comma- and quote-free by construction; this naive
+  * CSV rendering is NOT safe to copy for tables with richer string data).
   *
   * Cancels cleanly (not fails) when local Postgres or the `duckdb` CLI is unavailable -- same
   * environment guard [[StampedWriteIntegrationSpec]] and [[PostgresFixture]] use.
