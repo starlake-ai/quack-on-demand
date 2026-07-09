@@ -730,6 +730,34 @@ final case class CatalogSnapshotEntry(
     commitMessage: Option[String] = None // ducklake_snapshot_changes.commit_message
 )
 
+// ----- Per-table history / audit timeline (EPIC Spec 01) -----
+
+final case class CatalogHistoryTableRef(
+    schema: String,
+    name: String,
+    tableId: Long // stable DuckLake table_id; history identity survives renames
+)
+
+final case class CatalogHistoryCommit(
+    snapshotId: Long,
+    committedAt: String,           // ISO-8601, from ducklake_snapshot.snapshot_time
+    operation: String,             // one of HistoryOperation.Values
+    author: Option[String],        // null on pre-stamping snapshots
+    commitMessage: Option[String], // null when the writer set none
+    schemaChanged: Boolean,
+    schemaVersion: Long,
+    rowsAdded: Long,
+    rowsRemoved: Long,
+    filesAdded: Int,
+    filesRemoved: Int
+)
+
+final case class CatalogHistoryResponse(
+    table: CatalogHistoryTableRef,
+    commits: List[CatalogHistoryCommit], // snapshotId DESC
+    hasMore: Boolean
+)
+
 // ----- Snapshot tags (EPIC P2 / Spec 06) -----
 
 /** Wire representation of a snapshot tag. The `isProtected` Scala field maps to `"protected"` on
@@ -1474,6 +1502,9 @@ object Dtos:
   given Codec[CatalogTableDetailResponse] = deriveCodec
   given Codec[CatalogTableRef]            = deriveCodec
   given Codec[CatalogSnapshotEntry]       = deriveCodec
+  given Codec[CatalogHistoryTableRef]     = deriveCodec
+  given Codec[CatalogHistoryCommit]       = deriveCodec
+  given Codec[CatalogHistoryResponse]     = deriveCodec
 
   // Federation
   // Hand-rolled decoder so omitted optional fields fall back to the
