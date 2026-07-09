@@ -18,5 +18,6 @@ object EndpointModules:
     CatalogEndpoints,
     TagEndpoints,
     MaintenanceEndpoints,
-    RbacEndpoints
+    RbacEndpoints,
+    TimeTravelEndpoints
   )

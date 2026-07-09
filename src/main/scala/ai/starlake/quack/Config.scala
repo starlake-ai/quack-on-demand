@@ -269,6 +269,27 @@ final case class MaintenanceConfig(
 // swept out from under a still-healthy run, racing MaintenanceRunner's own finishMaintenanceRun
 // call (see the "AND status = 'running'" guard on both UPDATEs in PostgresControlPlaneStore).
 
+/** Catalog browser read surface (Spec 00 time-travel viewer). */
+final case class CatalogConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_CATALOG_READS",
+      description =
+        "Audit catalog browser reads: one catalog.read event per gated GET. Off by default " +
+          "(reads are chatty; mutations are always audited)."
+    )
+    auditCatalogReads: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_CATALOG_PREVIEW_MAX_ROWS",
+      description = "Hard cap on rows returned by the catalog data-preview endpoint."
+    )
+    previewMaxRows: Int = 1000,
+    @field @ConfigField(
+      envVar = "QOD_CATALOG_PREVIEW_TIMEOUT_SEC",
+      description = "Seconds before a catalog data-preview query is cancelled."
+    )
+    previewTimeoutSec: Int = 30
+)
+
 final case class TelemetryConfig(
     @field
     @ConfigField(
@@ -418,6 +439,7 @@ final case class ManagerConfig(
     ha: HaConfig = HaConfig(),
     telemetry: TelemetryConfig = TelemetryConfig(),
     maintenance: MaintenanceConfig = MaintenanceConfig(),
+    catalog: CatalogConfig = CatalogConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =

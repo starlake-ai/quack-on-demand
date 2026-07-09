@@ -401,21 +401,18 @@ object Main extends IOApp with LazyLogging:
       Some(tenantOidcRegistry)
     )
 
-    // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
+    // Catalog reader resolver. Only meaningful in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
     // Postgres metastore. One reader per tenant, cached so we don't reopen
     // Hikari on every request. The resolver reads the effective metastore
     // (default <- tenant overrides) the same way PoolSupervisor does for
-    // spawn-node.
+    // spawn-node. The CatalogHandlers themselves are constructed further
+    // down, after the audit recorder and the tag handlers they depend on.
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaderCache.computeIfAbsent(
         (tenant, tenantDb),
         { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
       )
-    val catalogHandlers: Option[CatalogHandlers] =
-      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
-        sup.findTenantDb(tenant, tenantDb).map(_.kind)
-      Some(new CatalogHandlers(catalogReader, kindOf))
 
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
@@ -472,13 +469,6 @@ object Main extends IOApp with LazyLogging:
       onAuthChanged = tenantOidcRegistry.invalidate,
       audit = auditRecorder
     )
-    val tenantDbs = new TenantDbHandlers(
-      sup,
-      manifestFedStore,
-      catalog = catalogHandlers,
-      audit = auditRecorder
-    )
-
     // Snapshot-tag CRUD (EPIC P2 / Spec 06). Snapshot existence resolves
     // through the same cached per-tenant-db DuckLake reader as the catalog
     // browser; tag rows live in the control-plane store.
@@ -490,6 +480,30 @@ object Main extends IOApp with LazyLogging:
         snapshotsExist = (t, td, ids) => catalogReader(t, td).snapshotsExist(ids),
         audit = auditRecorder
       )
+    )
+
+    // Catalog browser handlers (session-gated since Spec 00). AS OF selector
+    // resolution (asOf / asOfTag / asOfTs) runs inside getTable via
+    // SnapshotSelector; reads are audited only when catalog.auditCatalogReads is on.
+    val catalogHandlers: Option[CatalogHandlers] =
+      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
+        sup.findTenantDb(tenant, tenantDb).map(_.kind)
+      Some(
+        new CatalogHandlers(
+          catalogReader,
+          sup,
+          store,
+          kindOf,
+          audit = auditRecorder,
+          auditReads = mgrCfg.catalog.auditCatalogReads
+        )
+      )
+
+    val tenantDbs = new TenantDbHandlers(
+      sup,
+      manifestFedStore,
+      catalog = catalogHandlers,
+      audit = auditRecorder
     )
 
     // Managed maintenance (EPIC Spec 09). REST surface only; the scheduler + drain-loop
@@ -1017,6 +1031,107 @@ object Main extends IOApp with LazyLogging:
         audit = auditRecorder
       )
 
+      // Time-travel preview (Spec 00 Task 5). The executor adapts
+      // FlightSqlRouter.execute to CatalogPreviewHandlers.PreviewExecutor's shape, mirroring
+      // the FlightSQL handshake's own EffectiveSet resolution EXACTLY:
+      //   - the SuperuserIdentity sentinel (no session / unresolved token / open mode, per
+      //     CatalogPreviewHandlers' identity contract) gets a synthetic superuser EffectiveSet
+      //     (`user.tenant = None`) so PostgresAclValidator's superuser bypass applies -- NOT
+      //     `effectiveSet = None`, which the validator treats as "no RBAC principal bound" and
+      //     denies fail-safe (see PostgresAclValidator.validate's `case None => Denied`).
+      //   - a real session identity resolves through `sup.authorizeHandshake`, the SAME
+      //     supervisor method (and therefore the same 60s-TTL EffectiveSet cache) the FlightSQL
+      //     handshake uses. A Left here (disabled user, no pool grant, unknown pool/tenant) short
+      //     circuits straight to RouterFailure.AccessDenied without ever calling
+      //     fsRouter.execute, mirroring the handshake gate rejecting before any statement runs.
+      // `recordExecution = false` keeps previews out of statement history and per-node load
+      // stats, the same probe precedent HealthProbe's LIMIT-0 check uses.
+      //
+      // Cancellation safety (no wrapper needed -- proof, not just a claim): the handler
+      // (CatalogPreviewHandlers.preview) wraps this whole executor call in
+      // `.timeout(cfg.previewTimeoutSec.seconds)`. cats-effect's `Temporal#timeout` races the
+      // executor's IO against a sleep and, per its own contract, returns the executor's value
+      // intact whenever the executor side reaches a terminal outcome first -- ties go to the
+      // source, and a fiber that has already produced `Succeeded(value)` can never have that
+      // value silently discarded by the timer "winning" a shared race (cancellation only ever
+      // targets the LOSING fiber, never discards a completed winner). Cooperative cancellation
+      // also means a running, boundary-free synchronous tail cannot be preempted mid-flight: it
+      // either finishes and wins the race, or the timeout fires strictly before that tail even
+      // starts (in which case no QueryResult was ever built and there's nothing to close).
+      //
+      // SCOPE OF THIS PROOF: it covers the QueryResult only. It does NOT cover the wire-level
+      // node connection: the underlying call runs in IO.blocking, whose cancellation is
+      // best-effort (Thread.interrupt), so a timed-out preview can leave the abandoned blocking
+      // call to complete on its own and open a node connection/reader that nobody closes. That
+      // window is bounded by previewTimeoutSec and is a PRE-EXISTING property of the shared
+      // executor path (the FlightSQL prepare-probe has the identical exposure); the durable fix
+      // is bracketing the connection inside QuackHttpClient/QuackProtocol, tracked as a repo
+      // follow-up. Do not cite this comment as proof that a cancelled preview leaks nothing.
+      // The timeout also wraps the EffectiveSet-resolution leg, not just the HTTP leg
+      // (harmless: that leg holds no closeable resource).
+      // Reading FlightSqlRouter.execute's final flatMap chain (the `QuackResponse.Ok` arm)
+      // confirms there is no such boundary to worry about here: once the HTTP call to the Quack
+      // node returns `QuackResponse.Ok(reader, latency, close)`, every step to
+      // `IO.pure(Right(QueryResult(reader, closeAndDeregister, nodeId, latency)))` is
+      // synchronous, in-memory bookkeeping with no further suspension point --
+      // `sessions.onStatement` (TrieMap update), `registry.register`/`attachCancel` (TrieMap
+      // puts), and `maybeRecord` (in-memory ring buffer + Micrometer counters + a non-blocking
+      // queue offer for the audit journal, whose Postgres flush runs on a wholly separate
+      // background fiber). So the only place a preview's underlying connection can leak is if
+      // the timeout fires WHILE the HTTP call itself is still in flight -- and in that case no
+      // `QueryResult` was ever constructed, so there is nothing for this adapter to close.
+      val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
+        (connectionId, user, poolKey, sql) =>
+          val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
+            ai.starlake.quack.ondemand.rbac.EffectiveSet
+          ]]] =
+            if user == ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.SuperuserIdentity
+            then
+              val superuser = ai.starlake.quack.ondemand.state.RbacUser(
+                id = "",
+                tenant = None,
+                username = user,
+                role = "admin"
+              )
+              IO.pure(
+                Right(
+                  Some(
+                    ai.starlake.quack.ondemand.rbac
+                      .EffectiveSet(superuser, Nil, Nil, Nil, Nil)
+                  )
+                )
+              )
+            else
+              IO.delay(sup.authorizeHandshake(poolKey.tenant, poolKey.pool, user)).map {
+                case Left(reason) =>
+                  Left(ai.starlake.quack.edge.RouterFailure.AccessDenied(reason))
+                case Right(authorized) => Right(Some(authorized.effectiveSet))
+              }
+          effectiveSetIO.flatMap {
+            case Left(denied) => IO.pure(Left(denied))
+            case Right(eff)   =>
+              fsRouter.execute(
+                connectionId,
+                user,
+                poolKey,
+                sql,
+                effectiveSet = eff,
+                recordExecution = false
+              )
+          }
+
+      val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
+        new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(
+          sup,
+          store,
+          sessionTokens.get,
+          previewExecutor,
+          catalogReader,
+          mgrCfg.catalog,
+          audit = auditRecorder
+        )
+      )
+
       val mgr = new ManagerServer(
         mgrCfg,
         edgeCfg,
@@ -1032,6 +1147,7 @@ object Main extends IOApp with LazyLogging:
         catalogHandlers,
         tagHandlers,
         maintenanceHandlers,
+        previewHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,

@@ -145,17 +145,25 @@ Clicking a table opens its detail page, with breadcrumbs back to the catalog and
 
 ### Snapshots and time travel
 
-Below the table list, a **Snapshots** panel shows the database's DuckLake snapshot history, newest first: snapshot id, commit time, the raw change summary (`created_table:...`, `inserted_into_table:...`), rows added, files added / removed, and the affected tables. Each affected table links to its detail page as of that snapshot. The panel loads 200 snapshots at a time; **Load older snapshots** fetches the next page (keyset pagination, so new commits do not shift the window while you browse).
+Below the table list, a **Snapshots** panel shows the database's DuckLake snapshot history, newest first: snapshot id, commit time, author (the authenticated principal who triggered the change; "unknown" for pre-existing snapshots with no stamp), commit message (the SQL verb or manual description), the raw change summary (`created_table:...`, `inserted_into_table:...`), rows added, files added / removed, and the affected tables. Each affected table links to its detail page as of that snapshot. The panel loads 200 snapshots at a time; **Load older snapshots** fetches the next page (keyset pagination, so new commits do not shift the window while you browse). A **filter box** above the table narrows the timeline to snapshots that touched a specific table by name.
 
 ![The snapshots panel with the demo database's history](/img/ui/snapshots.png)
 
 Each snapshot row also carries its **tags**: named handles (chips) you create with the row's **+ tag** button, optionally with a retention hold ("protect this snapshot"). Protected tags show a `hold` badge and pin their snapshot against [maintenance expiry](/operating/maintenance#retention-holds); deleting one asks for confirmation since it releases the pin. A tag whose snapshot has since been expired renders dimmed with a `missing` badge. When holds exist, a summary line above the table counts the pinned snapshots. Tag names are per-database, 1 to 128 characters, and never all digits, so they stay unambiguous next to snapshot ids.
 
-On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use); the selector lists named tags first, so you can time-travel by name, and API callers can use `?asOfTag=<name>` as an alias (supplying both is rejected). Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
+On the table detail page, a **Snapshot** selector switches between the current state and any listed snapshot: the summary, column list, and parquet files re-render as of the chosen snapshot, a banner recalls which snapshot is shown, and **back to current** drops it. The view is addressable directly with the `?asOf=<snapshot id>` query parameter (what the panel's deep links use); the selector lists named tags first, so you can time-travel by name, and API callers can use `?asOfTag=<name>` as an alias (supplying both is rejected). You can also view data as of a specific ISO-8601 timestamp: supply `?asOfTs=<timestamp>` (e.g. `2026-07-09T14:30:00Z`) and the manager resolves it to the nearest snapshot at or before that moment, surfaced in the page banner. Picking a snapshot where the table did not yet exist shows a not-found message while keeping the selector usable, and an unknown snapshot id is a 404 rather than an empty render.
 
 ![A table viewed as of a snapshot, with the AS OF banner](/img/ui/catalog-asof.png)
 
 Snapshot semantics (linear history, inlined DML, retention and expiry) are covered in [DuckLake catalogs](/concepts/catalogs#snapshots-and-time-travel).
+
+#### Row preview
+
+The table detail page carries a **Preview** section that fetches a sample of live rows from the table. The preview executes through the same FlightSQL pipeline as production data traffic: pool access-control lists apply (a user without SELECT on the table is denied), row-level and column-level security policies are enforced, and reads route only to ReadOnly/Dual nodes to avoid load on write-capable pool members. Every preview is recorded in the audit log. The preview is bounded (default 100 rows, configurable via the UI) and labeled with the snapshot it reflects ("current" or the snapshot id) so the operator knows the exact version being examined.
+
+#### Schema diff
+
+The table detail page offers a **Compare** action between any two snapshots: click the snapshot selector's diff icon, pick a second snapshot, and the manager computes a schema diff showing added columns, removed columns, columns that changed type, and columns whose nullability changed. Columns that were renamed are disambiguated by table identity and sequence order rather than name matching, so a rename is correctly surfaced as a remove + add rather than a false "no change." Diff results include deep links back to both the source and target snapshots for context, and you can re-run the diff by modifying the `?from=<snapshot-id-or-tag>&to=<snapshot-id-or-tag>` query parameters.
 
 ## Control Plane
 

@@ -180,9 +180,10 @@ final class TagHandlers(
     }
   }
 
-  /** Shared AS OF resolution for the catalog table endpoint: at most one of asOf / asOfTag; a tag
-    * resolves to its snapshot id. NOT scope-gated: the catalog GET surface is gated by the caller
-    * (ManagerServer wiring passes the same authToken guard as the tags list).
+  /** Shared AS OF resolution for callers that only carry asOf / asOfTag (no asOfTs). Thin
+    * delegation to [[SnapshotSelector.resolve]]: existence is NOT checked here (exists is stubbed
+    * true), so a numeric asOf and a resolved tag pass through untouched, exactly like the
+    * pre-selector behavior. NOT scope-gated: the caller gates the surface.
     */
   def resolveAsOf(
       rawTenant: String,
@@ -190,16 +191,28 @@ final class TagHandlers(
       asOf: Option[Long],
       asOfTag: Option[String]
   ): Either[(StatusCode, String), Option[Long]] =
-    (asOf, asOfTag) match
-      case (Some(_), Some(_)) =>
+    val tid        = resolveTenantId(rawTenant).getOrElse(rawTenant)
+    lazy val tdOpt = sup.findTenantDb(tid, tenantDb)
+    SnapshotSelector.resolve(
+      asOf,
+      asOfTag,
+      asOfTs = None,
+      maxId = () => None,
+      atOrBefore = _ => None,
+      tagSnapshot =
+        tag => tdOpt.flatMap(td => store.findSnapshotTag(tid, td.name, tag.trim)).map(_.snapshotId),
+      exists = _ => true
+    ) match
+      case Right(SnapshotSelector.Resolution.Current)             => Right(None)
+      case Right(SnapshotSelector.Resolution.At(id, _))           => Right(Some(id))
+      case Left(SnapshotSelector.SelectorError.MultipleSelectors) =>
         Left((StatusCode.BadRequest, "supply either asOf or asOfTag, not both"))
-      case (None, Some(tag)) =>
-        val tid = resolveTenantId(rawTenant).getOrElse(rawTenant)
-        sup.findTenantDb(tid, tenantDb) match
-          case None =>
-            Left((StatusCode.NotFound, s"tenant-db '$tenantDb' not found"))
-          case Some(td) =>
-            store.findSnapshotTag(tid, td.name, tag.trim) match
-              case Some(t) => Right(Some(t.snapshotId))
-              case None    => Left((StatusCode.NotFound, s"tag '$tag' not found"))
-      case (some, None) => Right(some)
+      case Left(SnapshotSelector.SelectorError.TagNotFound(tag)) =>
+        // The selector cannot tell a missing tenant-db from a missing tag (both make
+        // tagSnapshot return None); disambiguate here to keep the wire messages identical.
+        if tdOpt.isEmpty then Left((StatusCode.NotFound, s"tenant-db '$tenantDb' not found"))
+        else Left((StatusCode.NotFound, s"tag '$tag' not found"))
+      case Left(other) =>
+        // Unreachable: exists is stubbed true and asOfTs is None, so the selector can
+        // never produce Expired / BeyondLatest / EmptyCatalog / BeforeFirstSnapshot.
+        Left((StatusCode.InternalServerError, s"unexpected selector error: $other"))

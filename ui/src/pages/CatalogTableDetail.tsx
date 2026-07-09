@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api } from '../api/client';
-import type { CatalogSnapshotEntry, CatalogTableDetailResponse, CatalogTagEntry } from '../api/types';
+import { api, ApiError } from '../api/client';
+import type {
+  CatalogSnapshotEntry,
+  CatalogTableDetailResponse,
+  CatalogTagEntry,
+  PreviewResponse,
+  SchemaDiffResponse,
+} from '../api/types';
 import Breadcrumb from '../components/Breadcrumb';
+import SnapshotPicker, { parseSnapshotSelector, type SnapshotSelectorValue } from '../components/SnapshotPicker';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -11,28 +18,79 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/** Read the current selector out of the URL: ?asOf=<id> | ?asOfTag=<name> | ?asOfTs=<iso>,
+ * at most one is expected to be set at a time. Encodes into SnapshotPicker's value grammar. */
+function selectorFromSearchParams(sp: URLSearchParams): SnapshotSelectorValue {
+  const asOf = sp.get('asOf');
+  if (asOf != null && /^\d+$/.test(asOf)) return `id:${asOf}`;
+  const asOfTag = sp.get('asOfTag');
+  if (asOfTag) return `tag:${asOfTag}`;
+  const asOfTs = sp.get('asOfTs');
+  if (asOfTs) return `ts:${asOfTs}`;
+  return '';
+}
+
+function writeSelectorToSearchParams(next: URLSearchParams, value: SnapshotSelectorValue) {
+  next.delete('asOf');
+  next.delete('asOfTag');
+  next.delete('asOfTs');
+  const sel = parseSnapshotSelector(value);
+  if (sel.asOf != null) next.set('asOf', String(sel.asOf));
+  else if (sel.asOfTag) next.set('asOfTag', sel.asOfTag);
+  else if (sel.asOfTs) next.set('asOfTs', sel.asOfTs);
+}
+
+function previewErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 403) return 'your data-plane roles do not grant SELECT on this table';
+    if (e.status === 410) return 'the requested snapshot has been vacuumed (snapshot_expired)';
+    if (e.status === 404) return 'preview needs a running pool';
+    if (e.status === 502) return `preview failed: ${e.message}`;
+    return e.message;
+  }
+  return String(e);
+}
+
 export default function CatalogTableDetail() {
   const { tenant, tenantDb, schema, table } = useParams<{
     tenant: string; tenantDb: string; schema: string; table: string;
   }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const asOfRaw = searchParams.get('asOf');
-  const asOf = asOfRaw != null && /^\d+$/.test(asOfRaw) ? Number(asOfRaw) : undefined;
+  const selector = selectorFromSearchParams(searchParams);
   const [detail, setDetail] = useState<CatalogTableDetailResponse | null>(null);
   const [error, setError]   = useState<string | null>(null);
   const [snaps, setSnaps] = useState<CatalogSnapshotEntry[]>([]);
   const [tags, setTags] = useState<CatalogTagEntry[]>([]);
+
+  // ----- Preview (fetch on demand only) -----
+  const [preview, setPreview] = useState<PreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // ----- Compare (schema diff between two snapshot selectors) -----
+  const diffFromParam = searchParams.get('diffFrom') ?? '';
+  const diffToParam = searchParams.get('diffTo') ?? '';
+  const [diffFrom, setDiffFrom] = useState<SnapshotSelectorValue>(
+    diffFromParam ? (/^\d+$/.test(diffFromParam) ? `id:${diffFromParam}` : `tag:${diffFromParam}`) : ''
+  );
+  const [diffTo, setDiffTo] = useState<SnapshotSelectorValue>(
+    diffToParam ? (/^\d+$/.test(diffToParam) ? `id:${diffToParam}` : `tag:${diffToParam}`) : ''
+  );
+  const [diff, setDiff] = useState<SchemaDiffResponse | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!tenant || !tenantDb || !schema || !table) return;
     let cancelled = false;
     setDetail(null);
     setError(null);
-    api.getCatalogTable(tenant, tenantDb, schema, table, asOf)
+    api.getCatalogTable(tenant, tenantDb, schema, table, parseSnapshotSelector(selector))
       .then(r => { if (!cancelled) setDetail(r); })
       .catch(e => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, schema, table, asOf]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant, tenantDb, schema, table, selector]);
 
   useEffect(() => {
     if (!tenant || !tenantDb) return;
@@ -45,6 +103,64 @@ export default function CatalogTableDetail() {
       .catch(() => { if (!cancelled) setTags([]); });
     return () => { cancelled = true; };
   }, [tenant, tenantDb]);
+
+  // Reset the on-demand preview whenever the table or its selector changes;
+  // never auto-fetch (the brief requires an explicit "Load preview" click).
+  useEffect(() => {
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(false);
+  }, [tenant, tenantDb, schema, table, selector]);
+
+  // Same for the compare diff -- but if the URL already carries diffFrom/diffTo,
+  // run the diff automatically so the deep link is directly useful.
+  useEffect(() => {
+    setDiff(null);
+    setDiffError(null);
+    if (tenant && tenantDb && schema && table && diffFromParam && diffToParam) {
+      loadDiff(diffFromParam, diffToParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant, tenantDb, schema, table]);
+
+  function loadPreview() {
+    if (!tenant || !tenantDb || !schema || !table) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    api.previewCatalogTable(tenant, tenantDb, schema, table, parseSnapshotSelector(selector), 100)
+      .then(r => setPreview(r))
+      .catch(e => setPreviewError(previewErrorMessage(e)))
+      .finally(() => setPreviewLoading(false));
+  }
+
+  function selectorToBound(v: SnapshotSelectorValue): string | null {
+    const sel = parseSnapshotSelector(v);
+    if (sel.asOf != null) return String(sel.asOf);
+    if (sel.asOfTag) return sel.asOfTag;
+    return null;
+  }
+
+  function loadDiff(fromRaw?: string, toRaw?: string) {
+    if (!tenant || !tenantDb || !schema || !table) return;
+    const from = fromRaw ?? selectorToBound(diffFrom);
+    const to = toRaw ?? selectorToBound(diffTo);
+    if (!from || !to) {
+      setDiffError('pick a "from" and a "to" snapshot or tag (a live timestamp cannot be diffed directly)');
+      return;
+    }
+    setDiffLoading(true);
+    setDiffError(null);
+    api.catalogSchemaDiff(tenant, tenantDb, schema, table, from, to)
+      .then(r => {
+        setDiff(r);
+        const next = new URLSearchParams(searchParams);
+        next.set('diffFrom', from);
+        next.set('diffTo', to);
+        setSearchParams(next);
+      })
+      .catch(e => setDiffError(e instanceof ApiError ? e.message : String(e)))
+      .finally(() => setDiffLoading(false));
+  }
 
   const tEnc  = encodeURIComponent(tenant!);
   const tdEnc = encodeURIComponent(tenantDb!);
@@ -63,38 +179,28 @@ export default function CatalogTableDetail() {
       />
 
       <div style={{ margin: '12px 0', display: 'flex', alignItems: 'center', gap: 12 }}>
-        <label>
-          Snapshot&nbsp;
-          <select
-            value={asOf ?? ''}
-            onChange={e => {
-              const v = e.target.value;
-              const next = new URLSearchParams(searchParams);
-              if (v === '') { next.delete('asOf'); } else { next.set('asOf', v); }
-              setSearchParams(next);
-            }}
-          >
-            <option value="">current</option>
-            {/* Named tags first; each encodes its snapshot id, so the URL
-                keeps ?asOf=<id> (asOfTag stays an API-level alias). */}
-            {tags.filter(t => t.exists).map(t => (
-              <option key={`tag-${t.name}`} value={t.snapshotId}>
-                {t.name} ({t.snapshotId}{t.protected ? ', hold' : ''})
-              </option>
-            ))}
-            {snaps.map(s => (
-              <option key={s.snapshotId} value={s.snapshotId}>
-                {s.snapshotId} ({new Date(s.committedAt).toLocaleString()})
-              </option>
-            ))}
-          </select>
-        </label>
-        {asOf != null && (
+        <SnapshotPicker
+          tenant={tenant!}
+          tenantDb={tenantDb!}
+          value={selector}
+          onChange={v => {
+            const next = new URLSearchParams(searchParams);
+            writeSelectorToSearchParams(next, v);
+            setSearchParams(next);
+          }}
+          snapshots={snaps}
+          tags={tags}
+        />
+        {selector !== '' && (
           <span style={{ background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
                          color: 'var(--warn)', borderRadius: 4, padding: '2px 8px', fontSize: '0.9rem' }}>
-            Viewing as of snapshot {asOf}
+            Viewing as of {parseSnapshotSelector(selector).asOfTs
+              ? `timestamp ${parseSnapshotSelector(selector).asOfTs}`
+              : `snapshot ${detail?.resolvedSnapshot ?? parseSnapshotSelector(selector).asOf ?? ''}`}
+            {detail?.resolvedAt && ` (resolved at ${new Date(detail.resolvedAt).toLocaleString()})`}
             {(() => {
-              const s = snaps.find(x => x.snapshotId === asOf);
+              const asOfId = parseSnapshotSelector(selector).asOf;
+              const s = asOfId != null ? snaps.find(x => x.snapshotId === asOfId) : undefined;
               return s ? ` (${new Date(s.committedAt).toLocaleString()})` : '';
             })()}
             <button
@@ -105,7 +211,7 @@ export default function CatalogTableDetail() {
               }}
               onClick={() => {
                 const next = new URLSearchParams(searchParams);
-                next.delete('asOf');
+                writeSelectorToSearchParams(next, '');
                 setSearchParams(next);
               }}
             >back to current</button>
@@ -120,7 +226,7 @@ export default function CatalogTableDetail() {
       </div>
 
       {error && <p style={{ color: 'red' }}>Error: {error}</p>}
-      {!detail && !error && <p>Loading…</p>}
+      {!detail && !error && <p>Loading...</p>}
 
       {detail && (
         <>
@@ -178,7 +284,7 @@ export default function CatalogTableDetail() {
                         <td>{c.name}</td>
                         <td><code>{c.typeName}</code></td>
                         <td>{c.nullable ? 'yes' : 'no'}</td>
-                        <td>{c.isPrimaryKey ? '✓' : ''}</td>
+                        <td>{c.isPrimaryKey ? 'yes' : ''}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -186,7 +292,7 @@ export default function CatalogTableDetail() {
               )}
           </section>
 
-          <section>
+          <section style={{ marginBottom: 24 }}>
             <h3>Parquet files</h3>
             {detail.dataFiles.length === 0
               ? <em style={{ color: '#888' }}>no parquet files</em>
@@ -212,6 +318,135 @@ export default function CatalogTableDetail() {
                   </tbody>
                 </table>
               )}
+          </section>
+
+          <section style={{ marginBottom: 24 }}>
+            <h3>Preview</h3>
+            <button type="button" onClick={loadPreview} disabled={previewLoading}>
+              {previewLoading ? 'Loading...' : 'Load preview'}
+            </button>
+            {previewError && (
+              <p style={{ color: 'red', marginTop: 8 }}>Error: {previewError}</p>
+            )}
+            {preview && (
+              <div style={{ marginTop: 12 }}>
+                {preview.truncated && (
+                  <p className="subtle">
+                    Showing the first {preview.rows.length} rows; the result set is truncated.
+                  </p>
+                )}
+                {preview.rows.length === 0
+                  ? <em style={{ color: '#888' }}>no rows</em>
+                  : (
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr>
+                            {preview.columns.map(c => (
+                              <th key={c.name} align="left">
+                                {c.name}<br />
+                                <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {preview.rows.map((row, i) => (
+                            <tr key={i} style={{ borderTop: '1px solid #eee' }}>
+                              {row.map((v, j) => (
+                                <td key={j}>
+                                  {v === null || v === undefined
+                                    ? <em style={{ color: '#888' }}>null</em>
+                                    : String(v)}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h3>Compare</h3>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+              <SnapshotPicker
+                tenant={tenant!}
+                tenantDb={tenantDb!}
+                value={diffFrom}
+                onChange={setDiffFrom}
+                snapshots={snaps}
+                tags={tags}
+                label="From"
+              />
+              <SnapshotPicker
+                tenant={tenant!}
+                tenantDb={tenantDb!}
+                value={diffTo}
+                onChange={setDiffTo}
+                snapshots={snaps}
+                tags={tags}
+                label="To"
+              />
+              <button type="button" onClick={() => loadDiff()} disabled={diffLoading}>
+                {diffLoading ? 'Comparing...' : 'Compare'}
+              </button>
+            </div>
+            {diffError && <p style={{ color: 'red' }}>Error: {diffError}</p>}
+            {diff && (
+              <div>
+                <p className="subtle">
+                  Diffing snapshot {diff.from} against snapshot {diff.to}.
+                </p>
+                {diff.added.length === 0 && diff.removed.length === 0 &&
+                  diff.typeChanged.length === 0 && diff.nullabilityChanged.length === 0
+                  ? <em style={{ color: '#888' }}>no schema differences</em>
+                  : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr>
+                          <th align="left">Change</th>
+                          <th align="left">Column</th>
+                          <th align="left">Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {diff.added.map(c => (
+                          <tr key={`added-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(34, 197, 94, 0.1)' }}>
+                            <td>added</td>
+                            <td>{c.name}</td>
+                            <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
+                          </tr>
+                        ))}
+                        {diff.removed.map(c => (
+                          <tr key={`removed-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(239, 68, 68, 0.1)' }}>
+                            <td>removed</td>
+                            <td>{c.name}</td>
+                            <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
+                          </tr>
+                        ))}
+                        {diff.typeChanged.map(c => (
+                          <tr key={`type-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                            <td>type changed</td>
+                            <td>{c.column}</td>
+                            <td><code>{c.fromType}</code> {'->'} <code>{c.toType}</code></td>
+                          </tr>
+                        ))}
+                        {diff.nullabilityChanged.map(c => (
+                          <tr key={`null-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                            <td>nullability changed</td>
+                            <td>{c.column}</td>
+                            <td>{c.fromNullable ? 'nullable' : 'not null'} {'->'} {c.toNullable ? 'nullable' : 'not null'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+              </div>
+            )}
           </section>
         </>
       )}

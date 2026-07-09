@@ -707,7 +707,9 @@ final case class CatalogDataFileEntry(
 final case class CatalogTableDetailResponse(
     table: CatalogTableEntry,
     columns: List[CatalogColumnEntry],
-    dataFiles: List[CatalogDataFileEntry]
+    dataFiles: List[CatalogDataFileEntry],
+    resolvedSnapshot: Option[Long] = None,
+    resolvedAt: Option[java.time.Instant] = None
 )
 
 final case class CatalogTableRef(
@@ -723,7 +725,9 @@ final case class CatalogSnapshotEntry(
     rowsAdded: Long,
     filesAdded: Int,
     filesRemoved: Int,
-    affectedTables: List[CatalogTableRef]
+    affectedTables: List[CatalogTableRef],
+    author: Option[String] = None,       // ducklake_snapshot_changes.author, P1 stamping
+    commitMessage: Option[String] = None // ducklake_snapshot_changes.commit_message
 )
 
 // ----- Snapshot tags (EPIC P2 / Spec 06) -----
@@ -845,6 +849,40 @@ final case class MaintenanceRunRequest(
 )
 
 final case class MaintenanceRunResponse(id: Long)
+
+// ----- Catalog data preview (Spec 00 time-travel viewer) -----
+final case class PreviewColumn(name: String, dataType: String)
+
+final case class PreviewResponse(
+    columns: List[PreviewColumn],
+    rows: List[List[Json]],
+    snapshotId: Option[Long],
+    truncated: Boolean
+)
+
+/** One column whose declared type differs between the `from` and `to` snapshots of a two-snapshot
+  * schema diff (Spec 00 Task 6). Only columns present at BOTH ends are considered here; an added or
+  * removed column shows up in `SchemaDiffResponse.added` / `.removed` instead.
+  */
+final case class SchemaDiffColumnType(column: String, fromType: String, toType: String)
+
+/** One column whose nullability differs between the `from` and `to` snapshots. Same "both ends
+  * present" caveat as [[SchemaDiffColumnType]].
+  */
+final case class SchemaDiffNullability(column: String, fromNullable: Boolean, toNullable: Boolean)
+
+/** Column-level schema diff between two DuckLake snapshots of one table (Spec 00 time-travel
+  * viewer). `from` / `to` are the resolved snapshot ids (after the request's `from`/`to` selectors
+  * -- a snapshot id or a tag name -- are each resolved via [[SnapshotSelector]]).
+  */
+final case class SchemaDiffResponse(
+    from: Long,
+    to: Long,
+    added: List[CatalogColumnEntry],
+    removed: List[CatalogColumnEntry],
+    typeChanged: List[SchemaDiffColumnType],
+    nullabilityChanged: List[SchemaDiffNullability]
+)
 
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
@@ -1609,3 +1647,12 @@ object Dtos:
     }
   )
   given Codec[MaintenanceRunResponse] = deriveCodec
+
+  // Catalog data preview
+  given Codec[PreviewColumn]   = deriveCodec
+  given Codec[PreviewResponse] = deriveCodec
+
+  // Schema diff (Task 6)
+  given Codec[SchemaDiffColumnType]  = deriveCodec
+  given Codec[SchemaDiffNullability] = deriveCodec
+  given Codec[SchemaDiffResponse]    = deriveCodec

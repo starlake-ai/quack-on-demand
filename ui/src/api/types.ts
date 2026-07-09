@@ -574,6 +574,8 @@ export interface CatalogTableDetailResponse {
   table: CatalogTableEntry;
   columns: CatalogColumnEntry[];
   dataFiles: CatalogDataFileEntry[];
+  resolvedSnapshot?: number | null;
+  resolvedAt?: string | null;
 }
 
 export interface CatalogTableRef {
@@ -590,6 +592,8 @@ export interface CatalogSnapshotEntry {
   filesAdded: number;
   filesRemoved: number;
   affectedTables: CatalogTableRef[];
+  author: string | null;        // ducklake_snapshot_changes.author, P1 stamping
+  commitMessage: string | null; // ducklake_snapshot_changes.commit_message
 }
 
 export interface CatalogTagEntry {
@@ -599,6 +603,41 @@ export interface CatalogTagEntry {
   createdBy: string | null;
   createdAt: string | null; // ISO-8601
   exists: boolean;          // false = dangling (snapshot expired/vacuumed)
+}
+
+// ----- Catalog data preview + schema diff (Spec 00 time-travel viewer) -----
+
+export interface PreviewColumn {
+  name: string;
+  dataType: string;
+}
+
+export interface PreviewResponse {
+  columns: PreviewColumn[];
+  rows: unknown[][];
+  snapshotId: number | null;
+  truncated: boolean;
+}
+
+export interface SchemaDiffColumnType {
+  column: string;
+  fromType: string;
+  toType: string;
+}
+
+export interface SchemaDiffNullability {
+  column: string;
+  fromNullable: boolean;
+  toNullable: boolean;
+}
+
+export interface SchemaDiffResponse {
+  from: number;
+  to: number;
+  added: CatalogColumnEntry[];
+  removed: CatalogColumnEntry[];
+  typeChanged: SchemaDiffColumnType[];
+  nullabilityChanged: SchemaDiffNullability[];
 }
 
 // ----- Managed maintenance (EPIC Spec 09) -----

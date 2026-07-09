@@ -1,0 +1,414 @@
+package ai.starlake.quack.ondemand.api
+
+import ai.starlake.quack.CatalogConfig
+import ai.starlake.quack.edge.{QueryResult, RouterFailure}
+import ai.starlake.quack.model.{PoolKey, Role, TenantDbKind}
+import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.state.ControlPlaneStore
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import cats.effect.IO
+import sttp.model.StatusCode
+
+import java.time.Instant
+import scala.concurrent.duration.DurationInt
+
+object CatalogPreviewHandlers:
+
+  /** `(connectionId, user, poolKey, sql) -> IO[Either[RouterFailure, QueryResult]]`, the same shape
+    * as [[ai.starlake.quack.edge.FlightSqlRouter.execute]]'s first four positional params. Task 5
+    * adapts the real router (plus effective-set resolution) to this shape; here it lets the handler
+    * stay unit-testable and keeps `RouterFailure` as the single failure vocabulary the handler maps
+    * to REST status codes (`AccessDenied` -> 403 `acl_denied`, everything else -> 502
+    * `preview_failed`).
+    */
+  type PreviewExecutor = (String, String, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
+
+  /** Identity contract for the executor call: a valid session token resolves to its
+    * `(profile.username)`; no token, an unresolved token (static API key), or open/dev mode all
+    * fall back to `"superuser"` as the executor `user` -- mirroring the data-plane's
+    * superuser-bypass semantics (a static-key / no-session caller is treated as trusted, exactly
+    * like every other REST handler in this codebase). The real executor adapter
+    * ([[ai.starlake.quack.Main]]) maps this identity to a synthetic superuser
+    * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] (`user.tenant = None`) so
+    * `PostgresAclValidator`'s superuser bypass applies -- NOT `effectiveSet = None`, which the
+    * validator treats as "no RBAC principal bound to this session" and denies fail-safe. Public
+    * (not `private[api]`) so Main's adapter, in a different package, can match on it.
+    *
+    * SAFETY INVARIANT (perimeter-enforced): this fallback is only sound because
+    * `ManagerServer.apiKeyGuard` guarantees that when a static API key is configured, the only
+    * requests reaching this handler carry either a VALID admin session or the static key itself; an
+    * expired/revoked/forged session token is rejected with 401 at the perimeter and never reaches
+    * this fallback. In open mode (no static key) everything is trusted by definition. If the
+    * perimeter contract ever changes (for example per-endpoint guards), this conflation of
+    * "unresolved token" with "trusted static key" must be revisited: the durable shape is a typed
+    * caller identity minted by the guard (see the authz-consolidation item in
+    * docs/AUDIT-FOLLOWUPS.md P3).
+    */
+  val SuperuserIdentity = "superuser"
+
+/** Bounded, ACL-routed snapshot preview (Spec 00 time-travel viewer). `preview` runs the same
+  * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (a non-
+  * DuckLake tenant-db is rejected with 400 `invalid_kind`: previews need the DuckLake `AT (VERSION
+  * => n)` clause, unlike the catalog browser's tolerant empty-result UX), then resolves the
+  * snapshot selector via [[SnapshotSelector]], picks the tenant-db's first pool (404 `no_pool` when
+  * none is running), builds a bounded `SELECT * FROM "schema"."table" [AT (VERSION => n)] LIMIT k`
+  * statement, and forwards it to the injected [[CatalogPreviewHandlers.PreviewExecutor]].
+  *
+  * The executor's `ArrowReader` is decoded through [[ArrowRowsDecoder]] with `maxRows =
+  * cfg.previewMaxRows` (the request `limit`, when given, further clamps that cap downward, never
+  * up) and the whole call is wrapped in `IO.timeout(cfg.previewTimeoutSec.seconds)`, mapping a
+  * timeout to the same 502 `preview_failed` outcome as any other executor failure.
+  *
+  * A `CatalogPreviewRead` audit event fires unconditionally (unlike [[CatalogHandlers]]' reads,
+  * which are gated behind `cfg.auditCatalogReads`): preview runs a real query against a live node,
+  * so it is audited every time, on both "denied" (gate rejection) and "ok" (success, with
+  * `rowsReturned` in the detail map) outcomes. A post-gate SQL failure surfaces as a REST error but
+  * is still recorded "ok" from the gate's perspective (mirrors [[CatalogHandlers]]'s "the audit
+  * outcome tracks the gate, not the read" convention) -- the 403 `acl_denied` / 502 `preview_failed`
+  * distinction is carried in the HTTP response, not duplicated into a second audit outcome value.
+  */
+final class CatalogPreviewHandlers(
+    sup: PoolSupervisor,
+    store: ControlPlaneStore,
+    sessions: String => Option[SessionTokenStore.Session],
+    executor: CatalogPreviewHandlers.PreviewExecutor,
+    resolveReader: (String, String) => DuckLakeCatalogReader,
+    cfg: CatalogConfig,
+    audit: AuditRecorder = AuditRecorder.noop
+):
+  import CatalogPreviewHandlers.SuperuserIdentity
+
+  private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
+
+  private def resolveTenantId(raw: String): Option[String] =
+    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
+
+  private def err(code: StatusCode, error: String, msg: String) =
+    Left((code, ErrorResponse(error, msg)))
+
+  private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
+
+  /** Tenant resolve -> scope gate -> tenant-db lookup, mirroring [[TagHandlers.gate]]: previews
+    * require a DuckLake tenant-db (400 `invalid_kind` otherwise), unlike the catalog browser's
+    * kind-tolerant reads.
+    */
+  private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Either[(StatusCode, ErrorResponse), (String, String)] =
+    resolveTenantId(rawTenant) match
+      case None =>
+        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
+      case Some(tid) =>
+        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
+          case Some(e) => Left(e)
+          case None    =>
+            sup.findTenantDb(tid, tenantDb) match
+              case None =>
+                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
+              case Some(td) if td.kind != TenantDbKind.DuckLake =>
+                err(
+                  StatusCode.BadRequest,
+                  "invalid_kind",
+                  "data preview requires a ducklake tenant-db"
+                )
+              case Some(td) => Right((tid, td.name))
+
+  /** Pool pick for `(tenant, tenantDb)`, stable across calls (Task 4 review carry-forward:
+    * `sup.list()` iterates a mutable map, so picking "the first" without a deterministic sort could
+    * return a different pool on every call). Sorted by pool name; among the candidates, prefer one
+    * whose CURRENT [[ai.starlake.quack.route.PoolSnapshot]] carries at least one `ReadOnly` or
+    * `Dual` node (a `SELECT` needs [[ai.starlake.quack.route.RoleMatcher]]'s read-eligible roles to
+    * route at all) -- `sup.snapshot(key)` is an O(1) map lookup plus the tracker's
+    * already-materialized load map, so this preference costs nothing extra to compute. A tenant-db
+    * whose only pool is WriteOnly still resolves (falls through to the first candidate by name)
+    * rather than 404 `no_pool`; `Router.pick` inside the real executor is the authority on whether
+    * the query can actually route, and surfaces `RouterFailure.Unavailable` if it can't.
+    */
+  private def firstPoolKey(tenant: String, tenantDb: String): Option[PoolKey] =
+    val candidates = sup
+      .list()
+      .map(_.key)
+      .filter(k => k.tenant == tenant && k.tenantDb == tenantDb)
+      .sortBy(_.pool)
+    def hasReadEligibleNode(key: PoolKey): Boolean =
+      sup
+        .snapshot(key)
+        .exists(_.nodes.exists(n => n.role == Role.ReadOnly || n.role == Role.Dual))
+    candidates.find(hasReadEligibleNode).orElse(candidates.headOption)
+
+  private def identityOf(apiKey: Option[String]): String =
+    apiKey.flatMap(sessions) match
+      case Some(session) => session.profile.username
+      case None          => SuperuserIdentity
+
+  private def buildSql(
+      schema: String,
+      table: String,
+      snapshotId: Option[Long],
+      limit: Int
+  ): String =
+    val target   = s"${quoteIdent(schema)}.${quoteIdent(table)}"
+    val atClause = snapshotId.fold("")(id => s" AT (VERSION => $id)")
+    s"SELECT * FROM $target$atClause LIMIT $limit"
+
+  private def selectorError(
+      e: SnapshotSelector.SelectorError
+  ): (StatusCode, String, String) = e match
+    case SnapshotSelector.SelectorError.MultipleSelectors =>
+      (StatusCode.BadRequest, "invalid_selector", "supply only one of asOf, asOfTag, or asOfTs")
+    case SnapshotSelector.SelectorError.TagNotFound(tag) =>
+      (StatusCode.NotFound, "not_found", s"tag '$tag' not found")
+    case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
+      (StatusCode.UnprocessableEntity, "invalid_snapshot", "timestamp is before the first snapshot")
+    case SnapshotSelector.SelectorError.EmptyCatalog =>
+      (StatusCode.UnprocessableEntity, "invalid_snapshot", "catalog has no snapshots")
+    case SnapshotSelector.SelectorError.BeyondLatest(id) =>
+      (
+        StatusCode.UnprocessableEntity,
+        "invalid_snapshot",
+        s"snapshot $id is beyond the latest snapshot"
+      )
+    case SnapshotSelector.SelectorError.Expired(id) =>
+      (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
+
+  /** Parse one `from`/`to` bound: all-digits is a snapshot id (`asOf`), anything else is a tag name
+    * (`asOfTag`). Fed into [[SnapshotSelector.resolve]] per bound so each side gets the same
+    * expired/beyond-max/tag-not-found/empty-catalog semantics as [[preview]]'s single selector.
+    */
+  private def parseBound(raw: String): (Option[Long], Option[String]) =
+    if raw.nonEmpty && raw.forall(_.isDigit) then (Some(raw.toLong), None) else (None, Some(raw))
+
+  private def resolveBound(
+      raw: String,
+      reader: DuckLakeCatalogReader,
+      tid: String,
+      db: String
+  ): Either[SnapshotSelector.SelectorError, Long] =
+    val (asOf, asOfTag) = parseBound(raw)
+    SnapshotSelector
+      .resolve(
+        asOf,
+        asOfTag,
+        None,
+        maxId = () => reader.maxSnapshotId(),
+        atOrBefore = (ts: Instant) => reader.snapshotAtOrBefore(ts),
+        tagSnapshot = (tag: String) => store.findSnapshotTag(tid, db, tag).map(_.snapshotId),
+        exists = (id: Long) => reader.snapshotExists(id)
+      )
+      .map {
+        case SnapshotSelector.Resolution.Current =>
+          sys.error("unreachable: parseBound never yields no selector")
+        case SnapshotSelector.Resolution.At(id, _) => id
+      }
+
+  /** Two-snapshot column-level schema diff (Spec 00 Task 6). `from`/`to` each accept EITHER a
+    * snapshot id (all-digits) or a tag name, resolved independently through [[SnapshotSelector]] so
+    * each side gets its own 410 `snapshot_expired` / 422 `invalid_snapshot` / 404 `not_found`
+    * (unknown tag) outcome. Once both bounds resolve to concrete snapshot ids, the table is looked
+    * up at `to` falling back to `from` (mirrors [[DuckLakeCatalogReader.schemaDiff]]'s own
+    * resolution order, via the cheap [[DuckLakeCatalogReader.tableExistsAt]] probe) so an unknown
+    * table surfaces as 404 `not_found` from the handler instead of the reader's silent empty-diff
+    * fallback. `from == to` is a valid request and yields an all-empty diff
+    * (added/removed/typeChanged/nullabilityChanged all empty).
+    *
+    * Audited unconditionally (denied + ok), same convention as [[preview]]. Once the bounds are
+    * resolved, every audit event (ok, and the unknown-table denial) carries the resolved snapshot
+    * ids as `detail = {from, to}`; pre-resolution denials (gate rejection, selector error) have no
+    * ids yet and stay detail-less.
+    */
+  def schemaDiff(
+      tenant: String,
+      tenantDb: String,
+      schema: String,
+      table: String,
+      from: String,
+      to: String,
+      apiKey: Option[String]
+  )(scopeOf: String => Option[SessionScope]): Out[SchemaDiffResponse] =
+    gate(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
+        IO.pure(Left(e))
+      case Right((tid, db)) =>
+        val reader = resolveReader(tid, db)
+        val target = Some(s"$db/$schema/$table")
+
+        def denyAudit(detail: Map[String, String] = Map.empty): Unit =
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.CatalogSchemaDiffRead,
+            "denied",
+            tenant = Some(tid),
+            target = target,
+            detail = detail
+          )
+
+        val resolved =
+          for
+            fromId <- resolveBound(from, reader, tid, db)
+            toId   <- resolveBound(to, reader, tid, db)
+          yield (fromId, toId)
+
+        resolved match
+          case Left(se) =>
+            val (sc, code, msg) = selectorError(se)
+            denyAudit()
+            IO.pure(err(sc, code, msg))
+          case Right((fromId, toId)) =>
+            val bounds = Map("from" -> fromId.toString, "to" -> toId.toString)
+            if !(reader.tableExistsAt(schema, table, toId) ||
+                reader.tableExistsAt(schema, table, fromId))
+            then
+              denyAudit(bounds)
+              IO.pure(
+                err(StatusCode.NotFound, "not_found", s"table '$schema.$table' not found")
+              )
+            else
+              val diff     = reader.schemaDiff(schema, table, fromId, toId)
+              val response = SchemaDiffResponse(
+                from = fromId,
+                to = toId,
+                added = diff.added,
+                removed = diff.removed,
+                typeChanged = diff.typeChanged.map { case (col, f, t) =>
+                  SchemaDiffColumnType(col, f, t)
+                },
+                nullabilityChanged = diff.nullabilityChanged.map { case (col, f, t) =>
+                  SchemaDiffNullability(col, f, t)
+                }
+              )
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.CatalogSchemaDiffRead,
+                "ok",
+                tenant = Some(tid),
+                target = target,
+                detail = bounds
+              )
+              IO.pure(Right(response))
+
+  def preview(
+      tenant: String,
+      tenantDb: String,
+      schema: String,
+      table: String,
+      asOf: Option[Long],
+      asOfTag: Option[String],
+      asOfTs: Option[Instant],
+      limit: Option[Int],
+      apiKey: Option[String]
+  )(scopeOf: String => Option[SessionScope]): Out[PreviewResponse] =
+    gate(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogPreviewRead, "denied")
+        IO.pure(Left(e))
+      case Right((tid, db)) =>
+        val reader      = resolveReader(tid, db)
+        val selectorRes = SnapshotSelector.resolve(
+          asOf,
+          asOfTag,
+          asOfTs,
+          maxId = () => reader.maxSnapshotId(),
+          atOrBefore = (ts: Instant) => reader.snapshotAtOrBefore(ts),
+          tagSnapshot = (tag: String) => store.findSnapshotTag(tid, db, tag).map(_.snapshotId),
+          exists = (id: Long) => reader.snapshotExists(id)
+        )
+        selectorRes match
+          case Left(se) =>
+            val (sc, code, msg) = selectorError(se)
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.CatalogPreviewRead,
+              "denied",
+              tenant = Some(tid),
+              target = Some(s"$db/$schema/$table")
+            )
+            IO.pure(err(sc, code, msg))
+          case Right(resolution) =>
+            firstPoolKey(tid, db) match
+              case None =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.CatalogPreviewRead,
+                  "denied",
+                  tenant = Some(tid),
+                  target = Some(s"$db/$schema/$table")
+                )
+                IO.pure(
+                  err(
+                    StatusCode.NotFound,
+                    "no_pool",
+                    s"tenant-db '$db' has no running pool; preview needs at least one pool " +
+                      "with a live ReadOnly/Dual node"
+                  )
+                )
+              case Some(poolKey) =>
+                val snapshotId = resolution match
+                  case SnapshotSelector.Resolution.Current   => None
+                  case SnapshotSelector.Resolution.At(id, _) => Some(id)
+                val effectiveLimit =
+                  limit.map(_.max(1)).getOrElse(cfg.previewMaxRows).min(cfg.previewMaxRows)
+                // Fetch one row beyond the cap so ArrowRowsDecoder's truncation check has
+                // something to observe: a SQL `LIMIT effectiveLimit` would hand the decoder a
+                // stream that never has more rows than the cap, so `truncated` could never be
+                // true no matter how large the underlying table is. `decode` still stops
+                // collecting at `effectiveLimit` -- the response never carries the extra row.
+                val sql  = buildSql(schema, table, snapshotId, effectiveLimit + 1)
+                val user = identityOf(apiKey)
+
+                executor(s"preview-$tid-$db", user, poolKey, sql)
+                  .timeout(cfg.previewTimeoutSec.seconds)
+                  .attempt
+                  .map {
+                    case Left(_) =>
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.CatalogPreviewRead,
+                        "denied",
+                        tenant = Some(tid),
+                        target = Some(s"$db/$schema/$table")
+                      )
+                      err(StatusCode.BadGateway, "preview_failed", "preview query timed out")
+                    case Right(Left(RouterFailure.AccessDenied(reason))) =>
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.CatalogPreviewRead,
+                        "denied",
+                        tenant = Some(tid),
+                        target = Some(s"$db/$schema/$table")
+                      )
+                      err(StatusCode.Forbidden, "acl_denied", reason)
+                    case Right(Left(failure)) =>
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.CatalogPreviewRead,
+                        "denied",
+                        tenant = Some(tid),
+                        target = Some(s"$db/$schema/$table")
+                      )
+                      err(StatusCode.BadGateway, "preview_failed", failure.reason)
+                    case Right(Right(result)) =>
+                      try
+                        val (columns, rows, truncated) =
+                          ArrowRowsDecoder.decode(result.rows, effectiveLimit)
+                        audit.rest(
+                          apiKey,
+                          "control-plane",
+                          AuditActions.CatalogPreviewRead,
+                          "ok",
+                          tenant = Some(tid),
+                          target = Some(s"$db/$schema/$table"),
+                          detail = Map("rowsReturned" -> rows.size.toString)
+                        )
+                        Right(PreviewResponse(columns, rows, snapshotId, truncated))
+                      finally result.close()
+                  }
