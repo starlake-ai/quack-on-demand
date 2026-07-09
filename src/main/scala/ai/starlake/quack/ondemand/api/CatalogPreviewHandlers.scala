@@ -354,7 +354,12 @@ final class CatalogPreviewHandlers(
                   case SnapshotSelector.Resolution.At(id, _) => Some(id)
                 val effectiveLimit =
                   limit.map(_.max(1)).getOrElse(cfg.previewMaxRows).min(cfg.previewMaxRows)
-                val sql  = buildSql(schema, table, snapshotId, effectiveLimit)
+                // Fetch one row beyond the cap so ArrowRowsDecoder's truncation check has
+                // something to observe: a SQL `LIMIT effectiveLimit` would hand the decoder a
+                // stream that never has more rows than the cap, so `truncated` could never be
+                // true no matter how large the underlying table is. `decode` still stops
+                // collecting at `effectiveLimit` -- the response never carries the extra row.
+                val sql  = buildSql(schema, table, snapshotId, effectiveLimit + 1)
                 val user = identityOf(apiKey)
 
                 executor(s"preview-$tid-$db", user, poolKey, sql)

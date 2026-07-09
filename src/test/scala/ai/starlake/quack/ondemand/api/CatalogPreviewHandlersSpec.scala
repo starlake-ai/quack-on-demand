@@ -242,22 +242,22 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val out = preview(h, asOf = Some(1L))
     out.left.toOption.get._1 shouldBe StatusCode.Gone
 
-  it should "build SQL with the AT (VERSION => n) clause and clamp limit to the cap" in new Stubs:
+  it should "build SQL with the AT (VERSION => n) clause, clamp limit to the cap, and fetch one extra row so truncation is observable" in new Stubs:
     val h = handlers()
     preview(h, asOf = Some(42L), limit = Some(999999))
     seenSql shouldBe Some(
-      """SELECT * FROM "tpch1"."region" AT (VERSION => 42) LIMIT 100"""
+      """SELECT * FROM "tpch1"."region" AT (VERSION => 42) LIMIT 101"""
     )
 
   it should "omit the AT clause when no selector is supplied" in new Stubs:
     val h = handlers()
     preview(h, limit = Some(10))
-    seenSql shouldBe Some("""SELECT * FROM "tpch1"."region" LIMIT 10""")
+    seenSql shouldBe Some("""SELECT * FROM "tpch1"."region" LIMIT 11""")
 
   it should "double-quote-escape a table name containing a double quote" in new Stubs:
     val h = handlers()
     preview(h, table = "re\"gion", limit = Some(10))
-    seenSql shouldBe Some("""SELECT * FROM "tpch1"."re""gion" LIMIT 10""")
+    seenSql shouldBe Some("""SELECT * FROM "tpch1"."re""gion" LIMIT 11""")
 
   it should "pass PoolKey and (no-session) superuser-equivalent identity to the executor" in new Stubs:
     val h = handlers()
