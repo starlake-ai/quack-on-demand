@@ -263,6 +263,63 @@ final class PoolSupervisor(
     // would cause infinite echo across replicas.
     invalidateEffectiveCacheLocal()
 
+  /** Wraps a mutator body so a failure anywhere after the store write leaves the in-memory caches
+    * consistent with the store instead of holding a partial mutation.
+    *
+    * The caches (`tenants`, `tenantDbs`, `poolRows`, `pools`, `poolIdByKey`, `rbacResolver`, the
+    * tracker quarantine flags, and the effective-set cache) are DERIVED state: every one of them is
+    * fully rebuildable from `store.snapshot()` via [[restore]]. Today a mutator does a store write
+    * then a handful of `TrieMap.put`/`rbacResolver.putX` calls with no rollback; if the store write
+    * lands but a later cache update throws (or the mutator raises for any other reason after the
+    * write), the caches are left holding a stale or half-applied view until the next full
+    * `restore()`.
+    *
+    * On any exception raised by `body`, this best-effort rebuilds every cache from the store via
+    * [[restore]] before rethrowing the ORIGINAL exception unchanged, so the eventual HTTP response
+    * is unaffected. If the rebuild itself throws, that secondary failure is logged and swallowed -
+    * the original exception is still what propagates. `restore()` never spawns processes, calls
+    * `backend`, or broadcasts (`publish`); it only rebuilds caches + tracker flags, so calling it
+    * from inside a mutator that already holds `locks.withLock` introduces no new lock acquisition
+    * and is safe to run under that same discipline.
+    */
+  private def withCacheRecovery[A](op: String)(body: => A): A =
+    try body
+    catch
+      case t: Throwable =>
+        try restore()
+        catch
+          case rebuildError: Throwable =>
+            logger.error(
+              s"withCacheRecovery[$op]: cache rebuild after failed mutation also failed: " +
+                s"${rebuildError.getMessage}",
+              rebuildError
+            )
+        logger.warn(
+          s"withCacheRecovery[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
+        )
+        throw t
+
+  /** [[withCacheRecovery]] for a mutator body that is already an `IO`. Recovery runs as part of the
+    * same `IO` chain (so it executes under whatever lock the surrounding `IO` was built under, e.g.
+    * `locks.withLock`), then the original error is re-raised via `IO.raiseError`.
+    */
+  private def withCacheRecoveryIO[A](op: String)(io: IO[A]): IO[A] =
+    io.onError { case t =>
+      IO {
+        try restore()
+        catch
+          case rebuildError: Throwable =>
+            logger.error(
+              s"withCacheRecoveryIO[$op]: cache rebuild after failed mutation also failed: " +
+                s"${rebuildError.getMessage}",
+              rebuildError
+            )
+        logger.warn(
+          s"withCacheRecoveryIO[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
+        )
+      }
+    }
+
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db. Runs in a single
     * controlled session per tenant-db so concurrent node ATTACHes do not race on the
     * `ducklake_metadata` CREATE TABLE in Postgres. Idempotent.
@@ -614,57 +671,61 @@ final class PoolSupervisor(
   // ---------- Tenant API ----------
 
   def createTenant(t: Tenant): IO[Either[SupervisorError, Tenant]] = IO.blocking {
-    // The tenant id is the one key: a normalized lowercase slug. The display
-    // name is a free-form label (falls back to the id when blank).
-    Names.normalizeOrError(t.id, "tenant id") match
-      case Left(err)                                      => Left(SupervisorError.InvalidName(err))
-      case Right(id) if !id.headOption.exists(_.isLetter) =>
-        Left(SupervisorError.InvalidName(s"tenant id '$id' must start with a letter"))
-      case Right(id) =>
-        if tenants.values.exists(_.id == id) then
-          Left(SupervisorError.AlreadyExists(s"tenant already exists: $id"))
-        else
-          val withId = t.copy(
-            id = id,
-            displayName = if t.displayName.trim.nonEmpty then t.displayName.trim else id
-          )
-          // Every new tenant gets a built-in `admin` role with a
-          // wildcard ALL permission, inserted in the same transaction as
-          // the tenant row so a partial failure leaves no orphans. The
-          // bootstrap admin (qodstate_user superuser) is wired to this
-          // role by BootstrapAccessSeeder at boot time.
-          val adminRole = RbacRole(
-            id = newId("r"),
-            tenantId = withId.id,
-            name = PoolSupervisor.AdminRoleName,
-            description = Some(s"Built-in admin role for tenant ${withId.displayName}")
-          )
-          val adminPerm = RolePermission(
-            id = newId("rp"),
-            roleId = adminRole.id,
-            catalogName = RolePermission.Wildcard,
-            schemaName = RolePermission.Wildcard,
-            tableName = RolePermission.Wildcard,
-            verb = "ALL"
-          )
-          store.createTenantWithAdminRole(withId, adminRole, adminPerm)
-          tenants.put(withId.id, withId)
-          rbacResolver.putRole(adminRole)
-          rbacResolver.putRolePermission(adminPerm)
-          publish.topologyChanged()
-          Right(withId)
+    withCacheRecovery("createTenant") {
+      // The tenant id is the one key: a normalized lowercase slug. The display
+      // name is a free-form label (falls back to the id when blank).
+      Names.normalizeOrError(t.id, "tenant id") match
+        case Left(err) => Left(SupervisorError.InvalidName(err))
+        case Right(id) if !id.headOption.exists(_.isLetter) =>
+          Left(SupervisorError.InvalidName(s"tenant id '$id' must start with a letter"))
+        case Right(id) =>
+          if tenants.values.exists(_.id == id) then
+            Left(SupervisorError.AlreadyExists(s"tenant already exists: $id"))
+          else
+            val withId = t.copy(
+              id = id,
+              displayName = if t.displayName.trim.nonEmpty then t.displayName.trim else id
+            )
+            // Every new tenant gets a built-in `admin` role with a
+            // wildcard ALL permission, inserted in the same transaction as
+            // the tenant row so a partial failure leaves no orphans. The
+            // bootstrap admin (qodstate_user superuser) is wired to this
+            // role by BootstrapAccessSeeder at boot time.
+            val adminRole = RbacRole(
+              id = newId("r"),
+              tenantId = withId.id,
+              name = PoolSupervisor.AdminRoleName,
+              description = Some(s"Built-in admin role for tenant ${withId.displayName}")
+            )
+            val adminPerm = RolePermission(
+              id = newId("rp"),
+              roleId = adminRole.id,
+              catalogName = RolePermission.Wildcard,
+              schemaName = RolePermission.Wildcard,
+              tableName = RolePermission.Wildcard,
+              verb = "ALL"
+            )
+            store.createTenantWithAdminRole(withId, adminRole, adminPerm)
+            tenants.put(withId.id, withId)
+            rbacResolver.putRole(adminRole)
+            rbacResolver.putRolePermission(adminPerm)
+            publish.topologyChanged()
+            Right(withId)
+    }
   }
 
   def setTenantDisabled(name: String, disabled: Boolean): IO[Either[SupervisorError, Tenant]] =
     IO.blocking {
-      getTenant(name) match
-        case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
-        case Some(t) =>
-          val updated = t.copy(disabled = disabled)
-          store.upsertTenant(updated)
-          tenants.put(updated.id, updated)
-          publish.topologyChanged()
-          Right(updated)
+      withCacheRecovery("setTenantDisabled") {
+        getTenant(name) match
+          case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
+          case Some(t) =>
+            val updated = t.copy(disabled = disabled)
+            store.upsertTenant(updated)
+            tenants.put(updated.id, updated)
+            publish.topologyChanged()
+            Right(updated)
+      }
     }
 
   /** Mutate the tenant's auth provider + provider-specific config. The existing users / roles /
@@ -677,51 +738,55 @@ final class PoolSupervisor(
       authProvider: String,
       authConfig: Map[String, String]
   ): IO[Either[SupervisorError, Tenant]] = IO.blocking {
-    if !Tenant.ValidAuthProviders.contains(authProvider) then
-      Left(
-        SupervisorError.InvalidArgument(
-          s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"
+    withCacheRecovery("setTenantAuth") {
+      if !Tenant.ValidAuthProviders.contains(authProvider) then
+        Left(
+          SupervisorError.InvalidArgument(
+            s"authProvider must be one of ${Tenant.ValidAuthProviders.toList.sorted.mkString(", ")}"
+          )
         )
-      )
-    else
-      getTenant(name) match
-        case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
-        case Some(t) =>
-          val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
-          store.upsertTenant(updated)
-          tenants.put(updated.id, updated)
-          publish.topologyChanged()
-          Right(updated)
+      else
+        getTenant(name) match
+          case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
+          case Some(t) =>
+            val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
+            store.upsertTenant(updated)
+            tenants.put(updated.id, updated)
+            publish.topologyChanged()
+            Right(updated)
+    }
   }
 
   def deleteTenant(name: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    getTenant(name) match
-      case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
-      case Some(t) =>
-        val tdbs    = tenantDbs.values.filter(_.tenantId == t.id).toList
-        val poolsOf = tdbs.flatMap(td => poolRows.values.filter(_.tenantDbId == td.id))
-        if poolsOf.nonEmpty then
-          Left(
-            SupervisorError.Conflict(
-              s"tenant '$name' has ${poolsOf.size} active pool(s); stop them first"
+    withCacheRecovery("deleteTenant") {
+      getTenant(name) match
+        case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
+        case Some(t) =>
+          val tdbs    = tenantDbs.values.filter(_.tenantId == t.id).toList
+          val poolsOf = tdbs.flatMap(td => poolRows.values.filter(_.tenantDbId == td.id))
+          if poolsOf.nonEmpty then
+            Left(
+              SupervisorError.Conflict(
+                s"tenant '$name' has ${poolsOf.size} active pool(s); stop them first"
+              )
             )
-          )
-        else
-          tdbs.foreach { td =>
-            store.deleteTenantDb(td.id); tenantDbs.remove(td.id)
-            try onTenantDbDeleted(name.toLowerCase, td.name)
-            catch case _: Throwable => ()
-            dbAdmin.dropDatabase(td.name) match
-              case Right(_)  => ()
-              case Left(err) =>
-                logger.warn(
-                  s"deleteTenant: tenant-db row removed but DROP DATABASE \"${td.name}\" failed: $err"
-                )
-          }
-          store.deleteTenant(t.id)
-          tenants.remove(t.id)
-          publish.topologyChanged()
-          Right(())
+          else
+            tdbs.foreach { td =>
+              store.deleteTenantDb(td.id); tenantDbs.remove(td.id)
+              try onTenantDbDeleted(name.toLowerCase, td.name)
+              catch case _: Throwable => ()
+              dbAdmin.dropDatabase(td.name) match
+                case Right(_)  => ()
+                case Left(err) =>
+                  logger.warn(
+                    s"deleteTenant: tenant-db row removed but DROP DATABASE \"${td.name}\" failed: $err"
+                  )
+            }
+            store.deleteTenant(t.id)
+            tenants.remove(t.id)
+            publish.topologyChanged()
+            Right(())
+    }
   }
 
   // ---------- TenantDb API ----------
@@ -737,109 +802,115 @@ final class PoolSupervisor(
       defaultSchema: Option[String] = None,
       initSql: String = ""
   ): IO[Either[SupervisorError, TenantDb]] = IO.blocking {
-    Names.normalizeTenantDbName(tenantName, suffix) match
-      case Left(err)   => Left(SupervisorError.InvalidName(err))
-      case Right(full) =>
-        val tn = tenantName.toLowerCase
-        getTenant(tn) match
-          case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
-          case Some(t) if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
-            Left(
-              SupervisorError.AlreadyExists(s"tenant-db '$full' already exists in tenant '$tn'")
-            )
-          case Some(t) =>
-            // Per-kind config preparation. DuckLake auto-injects dbName and
-            // pre-provisions the Postgres database + DuckLake metadata tables.
-            // DuckDbFile and InMemory skip both: a file-backed catalog needs no
-            // Postgres tables, and an in-memory catalog has no persistence at
-            // all.
-            val effectiveMeta = kind match
-              case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
-              case TenantDbKind.DuckDbFile => metastore
-              case TenantDbKind.InMemory   => metastore
+    withCacheRecovery("createTenantDb") {
+      Names.normalizeTenantDbName(tenantName, suffix) match
+        case Left(err)   => Left(SupervisorError.InvalidName(err))
+        case Right(full) =>
+          val tn = tenantName.toLowerCase
+          getTenant(tn) match
+            case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
+            case Some(t) if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
+              Left(
+                SupervisorError.AlreadyExists(s"tenant-db '$full' already exists in tenant '$tn'")
+              )
+            case Some(t) =>
+              // Per-kind config preparation. DuckLake auto-injects dbName and
+              // pre-provisions the Postgres database + DuckLake metadata tables.
+              // DuckDbFile and InMemory skip both: a file-backed catalog needs no
+              // Postgres tables, and an in-memory catalog has no persistence at
+              // all.
+              val effectiveMeta = kind match
+                case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
+                case TenantDbKind.DuckDbFile => metastore
+                case TenantDbKind.InMemory   => metastore
 
-            val td = TenantDb(
-              id = newId("td"),
-              tenantId = t.id,
-              name = full,
-              kind = kind,
-              metastore = effectiveMeta,
-              dataPath = dataPath,
-              objectStore = objectStore,
-              defaultDatabase = defaultDatabase,
-              defaultSchema = defaultSchema,
-              initSql = initSql
-            )
+              val td = TenantDb(
+                id = newId("td"),
+                tenantId = t.id,
+                name = full,
+                kind = kind,
+                metastore = effectiveMeta,
+                dataPath = dataPath,
+                objectStore = objectStore,
+                defaultDatabase = defaultDatabase,
+                defaultSchema = defaultSchema,
+                initSql = initSql
+              )
 
-            TenantDb.validate(td) match
-              case Some(msg) =>
-                Left(SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg"))
-              case None =>
-                kind match
-                  case TenantDbKind.DuckLake =>
-                    dbAdmin.createDatabase(full) match
-                      case Left(err) =>
-                        Left(
-                          SupervisorError.Internal(
-                            s"failed to provision Postgres database '$full': $err"
-                          )
-                        )
-                      case Right(_) =>
-                        // Pre-init the ducklake_* metadata tables in the fresh
-                        // tenant-db Postgres so the first batch of pool nodes
-                        // doesn't race on `CREATE TABLE __ducklake_metadata`.
-                        try
-                          DuckLakeInitializer.initBlocking(
-                            effectiveMeta.updated("dataPath", dataPath)
-                          )
-                        catch
-                          case t: Throwable =>
-                            logger.warn(
-                              s"createTenantDb: DuckLake pre-init for '$full' failed; " +
-                                s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
+              TenantDb.validate(td) match
+                case Some(msg) =>
+                  Left(SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg"))
+                case None =>
+                  kind match
+                    case TenantDbKind.DuckLake =>
+                      dbAdmin.createDatabase(full) match
+                        case Left(err) =>
+                          Left(
+                            SupervisorError.Internal(
+                              s"failed to provision Postgres database '$full': $err"
                             )
-                        store.upsertTenantDb(td)
-                        tenantDbs.put(td.id, td)
-                        publish.topologyChanged()
-                        Right(td)
-                  case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
-                    store.upsertTenantDb(td)
-                    tenantDbs.put(td.id, td)
-                    publish.topologyChanged()
-                    Right(td)
+                          )
+                        case Right(_) =>
+                          // Pre-init the ducklake_* metadata tables in the fresh
+                          // tenant-db Postgres so the first batch of pool nodes
+                          // doesn't race on `CREATE TABLE __ducklake_metadata`.
+                          try
+                            DuckLakeInitializer.initBlocking(
+                              effectiveMeta.updated("dataPath", dataPath)
+                            )
+                          catch
+                            case t: Throwable =>
+                              logger.warn(
+                                s"createTenantDb: DuckLake pre-init for '$full' failed; " +
+                                  s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
+                              )
+                          store.upsertTenantDb(td)
+                          tenantDbs.put(td.id, td)
+                          publish.topologyChanged()
+                          Right(td)
+                    case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
+                      store.upsertTenantDb(td)
+                      tenantDbs.put(td.id, td)
+                      publish.topologyChanged()
+                      Right(td)
+    }
   }
 
   def deleteTenantDb(tenantName: String, tenantDbName: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      val tn = tenantName.toLowerCase
-      getTenant(tn) match
-        case None    => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
-        case Some(t) =>
-          tenantDbs.values.find(td => td.tenantId == t.id && td.name == tenantDbName) match
-            case None =>
-              Left(SupervisorError.NotFound(s"tenant-db '$tenantDbName' not found in tenant '$tn'"))
-            case Some(td) =>
-              val activePools = poolRows.values.filter(_.tenantDbId == td.id).toList
-              if activePools.nonEmpty then
+      withCacheRecovery("deleteTenantDb") {
+        val tn = tenantName.toLowerCase
+        getTenant(tn) match
+          case None    => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
+          case Some(t) =>
+            tenantDbs.values.find(td => td.tenantId == t.id && td.name == tenantDbName) match
+              case None =>
                 Left(
-                  SupervisorError.Conflict(
-                    s"tenant-db '$tenantDbName' has ${activePools.size} active pool(s); stop them first"
-                  )
+                  SupervisorError.NotFound(s"tenant-db '$tenantDbName' not found in tenant '$tn'")
                 )
-              else
-                store.deleteTenantDb(td.id)
-                tenantDbs.remove(td.id)
-                try onTenantDbDeleted(tn, tenantDbName)
-                catch case _: Throwable => ()
-                dbAdmin.dropDatabase(td.name) match
-                  case Right(_)  => ()
-                  case Left(err) =>
-                    logger.warn(
-                      s"deleteTenantDb: control-plane row removed but " +
-                        s"DROP DATABASE \"${td.name}\" failed: $err"
+              case Some(td) =>
+                val activePools = poolRows.values.filter(_.tenantDbId == td.id).toList
+                if activePools.nonEmpty then
+                  Left(
+                    SupervisorError.Conflict(
+                      s"tenant-db '$tenantDbName' has ${activePools.size} active pool(s); stop them first"
                     )
-                publish.topologyChanged()
-                Right(())
+                  )
+                else
+                  store.deleteTenantDb(td.id)
+                  tenantDbs.remove(td.id)
+                  try onTenantDbDeleted(tn, tenantDbName)
+                  catch case _: Throwable => ()
+                  dbAdmin.dropDatabase(td.name) match
+                    case Right(_)  => ()
+                    case Left(err) =>
+                      logger.warn(
+                        s"deleteTenantDb: control-plane row removed but " +
+                          s"DROP DATABASE \"${td.name}\" failed: $err"
+                      )
+                  publish.topologyChanged()
+                  Right(())
+      }
     }
 
   /** Merge a patch into an existing tenant-db, persist it, refresh caches, and restart every node
@@ -884,28 +955,30 @@ final class PoolSupervisor(
                 merged.metastore != td.metastore ||
                   merged.objectStore != td.objectStore ||
                   merged.initSql != td.initSql
-              val refresh = IO.blocking {
-                store.upsertTenantDb(merged)
-                tenantDbs.put(merged.id, merged)
-                // Unlocked read-modify-write: same trade-off as documented on the
-                // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
-                pools.foreach { case (key, state) =>
-                  if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
-                    pools.put(
-                      key,
-                      state.copy(
-                        metastore = effectiveMetastoreFor(merged),
-                        s3 = merged.objectStore,
-                        dbInitSql = merged.initSql,
-                        defaultDatabase = merged.defaultDatabase,
-                        defaultSchema = merged.defaultSchema
+              val refresh = withCacheRecoveryIO("updateTenantDb") {
+                IO.blocking {
+                  store.upsertTenantDb(merged)
+                  tenantDbs.put(merged.id, merged)
+                  // Unlocked read-modify-write: same trade-off as documented on the
+                  // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
+                  pools.foreach { case (key, state) =>
+                    if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
+                      pools.put(
+                        key,
+                        state.copy(
+                          metastore = effectiveMetastoreFor(merged),
+                          s3 = merged.objectStore,
+                          dbInitSql = merged.initSql,
+                          defaultDatabase = merged.defaultDatabase,
+                          defaultSchema = merged.defaultSchema
+                        )
                       )
-                    )
+                  }
+                  if merged.metastore != td.metastore then
+                    try onTenantDbChanged(tenantName.toLowerCase, merged.name)
+                    catch case _: Throwable => ()
+                  publish.topologyChanged()
                 }
-                if merged.metastore != td.metastore then
-                  try onTenantDbChanged(tenantName.toLowerCase, merged.name)
-                  catch case _: Throwable => ()
-                publish.topologyChanged()
               }
               val restarts =
                 if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
@@ -980,7 +1053,7 @@ final class PoolSupervisor(
       cpu: String = "",
       memory: String = "",
       podTemplateYaml: String = ""
-  ): IO[List[RunningNode]] = locks.withLock(key)(IO.defer {
+  ): IO[List[RunningNode]] = locks.withLock(key)(withCacheRecoveryIO("createPool")(IO.defer {
     val size = dist.total
     require(
       dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
@@ -1127,27 +1200,29 @@ final class PoolSupervisor(
               }
           }
         }
-  })
+  }))
 
   def setPoolDisabled(key: PoolKey, disabled: Boolean): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
-      pools.get(key) match
-        case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
-        case Some(state) =>
-          poolIdByKey.get(key).flatMap(poolRows.get) match
-            case None =>
-              Left(
-                SupervisorError.Internal(
-                  s"pool entity missing for $key (control-plane out of sync)"
+      withCacheRecovery("setPoolDisabled") {
+        pools.get(key) match
+          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
                 )
-              )
-            case Some(p) =>
-              val updated = p.copy(disabled = disabled)
-              store.upsertPool(updated)
-              poolRows.put(updated.id, updated)
-              pools.put(key, state.copy(disabled = disabled))
-              publish.topologyChanged()
-              Right(updated)
+              case Some(p) =>
+                val updated = p.copy(disabled = disabled)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(disabled = disabled))
+                publish.topologyChanged()
+                Right(updated)
+      }
     }
 
   def setPoolResources(
@@ -1156,58 +1231,64 @@ final class PoolSupervisor(
       memory: String
   ): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
-      pools.get(key) match
-        case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
-        case Some(state) =>
-          poolIdByKey.get(key).flatMap(poolRows.get) match
-            case None =>
-              Left(
-                SupervisorError.Internal(
-                  s"pool entity missing for $key (control-plane out of sync)"
+      withCacheRecovery("setPoolResources") {
+        pools.get(key) match
+          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
                 )
-              )
-            case Some(p) =>
-              val updated = p.copy(cpu = cpu, memory = memory)
-              store.upsertPool(updated)
-              poolRows.put(updated.id, updated)
-              pools.put(key, state.copy(cpu = cpu, memory = memory))
-              publish.topologyChanged()
-              Right(updated)
+              case Some(p) =>
+                val updated = p.copy(cpu = cpu, memory = memory)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(cpu = cpu, memory = memory))
+                publish.topologyChanged()
+                Right(updated)
+      }
     }
 
   def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
-      pools.get(key) match
-        case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
-        case Some(state) =>
-          poolIdByKey.get(key).flatMap(poolRows.get) match
-            case None =>
-              Left(
-                SupervisorError.Internal(
-                  s"pool entity missing for $key (control-plane out of sync)"
+      withCacheRecovery("setPoolTemplate") {
+        pools.get(key) match
+          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
                 )
-              )
-            case Some(p) =>
-              val updated = p.copy(podTemplateYaml = yaml)
-              store.upsertPool(updated)
-              poolRows.put(updated.id, updated)
-              pools.put(key, state.copy(podTemplateYaml = yaml))
-              publish.topologyChanged()
-              Right(updated)
+              case Some(p) =>
+                val updated = p.copy(podTemplateYaml = yaml)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(podTemplateYaml = yaml))
+                publish.topologyChanged()
+                Right(updated)
+      }
     }
 
   def setMaxConcurrent(key: PoolKey, nodeId: String, max: Int): IO[Option[RunningNode]] =
     pools.get(key).flatMap(s => s.nodes.find(_.nodeId == nodeId)) match
       case None    => IO.pure(None)
       case Some(n) =>
-        val u        = n.copy(maxConcurrent = max)
-        val state    = pools(key)
-        val newNodes = state.nodes.map(x => if x.nodeId == nodeId then u else x)
-        pools.put(key, state.copy(nodes = newNodes))
-        poolIdByKey.get(key) match
-          case Some(pid) =>
-            IO.blocking(store.upsertNode(u, pid)).map { _ => publish.topologyChanged(); Some(u) }
-          case None => IO.delay { publish.topologyChanged(); Some(u) }
+        withCacheRecoveryIO("setMaxConcurrent") {
+          val u        = n.copy(maxConcurrent = max)
+          val state    = pools(key)
+          val newNodes = state.nodes.map(x => if x.nodeId == nodeId then u else x)
+          pools.put(key, state.copy(nodes = newNodes))
+          poolIdByKey.get(key) match
+            case Some(pid) =>
+              IO.blocking(store.upsertNode(u, pid)).map { _ => publish.topologyChanged(); Some(u) }
+            case None => IO.delay { publish.topologyChanged(); Some(u) }
+        }
 
   def scale(
       key: PoolKey,
@@ -1217,7 +1298,7 @@ final class PoolSupervisor(
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
     locks.withLock(key) {
-      scaleUnlocked(key, targetSize, newDist, force)
+      withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
     }
 
   private def scaleUnlocked(
@@ -1330,7 +1411,7 @@ final class PoolSupervisor(
     */
   def deletePool(key: PoolKey, force: Boolean): IO[Unit] =
     locks.withLock(key) {
-      deletePoolUnlocked(key, force)
+      withCacheRecoveryIO("deletePool")(deletePoolUnlocked(key, force))
     }
 
   private def deletePoolUnlocked(key: PoolKey, force: Boolean): IO[Unit] =
@@ -1368,30 +1449,32 @@ final class PoolSupervisor(
     */
   def restartNode(key: PoolKey, nodeId: String): IO[Either[SupervisorError, Unit]] =
     locks.withLock(key) {
-      IO.delay(pools.get(key)).flatMap {
-        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool $key not found")))
-        case Some(state) =>
-          state.nodes.find(_.nodeId == nodeId) match
-            case None =>
-              IO.pure(Left(SupervisorError.NotFound(s"node $nodeId not found in $key")))
-            case Some(n) =>
-              for
-                _     <- backend.stop(n.nodeId)
-                _     <- IO.delay(tracker.remove(n.nodeId))
-                fresh <- backend.start(respawnSpec(key, state, n))
-                _     <- poolIdByKey.get(key) match
-                  case Some(pid) => IO.blocking(store.upsertNode(fresh, pid))
-                  case None      => IO.unit
-                _ <- IO.blocking(store.setNodeQuarantined(nodeId, false))
-                _ <- IO.delay {
-                  tracker.setQuarantined(nodeId, false)
-                  val updated = state.copy(
-                    nodes = state.nodes.map(x => if x.nodeId == nodeId then fresh else x)
-                  )
-                  pools.put(key, updated)
-                  publish.topologyChanged()
-                }
-              yield Right(())
+      withCacheRecoveryIO("restartNode") {
+        IO.delay(pools.get(key)).flatMap {
+          case None        => IO.pure(Left(SupervisorError.NotFound(s"pool $key not found")))
+          case Some(state) =>
+            state.nodes.find(_.nodeId == nodeId) match
+              case None =>
+                IO.pure(Left(SupervisorError.NotFound(s"node $nodeId not found in $key")))
+              case Some(n) =>
+                for
+                  _     <- backend.stop(n.nodeId)
+                  _     <- IO.delay(tracker.remove(n.nodeId))
+                  fresh <- backend.start(respawnSpec(key, state, n))
+                  _     <- poolIdByKey.get(key) match
+                    case Some(pid) => IO.blocking(store.upsertNode(fresh, pid))
+                    case None      => IO.unit
+                  _ <- IO.blocking(store.setNodeQuarantined(nodeId, false))
+                  _ <- IO.delay {
+                    tracker.setQuarantined(nodeId, false)
+                    val updated = state.copy(
+                      nodes = state.nodes.map(x => if x.nodeId == nodeId then fresh else x)
+                    )
+                    pools.put(key, updated)
+                    publish.topologyChanged()
+                  }
+                yield Right(())
+        }
       }
     }
 
@@ -1408,22 +1491,27 @@ final class PoolSupervisor(
       role: String = "user",
       userStore: ai.starlake.quack.ondemand.state.UserStore
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
-    if username.isEmpty || password.isEmpty then
-      Left(SupervisorError.InvalidArgument("username and password are required"))
-    else
-      tenant match
-        case Some(t) if t.isEmpty =>
-          Left(SupervisorError.InvalidArgument("tenant must be non-empty (use None for superuser)"))
-        case Some(t) if !tenants.values.exists(x => x.id == t || x.displayName == t.toLowerCase) =>
-          Left(SupervisorError.NotFound(s"tenant not found: $t"))
-        case _ =>
-          val resolvedTenantId = tenant.flatMap { t =>
-            tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
-          }
-          val out = userStore.upsertUser(resolvedTenantId, username, password, role)
-          val u   = RbacUser(out.id, resolvedTenantId, username, role)
-          store.upsertUserIdentity(u)
-          Right(u)
+    withCacheRecovery("createUser") {
+      if username.isEmpty || password.isEmpty then
+        Left(SupervisorError.InvalidArgument("username and password are required"))
+      else
+        tenant match
+          case Some(t) if t.isEmpty =>
+            Left(
+              SupervisorError.InvalidArgument("tenant must be non-empty (use None for superuser)")
+            )
+          case Some(t)
+              if !tenants.values.exists(x => x.id == t || x.displayName == t.toLowerCase) =>
+            Left(SupervisorError.NotFound(s"tenant not found: $t"))
+          case _ =>
+            val resolvedTenantId = tenant.flatMap { t =>
+              tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
+            }
+            val out = userStore.upsertUser(resolvedTenantId, username, password, role)
+            val u   = RbacUser(out.id, resolvedTenantId, username, role)
+            store.upsertUserIdentity(u)
+            Right(u)
+    }
   }
 
   def updateUserPassword(
@@ -1432,26 +1520,30 @@ final class PoolSupervisor(
       role: Option[String],
       userStore: ai.starlake.quack.ondemand.state.UserStore
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
-    store.getUserById(userId) match
-      case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
-      case Some(u) =>
-        val newRole = role.getOrElse(u.role)
-        password.foreach(pw => userStore.upsertUser(u.tenant, u.username, pw, newRole))
-        val updated = u.copy(role = newRole)
-        store.upsertUserIdentity(updated)
-        invalidateEffectiveCache()
-        Right(updated)
+    withCacheRecovery("updateUserPassword") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(u) =>
+          val newRole = role.getOrElse(u.role)
+          password.foreach(pw => userStore.upsertUser(u.tenant, u.username, pw, newRole))
+          val updated = u.copy(role = newRole)
+          store.upsertUserIdentity(updated)
+          invalidateEffectiveCache()
+          Right(updated)
+    }
   }
 
   def deleteUser(userId: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    store.getUserById(userId) match
-      case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
-      case Some(_) =>
-        // ON DELETE CASCADE in qodstate_user_role / user_group /
-        // pool_permission cleans up the user's edges automatically.
-        store.deleteUser(userId)
-        invalidateEffectiveCache()
-        Right(())
+    withCacheRecovery("deleteUser") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(_) =>
+          // ON DELETE CASCADE in qodstate_user_role / user_group /
+          // pool_permission cleans up the user's edges automatically.
+          store.deleteUser(userId)
+          invalidateEffectiveCache()
+          Right(())
+    }
   }
 
   def listUsers(tenant: Option[String]): List[RbacUser] = tenant match
@@ -1468,27 +1560,31 @@ final class PoolSupervisor(
       name: String,
       description: Option[String] = None
   ): IO[Either[SupervisorError, RbacRole]] = IO.blocking {
-    if name.isEmpty then Left(SupervisorError.InvalidArgument("role name must be non-empty"))
-    else if !tenants.contains(tenantId) then
-      Left(SupervisorError.NotFound(s"tenant not found: $tenantId"))
-    else if store.findRole(tenantId, name).isDefined then
-      Left(SupervisorError.AlreadyExists(s"role '$name' already exists in tenant '$tenantId'"))
-    else
-      val r = RbacRole(newId("r"), tenantId, name, description)
-      store.upsertRole(r)
-      rbacResolver.putRole(r)
-      invalidateEffectiveCache()
-      Right(r)
+    withCacheRecovery("createRole") {
+      if name.isEmpty then Left(SupervisorError.InvalidArgument("role name must be non-empty"))
+      else if !tenants.contains(tenantId) then
+        Left(SupervisorError.NotFound(s"tenant not found: $tenantId"))
+      else if store.findRole(tenantId, name).isDefined then
+        Left(SupervisorError.AlreadyExists(s"role '$name' already exists in tenant '$tenantId'"))
+      else
+        val r = RbacRole(newId("r"), tenantId, name, description)
+        store.upsertRole(r)
+        rbacResolver.putRole(r)
+        invalidateEffectiveCache()
+        Right(r)
+    }
   }
 
   def deleteRole(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    rbacResolver.role(id) match
-      case None    => Left(SupervisorError.NotFound(s"role not found: $id"))
-      case Some(_) =>
-        store.deleteRole(id)
-        rbacResolver.removeRole(id)
-        invalidateEffectiveCache()
-        Right(())
+    withCacheRecovery("deleteRole") {
+      rbacResolver.role(id) match
+        case None    => Left(SupervisorError.NotFound(s"role not found: $id"))
+        case Some(_) =>
+          store.deleteRole(id)
+          rbacResolver.removeRole(id)
+          invalidateEffectiveCache()
+          Right(())
+    }
   }
 
   def listRoles(tenantId: String): List[RbacRole] = store.listRoles(tenantId)
@@ -1500,29 +1596,33 @@ final class PoolSupervisor(
       table: String,
       verb: String
   ): IO[Either[SupervisorError, RolePermission]] = IO.blocking {
-    val upper = verb.toUpperCase
-    if !RolePermission.ValidVerbs.contains(upper) then
-      Left(
-        SupervisorError.InvalidArgument(
-          s"verb must be one of ${RolePermission.ValidVerbs.mkString(", ")}"
+    withCacheRecovery("grantRolePermission") {
+      val upper = verb.toUpperCase
+      if !RolePermission.ValidVerbs.contains(upper) then
+        Left(
+          SupervisorError.InvalidArgument(
+            s"verb must be one of ${RolePermission.ValidVerbs.mkString(", ")}"
+          )
         )
-      )
-    else if rbacResolver.role(roleId).isEmpty then
-      Left(SupervisorError.NotFound(s"role not found: $roleId"))
-    else
-      val p         = RolePermission(newId("rp"), roleId, catalog, schema, table, upper)
-      val persisted = store.insertRolePermission(p)
-      rbacResolver.putRolePermission(persisted)
-      invalidateEffectiveCache()
-      Right(persisted)
+      else if rbacResolver.role(roleId).isEmpty then
+        Left(SupervisorError.NotFound(s"role not found: $roleId"))
+      else
+        val p         = RolePermission(newId("rp"), roleId, catalog, schema, table, upper)
+        val persisted = store.insertRolePermission(p)
+        rbacResolver.putRolePermission(persisted)
+        invalidateEffectiveCache()
+        Right(persisted)
+    }
   }
 
   def revokeRolePermission(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    if store.deleteRolePermission(id) then
-      rbacResolver.removeRolePermission(id)
-      invalidateEffectiveCache()
-      Right(())
-    else Left(SupervisorError.NotFound(s"role permission not found: $id"))
+    withCacheRecovery("revokeRolePermission") {
+      if store.deleteRolePermission(id) then
+        rbacResolver.removeRolePermission(id)
+        invalidateEffectiveCache()
+        Right(())
+      else Left(SupervisorError.NotFound(s"role permission not found: $id"))
+    }
   }
 
   def listRolePermissions(roleId: String): List[RolePermission] =
@@ -1545,48 +1645,52 @@ final class PoolSupervisor(
       action: String,
       transformSql: Option[String]
   ): IO[Either[SupervisorError, state.RoleColumnPolicy]] = IO.blocking {
-    val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
-    if !state.RoleColumnPolicy.ValidActions.contains(action) then
-      Left(
-        SupervisorError.InvalidArgument(
-          s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
-        )
-      )
-    else if columnName == state.RoleColumnPolicy.Wildcard || columnName.trim.isEmpty then
-      Left(SupervisorError.InvalidArgument("columnName is required and must not be '*'"))
-    else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
-      Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-    else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
-      Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
-    else
-      val validatedTransform: Either[SupervisorError, Option[String]] =
-        if action == state.RoleColumnPolicy.ActionMask then
-          normalisedTransform
-            .toRight(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-            .flatMap { raw =>
-              ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, columnName) match
-                case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
-                  Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
-                case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
-                  Right(Some(canon))
-            }
-        else Right(None)
-      validatedTransform match
-        case Left(err)             => Left(err)
-        case Right(canonTransform) =>
-          val p = state.RoleColumnPolicy(
-            id = newId("cp"),
-            roleId = roleId,
-            catalogName = catalogName,
-            schemaName = schemaName,
-            tableName = tableName,
-            columnName = columnName,
-            action = action,
-            transformSql = canonTransform
+    withCacheRecovery("createColumnPolicy") {
+      val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
+      if !state.RoleColumnPolicy.ValidActions.contains(action) then
+        Left(
+          SupervisorError.InvalidArgument(
+            s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
           )
-          val persisted = store.insertColumnPolicy(p)
-          invalidateEffectiveCache()
-          Right(persisted)
+        )
+      else if columnName == state.RoleColumnPolicy.Wildcard || columnName.trim.isEmpty then
+        Left(SupervisorError.InvalidArgument("columnName is required and must not be '*'"))
+      else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
+        Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
+      else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
+        Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
+      else
+        val validatedTransform: Either[SupervisorError, Option[String]] =
+          if action == state.RoleColumnPolicy.ActionMask then
+            normalisedTransform
+              .toRight(
+                SupervisorError.InvalidArgument("transformSql is required when action='mask'")
+              )
+              .flatMap { raw =>
+                ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, columnName) match
+                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
+                    Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
+                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
+                    Right(Some(canon))
+              }
+          else Right(None)
+        validatedTransform match
+          case Left(err)             => Left(err)
+          case Right(canonTransform) =>
+            val p = state.RoleColumnPolicy(
+              id = newId("cp"),
+              roleId = roleId,
+              catalogName = catalogName,
+              schemaName = schemaName,
+              tableName = tableName,
+              columnName = columnName,
+              action = action,
+              transformSql = canonTransform
+            )
+            val persisted = store.insertColumnPolicy(p)
+            invalidateEffectiveCache()
+            Right(persisted)
+    }
   }
 
   def updateColumnPolicy(
@@ -1594,46 +1698,52 @@ final class PoolSupervisor(
       action: String,
       transformSql: Option[String]
   ): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
-    if !state.RoleColumnPolicy.ValidActions.contains(action) then
-      Left(
-        SupervisorError.InvalidArgument(
-          s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
+    withCacheRecovery("updateColumnPolicy") {
+      val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
+      if !state.RoleColumnPolicy.ValidActions.contains(action) then
+        Left(
+          SupervisorError.InvalidArgument(
+            s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
+          )
         )
-      )
-    else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
-      Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-    else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
-      Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
-    else
-      val validatedTransform: Either[SupervisorError, Option[String]] =
-        if action == state.RoleColumnPolicy.ActionMask then
-          normalisedTransform
-            .toRight(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-            .flatMap { raw =>
-              // updateColumnPolicy does not know the columnName; fetch it from the store to validate.
-              store.getColumnPolicy(id) match
-                case None => Left(SupervisorError.NotFound(s"column policy $id not found"))
-                case Some(existing) =>
-                  ai.starlake.quack.edge.cls.TransformSqlValidator
-                    .validate(raw, existing.columnName) match
-                    case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
-                      Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
-                    case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
-                      Right(Some(canon))
-            }
-        else Right(None)
-      validatedTransform match
-        case Left(err)             => Left(err)
-        case Right(canonTransform) =>
-          val ok = store.updateColumnPolicy(id, action, canonTransform)
-          if ok then { invalidateEffectiveCache(); Right(()) }
-          else Left(SupervisorError.NotFound(s"column policy $id not found"))
+      else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
+        Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
+      else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
+        Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
+      else
+        val validatedTransform: Either[SupervisorError, Option[String]] =
+          if action == state.RoleColumnPolicy.ActionMask then
+            normalisedTransform
+              .toRight(
+                SupervisorError.InvalidArgument("transformSql is required when action='mask'")
+              )
+              .flatMap { raw =>
+                // updateColumnPolicy does not know the columnName; fetch it from the store to validate.
+                store.getColumnPolicy(id) match
+                  case None => Left(SupervisorError.NotFound(s"column policy $id not found"))
+                  case Some(existing) =>
+                    ai.starlake.quack.edge.cls.TransformSqlValidator
+                      .validate(raw, existing.columnName) match
+                      case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
+                        Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
+                      case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
+                        Right(Some(canon))
+              }
+          else Right(None)
+        validatedTransform match
+          case Left(err)             => Left(err)
+          case Right(canonTransform) =>
+            val ok = store.updateColumnPolicy(id, action, canonTransform)
+            if ok then { invalidateEffectiveCache(); Right(()) }
+            else Left(SupervisorError.NotFound(s"column policy $id not found"))
+    }
   }
 
   def deleteColumnPolicy(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    if store.deleteColumnPolicy(id) then { invalidateEffectiveCache(); Right(()) }
-    else Left(SupervisorError.NotFound(s"column policy $id not found"))
+    withCacheRecovery("deleteColumnPolicy") {
+      if store.deleteColumnPolicy(id) then { invalidateEffectiveCache(); Right(()) }
+      else Left(SupervisorError.NotFound(s"column policy $id not found"))
+    }
   }
 
   def listColumnPoliciesByRole(roleId: String): IO[List[state.RoleColumnPolicy]] =
@@ -1651,37 +1761,43 @@ final class PoolSupervisor(
       tableName: String,
       predicateSql: String
   ): IO[Either[SupervisorError, state.RoleRowPolicy]] = IO.blocking {
-    ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
-      case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
-        Left(SupervisorError.InvalidArgument(s"invalid predicateSql: $reason"))
-      case ai.starlake.quack.edge.rls.RowPredicateValidator.Valid(canon) =>
-        val p = state.RoleRowPolicy(
-          id = newId("rp"),
-          roleId = roleId,
-          catalogName = catalogName,
-          schemaName = schemaName,
-          tableName = tableName,
-          predicateSql = canon
-        )
-        val persisted = store.insertRowPolicy(p)
-        invalidateEffectiveCache()
-        Right(persisted)
-  }
-
-  def updateRowPolicy(id: String, predicateSql: String): IO[Either[SupervisorError, Unit]] =
-    IO.blocking {
+    withCacheRecovery("createRowPolicy") {
       ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
         case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
           Left(SupervisorError.InvalidArgument(s"invalid predicateSql: $reason"))
         case ai.starlake.quack.edge.rls.RowPredicateValidator.Valid(canon) =>
-          val ok = store.updateRowPolicy(id, canon)
-          if ok then { invalidateEffectiveCache(); Right(()) }
-          else Left(SupervisorError.NotFound(s"row policy $id not found"))
+          val p = state.RoleRowPolicy(
+            id = newId("rp"),
+            roleId = roleId,
+            catalogName = catalogName,
+            schemaName = schemaName,
+            tableName = tableName,
+            predicateSql = canon
+          )
+          val persisted = store.insertRowPolicy(p)
+          invalidateEffectiveCache()
+          Right(persisted)
+    }
+  }
+
+  def updateRowPolicy(id: String, predicateSql: String): IO[Either[SupervisorError, Unit]] =
+    IO.blocking {
+      withCacheRecovery("updateRowPolicy") {
+        ai.starlake.quack.edge.rls.RowPredicateValidator.validate(predicateSql) match
+          case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
+            Left(SupervisorError.InvalidArgument(s"invalid predicateSql: $reason"))
+          case ai.starlake.quack.edge.rls.RowPredicateValidator.Valid(canon) =>
+            val ok = store.updateRowPolicy(id, canon)
+            if ok then { invalidateEffectiveCache(); Right(()) }
+            else Left(SupervisorError.NotFound(s"row policy $id not found"))
+      }
     }
 
   def deleteRowPolicy(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    if store.deleteRowPolicy(id) then { invalidateEffectiveCache(); Right(()) }
-    else Left(SupervisorError.NotFound(s"row policy $id not found"))
+    withCacheRecovery("deleteRowPolicy") {
+      if store.deleteRowPolicy(id) then { invalidateEffectiveCache(); Right(()) }
+      else Left(SupervisorError.NotFound(s"row policy $id not found"))
+    }
   }
 
   def listRowPoliciesByRole(roleId: String): IO[List[state.RoleRowPolicy]] =
@@ -1694,27 +1810,31 @@ final class PoolSupervisor(
       name: String,
       description: Option[String] = None
   ): IO[Either[SupervisorError, RbacGroup]] = IO.blocking {
-    if name.isEmpty then Left(SupervisorError.InvalidArgument("group name must be non-empty"))
-    else if !tenants.contains(tenantId) then
-      Left(SupervisorError.NotFound(s"tenant not found: $tenantId"))
-    else if store.findGroup(tenantId, name).isDefined then
-      Left(SupervisorError.AlreadyExists(s"group '$name' already exists in tenant '$tenantId'"))
-    else
-      val g = RbacGroup(newId("g"), tenantId, name, description)
-      store.upsertGroup(g)
-      rbacResolver.putGroup(g)
-      invalidateEffectiveCache()
-      Right(g)
+    withCacheRecovery("createGroup") {
+      if name.isEmpty then Left(SupervisorError.InvalidArgument("group name must be non-empty"))
+      else if !tenants.contains(tenantId) then
+        Left(SupervisorError.NotFound(s"tenant not found: $tenantId"))
+      else if store.findGroup(tenantId, name).isDefined then
+        Left(SupervisorError.AlreadyExists(s"group '$name' already exists in tenant '$tenantId'"))
+      else
+        val g = RbacGroup(newId("g"), tenantId, name, description)
+        store.upsertGroup(g)
+        rbacResolver.putGroup(g)
+        invalidateEffectiveCache()
+        Right(g)
+    }
   }
 
   def deleteGroup(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    rbacResolver.group(id) match
-      case None    => Left(SupervisorError.NotFound(s"group not found: $id"))
-      case Some(_) =>
-        store.deleteGroup(id)
-        rbacResolver.removeGroup(id)
-        invalidateEffectiveCache()
-        Right(())
+    withCacheRecovery("deleteGroup") {
+      rbacResolver.group(id) match
+        case None    => Left(SupervisorError.NotFound(s"group not found: $id"))
+        case Some(_) =>
+          store.deleteGroup(id)
+          rbacResolver.removeGroup(id)
+          invalidateEffectiveCache()
+          Right(())
+    }
   }
 
   def listGroups(tenantId: String): List[RbacGroup] = store.listGroups(tenantId)
@@ -1725,63 +1845,75 @@ final class PoolSupervisor(
   // ---------- RBAC: memberships ----------
 
   def addUserRole(userId: String, roleId: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    membershipCheck(userId, roleId, rbacResolver.role(_), _.tenantId, "role") match
-      case Some(err) => Left(err)
-      case None      =>
-        store.addUserRole(userId, roleId)
-        invalidateEffectiveCache()
-        Right(())
+    withCacheRecovery("addUserRole") {
+      membershipCheck(userId, roleId, rbacResolver.role(_), _.tenantId, "role") match
+        case Some(err) => Left(err)
+        case None      =>
+          store.addUserRole(userId, roleId)
+          invalidateEffectiveCache()
+          Right(())
+    }
   }
 
   def removeUserRole(userId: String, roleId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      store.removeUserRole(userId, roleId)
-      invalidateEffectiveCache()
-      Right(())
+      withCacheRecovery("removeUserRole") {
+        store.removeUserRole(userId, roleId)
+        invalidateEffectiveCache()
+        Right(())
+      }
     }
 
   def addUserGroup(userId: String, groupId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      membershipCheck(userId, groupId, rbacResolver.group(_), _.tenantId, "group") match
-        case Some(err) => Left(err)
-        case None      =>
-          store.addUserGroup(userId, groupId)
-          invalidateEffectiveCache()
-          Right(())
+      withCacheRecovery("addUserGroup") {
+        membershipCheck(userId, groupId, rbacResolver.group(_), _.tenantId, "group") match
+          case Some(err) => Left(err)
+          case None      =>
+            store.addUserGroup(userId, groupId)
+            invalidateEffectiveCache()
+            Right(())
+      }
     }
 
   def removeUserGroup(userId: String, groupId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      store.removeUserGroup(userId, groupId)
-      invalidateEffectiveCache()
-      Right(())
+      withCacheRecovery("removeUserGroup") {
+        store.removeUserGroup(userId, groupId)
+        invalidateEffectiveCache()
+        Right(())
+      }
     }
 
   def addGroupRole(groupId: String, roleId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      (rbacResolver.group(groupId), rbacResolver.role(roleId)) match
-        case (None, _) => Left(SupervisorError.NotFound(s"group not found: $groupId"))
-        case (_, None) => Left(SupervisorError.NotFound(s"role not found: $roleId"))
-        case (Some(g), Some(r)) if g.tenantId != r.tenantId =>
-          Left(
-            SupervisorError.InvalidArgument(
-              s"cross-tenant membership not allowed: group tenant ${g.tenantId} " +
-                s"!= role tenant ${r.tenantId}"
+      withCacheRecovery("addGroupRole") {
+        (rbacResolver.group(groupId), rbacResolver.role(roleId)) match
+          case (None, _) => Left(SupervisorError.NotFound(s"group not found: $groupId"))
+          case (_, None) => Left(SupervisorError.NotFound(s"role not found: $roleId"))
+          case (Some(g), Some(r)) if g.tenantId != r.tenantId =>
+            Left(
+              SupervisorError.InvalidArgument(
+                s"cross-tenant membership not allowed: group tenant ${g.tenantId} " +
+                  s"!= role tenant ${r.tenantId}"
+              )
             )
-          )
-        case (Some(_), Some(_)) =>
-          store.addGroupRole(groupId, roleId)
-          rbacResolver.addGroupRoleEdge(groupId, roleId)
-          invalidateEffectiveCache()
-          Right(())
+          case (Some(_), Some(_)) =>
+            store.addGroupRole(groupId, roleId)
+            rbacResolver.addGroupRoleEdge(groupId, roleId)
+            invalidateEffectiveCache()
+            Right(())
+      }
     }
 
   def removeGroupRole(groupId: String, roleId: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
-      store.removeGroupRole(groupId, roleId)
-      rbacResolver.removeGroupRoleEdge(groupId, roleId)
-      invalidateEffectiveCache()
-      Right(())
+      withCacheRecovery("removeGroupRole") {
+        store.removeGroupRole(groupId, roleId)
+        rbacResolver.removeGroupRoleEdge(groupId, roleId)
+        invalidateEffectiveCache()
+        Right(())
+      }
     }
 
   /** Validate a user->role or user->group membership edge before it is written.
@@ -1827,64 +1959,68 @@ final class PoolSupervisor(
       userId: Option[String],
       groupId: Option[String]
   ): IO[Either[SupervisorError, PoolPermission]] = IO.blocking {
-    // Walk through the predicates in order and short-circuit on the
-    // first failure. Tenant-scoping invariant (principal belongs to
-    // the target tenant) is checked at the end since it requires the
-    // principal lookup to have succeeded.
-    val problem: Option[SupervisorError] =
-      if !tenants.contains(tenantId) then
-        Some(SupervisorError.NotFound(s"tenant not found: $tenantId"))
-      else if userId.isDefined == groupId.isDefined then
-        Some(SupervisorError.InvalidArgument("exactly one of userId / groupId must be set"))
-      else
-        poolId
-          .flatMap(p =>
-            if poolRows.contains(p) then None
-            else Some(SupervisorError.NotFound(s"pool not found: $p"))
-          )
-          .orElse(
-            userId.flatMap(u =>
-              if store.getUserById(u).isDefined then None
-              else Some(SupervisorError.NotFound(s"user not found: $u"))
+    withCacheRecovery("grantPoolPermission") {
+      // Walk through the predicates in order and short-circuit on the
+      // first failure. Tenant-scoping invariant (principal belongs to
+      // the target tenant) is checked at the end since it requires the
+      // principal lookup to have succeeded.
+      val problem: Option[SupervisorError] =
+        if !tenants.contains(tenantId) then
+          Some(SupervisorError.NotFound(s"tenant not found: $tenantId"))
+        else if userId.isDefined == groupId.isDefined then
+          Some(SupervisorError.InvalidArgument("exactly one of userId / groupId must be set"))
+        else
+          poolId
+            .flatMap(p =>
+              if poolRows.contains(p) then None
+              else Some(SupervisorError.NotFound(s"pool not found: $p"))
             )
-          )
-          .orElse(
-            groupId.flatMap(g =>
-              if rbacResolver.group(g).isDefined then None
-              else Some(SupervisorError.NotFound(s"group not found: $g"))
-            )
-          )
-          .orElse {
-            // Principal must belong to the same tenant the grant covers.
-            // A superuser (tenant=None) cannot receive a tenant-scoped
-            // pool grant; the resolver's bypass rule already gives them
-            // every pool.
-            val ok = userId match
-              case Some(u) => store.getUserById(u).exists(_.tenant.contains(tenantId))
-              case None    => groupId.flatMap(rbacResolver.group).exists(_.tenantId == tenantId)
-            if ok then None
-            else
-              Some(
-                SupervisorError.InvalidArgument("principal does not belong to the target tenant")
+            .orElse(
+              userId.flatMap(u =>
+                if store.getUserById(u).isDefined then None
+                else Some(SupervisorError.NotFound(s"user not found: $u"))
               )
-          }
+            )
+            .orElse(
+              groupId.flatMap(g =>
+                if rbacResolver.group(g).isDefined then None
+                else Some(SupervisorError.NotFound(s"group not found: $g"))
+              )
+            )
+            .orElse {
+              // Principal must belong to the same tenant the grant covers.
+              // A superuser (tenant=None) cannot receive a tenant-scoped
+              // pool grant; the resolver's bypass rule already gives them
+              // every pool.
+              val ok = userId match
+                case Some(u) => store.getUserById(u).exists(_.tenant.contains(tenantId))
+                case None    => groupId.flatMap(rbacResolver.group).exists(_.tenantId == tenantId)
+              if ok then None
+              else
+                Some(
+                  SupervisorError.InvalidArgument("principal does not belong to the target tenant")
+                )
+            }
 
-    problem match
-      case Some(err) => Left(err)
-      case None      =>
-        val pp        = PoolPermission(newId("pp"), tenantId, poolId, userId, groupId)
-        val persisted = store.insertPoolPermission(pp)
-        rbacResolver.putPoolPermission(persisted)
-        invalidateEffectiveCache()
-        Right(persisted)
+      problem match
+        case Some(err) => Left(err)
+        case None      =>
+          val pp        = PoolPermission(newId("pp"), tenantId, poolId, userId, groupId)
+          val persisted = store.insertPoolPermission(pp)
+          rbacResolver.putPoolPermission(persisted)
+          invalidateEffectiveCache()
+          Right(persisted)
+    }
   }
 
   def revokePoolPermission(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
-    if store.deletePoolPermission(id) then
-      rbacResolver.removePoolPermission(id)
-      invalidateEffectiveCache()
-      Right(())
-    else Left(SupervisorError.NotFound(s"pool permission not found: $id"))
+    withCacheRecovery("revokePoolPermission") {
+      if store.deletePoolPermission(id) then
+        rbacResolver.removePoolPermission(id)
+        invalidateEffectiveCache()
+        Right(())
+      else Left(SupervisorError.NotFound(s"pool permission not found: $id"))
+    }
   }
 
   def listPoolPermissions(

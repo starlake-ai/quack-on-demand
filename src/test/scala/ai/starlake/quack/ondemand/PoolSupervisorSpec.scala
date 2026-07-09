@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -912,4 +912,81 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.get(key).map(_.cpu)             shouldBe Some("250m")
     sup.get(key).map(_.memory)          shouldBe Some("1Gi")
     sup.get(key).map(_.podTemplateYaml) shouldBe Some(tmpl)
+  }
+
+  // ---------- withCacheRecovery: caches converge to store on failed mutations ----------
+
+  /** Delegates everything to an [[InMemoryControlPlaneStore]] but lets a test arm two seams:
+    *   - `failAfterUpsertRole`: the role row IS persisted, then the call throws. Simulates a store
+    *     write that lands followed by a failure BEFORE the supervisor's cache update runs (the
+    *     cache would silently miss the persisted row without recovery).
+    *   - `failUpsertNode`: the node write is refused outright. `setMaxConcurrent` updates the pools
+    *     cache BEFORE its store write, so this leaves the cache AHEAD of the store without
+    *     recovery.
+    */
+  private final class FaultInjectingStore extends ControlPlaneStore:
+    val inner = new InMemoryControlPlaneStore()
+    export inner.{upsertRole as _, upsertNode as _, *}
+
+    @volatile var failAfterUpsertRole = false
+    @volatile var failUpsertNode      = false
+
+    def upsertRole(r: RbacRole): Unit =
+      inner.upsertRole(r)
+      if failAfterUpsertRole then throw new RuntimeException("boom: post-write failure")
+
+    def upsertNode(n: RunningNode, poolId: String): Unit =
+      if failUpsertNode then throw new RuntimeException("boom: node write refused")
+      inner.upsertNode(n, poolId)
+
+  "PoolSupervisor cache recovery" should
+    "rebuild the RBAC caches from the store when a mutator fails after its store write" in {
+      val store = new FaultInjectingStore
+      val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+      sup.createTenant(Tenant("acme")).unsafeRunSync()
+      val tenantId = sup.getTenant("acme").get.id
+
+      store.failAfterUpsertRole = true
+      val boom = intercept[RuntimeException] {
+        sup.createRole(tenantId, "analyst").unsafeRunSync()
+      }
+      boom.getMessage should include("post-write failure")
+
+      // The store write landed before the failure; recovery must have rebuilt the
+      // resolver from the store so the persisted role is visible, not silently
+      // missing from the cache until the next restart.
+      val persisted = store.findRole(tenantId, "analyst")
+      persisted shouldBe defined
+      sup.rbacResolver.role(persisted.get.id) shouldBe defined
+    }
+
+  it should "roll the pool cache back to the store when the store write fails after the cache update" in {
+    val store = new FaultInjectingStore
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1), maxConcurrentPerNode = 2).unsafeRunSync()
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+
+    store.failUpsertNode = true
+    val boom = intercept[RuntimeException] {
+      sup.setMaxConcurrent(key, nodeId, 99).unsafeRunSync()
+    }
+    boom.getMessage should include("node write refused")
+
+    // setMaxConcurrent puts the patched node list into the pools cache BEFORE the
+    // store write; the recovery must converge the cache back to the store value.
+    sup.get(key).get.nodes.find(_.nodeId == nodeId).get.maxConcurrent shouldBe 2
+  }
+
+  it should "leave the happy path of a wrapped mutator unchanged" in {
+    val store = new FaultInjectingStore
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val tenantId = sup.getTenant("acme").get.id
+    val created  = sup.createRole(tenantId, "analyst").unsafeRunSync()
+    created.isRight shouldBe true
+    sup.rbacResolver.role(created.toOption.get.id) shouldBe defined
+    store.findRole(tenantId, "analyst") shouldBe defined
   }
