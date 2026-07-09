@@ -24,7 +24,7 @@ final class PoolHandlers(
 
   /** Hide secret-like keys from the API response. Today: just `pgPassword`. */
   private def redact(metastore: Map[String, String]): Map[String, String] =
-    metastore.filterNot(_._1.equalsIgnoreCase("pgPassword"))
+    HandlerResolvers.redactPassword(metastore)
 
   /** Build the response for an existing pool by looking up its supervisor state. */
   private def respond(key: PoolKey): Option[PoolResponse] =

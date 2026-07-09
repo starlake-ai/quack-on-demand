@@ -24,7 +24,7 @@ final class TenantDbHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def redact(m: Map[String, String]): Map[String, String] =
-    m.filterNot(_._1.equalsIgnoreCase("pgPassword"))
+    HandlerResolvers.redactPassword(m)
 
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)

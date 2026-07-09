@@ -16,11 +16,7 @@ final class GroupHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def resolveTenantId(raw: String): Option[String] =
-    val tenants = sup.listTenants()
-    tenants
-      .find(_.id == raw)
-      .map(_.id)
-      .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
+    HandlerResolvers.resolveTenantId(sup, raw)
 
   def createGroup(req: GroupCreateRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

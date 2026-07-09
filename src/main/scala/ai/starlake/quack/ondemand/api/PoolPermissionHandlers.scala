@@ -19,11 +19,7 @@ final class PoolPermissionHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def resolveTenantId(raw: String): Option[String] =
-    val tenants = sup.listTenants()
-    tenants
-      .find(_.id == raw)
-      .map(_.id)
-      .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
+    HandlerResolvers.resolveTenantId(sup, raw)
 
   def grant(req: PoolPermissionGrantRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
