@@ -35,6 +35,8 @@ import type {
   CatalogTableDetailResponse,
   CatalogSnapshotEntry,
   CatalogTagEntry,
+  PreviewResponse,
+  SchemaDiffResponse,
   // Managed maintenance
   MaintenancePolicyUpsertRequest,
   MaintenancePolicyEntry,
@@ -376,19 +378,57 @@ export const api = {
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
         `/schemas/${encodeURIComponent(schema)}/tables`
     ),
-  getCatalogTable: (tenant: string, tenantDb: string, schema: string, table: string, asOf?: number) =>
-    get<CatalogTableDetailResponse>(
+  getCatalogTable: (
+    tenant: string, tenantDb: string, schema: string, table: string,
+    selector?: { asOf?: number; asOfTag?: string; asOfTs?: string }
+  ) => {
+    const qs = new URLSearchParams();
+    if (selector?.asOf != null) qs.set('asOf', String(selector.asOf));
+    if (selector?.asOfTag) qs.set('asOfTag', selector.asOfTag);
+    if (selector?.asOfTs) qs.set('asOfTs', selector.asOfTs);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<CatalogTableDetailResponse>(
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
-        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}` +
-        (asOf != null ? `?asOf=${asOf}` : '')
-    ),
-  listCatalogSnapshots: (tenant: string, tenantDb: string, limit?: number, before?: number) => {
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}${q}`
+    );
+  },
+  listCatalogSnapshots: (
+    tenant: string, tenantDb: string, limit?: number, before?: number, table?: string
+  ) => {
     const qs = new URLSearchParams();
     if (limit != null) qs.set('limit', String(limit));
     if (before != null) qs.set('before', String(before));
+    if (table) qs.set('table', table);
     const q = qs.toString() ? `?${qs.toString()}` : '';
     return get<CatalogSnapshotEntry[]>(
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/snapshots${q}`
+    );
+  },
+  previewCatalogTable: (
+    tenant: string, tenantDb: string, schema: string, table: string,
+    selector?: { asOf?: number; asOfTag?: string; asOfTs?: string },
+    limit?: number
+  ) => {
+    const qs = new URLSearchParams();
+    if (selector?.asOf != null) qs.set('asOf', String(selector.asOf));
+    if (selector?.asOfTag) qs.set('asOfTag', selector.asOfTag);
+    if (selector?.asOfTs) qs.set('asOfTs', selector.asOfTs);
+    if (limit != null) qs.set('limit', String(limit));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<PreviewResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/preview${q}`
+    );
+  },
+  catalogSchemaDiff: (
+    tenant: string, tenantDb: string, schema: string, table: string, from: string, to: string
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set('from', from);
+    qs.set('to', to);
+    return get<SchemaDiffResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/schema-diff?${qs.toString()}`
     );
   },
 
