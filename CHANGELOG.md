@@ -2,6 +2,20 @@
 
 ## 0.3.7 (unreleased)
 
+### Catalog
+
+- **Time-travel viewer completed (EPIC Spec 00).** The snapshot browser now shows the author and
+  commit message stamped on each snapshot (unstamped rows render "unknown") and can filter the
+  timeline to one table. Tables can be viewed as of a timestamp (`asOfTs=<ISO-8601>`, resolved
+  nearest-at-or-before and surfaced in the response) in addition to snapshot ids and tags. A new
+  row preview (`GET .../tables/{t}/preview`) executes through the same FlightSQL pipeline as data
+  traffic: pool ACLs, row-level and column-level policies all apply, reads route only to
+  ReadOnly/Dual nodes, and every preview is audited. A two-snapshot schema diff
+  (`GET .../tables/{t}/schema-diff?from=&to=`, ids or tag names) reports added, removed, retyped,
+  and renullabled columns, rename-proof via table identity. Expired snapshots now return 410 and
+  beyond-latest ids 422. The catalog browser endpoints are session-gated (closing the last
+  endpoint-signature drift), with optional full read auditing via `QOD_AUDIT_CATALOG_READS`.
+
 ### Governance
 
 - **Named and protected snapshot tags with reference pinning (EPIC P2 / Spec 06).** Any DuckLake
