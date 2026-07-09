@@ -376,7 +376,7 @@ FROM (
 
 -- lineorder: lineitem denormalized with its order header; lo_discount and
 -- lo_tax become 0-10 / 0-8 integer percentages (SSB queries filter
--- `lo_discount BETWEEN 1 AND 3`), lo_supplycost comes from partsupp.
+-- lo_discount BETWEEN 1 AND 3), lo_supplycost comes from partsupp.
 DROP TABLE IF EXISTS $DB_NAME.$SCHEMA_NAME.lineorder;
 CREATE TABLE $DB_NAME.$SCHEMA_NAME.lineorder AS
 SELECT
