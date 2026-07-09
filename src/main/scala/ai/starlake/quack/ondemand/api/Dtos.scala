@@ -850,6 +850,16 @@ final case class MaintenanceRunRequest(
 
 final case class MaintenanceRunResponse(id: Long)
 
+// ----- Catalog data preview (Spec 00 time-travel viewer) -----
+final case class PreviewColumn(name: String, dataType: String)
+
+final case class PreviewResponse(
+    columns: List[PreviewColumn],
+    rows: List[List[Json]],
+    snapshotId: Option[Long],
+    truncated: Boolean
+)
+
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
@@ -1613,3 +1623,7 @@ object Dtos:
     }
   )
   given Codec[MaintenanceRunResponse] = deriveCodec
+
+  // Catalog data preview
+  given Codec[PreviewColumn]   = deriveCodec
+  given Codec[PreviewResponse] = deriveCodec
