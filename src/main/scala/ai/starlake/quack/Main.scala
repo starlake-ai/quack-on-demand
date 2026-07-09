@@ -178,10 +178,26 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
+    // AuthenticationService construction is deferred until after `sup` is built
+    // so the optional per-tenant OIDC registry can read tenant authConfig rows
+    // out of the supervisor.
+
+    // Bootstrap admin users at startup so the DB auth backend has at least
+    // one credential. Re-hashed on every boot: changing QOD_ADMIN_PASSWORD
+    // + restart rotates. All names in QOD_ADMIN_USERNAME (comma-separated)
+    // get the same password + role.
+    // Apply the Liquibase changelog first: `qodstate_user` (and the rest
+    // of the control plane) must exist before we upsert the admin row.
+    // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+
     // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
     // must each project (password_hash, role, enabled) -- exactly the shape
     // DatabaseAuthenticator requires at runtime now that the tolerant
     // two-column branch is gone. Caught here instead of at first login.
+    // Runs AFTER the Liquibase apply above: the default queries target
+    // qodstate_user in the control-plane database, which does not exist yet
+    // on a fresh (or nuked) metastore until the changelog has been applied.
     // The probe result is computed first and sys.error'd after, so an
     // unreachable auth database surfaces as the same clean config-error
     // framing as the sibling gates above, not a raw JDBC exception.
@@ -206,18 +222,6 @@ object Main extends IOApp with LazyLogging:
             )
       probeResult.left.foreach(msg => sys.error(msg))
 
-    // AuthenticationService construction is deferred until after `sup` is built
-    // so the optional per-tenant OIDC registry can read tenant authConfig rows
-    // out of the supervisor.
-
-    // Bootstrap admin users at startup so the DB auth backend has at least
-    // one credential. Re-hashed on every boot: changing QOD_ADMIN_PASSWORD
-    // + restart rotates. All names in QOD_ADMIN_USERNAME (comma-separated)
-    // get the same password + role.
-    // Apply the Liquibase changelog first: `qodstate_user` (and the rest
-    // of the control plane) must exist before we upsert the admin row.
-    // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
-    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
     val bootstrapUserStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     val admins             = mgrCfg.admin.usernameList
     if admins.isEmpty then
