@@ -592,7 +592,18 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
     * (already used unscoped by `filesScheduledForDeletion`), which carries no `table_id` or
     * `snapshot_id` column. `schedule_start` matches the triggering snapshot's `snapshot_time`
     * exactly (same transaction), so `sched` joins on that equality and scopes to this table via a
-    * `path LIKE 'schema/table/%'` prefix. None = table name unknown in the current catalog state.
+    * `path LIKE 'schema/table/%'` prefix. `sched` deliberately does NOT participate in the
+    * membership WHERE below - `schedule_start = snapshot_time` is a timestamp-equality join with no
+    * snapshot_id/table_id on the DuckLake side, so on a timestamp collision between two snapshots
+    * it could admit a foreign snapshot into this table's timeline; compaction snapshots are already
+    * members via `tf` (the merged output file's `ducklake_data_file` row has `begin_snapshot` = the
+    * compaction snapshot). `tr.files_removed + sched.n` is a plain sum, not `greatest(...)`:
+    * verified against a live catalog that the two never populate for the same `snapshot_id` -
+    * DuckLake rejects a transaction that both writes data and compacts ("Transactions can either
+    * make changes OR perform compaction - not both"), and separate DML vs. compaction transactions
+    * land on different snapshot_ids, so `tr` (keyed by a DML snapshot's end_snapshot) and `sched`
+    * (keyed by a compaction snapshot's own snapshot_id) are structurally disjoint keys; re-verify
+    * this invariant on a DuckLake pin bump. None = table name unknown in the current catalog state.
     */
   def listTableHistory(
       schema: String,
@@ -703,7 +714,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
            |    LEFT JOIN sched ON sched.sid = s.snapshot_id
            |   WHERE (tf.sid IS NOT NULL OR tr.sid IS NOT NULL OR dn.sid IS NOT NULL
            |          OR dold.sid IS NOT NULL OR tb.sid IS NOT NULL OR te.sid IS NOT NULL
-           |          OR cb.sid IS NOT NULL OR ce.sid IS NOT NULL OR sched.sid IS NOT NULL
+           |          OR cb.sid IS NOT NULL OR ce.sid IS NOT NULL
            |          OR coalesce(c.changes_made, '') ~ ?)$beforePred$fromPred$toPred$authorPred
            |) h$opPred
            |ORDER BY h.snapshot_id DESC

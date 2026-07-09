@@ -111,6 +111,9 @@ class DuckLakeCatalogReaderHistorySpec extends AnyFlatSpec with Matchers with Po
   it should "classify compaction as maintenance with zeroed row deltas" in
     withCatalog("hist") { (reader, _) =>
       // Several small flushed inserts produce adjacent small files, then compaction rewrites them.
+      // The seed catalog already flushes one insert for region, plus the two below - 3 small files
+      // merged into 1. Verified against the live fixture (ducklake_merge_adjacent_files reports
+      // files_processed=3): filesRemoved must be exactly 3, not merely positive.
       runSqlOnCatalog(
         """INSERT INTO lake.tpch1.region VALUES (10, 'A', 'x');
           |CALL ducklake_flush_inlined_data('lake');
@@ -127,6 +130,6 @@ class DuckLakeCatalogReaderHistorySpec extends AnyFlatSpec with Matchers with Po
       maint.foreach { c =>
         c.rowsAdded shouldBe 0L
         c.rowsRemoved shouldBe 0L
-        c.filesRemoved should be > 0
+        c.filesRemoved shouldBe 3
       }
     }
