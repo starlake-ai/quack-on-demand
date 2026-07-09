@@ -127,12 +127,29 @@ final case class ManifestGroup(
     roles: List[String] = Nil
 )
 
-final case class ManifestPoolGrant(pool: Option[String])
+/** `tenant` is an optional qualifier naming the tenant the granted pool actually lives in. Absent
+  * (the common case) means "resolve `pool` against the grant owner's home tenant", matching the
+  * behavior before this field existed. It must be set when the grant crosses tenants -- which can
+  * only happen for a superuser (a tenant-scoped user's grants are always inside their own tenant).
+  * Without this qualifier a cross-tenant superuser grant cannot be told apart from an in-tenant one
+  * once `tenant` context is gone (a superuser has no home tenant to resolve `pool` against), so
+  * export previously had to emit `pool = None` and the grant's real target was lost.
+  */
+final case class ManifestPoolGrant(pool: Option[String], tenant: Option[String] = None)
 
 final case class ManifestUser(
     tenant: Option[String], // None = superuser
     username: String,
-    password: Option[String] = None, // omitted on export; bcrypt-or-plaintext on import
+    // Omitted on export: passwords are stored as bcrypt hashes only, plaintext is never available
+    // once a user is created, so there is nothing to write back into this field at export time.
+    // Bcrypt-or-plaintext on import (BcryptUtils.toHash hashes anything that isn't already a hash).
+    password: Option[String] = None,
+    // Real bcrypt hash exported verbatim (see [[ManifestExporter]]). Optional and backward
+    // compatible: a manifest without this field falls back to `password`/prior-credential
+    // resolution exactly as before. When present, the importer applies the hash directly and skips
+    // re-hashing, so a round-tripped user authenticates with the SAME credential it had before
+    // export -- this is what makes password round-trip possible without ever seeing plaintext.
+    passwordHash: Option[String] = None,
     role: String = "user",
     enabled: Boolean = true,
     roles: List[String] = Nil,

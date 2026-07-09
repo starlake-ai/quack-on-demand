@@ -15,6 +15,7 @@ final case class RbacUser(
     tenant: Option[String],
     username: String,
     role: String,
+    enabled: Boolean = true,
     createdAt: Option[Instant] = None,
     updatedAt: Option[Instant] = None
 )

@@ -494,7 +494,8 @@ final class PostgresControlPlaneStore(
       tenant: Option[String],
       username: String,
       passwordHash: String,
-      role: String
+      role: String,
+      enabled: Boolean = true
   ): String = withConn { c =>
     // Look up the existing id first so the upsert can preserve it
     // (mirrors [[UserStore.upsertUser]]). The partial unique indexes
@@ -524,11 +525,12 @@ final class PostgresControlPlaneStore(
     val id = existingId.getOrElse(ai.starlake.quack.model.Names.newSurrogateId("u"))
 
     val ps = c.prepareStatement(
-      """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, updated_at)
-        |VALUES (?, ?, ?, ?, ?, NOW())
+      """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, enabled, updated_at)
+        |VALUES (?, ?, ?, ?, ?, ?, NOW())
         |ON CONFLICT (id) DO UPDATE SET
         |  password_hash = EXCLUDED.password_hash,
         |  role          = EXCLUDED.role,
+        |  enabled       = EXCLUDED.enabled,
         |  updated_at    = NOW()""".stripMargin
     )
     try
@@ -539,6 +541,7 @@ final class PostgresControlPlaneStore(
       ps.setString(3, username)
       ps.setString(4, passwordHash)
       ps.setString(5, role)
+      ps.setBoolean(6, enabled)
       ps.executeUpdate()
       id
     finally ps.close()
@@ -546,7 +549,7 @@ final class PostgresControlPlaneStore(
 
   def getUserById(id: String): Option[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      "SELECT id, tenant, username, role, created_at, updated_at FROM qodstate_user WHERE id = ?"
+      "SELECT id, tenant, username, role, enabled, created_at, updated_at FROM qodstate_user WHERE id = ?"
     )
     try
       ps.setString(1, id)
@@ -560,7 +563,7 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, created_at, updated_at
             |FROM qodstate_user WHERE tenant = ? AND username = ?""".stripMargin
         )
         p.setString(1, t)
@@ -568,7 +571,7 @@ final class PostgresControlPlaneStore(
         p
       case None =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, created_at, updated_at
             |FROM qodstate_user WHERE tenant IS NULL AND username = ?""".stripMargin
         )
         p.setString(1, username)
@@ -584,14 +587,14 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, created_at, updated_at
             |FROM qodstate_user WHERE tenant = ? ORDER BY username""".stripMargin
         )
         p.setString(1, t)
         p
       case None =>
         c.prepareStatement(
-          """SELECT id, tenant, username, role, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, created_at, updated_at
             |FROM qodstate_user ORDER BY COALESCE(tenant, ''), username""".stripMargin
         )
     try
@@ -603,7 +606,7 @@ final class PostgresControlPlaneStore(
 
   def listSuperusers(): List[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, created_at, updated_at
         |FROM qodstate_user WHERE tenant IS NULL ORDER BY username""".stripMargin
     )
     try
@@ -618,7 +621,7 @@ final class PostgresControlPlaneStore(
     // the wildcard NULL superuser row when both exist with the same
     // username. Mirrors application.conf's auth.database.query.
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, created_at, updated_at
         |FROM qodstate_user
         |WHERE (tenant IS NULL OR tenant = ?) AND username = ?
         |ORDER BY (tenant IS NOT NULL) DESC
@@ -642,6 +645,7 @@ final class PostgresControlPlaneStore(
       tenant = Option(rs.getString("tenant")),
       username = rs.getString("username"),
       role = rs.getString("role"),
+      enabled = rs.getBoolean("enabled"),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
       updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
     )
@@ -1378,7 +1382,7 @@ final class PostgresControlPlaneStore(
       ),
       users = selectAll(
         c,
-        "SELECT id, tenant, username, role, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
+        "SELECT id, tenant, username, role, enabled, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
         readRbacUser
       ),
       roles = selectAll(

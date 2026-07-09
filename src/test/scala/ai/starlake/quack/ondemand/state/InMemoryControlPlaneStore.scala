@@ -110,7 +110,8 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       tenant: Option[String],
       username: String,
       passwordHash: String,
-      role: String
+      role: String,
+      enabled: Boolean = true
   ): String =
     val now             = Instant.now()
     val (id, createdAt) = findUser(tenant, username) match
@@ -123,6 +124,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
         tenant = tenant,
         username = username,
         role = role,
+        enabled = enabled,
         createdAt = Some(createdAt),
         updatedAt = Some(now)
       )

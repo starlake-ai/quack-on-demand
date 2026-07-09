@@ -83,12 +83,18 @@ trait ControlPlaneStore:
     * inserts, existing for updates). Unlike [[upsertUserIdentity]] this writes the `password_hash`
     * column. The hash is stored as-is -- the caller is responsible for bcrypt-ing the plaintext
     * (see [[ai.starlake.quack.ondemand.manifest.BcryptUtils.toHash]]).
+    *
+    * `enabled` defaults to `true` so every pre-existing call site (login, RBAC handlers) keeps
+    * creating/refreshing an enabled user without change.
+    * [[ai.starlake.quack.ondemand.manifest.ManifestImporter]] passes the manifest's `enabled` field
+    * through explicitly so a disabled user round-trips.
     */
   def upsertUserWithHash(
       tenant: Option[String],
       username: String,
       passwordHash: String,
-      role: String
+      role: String,
+      enabled: Boolean = true
   ): String
 
   def getUserById(id: String): Option[RbacUser]
