@@ -34,16 +34,19 @@ The document mirrors the object hierarchy:
   - `identities[]` - external identity mappings for the tenant.
 - `roles[]` - each `(tenant, name)` with its `permissions[]` (catalog/schema/table/verb).
 - `groups[]` - each `(tenant, name)` with its assigned `roles[]`.
-- `users[]` - `tenant` (omitted/null for a superuser), `username`, `role`, `enabled`, and the user's `roles[]`, `groups[]`, and `poolGrants[]`.
+- `users[]` - `tenant` (omitted/null for a superuser), `username`, `passwordHash`, `role`, `enabled`, and the user's `roles[]`, `groups[]`, and `poolGrants[]`.
 
-### Redaction
+### Sensitivity of an export
 
-Secrets are never written in clear text on export:
+Plaintext credentials are never written on export, but the file is NOT free of credential material:
 
-- User `password` is **omitted** entirely from exported users.
+- User `password` (plaintext) is **omitted** entirely from exported users; there is no plaintext to export, only bcrypt hashes are stored.
+- User `passwordHash` carries the user's **real bcrypt hash verbatim**. This is what lets a backup restore the same credential without anyone re-typing passwords.
 - Federated secret `value`s are written as `***REDACTED***`; an `externalRef` is written verbatim.
 
-This is what makes a plain export-then-import round-trip safe: omitted passwords and redacted secret values are preserved from the existing rows on import (see below), so a round-trip never rotates or wipes a credential.
+Because bcrypt hashes of weak passwords are subject to offline cracking, **treat an exported manifest as sensitive**: do not commit it to a public repository, and store it with the same care as any other credential material (private repository, secret store, or encrypted backup).
+
+A plain export-then-import round-trip preserves credentials without rotation: exported hashes are applied verbatim on import, an absent hash falls back to the existing row, and redacted secret values are reused from the existing rows (see below).
 
 ## Import
 
@@ -78,13 +81,14 @@ Because nested collections are replaced, omitting a child under a parent you do 
 
 ### Passwords and secrets on import
 
-- A user with **no** `password` field reuses the bcrypt hash captured from the existing row at the start of the import. A user with a `password` value sets it (the value is treated as a bcrypt hash if it looks like one, otherwise as plaintext to be hashed).
+- A user with a `passwordHash` value has it applied **verbatim** (no re-hashing): this is the field an export populates, so a round-trip restores the exact credential the user had at export time.
+- Otherwise, a user with a `password` value sets it (the value is treated as a bcrypt hash if it looks like one, otherwise as plaintext to be hashed). A user with **neither** field reuses the bcrypt hash captured from the existing row at the start of the import, so hand-written manifests that omit both keep existing users' passwords unchanged.
 - A federated secret left as `value: "***REDACTED***"` (and no `externalRef`) reuses the existing stored value. This is why a redacted export re-imports without re-typing credentials.
 
 ## Typical workflows
 
-- **Backup.** Export on a schedule and store `manifest.yaml` in version control. The redaction means the file carries no plaintext credentials.
+- **Backup.** Export on a schedule and store `manifest.yaml` somewhere access-controlled (private repository, secret store, or encrypted backup). The file carries no plaintext credentials, but it DOES carry each user's bcrypt password hash, so treat it as sensitive and keep it out of public repositories.
 - **Promote a change.** Export, edit in a reviewed pull request, re-import. Validation plus all-or-nothing apply makes a bad edit fail before it touches the store.
-- **Clone an environment.** Import a source environment's manifest into a fresh manager. Provide real `password` / secret `value`s for anything the target does not already have, since there is nothing to reuse on a first import.
+- **Clone an environment.** Import a source environment's manifest into a fresh manager. Exported `passwordHash` values carry user credentials over as-is; provide real `password` / secret `value`s only for anything the manifest does not carry, since there is nothing to reuse on a first import.
 
 For the objects the manifest carries, see "Tenants and databases", "Pools and cohorts", [Federation](/operating/federation), and the [Access control model](/operating/rbac-model).
