@@ -111,62 +111,67 @@ final class UserStore(
     * first; if that yields nothing AND `email` is given, retries with `username = email` so
     * operators can provision either form. tenant=NULL rows are superuser grants.
     *
-    * A row that exists but is disabled short-circuits to a deny (no grants) WITHOUT falling through
-    * to the email lookup: otherwise a disabled username-keyed row would look identical to a
-    * genuinely-missing row (both yield an empty grant list from a naive `AND enabled` filter), and
-    * an enabled email-keyed row for the same person would silently grant access despite the
-    * disable. The fallback to email is reserved for identities that are genuinely absent by
-    * username, not merely disabled.
+    * The disabled check is per-row, not per-username: the same username may exist once per tenant
+    * plus once as global superuser, and a multi-tenant admin must keep every enabled row's grant
+    * even when another tenant's row for the same username is disabled. Three cases per lookup:
     *
-    * Returns one `UserGrant` per row. Order is unspecified.
+    *   - rows exist, at least one enabled: return ONLY the enabled rows' grants (disabled rows
+    *     dropped). The email fallback does NOT run: rows existed under this key.
+    *   - rows exist, ALL disabled: deny outright (no grants) WITHOUT falling through to the email
+    *     lookup. Otherwise an all-disabled username would look identical to a genuinely-missing one
+    *     and an enabled email-keyed row for the same person would silently restore access.
+    *   - no rows: fall back to the email lookup (same per-row logic there).
+    *
+    * Returns one `UserGrant` per enabled row. Order is unspecified.
     */
   def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
     withConn { c =>
       lookupByUsername(c, identity) match
-        case Lookup.Disabled  => Nil
-        case Lookup.Found(gs) => gs
-        case Lookup.Missing   =>
+        case Lookup.AllDisabled => Nil
+        case Lookup.Found(gs)   => gs
+        case Lookup.Missing     =>
           email
             .filter(e => e.nonEmpty && e != identity)
             .map(lookupByUsername(c, _))
             .map {
-              case Lookup.Disabled  => Nil
-              case Lookup.Found(gs) => gs
-              case Lookup.Missing   => Nil
+              case Lookup.AllDisabled => Nil
+              case Lookup.Found(gs)   => gs
+              case Lookup.Missing     => Nil
             }
             .getOrElse(Nil)
     }
 
-  /** Outcome of a single username lookup, distinguishing "row absent" from "row present but
-    * disabled" so callers can short-circuit the disabled case instead of treating it the same as
-    * absent.
+  /** Outcome of a single username lookup, distinguishing "no rows at all" from "rows exist but
+    * every one is disabled" so callers can short-circuit the all-disabled case instead of treating
+    * it the same as absent. `Found` carries only the enabled rows' grants.
     */
   private enum Lookup:
     case Missing
-    case Disabled
+    case AllDisabled
     case Found(grants: List[UserGrant])
 
   private def lookupByUsername(c: Connection, username: String): Lookup =
-    // No `AND enabled` filter here: the row must be fetched regardless of
-    // its enabled state so a disabled row can be distinguished from a
-    // genuinely-missing one (see grantsForIdentity's doc).
+    // No `AND enabled` filter here: rows must be fetched regardless of
+    // their enabled state so an all-disabled username can be distinguished
+    // from a genuinely-missing one (see grantsForIdentity's doc).
     val ps = c.prepareStatement(
       "SELECT tenant, role, enabled FROM qodstate_user WHERE username = ?"
     )
     try
       ps.setString(1, username)
-      val rs          = ps.executeQuery()
-      val buf         = scala.collection.mutable.ListBuffer.empty[UserGrant]
-      var anyDisabled = false
+      val rs        = ps.executeQuery()
+      val buf       = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      var rowsFound = false
       try
         while rs.next() do
+          rowsFound = true
           val t       = Option(rs.getString(1)).filter(_.nonEmpty)
           val r       = Option(rs.getString(2)).getOrElse("user")
           val enabled = rs.getBoolean(3)
-          if !enabled then anyDisabled = true else buf += UserGrant(t, r)
+          if enabled then buf += UserGrant(t, r)
       finally rs.close()
-      if anyDisabled then Lookup.Disabled
-      else if buf.isEmpty then Lookup.Missing
+      if !rowsFound then Lookup.Missing
+      else if buf.isEmpty then Lookup.AllDisabled
       else Lookup.Found(buf.toList)
     finally ps.close()
 

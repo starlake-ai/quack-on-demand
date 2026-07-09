@@ -13,6 +13,10 @@ import java.sql.Connection
   * Uses `PreparedStatement.getMetaData` -- the Postgres JDBC driver resolves column metadata via
   * the wire-protocol `Describe` message without executing the statement or binding parameters, so
   * this is a cheap, side-effect-free check.
+  *
+  * Scope: only the projected column count is validated. Placeholder-count mismatches (systemQuery
+  * takes one `?` for username, tenantQuery two for tenant then username) are NOT checked here and
+  * surface as a login failure at the first authentication attempt instead.
   */
 object AuthQueryPreconditions:
 

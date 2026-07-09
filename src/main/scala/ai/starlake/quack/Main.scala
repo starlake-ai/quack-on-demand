@@ -182,19 +182,29 @@ object Main extends IOApp with LazyLogging:
     // must each project (password_hash, role, enabled) -- exactly the shape
     // DatabaseAuthenticator requires at runtime now that the tolerant
     // two-column branch is gone. Caught here instead of at first login.
+    // The probe result is computed first and sys.error'd after, so an
+    // unreachable auth database surfaces as the same clean config-error
+    // framing as the sibling gates above, not a raw JDBC exception.
     if authCfg.database.enabled then
-      Class.forName("org.postgresql.Driver")
-      val probeConn = java.sql.DriverManager.getConnection(
-        authCfg.database.jdbcUrl,
-        authCfg.database.username,
-        authCfg.database.password
-      )
-      try
-        AuthQueryPreconditions
-          .validate(probeConn, authCfg.database)
-          .left
-          .foreach(msg => sys.error(msg))
-      finally probeConn.close()
+      val probeResult: Either[String, Unit] =
+        try
+          Class.forName("org.postgresql.Driver")
+          val probeConn = java.sql.DriverManager.getConnection(
+            authCfg.database.jdbcUrl,
+            authCfg.database.username,
+            authCfg.database.password
+          )
+          try AuthQueryPreconditions.validate(probeConn, authCfg.database)
+          finally probeConn.close()
+        catch
+          case e: Exception =>
+            Left(
+              "auth.database startup validation failed: could not probe " +
+                s"systemQuery/tenantQuery against '${authCfg.database.jdbcUrl}' " +
+                s"(${e.getMessage}). Check QOD_AUTH_DB_JDBC_URL / QOD_AUTH_DB_USER / " +
+                "QOD_AUTH_DB_PASSWORD and that the auth database is reachable."
+            )
+      probeResult.left.foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows

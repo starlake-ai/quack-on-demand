@@ -154,3 +154,37 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       try us.grantsForIdentity("erin", Some("erin@example.com")) shouldBe Nil
       finally us.close()
     }
+
+  it should "keep tenant B's enabled grant when the same username's tenant A row is disabled" in
+    withFreshDb { (store, url) =>
+      // The same username may exist once per tenant (plus once as global
+      // superuser). Disabling one tenant's row must not zero the other
+      // tenant's untouched grant: the disabled check is per-row, not
+      // per-username. mintSessionFor depends on multi-tenant admins
+      // getting one UserGrant per enabled row.
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertTenant(Tenant(id = "globex", displayName = "globex"))
+      store.upsertUserWithHash(Some("acme"), "frank", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(Some("globex"), "frank", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try
+        us.grantsForIdentity("frank", None).map(_.tenant) shouldBe List(Some("globex"))
+      finally us.close()
+    }
+
+  it should "yield no grants and skip the email fallback when ALL rows for the username are disabled" in
+    withFreshDb { (store, url) =>
+      // Multi-row variant of the erin case: every username-keyed row
+      // (two tenants) is disabled, and an enabled email-keyed row exists.
+      // All-disabled must deny outright, not fall through to email.
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertTenant(Tenant(id = "globex", displayName = "globex"))
+      store.upsertUserWithHash(Some("acme"), "gina", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(Some("globex"), "gina", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(None, "gina@example.com", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try us.grantsForIdentity("gina", Some("gina@example.com")) shouldBe Nil
+      finally us.close()
+    }
