@@ -113,6 +113,7 @@ final class CatalogHandlers(
       tenantDb: String,
       limit: Option[Int],
       before: Option[Long],
+      table: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Res[List[CatalogSnapshotEntry]] =
     gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
@@ -120,7 +121,13 @@ final class CatalogHandlers(
         if !isDuckLake(tid, db) then Nil
         else
           val effectiveLimit = limit.getOrElse(200).max(1).min(1000)
-          resolveReader(tid, db).listSnapshots(effectiveLimit, before)
+          val parsedTable    = table.flatMap { raw =>
+            val dotIdx = raw.indexOf('.')
+            if dotIdx > 0 && dotIdx < raw.length - 1 then
+              Some((raw.substring(0, dotIdx), raw.substring(dotIdx + 1)))
+            else None
+          }
+          resolveReader(tid, db).listSnapshots(effectiveLimit, before, parsedTable)
       )
     }
 

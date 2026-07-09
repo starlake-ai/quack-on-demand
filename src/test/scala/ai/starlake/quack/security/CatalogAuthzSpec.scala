@@ -204,3 +204,18 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
+
+  it should "accept the table query parameter on snapshots GET" in {
+    val (h, _) = bootWithTwoTenants()
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/catalog/tenant/${SecurityFixtures.TenantId}/database/${SecurityFixtures.TenantDbName}/snapshots?table=tpch1.region",
+        apiKey = Some(token)
+      )
+      withClue(s"snapshots with table filter body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }

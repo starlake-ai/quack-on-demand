@@ -201,8 +201,10 @@ final class ManagerServer(
                 )
         },
         CatalogEndpoints.listSnapshotsEndpoint.serverLogic {
-          case (tenant, tenantDb, limit, before, token) =>
-            IO.blocking(h.listSnapshots(tenant, tenantDb, limit, before, token)(sessions.scopeOf))
+          case (tenant, tenantDb, limit, before, table, token) =>
+            IO.blocking(
+              h.listSnapshots(tenant, tenantDb, limit, before, table, token)(sessions.scopeOf)
+            )
         }
       )
     }

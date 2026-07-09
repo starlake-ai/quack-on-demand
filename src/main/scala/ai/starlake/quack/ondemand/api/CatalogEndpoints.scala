@@ -75,7 +75,7 @@ object CatalogEndpoints:
       )
 
   val listSnapshotsEndpoint: PublicEndpoint[
-    (String, String, Option[Int], Option[Long], Option[String]),
+    (String, String, Option[Int], Option[Long], Option[String], Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
     List[CatalogSnapshotEntry],
     Any
@@ -87,8 +87,10 @@ object CatalogEndpoints:
       )
       .in(query[Option[Int]]("limit"))
       .in(query[Option[Long]]("before"))
+      .in(query[Option[String]]("table"))
       .in(Endpoints.authToken)
       .out(jsonBody[List[CatalogSnapshotEntry]])
       .description(
-        "List DuckLake snapshots of the (tenant, tenantDb), newest first; keyset pagination via limit + before=snapshotId."
+        "List DuckLake snapshots of the (tenant, tenantDb), newest first; keyset pagination via limit + before=snapshotId. " +
+          "Optional table=<schema>.<table> filters to snapshots affecting that table."
       )

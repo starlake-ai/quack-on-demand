@@ -79,9 +79,10 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
       filesRemoved = 0,
       affectedTables = List(CatalogTableRef("tpch1", "region"))
     )
-    var seenAsOf: Option[Long]   = None
-    var seenLimit: Option[Int]   = None
-    var seenBefore: Option[Long] = None
+    var seenAsOf: Option[Long]                  = None
+    var seenLimit: Option[Int]                  = None
+    var seenBefore: Option[Long]                = None
+    var seenTable: Option[(String, String)]     = None
 
     // Subclass `DuckLakeCatalogReader` for the stub. The base class wants
     // a HikariDataSource - we pass null since none of the methods we
@@ -97,6 +98,7 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
       ): List[CatalogSnapshotEntry] =
         seenLimit = Some(limit)
         seenBefore = before
+        seenTable = table
         List(snapshot)
       override def getTable(schema: String, table: String, asOf: Option[Long] = None) =
         seenAsOf = asOf
@@ -138,32 +140,48 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     getTable("ghost").left.toOption.get._1 shouldBe StatusCode.NotFound
 
   "listSnapshots" should "return what the reader returns" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, NoKey)(NoScope) shouldBe
+    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope) shouldBe
       Right(List(snapshot))
 
   "listSnapshots" should "return Nil for non-DuckLake tenant-dbs" in new Stubs:
     val gated =
       new CatalogHandlers((_, _) => reader, sup, store, (_, _) => Some(TenantDbKind.InMemory))
-    gated.listSnapshots("acme", "acme_default", None, None, NoKey)(NoScope) shouldBe Right(Nil)
+    gated.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope) shouldBe Right(Nil)
 
   "listSnapshots" should "default limit to 200 when None" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope)
     seenLimit shouldBe Some(200)
     seenBefore shouldBe None
 
   "listSnapshots" should "clamp limit 5000 to 1000" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(5000), None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(5000), None, None, NoKey)(NoScope)
     seenLimit shouldBe Some(1000)
 
   "listSnapshots" should "clamp limit 0 to 1" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(0), None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(0), None, None, NoKey)(NoScope)
     seenLimit shouldBe Some(1)
 
   "listSnapshots" should "pass before through unchanged" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(10), Some(42L), NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(10), Some(42L), None, NoKey)(NoScope)
     seenLimit shouldBe Some(10)
     seenBefore shouldBe Some(42L)
 
   "getTable" should "pass asOf through to the reader" in new Stubs:
     getTable("region", asOf = Some(3L))
     seenAsOf shouldBe Some(3L)
+
+  "listSnapshots" should "parse and pass valid schema.table through" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", None, None, Some("tpch1.region"), NoKey)(
+      NoScope
+    )
+    seenTable shouldBe Some(("tpch1", "region"))
+
+  "listSnapshots" should "ignore dotless table filter" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", None, None, Some("nodot"), NoKey)(NoScope)
+    seenTable shouldBe None
+
+  "listSnapshots" should "ignore table filter with empty parts" in new Stubs:
+    handlers.listSnapshots("acme", "acme_default", None, None, Some(".suffix"), NoKey)(NoScope)
+    seenTable shouldBe None
+    handlers.listSnapshots("acme", "acme_default", None, None, Some("prefix."), NoKey)(NoScope)
+    seenTable shouldBe None
