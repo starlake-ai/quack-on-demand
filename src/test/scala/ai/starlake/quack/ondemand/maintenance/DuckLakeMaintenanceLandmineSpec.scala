@@ -26,10 +26,14 @@ class DuckLakeMaintenanceLandmineSpec extends AnyFlatSpec with Matchers with Pos
       .mkString("\n")
 
   private def dirBytes(p: Path): Long =
-    Files.walk(p).filter(Files.isRegularFile(_)).mapToLong(Files.size(_)).sum
+    val stream = Files.walk(p)
+    try stream.filter(Files.isRegularFile(_)).mapToLong(Files.size(_)).sum
+    finally stream.close()
 
   private def parquetCount(p: Path): Long =
-    Files.walk(p).filter(f => f.toString.endsWith(".parquet")).count()
+    val stream = Files.walk(p)
+    try stream.filter(f => f.toString.endsWith(".parquet")).count()
+    finally stream.close()
 
   "compaction alone" should "NOT reduce on-disk bytes (the chain is required)" in
     withCatalog("maint", extraSql = manySmallFiles) { (reader, dataPath) =>

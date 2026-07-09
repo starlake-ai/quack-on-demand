@@ -4,7 +4,6 @@ import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import org.scalatest.Assertions
 
 import java.nio.file.{Files, Path}
-import java.sql.DriverManager
 import scala.sys.process._
 import scala.util.Try
 
@@ -15,10 +14,10 @@ import scala.util.Try
   */
 trait PostgresFixture:
 
-  private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST", "localhost")
-  private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT", "5432").toInt
-  private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
-  private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
+  private val pgHost = TestPostgres.pgHost
+  private val pgPort = TestPostgres.pgPort
+  private val pgUser = TestPostgres.pgUser
+  private val pgPass = TestPostgres.pgPass
 
   /** The temp database name and DATA_PATH of the catalog currently open under `withCatalog`, set
     * right after seeding so a test body can rebuild its own ATTACH (e.g. a second `duckdb` CLI
@@ -27,24 +26,10 @@ trait PostgresFixture:
   protected var currentDbName: Option[String] = None
   protected var currentDataPath: Option[Path] = None
 
-  Class.forName("org.postgresql.Driver")
-
-  private def adminUrl: String = s"jdbc:postgresql://$pgHost:$pgPort/postgres"
-
-  private lazy val pgReachable: Boolean =
-    Try {
-      val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
-      try c.isValid(2)
-      finally c.close()
-    }.getOrElse(false)
-
   def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
       test: (DuckLakeCatalogReader, Path) => A
   ): A =
-    if !pgReachable then
-      Assertions.cancel(
-        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
-      )
+    TestPostgres.ensureReachable()
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
     try

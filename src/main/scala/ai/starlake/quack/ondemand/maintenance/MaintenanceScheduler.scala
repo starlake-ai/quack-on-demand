@@ -38,20 +38,25 @@ final class MaintenanceScheduler(
       store.listTenantDbs(t.id).filter(_.kind == TenantDbKind.DuckLake).foreach { td =>
         val rows = store.listMaintenancePolicies(t.id, td.name)
         val pol  = PolicyMath.effective(rows, None, None)
+        // Computed once per tenant-db and reused below for both the min-interval gate and the
+        // cron-due check (F3b): the two reads were previously separate store round trips that
+        // could observe different results if a run enqueued between them.
+        val lastRun = store.lastNonManualMaintenanceRunAt(t.id, td.name)
         if pol.enabled
           && !store.hasActiveMaintenanceRun(t.id, td.name)
-          && store
-            .lastNonManualMaintenanceRunAt(t.id, td.name)
-            .forall(_.isBefore(now.minusSeconds(minIntervalMinutes * 60L)))
+          && lastRun.forall(_.isBefore(now.minusSeconds(minIntervalMinutes * 60L)))
         then
-          val last = store.lastNonManualMaintenanceRunAt(t.id, td.name)
-          if CronExpr.due(pol.cron, staggerOf(t.id, td.name), last, now) then
+          if CronExpr.due(pol.cron, staggerOf(t.id, td.name), lastRun, now) then
             store.enqueueMaintenanceRun(t.id, td.name, "tenantdb", "cadence", None)
             ()
           else
             val hot = smallFileCountsOf(t.id, td.name, TargetBytesForSmall)
               .filter { case ((s, tb), n) =>
-                n >= PolicyMath.effective(rows, Some(s), Some(tb)).smallFileMinCount
+                val effective = PolicyMath.effective(rows, Some(s), Some(tb))
+                // Per-table enabled=false overrides a lake-level enabled=true (F3a): a table
+                // can be individually opted out of managed maintenance even while the rest of
+                // the lake is on, so a threshold hit alone must not be enough to enqueue it.
+                effective.enabled && n >= effective.smallFileMinCount
               }
               .filterNot { case ((s, tb), _) =>
                 val unsafe = isUnsafeIdentifier(s) || isUnsafeIdentifier(tb)

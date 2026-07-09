@@ -94,6 +94,48 @@ class MaintenanceSchedulerSpec extends AnyFlatSpec with Matchers:
     store.listMaintenanceRuns("acme", "acme_db", 10, None).size shouldBe 1
   }
 
+  it should "skip a threshold-triggered run for a table whose effective policy disables it, " +
+    "while other hot tables in the same lake still get enqueued (F3a)" in {
+      // cron far in the future so only the threshold path can fire
+      val tableDisabled = MaintenancePolicy(
+        Names.newSurrogateId("mpol"),
+        "acme",
+        "acme_db",
+        "table",
+        Some("tpch1"),
+        Some("region"),
+        enabled = Some(false),
+        retentionDays = None,
+        compactionEnabled = None,
+        targetFileSize = None,
+        smallFileMinCount = None,
+        rewriteDeleteThreshold = None,
+        cleanupGraceDays = None,
+        orphanMinAgeDays = None,
+        cron = None
+      )
+      val (store, sched) = fixture(
+        smallFiles = Map(("tpch1", "region") -> 5, ("tpch1", "nation") -> 5),
+        policyRows = List(enabledPolicy(cron = "0 0 1 1 *"), tableDisabled)
+      )
+      // tickOnce enqueues at most one threshold-triggered table per tick; tick, drain, tick
+      // again (well past minIntervalMinutes so the second tick isn't interval-blocked) so both
+      // hot tables get a chance regardless of map iteration order.
+      val t0 = Instant.now()
+      sched.tickOnce(t0)
+      store.claimQueuedMaintenanceRun().foreach { r =>
+        store.finishMaintenanceRun(r.id, "succeeded", RunCounters(), None)
+      }
+      sched.tickOnce(t0.plusSeconds(3600))
+
+      val runs = store.listMaintenanceRuns("acme", "acme_db", 10, None)
+      // "region" is disabled at the table level and must never be enqueued even though its
+      // small-file count exceeds smallFileMinCount; "nation" has no per-table override and
+      // still gets enqueued, proving this is a per-table suppression, not a global one.
+      runs.map(_.scope) should not contain "table:tpch1.region"
+      runs.map(_.scope) should contain("table:tpch1.nation")
+    }
+
   it should "sweep stale running rows" in {
     val (store, sched) = fixture(policyRows = List(enabledPolicy(cron = "0 0 1 1 *")))
     store.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "cadence", None)

@@ -57,6 +57,17 @@ final class MaintenanceRunner(
               .handleErrorWith { t =>
                 // Defensive: a synchronous throw from an injected lookup escapes the
                 // step-level Left handling; still record + audit the finished run.
+                //
+                // Note: this same handler also catches the case where the chain ran every
+                // step successfully and only the final store.finishMaintenanceRun call inside
+                // chain() threw (for example a transient store error). When that happens we
+                // land here with just the thrown error, not the real per-step counters the
+                // chain had already accumulated, so the run gets recorded "failed" with zero
+                // counters even though the work actually completed. This is inherent
+                // best-effort behavior given the current design (the counters live in a Ref
+                // local to chain() and are not threaded out to this handler), not a new bug
+                // introduced here; it is called out so a future change that wants exact
+                // counters in that edge case knows where to look.
                 val msg = Option(t.getMessage).getOrElse(t.toString)
                 IO.blocking(
                   store.finishMaintenanceRun(run.id, "failed", RunCounters(), Some(msg))
@@ -118,14 +129,24 @@ final class MaintenanceRunner(
         countersRef <- Ref.of[IO, RunCounters](RunCounters(snapshotsSkippedPinned = skipped.size))
         statusRef   <- Ref.of[IO, String]("succeeded")
         errorRef    <- Ref.of[IO, Option[String]](None)
+        sweptRef    <- Ref.of[IO, Boolean](false)
 
+        // `false` from heartbeatMaintenanceRun means a sweeper already reaped this run as a
+        // zombie (stale heartbeat) elsewhere and marked it terminal-failed. Stop the chain
+        // right there like a step failure would, but do not touch statusRef/errorRef: that
+        // would be this caller overwriting a status it no longer owns. sweptRef records that
+        // this is why the chain stopped, so the finish path below skips the finish-write and
+        // success audit instead of clobbering the sweeper's row.
         step = (name: String, sql: String, onOk: RunCounters => RunCounters) =>
           exec(node, sql).flatMap {
             case Right(()) =>
               countersRef.update(onOk) *>
                 countersRef.get
                   .flatMap(c => IO.blocking(store.heartbeatMaintenanceRun(run.id, c)))
-                  .as(true)
+                  .flatMap { stillOwned =>
+                    if stillOwned then IO.pure(true)
+                    else sweptRef.set(true).as(false)
+                  }
             case Left(msg) =>
               statusRef.set("failed") *> errorRef.set(Some(s"$name: $msg")).as(false)
           }
@@ -223,8 +244,18 @@ final class MaintenanceRunner(
           _.copy(bytesReclaimed = math.max(0L, bytesBefore - bytesAfter))
         )
         counters <- countersRef.get
-        won      <- IO.blocking(store.finishMaintenanceRun(run.id, status, counters, error))
-        _        <- finishIfNotSwept(run, status, counters, startedAt)(won)
+        swept    <- sweptRef.get
+        // When a mid-chain heartbeat already reported the run swept, the store row is already
+        // terminal (failed by the sweeper); don't call finishMaintenanceRun again for it (that
+        // would either no-op against a row this caller no longer owns, or -- worse, if the
+        // sweeper's write and this write interleaved some other way -- risk overwriting it) and
+        // don't emit a success/failed audit for a run this caller didn't actually conclude.
+        // finishIfNotSwept(won = false) reuses the existing "already swept" log-and-skip path.
+        _ <-
+          if swept then finishIfNotSwept(run, status, counters, startedAt)(false)
+          else
+            IO.blocking(store.finishMaintenanceRun(run.id, status, counters, error))
+              .flatMap(finishIfNotSwept(run, status, counters, startedAt))
       yield ()
     }
 
