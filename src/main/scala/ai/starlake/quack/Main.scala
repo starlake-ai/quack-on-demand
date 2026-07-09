@@ -489,15 +489,32 @@ object Main extends IOApp with LazyLogging:
     // Catalog browser handlers (session-gated since Spec 00). AS OF selector
     // resolution (asOf / asOfTag / asOfTs) runs inside getTable via
     // SnapshotSelector; reads are audited only when catalog.auditCatalogReads is on.
+    def tenantDbKindOf(
+        tenant: String,
+        tenantDb: String
+    ): Option[ai.starlake.quack.model.TenantDbKind] =
+      sup.findTenantDb(tenant, tenantDb).map(_.kind)
+
     val catalogHandlers: Option[CatalogHandlers] =
-      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
-        sup.findTenantDb(tenant, tenantDb).map(_.kind)
       Some(
         new CatalogHandlers(
           catalogReader,
           sup,
           store,
-          kindOf,
+          tenantDbKindOf,
+          audit = auditRecorder,
+          auditReads = mgrCfg.catalog.auditCatalogReads
+        )
+      )
+
+    // Per-table history timeline (EPIC Spec 01). Same reader cache, gate, and audit knob as the
+    // browser handlers.
+    val catalogHistoryHandlers: Option[ai.starlake.quack.ondemand.api.CatalogHistoryHandlers] =
+      Some(
+        new ai.starlake.quack.ondemand.api.CatalogHistoryHandlers(
+          catalogReader,
+          sup,
+          tenantDbKindOf,
           audit = auditRecorder,
           auditReads = mgrCfg.catalog.auditCatalogReads
         )
@@ -1152,6 +1169,7 @@ object Main extends IOApp with LazyLogging:
         tagHandlers,
         maintenanceHandlers,
         previewHandlers,
+        catalogHistoryHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,

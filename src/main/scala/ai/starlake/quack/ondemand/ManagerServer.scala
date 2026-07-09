@@ -37,6 +37,7 @@ final class ManagerServer(
     tags: Option[TagHandlers],
     maintenance: Option[MaintenanceHandlers],
     preview: Option[CatalogPreviewHandlers],
+    catalogHistory: Option[CatalogHistoryHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -284,6 +285,65 @@ final class ManagerServer(
             h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(sessions.scopeOf)
         }
       )
+    }
+
+    // Per-table history timeline (EPIC Spec 01). Session-gated per request via
+    // TenantScopeCheck inside the handler, same shape as the browser GETs above.
+    val catalogHistoryEndpoints: List[ServerEndpoint[Any, IO]] = catalogHistory.toList.map { h =>
+      CatalogEndpoints.tableHistoryEndpoint.serverLogic {
+        case (
+              tenant,
+              tenantDb,
+              schema,
+              table,
+              limit,
+              before,
+              fromRaw,
+              toRaw,
+              operation,
+              author,
+              token
+            ) =>
+          def parseTs(
+              raw: Option[String],
+              name: String
+          ): Either[(sttp.model.StatusCode, ErrorResponse), Option[java.time.Instant]] =
+            raw match
+              case None    => Right(None)
+              case Some(r) =>
+                try Right(Some(java.time.Instant.parse(r)))
+                catch
+                  case _: Exception =>
+                    Left(
+                      (
+                        sttp.model.StatusCode.BadRequest,
+                        ErrorResponse("invalid_filter", s"$name must be ISO-8601")
+                      )
+                    )
+          val bounds =
+            for
+              from <- parseTs(fromRaw, "from")
+              to   <- parseTs(toRaw, "to")
+            yield (from, to)
+          bounds match
+            case Left(e)           => IO.pure(Left(e))
+            case Right((from, to)) =>
+              IO.blocking(
+                h.history(
+                  tenant,
+                  tenantDb,
+                  schema,
+                  table,
+                  limit,
+                  before,
+                  from,
+                  to,
+                  operation,
+                  author,
+                  token
+                )(sessions.scopeOf)
+              )
+      }
     }
 
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
@@ -569,7 +629,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

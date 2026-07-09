@@ -4,6 +4,17 @@
 
 ### Catalog
 
+- **Per-table history / audit timeline (EPIC Spec 01).** `GET /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/history`
+  returns the table's DuckLake commit history, newest first, with operation classification
+  (create / insert / delete / update / alter / drop / maintenance / unknown), author and commit
+  message (P1 stamping), a schema-changed flag, and row/file deltas attributable to the table.
+  Keyset pagination (`limit` default 50 max 200, `before`) plus server-side `from` / `to` /
+  `operation` / `author` filters. Identity keys on the stable DuckLake `table_id`, so history
+  survives renames. New History tab on the catalog table detail page: a filterable timeline,
+  a per-commit detail drawer, and deep links to "view table at this snapshot" (AS OF) and
+  "compare schema" (two-snapshot diff). Null authors (pre-stamping snapshots) render as
+  "unknown". History reads audit as `catalog.history.read` under the existing
+  `QOD_AUDIT_CATALOG_READS` knob.
 - **Time-travel viewer completed (EPIC Spec 00).** The snapshot browser now shows the author and
   commit message stamped on each snapshot (unstamped rows render "unknown") and can filter the
   timeline to one table. Tables can be viewed as of a timestamp (`asOfTs=<ISO-8601>`, resolved
