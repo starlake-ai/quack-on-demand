@@ -603,7 +603,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
     * make changes OR perform compaction - not both"), and separate DML vs. compaction transactions
     * land on different snapshot_ids, so `tr` (keyed by a DML snapshot's end_snapshot) and `sched`
     * (keyed by a compaction snapshot's own snapshot_id) are structurally disjoint keys; re-verify
-    * this invariant on a DuckLake pin bump. None = table name unknown in the current catalog state.
+    * this invariant on a DuckLake pin bump. Row/file deltas are computed from this live metadata,
+    * so they decay once maintenance has run: `filesRemoved` reads
+    * `ducklake_files_scheduled_for_deletion`, whose rows are consumed by
+    * `ducklake_cleanup_old_files` (part of the shipped Spec 09 maintenance chain), so a commit's
+    * `filesRemoved` reverts to 0 after cleanup runs; and `merge_adjacent` hard-deletes the
+    * superseded `ducklake_data_file` rows, so an insert commit's `rowsAdded`/`filesAdded` are lost
+    * once compaction has run over it. None = table name unknown in the current catalog state.
     */
   def listTableHistory(
       schema: String,
