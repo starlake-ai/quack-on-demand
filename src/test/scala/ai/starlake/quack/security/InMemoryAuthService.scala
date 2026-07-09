@@ -94,7 +94,12 @@ object InMemoryAuthService:
           val result = BCrypt.verifyer().verify(password.toCharArray, hash)
           if result.verified then
             store.findUser(tenant, username) match
-              case None    => Left(s"user '$username' vanished after hash lookup")
+              case None                  => Left(s"user '$username' vanished after hash lookup")
+              case Some(u) if !u.enabled =>
+                // Mirrors DatabaseAuthenticator: a disabled user is rejected
+                // with the exact same message as a wrong password so the
+                // REST response cannot distinguish the two.
+                Left("invalid credentials")
               case Some(u) =>
                 Right(
                   AuthenticatedProfile(

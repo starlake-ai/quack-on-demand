@@ -127,9 +127,12 @@ object ManifestImporter:
     * longer appear under a parent that IS in the YAML get deleted (delete-then-upsert). The
     * importer never drops a Postgres database -- only the `qodstate_*` registry rows are removed.
     *
-    * Passwords: a user with `password` set has it bcrypt-ed (or kept verbatim if it already looks
-    * like a hash); a user with no `password` field reuses the existing hash captured at the start
-    * (snapshot); a brand-new user without a password is an error.
+    * Passwords: a user with `passwordHash` set has it applied verbatim, no re-hashing (this is the
+    * field [[ManifestExporter]] populates, so an export/import round-trip preserves the SAME
+    * credential without ever seeing plaintext). Otherwise a user with `password` set has it
+    * bcrypt-ed (or kept verbatim if it already looks like a hash); a user with neither field reuses
+    * the existing hash captured at the start (snapshot); a brand-new user without either is an
+    * error.
     *
     * @param federatedStore
     *   when present, federated sources and secrets nested inside each tenant-db are upserted using
@@ -439,9 +442,15 @@ object ManifestImporter:
 
       // 5. Users (with password snapshot fallback).
       m.users.foreach { mu =>
-        val hashOpt: Option[String] = mu.password.map(BcryptUtils.toHash).orElse {
-          snapshot.get((mu.tenant, mu.username))
-        }
+        // Priority: an explicit passwordHash is applied verbatim (no
+        // re-hashing -- it is already the real bcrypt hash captured at
+        // export time, so this is what makes a round-tripped user
+        // authenticate with the SAME credential it had before export).
+        // Otherwise fall back to plaintext-or-prior-credential exactly as
+        // before this field existed.
+        val hashOpt: Option[String] = mu.passwordHash
+          .orElse(mu.password.map(BcryptUtils.toHash))
+          .orElse(snapshot.get((mu.tenant, mu.username)))
         hashOpt match
           case None =>
             errs += s"users[]: '${mu.username}' has no password and no prior credential in the manager"
@@ -454,7 +463,8 @@ object ManifestImporter:
             // silently come back empty. Superusers (tenant = None) stay None;
             // the import-time validation guarantees a non-None tenant resolves.
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
-            val userId = store.upsertUserWithHash(tenantId, mu.username, hash, mu.role)
+            val userId                   =
+              store.upsertUserWithHash(tenantId, mu.username, hash, mu.role, mu.enabled)
 
             // --- User roles
             val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
@@ -481,8 +491,17 @@ object ManifestImporter:
               store.deletePoolPermission(p.id)
             }
             mu.poolGrants.foreach { mpg =>
+              // The grant's pool lives in `mpg.tenant` when set (a cross-tenant
+              // grant, only meaningful for a superuser -- see ManifestPoolGrant's
+              // doc comment), otherwise it lives in the grant owner's own tenant
+              // (the pre-existing, common in-tenant case). Resolving the
+              // qualifier first is what lets a superuser's cross-tenant grant
+              // round-trip to the SAME (tenant, pool) pair instead of the old
+              // behavior of collapsing to a tenant-less `pool = None`.
+              val grantTenantId: Option[String] =
+                mpg.tenant.flatMap(t => tenantIdFor(store, t)).orElse(tenantId)
               val poolId: Option[String] = mpg.pool.flatMap { pn =>
-                tenantId.flatMap { tid =>
+                grantTenantId.flatMap { tid =>
                   // Walk this tenant's tenant-dbs from the local map and
                   // search each db's pool map by name -- no store call.
                   dbsOf(tid).values.iterator
@@ -494,7 +513,14 @@ object ManifestImporter:
               store.insertPoolPermission(
                 PoolPermission(
                   id = Names.newSurrogateId("pp"),
-                  tenantId = tenantId.getOrElse(""),
+                  // qodstate_pool_permission.tenant_id FK-references qodstate_tenant
+                  // and must name the pool's OWNING tenant, not necessarily the
+                  // grant owner's tenant. Falling back to "" here (as before this
+                  // qualifier existed) violated that FK for any superuser grant;
+                  // grantTenantId is always the pool's real tenant when the pool
+                  // resolved, so this now names it correctly in both the in-tenant
+                  // and cross-tenant cases.
+                  tenantId = grantTenantId.getOrElse(""),
                   poolId = poolId,
                   userId = Some(userId),
                   groupId = None

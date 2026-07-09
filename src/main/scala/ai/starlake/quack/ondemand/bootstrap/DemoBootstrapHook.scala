@@ -18,8 +18,7 @@ import scala.util.Try
   */
 object DemoBootstrapHook:
 
-  private val EnvKey    = "QOD_BOOTSTRAP_YAML"
-  private val DemoNames = Set("acme", "globex")
+  private val EnvKey = "QOD_BOOTSTRAP_YAML"
 
   private val logger = LoggerFactory.getLogger(getClass)
 
@@ -62,12 +61,15 @@ object DemoBootstrapHook:
       fedStore: Option[FederatedSourceStore],
       path: String
   ): Unit =
-    val existing   = store.listTenants().map(_.id).toSet
-    val collisions = existing.intersect(DemoNames)
-    if collisions.nonEmpty then
+    val existingCount = store.listTenants().size
+    if existingCount > 0 then
+      // Any tenant already present means this store is not a fresh boot,
+      // whether or not those tenants happen to be demo-named. The importer's
+      // delete-then-upsert semantics would otherwise wipe REST-API-added
+      // sibling rows under a non-demo tenant on every restart.
       logger.info(
-        s"bootstrap: demo tenants already present (${collisions.mkString(", ")}), " +
-          s"skipping import of '$path'"
+        s"bootstrap: $existingCount tenant(s) already present in store, " +
+          s"skipping demo bootstrap import of '$path'"
       )
     else
       ManifestImporter.apply(manifest, store, fedStore) match

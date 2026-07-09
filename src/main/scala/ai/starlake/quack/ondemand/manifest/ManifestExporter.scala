@@ -5,8 +5,11 @@ import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore
 import java.time.Instant
 
 /** Read-only snapshot of the qodstate_* control plane in YAML-manifest shape. The output never
-  * carries user passwords (hashes stay in Postgres) but does carry tenant authProvider
-  * clientSecrets verbatim since those are operator-supplied and cannot be recovered if lost.
+  * carries a plaintext user password (`ManifestUser.password` stays `None` -- plaintext is never
+  * available once a user is created, only the bcrypt hash is stored) but DOES carry the real bcrypt
+  * hash in `ManifestUser.passwordHash` so a round-trip preserves the SAME credential. Tenant
+  * authProvider clientSecrets are carried verbatim since those are operator-supplied and cannot be
+  * recovered if lost.
   */
 object ManifestExporter:
 
@@ -31,18 +34,25 @@ object ManifestExporter:
 
     // Pull the whole graph in one round-trip; the per-tenant loop below
     // walks the in-memory index maps instead of going back to the store.
-    val snap              = store.snapshot()
-    val dbsByTenant       = snap.tenantDbs.groupBy(_.tenantId)
-    val poolsByDb         = snap.pools.groupBy(_.tenantDbId)
-    val rolesByT          = snap.roles.groupBy(_.tenantId)
-    val groupsByT         = snap.groups.groupBy(_.tenantId)
-    val rolePermsByRole   = snap.rolePermissions.groupBy(_.roleId)
-    val colPoliciesByRole = snap.columnPolicies.groupBy(_.roleId)
-    val rowPoliciesByRole = snap.rowPolicies.groupBy(_.roleId)
-    val rolesByGroup      = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
-    val rolesByUser       = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
-    val groupsByUser      = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
-    val poolPermsByUser   =
+    val snap        = store.snapshot()
+    val dbsByTenant = snap.tenantDbs.groupBy(_.tenantId)
+    val poolsByDb   = snap.pools.groupBy(_.tenantDbId)
+    // Global pool -> (owning tenant addressing-name, pool name) index, used to
+    // resolve pool grants regardless of which tenant loop iteration is
+    // running. Pool carries its own tenantId directly (denormalized from its
+    // tenant-db), so this does not need to go through tenantDbId. The tenant
+    // id IS the manifest addressing name (see the comment at `name = t.id`
+    // below), so `p.tenantId` needs no further lookup.
+    val poolTenantAndNameByPoolId = snap.pools.map(p => p.id -> (p.tenantId, p.name)).toMap
+    val rolesByT                  = snap.roles.groupBy(_.tenantId)
+    val groupsByT                 = snap.groups.groupBy(_.tenantId)
+    val rolePermsByRole           = snap.rolePermissions.groupBy(_.roleId)
+    val colPoliciesByRole         = snap.columnPolicies.groupBy(_.roleId)
+    val rowPoliciesByRole         = snap.rowPolicies.groupBy(_.roleId)
+    val rolesByGroup    = snap.groupRoles.groupBy(_.groupId).view.mapValues(_.map(_.roleId)).toMap
+    val rolesByUser     = snap.userRoles.groupBy(_.userId).view.mapValues(_.map(_.roleId)).toMap
+    val groupsByUser    = snap.userGroups.groupBy(_.userId).view.mapValues(_.map(_.groupId)).toMap
+    val poolPermsByUser =
       snap.poolPermissions
         .collect { case p if p.userId.isDefined => p.userId.get -> p }
         .groupBy(_._1)
@@ -195,9 +205,9 @@ object ManifestExporter:
             rolesByUser.getOrElse(u.id, Nil).flatMap(roleIdToName.get).sorted
           val userGroupNames =
             groupsByUser.getOrElse(u.id, Nil).flatMap(groupIdToName.get).sorted
-          val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { pp =>
-            ManifestPoolGrant(pool = pp.poolId.flatMap(poolIdToName.get))
-          }
+          val userPoolGrants = poolPermsByUser
+            .getOrElse(u.id, Nil)
+            .map(pp => poolGrantFor(pp, ownerTenantAddr = Some(t.id), poolTenantAndNameByPoolId))
           ManifestUser(
             // Emit the tenant DISPLAY NAME -- manifests are human-facing and
             // keyed by name (matching role/group emission above), not the
@@ -205,8 +215,12 @@ object ManifestExporter:
             tenant = u.tenant.map(_ => t.id),
             username = u.username,
             password = None,
+            // Real bcrypt hash: plaintext is never available post-creation (see
+            // ManifestUser.passwordHash doc comment), so this is the only way a
+            // round-trip can carry the SAME credential forward.
+            passwordHash = store.getPasswordHash(u.tenant, u.username),
             role = u.role,
-            enabled = true,
+            enabled = u.enabled,
             roles = userRoleNames,
             groups = userGroupNames,
             poolGrants = userPoolGrants
@@ -229,17 +243,23 @@ object ManifestExporter:
       )
     }
 
-    // Superusers are listed with tenant=None; collect them separately.
+    // Superusers are listed with tenant=None; collect them separately. A
+    // superuser has no home tenant, so every pool grant is potentially
+    // cross-tenant -- poolGrantFor always emits the `tenant` qualifier here
+    // (ownerTenantAddr = None) so the grant resolves back to the exact same
+    // (tenant, pool) pair on import instead of collapsing to a useless
+    // tenant-less `pool = None`.
     val superusers = snap.users.filter(_.tenant.isEmpty).sortBy(_.username).map { u =>
-      val userPoolGrants = poolPermsByUser.getOrElse(u.id, Nil).map { _ =>
-        ManifestPoolGrant(pool = None) // superusers: pool id resolution requires tenant context
-      }
+      val userPoolGrants = poolPermsByUser
+        .getOrElse(u.id, Nil)
+        .map(pp => poolGrantFor(pp, ownerTenantAddr = None, poolTenantAndNameByPoolId))
       ManifestUser(
         tenant = None,
         username = u.username,
         password = None,
+        passwordHash = store.getPasswordHash(None, u.username),
         role = u.role,
-        enabled = true,
+        enabled = u.enabled,
         roles = Nil,
         groups = Nil,
         poolGrants = userPoolGrants
@@ -256,3 +276,24 @@ object ManifestExporter:
       groups = tenants.flatMap(_._3),
       users = superusers ++ tenants.flatMap(_._4)
     )
+
+  /** Resolve a single [[ai.starlake.quack.ondemand.state.PoolPermission]] into a
+    * [[ManifestPoolGrant]]. `pool = None` when the permission has no pool id (a tenant-wide
+    * wildcard grant) or the pool id no longer resolves (dangling FK, should not happen). The
+    * `tenant` qualifier is only emitted when the pool's owning tenant differs from
+    * `ownerTenantAddr` -- the common in-tenant case stays qualifier-free so existing manifests
+    * round-trip byte-for-byte; a cross-tenant grant (only possible for a superuser, whose
+    * `ownerTenantAddr` is None) always gets the qualifier so import can resolve back to the exact
+    * same (tenant, pool) pair instead of guessing.
+    */
+  private def poolGrantFor(
+      pp: ai.starlake.quack.ondemand.state.PoolPermission,
+      ownerTenantAddr: Option[String],
+      poolTenantAndNameByPoolId: Map[String, (String, String)]
+  ): ManifestPoolGrant =
+    pp.poolId.flatMap(poolTenantAndNameByPoolId.get) match
+      case None => ManifestPoolGrant(pool = None)
+      case Some((poolTenantAddr, poolName)) if ownerTenantAddr.contains(poolTenantAddr) =>
+        ManifestPoolGrant(pool = Some(poolName))
+      case Some((poolTenantAddr, poolName)) =>
+        ManifestPoolGrant(pool = Some(poolName), tenant = Some(poolTenantAddr))

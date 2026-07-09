@@ -1,22 +1,29 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestRoundTripSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
+  NodeSpec,
   Pool,
   RoleDistribution,
+  RunningNode,
   Tenant,
   TenantDb,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   InMemoryFederatedSourceStore,
+  PoolPermission,
   RbacRole,
   RolePermission
 }
 import at.favre.lib.crypto.bcrypt.BCrypt
+import cats.effect.IO
 import io.circe.syntax.*
 import io.circe.yaml.v12.Printer
 import io.circe.yaml.v12.parser
@@ -32,6 +39,36 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   private val ExportedAt   = Instant.parse("2026-06-05T12:00:00Z")
   private val AdminVersion = "0.2.0"
   private val Hostname     = "test"
+
+  /** Minimal no-op backend so a PoolSupervisor can be built over an imported store to exercise the
+    * authorizeHandshake login gate. restore() only rehydrates caches; no process is spawned.
+    * Mirrors the stub in FlightHandshakeSecuritySpec.
+    */
+  private def stubBackend: QuackBackend = new QuackBackend:
+    def start(s: NodeSpec): IO[RunningNode] =
+      IO.pure(
+        RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          21000,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+      )
+    def stop(id: String)    = IO.unit
+    def isAlive(id: String) = true
+    def discoverExisting()  = IO.pure(Nil)
+    def cleanup()           = IO.unit
+
+  private def buildSupervisor(store: InMemoryControlPlaneStore): PoolSupervisor =
+    val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
+    sup.restore()
+    sup
 
   private val adminHash = BCrypt.withDefaults().hashToString(12, "admin-secret".toCharArray)
   private val aliceHash = BCrypt.withDefaults().hashToString(12, "alice-secret".toCharArray)
@@ -318,4 +355,155 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     manifest3.tenants.head.tenantDbs.head.federatedSources shouldBe
       manifest1.tenants.head.tenantDbs.head.federatedSources
+  }
+
+  // ------------------------------------------------------------------
+  // Test 4: a disabled user stays disabled across export -> import
+  // ------------------------------------------------------------------
+
+  it should "keep a disabled user disabled across export then import" in {
+    val src = buildSrc()
+    // alice starts enabled (buildSrc's default); disable her explicitly by
+    // re-upserting with the same hash and enabled = false.
+    src.upsertUserWithHash(
+      tenant = Some("tpch"),
+      username = "alice",
+      passwordHash = aliceHash,
+      role = "user",
+      enabled = false
+    )
+
+    val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+    val aliceManifest = manifest1.users.find(_.username == "alice").get
+    aliceManifest.enabled shouldBe false
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(
+      manifest1.copy(users = manifest1.users.map { u =>
+        if u.username == "alice" then u.copy(password = Some(aliceHash)) else u
+      }),
+      dst
+    ) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    dst.findUser(Some(aliceTenantId), "alice").get.enabled shouldBe false
+
+    // Close the loop: the imported disabled user must not merely carry the
+    // flag, she must be unable to log in. authorizeHandshake is the FlightSQL
+    // login gate; it must deny her with a 'disabled' reason before the
+    // pool-access check even runs.
+    val sup = buildSupervisor(dst)
+    val hs  = sup.authorizeHandshake("tpch", "sales", "alice")
+    hs.isLeft shouldBe true
+    hs.left.toOption.get.toLowerCase should include("disabled")
+  }
+
+  // ------------------------------------------------------------------
+  // Test 5: a user's bcrypt hash round-trips byte-identical and still
+  // authenticates with the SAME original credential
+  // ------------------------------------------------------------------
+
+  it should "round-trip a user's bcrypt hash so the same password still authenticates" in {
+    val src = buildSrc()
+
+    val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+    val aliceManifest = manifest1.users.find(_.username == "alice").get
+
+    // The exporter must carry the REAL hash, not a redaction placeholder,
+    // and never the plaintext.
+    aliceManifest.password shouldBe None
+    aliceManifest.passwordHash shouldBe Some(aliceHash)
+
+    // Import into a fresh store WITHOUT supplying any plaintext password --
+    // the passwordHash field alone must be enough to carry the credential
+    // forward.
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    val storedHash    = dst.getPasswordHash(Some(aliceTenantId), "alice").get
+
+    // Byte-identical hash post-roundtrip.
+    storedHash shouldBe aliceHash
+
+    // And the ORIGINAL plaintext still authenticates against it.
+    BCrypt.verifyer().verify("alice-secret".toCharArray, storedHash).verified shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // Test 6: a superuser pool grant to a pool in a DIFFERENT tenant
+  // round-trips to the exact same (tenant, pool) target
+  // ------------------------------------------------------------------
+
+  it should "round-trip a superuser's cross-tenant pool grant to the same (tenant, pool)" in {
+    val src = buildSrc()
+
+    // A second tenant with its own pool, distinct from "tpch"/"sales".
+    src.upsertTenant(Tenant(id = "other", displayName = "other", authProvider = "db"))
+    src.upsertTenantDb(
+      TenantDb(
+        id = "td-2",
+        tenantId = "other",
+        name = "other_db1",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map.empty,
+        dataPath = "/tmp/other",
+        objectStore = Map.empty
+      )
+    )
+    src.upsertPool(
+      Pool(
+        id = "p-2",
+        tenantId = "other",
+        tenantDbId = "td-2",
+        name = "reporting",
+        size = 1,
+        distribution = RoleDistribution(writeonly = 0, readonly = 1, dual = 0)
+      )
+    )
+
+    // Grant the superuser "admin" access to the "reporting" pool in the
+    // "other" tenant -- a tenant DIFFERENT from admin's (non-existent) home
+    // tenant.
+    val adminId = src.findUser(None, "admin").get.id
+    src.insertPoolPermission(
+      PoolPermission(
+        id = "pp-cross",
+        tenantId = "other",
+        poolId = Some("p-2"),
+        userId = Some(adminId),
+        groupId = None
+      )
+    )
+
+    val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+    val adminManifest = manifest1.users.find(_.username == "admin").get
+
+    // The grant must resolve to the real pool name AND the tenant it
+    // actually lives in -- not None, and not "tpch" (admin's export-time
+    // tenant context, which does not even apply since admin is a
+    // superuser).
+    adminManifest.poolGrants shouldBe List(
+      ManifestPoolGrant(pool = Some("reporting"), tenant = Some("other"))
+    )
+
+    // Round-trip: import into a fresh store and export again; the grant
+    // must resolve to the identical (tenant, pool) target.
+    val withPasswords = manifest1.copy(users = manifest1.users.map { u =>
+      u.copy(password = Some(if u.username == "admin" then adminHash else aliceHash))
+    })
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(withPasswords, dst) shouldBe Right(())
+
+    val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
+    manifest2.users.find(_.username == "admin").get.poolGrants shouldBe
+      List(ManifestPoolGrant(pool = Some("reporting"), tenant = Some("other")))
+
+    // And the underlying pool-permission row really points at the pool
+    // that lives under the "other" tenant-db, not under "tpch".
+    val otherTenantId = dst.listTenants().find(_.displayName == "other").map(_.id).get
+    val otherDb       = dst.listTenantDbs(otherTenantId).find(_.name == "other_db1").get
+    val reportingPool = dst.listPools(otherDb.id).find(_.name == "reporting").get
+    val adminId2      = dst.findUser(None, "admin").get.id
+    dst.listPoolPermissionsForUser(adminId2).map(_.poolId) shouldBe List(Some(reportingPool.id))
   }

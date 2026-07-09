@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0022-user-enabled
+      author: qod
+      changes:
+        # Persist a real enabled/disabled flag on qodstate_user. Before this
+        # changeset the manifest exporter hardcoded `enabled = true` on every
+        # exported user because there was nothing in the schema to read --
+        # a disabled user silently came back enabled on export/import
+        # round-trip. Default true so every pre-existing row stays enabled.
+        - addColumn:
+            tableName: qodstate_user
+            columns:
+              - column:
+                  name: enabled
+                  type: BOOLEAN
+                  defaultValueBoolean: true
+                  constraints: { nullable: false }

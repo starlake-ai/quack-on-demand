@@ -73,3 +73,19 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     // 'globex' from the manifest must NOT have been added because the guard tripped on 'acme'.
     store.listTenants().map(_.id).toSet shouldBe Set("acme")
   }
+
+  it should "skip import when a non-demo tenant already exists in the store" in {
+    val store = new InMemoryControlPlaneStore()
+    // Pre-seed a tenant whose name is neither "acme" nor "globex". The old
+    // gate only checked for demo-named collisions, so it would re-import
+    // the demo manifest here and the importer's delete-then-upsert semantics
+    // would wipe any REST-API-added rows under this tenant. The gate must be
+    // "any tenant already present" so a non-demo store is left untouched.
+    store.upsertTenant(Tenant(id = "wonka", displayName = "Wonka Industries"))
+    val env  = envWith("QOD_BOOTSTRAP_YAML", "/p")
+    val read = (_: String) => Success(ValidYaml)
+    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    // Neither "acme" nor "globex" must have been imported, and "wonka" must
+    // be left exactly as it was.
+    store.listTenants().map(_.id).toSet shouldBe Set("wonka")
+  }

@@ -57,7 +57,22 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
           if rs.next() then
             val storedHash = rs.getString(1)
             val role       = Option(rs.getString(2)).getOrElse("user")
-            if BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
+            // Third column (`enabled`) is optional so a pre-existing operator
+            // override of systemQuery/tenantQuery that projects only two
+            // columns keeps working; the bundled defaults project it.
+            val enabled =
+              if rs.getMetaData.getColumnCount >= 3 then rs.getBoolean(3) else true
+            if !BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
+              Left("Invalid password")
+            else if !enabled then
+              // Same failure shape as a wrong password so the response does
+              // not reveal that the account exists but is disabled. The
+              // distinct reason is only visible in the manager log. bcrypt
+              // verification ran above regardless, so timing does not
+              // distinguish the two either.
+              logger.info(s"login rejected for '$username': user is disabled")
+              Left("Invalid password")
+            else
               Right(
                 AuthenticatedProfile(
                   username = username,
@@ -68,7 +83,6 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
                   tenant = scope.tenantId
                 )
               )
-            else Left("Invalid password")
           else Left("User not found")
         finally ps.close()
       finally conn.close()

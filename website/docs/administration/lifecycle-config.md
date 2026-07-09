@@ -142,7 +142,7 @@ Note: the Config/Manifest tab and the manifest endpoints are restricted to super
 
 1. Click **Config** in the top navigation bar.
 2. Select the **Manifest** section.
-3. Click **Download YAML** to export the current configuration. The file contains all tenants, databases, pools, federated sources, roles, groups, and users. Secret values are written as `***REDACTED***`; user passwords are omitted entirely.
+3. Click **Download YAML** to export the current configuration. The file contains all tenants, databases, pools, federated sources, roles, groups, and users. Secret values are written as `***REDACTED***`; plaintext user passwords are never written, but each user's bcrypt `passwordHash` is exported verbatim so a restore keeps the same credential. Treat the downloaded file as sensitive and do not commit it to a public repository.
 4. Edit the file as needed. Leave `***REDACTED***` in place for secrets you do not intend to change; the importer reuses the existing stored value for those entries.
 5. Click **Import** and upload the edited YAML.
 
