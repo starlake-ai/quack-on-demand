@@ -125,8 +125,11 @@ final class UserStore(
     }
 
   private def grantsByUsername(c: Connection, username: String): List[UserGrant] =
+    // A disabled user contributes no grants: the OIDC callback then hits the
+    // not_provisioned gate instead of minting a session, mirroring the
+    // password-login and FlightSQL-handshake enforcement of the same flag.
     val ps = c.prepareStatement(
-      "SELECT tenant, role FROM qodstate_user WHERE username = ?"
+      "SELECT tenant, role FROM qodstate_user WHERE username = ? AND enabled"
     )
     try
       ps.setString(1, username)

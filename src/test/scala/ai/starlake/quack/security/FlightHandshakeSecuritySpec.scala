@@ -3,7 +3,15 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthScope
-import ai.starlake.quack.model.{NodeSpec, Pool, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{
+  NodeSpec,
+  Pool,
+  RoleDistribution,
+  RunningNode,
+  Tenant,
+  TenantDb,
+  TenantDbKind
+}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, PoolPermission}
@@ -15,26 +23,25 @@ import java.time.Instant
 
 /** Stubbed FlightSQL handshake security suite.
   *
-  * Does NOT open any Flight/gRPC client sockets. The two collaborators under
-  * test are:
+  * Does NOT open any Flight/gRPC client sockets. The two collaborators under test are:
   *
-  *   - [[InMemoryAuthService.Service.authenticateBasic]] -- Basic auth + tenant
-  *     id/name resolution contract (groups A-B).
-  *   - [[PoolSupervisor.authorizeHandshake]] -- 5-gate cascade that guards a
-  *     FlightSQL handshake (groups C-D).
+  *   - [[InMemoryAuthService.Service.authenticateBasic]] -- Basic auth + tenant id/name resolution
+  *     contract (groups A-B).
+  *   - [[PoolSupervisor.authorizeHandshake]] -- 5-gate cascade that guards a FlightSQL handshake
+  *     (groups C-D).
   *
   * The real Flight client tests live in the next task (e2e-6).
   *
-  * Each test builds its own fresh [[SecurityFixtures.Fixture]] so no state
-  * leaks between cases.
+  * Each test builds its own fresh [[SecurityFixtures.Fixture]] so no state leaks between cases.
   */
 class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
 
   // ---------- Supervisor builder (mirrors FlightEdgeHarness) ----------
 
-  /** A minimal no-op backend: no child processes. Only start() is called by
-    * restore() in these tests (through upsertPool in the fixture), and those
-    * nodes are never actually touched by the handshake gate. */
+  /** A minimal no-op backend: no child processes. Only start() is called by restore() in these
+    * tests (through upsertPool in the fixture), and those nodes are never actually touched by the
+    * handshake gate.
+    */
   private def stubBackend: QuackBackend = new QuackBackend:
     def start(s: NodeSpec): IO[RunningNode] =
       IO.pure(
@@ -56,8 +63,9 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     def discoverExisting()  = IO.pure(Nil)
     def cleanup()           = IO.unit
 
-  /** Build a PoolSupervisor over the given store and replay the store's state
-    * into the supervisor's in-memory caches. */
+  /** Build a PoolSupervisor over the given store and replay the store's state into the supervisor's
+    * in-memory caches.
+    */
   private def buildSupervisor(store: InMemoryControlPlaneStore): PoolSupervisor =
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
     sup.restore()
@@ -92,8 +100,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     "succeed when wire-level tenant header is the surrogate id (t-acme0001)" in {
       // Same effective call as the display-name case above: after normalisation
       // the service always sees the surrogate id.
-      val fix = SecurityFixtures.freshStore()
-      val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+      val fix    = SecurityFixtures.freshStore()
+      val svc    = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
       val result = svc.authenticateBasic(
         AuthScope.Tenant(SecurityFixtures.TenantId),
         SecurityFixtures.AliceUsername,
@@ -107,8 +115,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   // ==========================================================================
 
   it should "return Left for a wrong password" in {
-    val fix = SecurityFixtures.freshStore()
-    val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val fix    = SecurityFixtures.freshStore()
+    val svc    = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
       AuthScope.Tenant(SecurityFixtures.TenantId),
       SecurityFixtures.AliceUsername,
@@ -120,8 +128,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return Left for an unknown user" in {
-    val fix = SecurityFixtures.freshStore()
-    val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val fix    = SecurityFixtures.freshStore()
+    val svc    = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
       AuthScope.Tenant(SecurityFixtures.TenantId),
       "noone",
@@ -132,8 +140,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "succeed for the system superuser (root / no tenant)" in {
-    val fix = SecurityFixtures.freshStore()
-    val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
+    val fix    = SecurityFixtures.freshStore()
+    val svc    = new InMemoryAuthService.Service(fix.store, providersEnabled = true)
     val result = svc.authenticateBasic(
       AuthScope.System,
       SecurityFixtures.RootUsername,
@@ -141,12 +149,12 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     )
     result shouldBe a[Right[?, ?]]
     result.map(_.username) shouldBe Right(SecurityFixtures.RootUsername)
-    result.map(_.tenant)   shouldBe Right(None)
+    result.map(_.tenant) shouldBe Right(None)
   }
 
   it should "return Left 'No basic auth providers configured' when hasProviders=false" in {
-    val fix = SecurityFixtures.freshStore()
-    val svc = new InMemoryAuthService.Service(fix.store, providersEnabled = false)
+    val fix    = SecurityFixtures.freshStore()
+    val svc    = new InMemoryAuthService.Service(fix.store, providersEnabled = false)
     val result = svc.authenticateBasic(
       AuthScope.Tenant(SecurityFixtures.TenantId),
       SecurityFixtures.AliceUsername,
@@ -161,8 +169,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
 
   "PoolSupervisor.authorizeHandshake" should
     "return Right with non-empty EffectiveSet for alice on acme/sales (happy path)" in {
-      val fix = SecurityFixtures.freshStore()
-      val sup = buildSupervisor(fix.store)
+      val fix    = SecurityFixtures.freshStore()
+      val sup    = buildSupervisor(fix.store)
       val result = sup.authorizeHandshake(
         SecurityFixtures.TenantName,
         SecurityFixtures.PoolName,
@@ -180,7 +188,11 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     import cats.effect.unsafe.implicits.global
     sup
       .setPoolDisabled(
-        PoolKey(SecurityFixtures.TenantName, SecurityFixtures.TenantDbName, SecurityFixtures.PoolName),
+        PoolKey(
+          SecurityFixtures.TenantName,
+          SecurityFixtures.TenantDbName,
+          SecurityFixtures.PoolName
+        ),
         disabled = true
       )
       .unsafeRunSync()
@@ -208,8 +220,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return Left containing 'not registered' for an unknown user" in {
-    val fix = SecurityFixtures.freshStore()
-    val sup = buildSupervisor(fix.store)
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
@@ -230,20 +242,22 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     // is unreachable for the cross-tenant case.  The actual observed error is
     // "not registered".  The test asserts the actual current behavior; the
     // underlying code smell is flagged in the DONE_WITH_CONCERNS report.
-    val fix = SecurityFixtures.freshStore()
-    val s   = fix.store
+    val fix           = SecurityFixtures.freshStore()
+    val s             = fix.store
     val otherTenantId = "t-other0001"
     import at.favre.lib.crypto.bcrypt.BCrypt
-    s.upsertTenant(Tenant(
-      id           = otherTenantId,
-      displayName  = "other",
-      authProvider = "db"
-    ))
+    s.upsertTenant(
+      Tenant(
+        id = otherTenantId,
+        displayName = "other",
+        authProvider = "db"
+      )
+    )
     s.upsertUserWithHash(
-      tenant       = Some(otherTenantId),
-      username     = "carol",
+      tenant = Some(otherTenantId),
+      username = "carol",
       passwordHash = BCrypt.withDefaults().hashToString(10, "carolpw".toCharArray),
-      role         = "user"
+      role = "user"
     )
     // Build a new supervisor that picks up both tenants.
     val sup    = buildSupervisor(s)
@@ -259,8 +273,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return Left containing 'no access to pool' for bob (no pool_permission)" in {
-    val fix = SecurityFixtures.freshStore()
-    val sup = buildSupervisor(fix.store)
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
@@ -270,45 +284,85 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     result.left.toOption.get.toLowerCase should include("no access to pool")
   }
 
+  it should "return Left containing 'disabled' when the user is disabled" in {
+    val fix = SecurityFixtures.freshStore()
+    val s   = fix.store
+    // Disable alice: re-upsert with her existing hash and enabled = false.
+    val aliceHash =
+      s.getPasswordHash(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername).get
+    s.upsertUserWithHash(
+      tenant = Some(SecurityFixtures.TenantId),
+      username = SecurityFixtures.AliceUsername,
+      passwordHash = aliceHash,
+      role = "admin",
+      enabled = false
+    )
+    val sup    = buildSupervisor(s)
+    val result = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.AliceUsername
+    )
+    result shouldBe a[Left[?, ?]]
+    result.left.toOption.get.toLowerCase should include("disabled")
+
+    // The sibling enabled superuser is unaffected by alice's disablement.
+    val rootResult = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.RootUsername
+    )
+    rootResult shouldBe a[Right[?, ?]]
+  }
+
   it should "return Right for alice on both pools when she holds a wildcard pool_permission" in {
     // Wildcard: poolId = None means "every pool in the tenant".
     val fix = SecurityFixtures.freshStore()
     val s   = fix.store
 
     // Add wildcard permission for alice.
-    s.insertPoolPermission(PoolPermission(
-      id       = "pp-wild0001",
-      tenantId = SecurityFixtures.TenantId,
-      poolId   = None,
-      userId   = Some(fix.aliceUserId)
-    ))
+    s.insertPoolPermission(
+      PoolPermission(
+        id = "pp-wild0001",
+        tenantId = SecurityFixtures.TenantId,
+        poolId = None,
+        userId = Some(fix.aliceUserId)
+      )
+    )
 
     // Add a second pool 'sales2' under the same tenant-db.
     val sales2Id = "p-sales20001"
-    s.upsertPool(Pool(
-      id                   = sales2Id,
-      tenantId             = SecurityFixtures.TenantId,
-      tenantDbId           = SecurityFixtures.TenantDbId,
-      name                 = "sales2",
-      size                 = 1,
-      distribution         = RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
-      maxConcurrentPerNode = 0,
-      disabled             = false
-    ))
+    s.upsertPool(
+      Pool(
+        id = sales2Id,
+        tenantId = SecurityFixtures.TenantId,
+        tenantDbId = SecurityFixtures.TenantDbId,
+        name = "sales2",
+        size = 1,
+        distribution = RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
+        maxConcurrentPerNode = 0,
+        disabled = false
+      )
+    )
 
     val sup = buildSupervisor(s)
 
-    val onSales  = sup.authorizeHandshake(SecurityFixtures.TenantName, SecurityFixtures.PoolName, SecurityFixtures.AliceUsername)
-    val onSales2 = sup.authorizeHandshake(SecurityFixtures.TenantName, "sales2", SecurityFixtures.AliceUsername)
+    val onSales = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.AliceUsername
+    )
+    val onSales2 =
+      sup.authorizeHandshake(SecurityFixtures.TenantName, "sales2", SecurityFixtures.AliceUsername)
 
-    withClue("alice on sales:") { onSales  shouldBe a[Right[?, ?]] }
-    withClue("alice on sales2:") { onSales2 shouldBe a[Right[?, ?]] }
+    withClue("alice on sales:")(onSales shouldBe a[Right[?, ?]])
+    withClue("alice on sales2:")(onSales2 shouldBe a[Right[?, ?]])
   }
 
   it should "return Right for a superuser (root) bypassing pool_permission check" in {
     // Gate 5 is skipped when user.tenant.isEmpty (superuser).
-    val fix = SecurityFixtures.freshStore()
-    val sup = buildSupervisor(fix.store)
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
@@ -327,8 +381,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
   it should "include the admin role when jwtRoles contains 'admin'" in {
     // alice already has the admin role via direct user_role edge; the JWT
     // claim should also merge it in (union is idempotent).
-    val fix = SecurityFixtures.freshStore()
-    val sup = buildSupervisor(fix.store)
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,
@@ -344,8 +398,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     // Names unknown to the manager are dropped per CLAUDE.md: the JWT
     // claiming "ghostrole" must not cause a failure, and "ghostrole" must
     // NOT appear in the effective roles.
-    val fix = SecurityFixtures.freshStore()
-    val sup = buildSupervisor(fix.store)
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
     val result = sup.authorizeHandshake(
       SecurityFixtures.TenantName,
       SecurityFixtures.PoolName,

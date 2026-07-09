@@ -1897,10 +1897,12 @@ final class PoolSupervisor(
 
   /** End-to-end FlightSQL handshake gate. Runs (in order):
     *   1. resolve `(tenant, pool) -> PoolKey` + tenant/pool kill switches
-    *   2. lookup the user via [[ControlPlaneStore.findUserForLogin]] -- this query also enforces
-    *      the tenant scope: it returns rows where `tenant IS NULL` (superuser) OR
-    *      `tenant = <tenantId>`. Any user returned here is therefore already scoped correctly, so
-    *      we do NOT re-check `user.tenant == tenantRow.id` at the application layer. If
+    *   2. lookup the user via [[ControlPlaneStore.findUserForLogin]], then reject when the row
+    *      carries `enabled = false` (operator kill switch on the single user, mirroring the tenant
+    *      and pool switches of gate 1) -- this query also enforces the tenant scope: it returns
+    *      rows where `tenant IS NULL` (superuser) OR `tenant = <tenantId>`. Any user returned here
+    *      is therefore already scoped correctly, so we do NOT re-check
+    *      `user.tenant == tenantRow.id` at the application layer. If
     *      [[ControlPlaneStore.findUserForLogin]] is ever refactored to drop the tenant filter (e.g.
     *      moving to a global-username model), reinstate the scope check between gates 2 and 3.
     *   3. compute the effective set (groups, roles, permissions, pool grants)
@@ -1940,6 +1942,8 @@ final class PoolSupervisor(
                 store.findUserForLogin(tenantRow.id, username) match
                   case None =>
                     Left(s"user '$username' is not registered in tenant '${key.tenant}'")
+                  case Some(user) if !user.enabled =>
+                    Left(s"user '$username' is disabled")
                   case Some(user) =>
                     // 3. Effective set. Superusers get an empty set --
                     //    the per-statement validator bypasses them.
