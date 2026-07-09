@@ -17,8 +17,8 @@ import scala.util.Try
   *   - [[DatabaseAuthenticator]] (REST/UI password login): the default `systemQuery` /
   *     `tenantQuery` project `enabled` as a third column; a disabled user presenting the CORRECT
   *     password must be rejected with the exact same error as a wrong password so the response does
-  *     not reveal which one failed. A custom operator query that projects only two columns must
-  *     keep working (enabled defaults to true when not projected).
+  *     not reveal which one failed. A custom operator query that projects only two columns is
+  *     REQUIRED to project `enabled`; a two-column result set fails authentication outright.
   *   - [[UserStore.grantsForIdentity]] (OIDC login): a disabled user must yield no grants, so the
   *     OIDC callback hits the not_provisioned gate instead of minting a session.
   *
@@ -38,7 +38,8 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
   private val DefaultTenantQuery =
     "SELECT password_hash, role, enabled FROM qodstate_user WHERE tenant = ? AND username = ? LIMIT 1"
 
-  // A pre-0022-style operator override that does not project `enabled`.
+  // A pre-0022-style operator override that does not project `enabled`. Must
+  // now be rejected outright: the enabled column is mandatory.
   private val LegacySystemQuery =
     "SELECT password_hash, role FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
 
@@ -108,7 +109,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       finally auth.close()
     }
 
-  it should "keep working with a legacy custom query that does not project enabled" in
+  it should "reject authentication when a legacy custom query does not project the enabled column" in
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
       val auth = new DatabaseAuthenticator(
@@ -117,7 +118,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       )
       try
         val r = auth.authenticate(AuthScope.System, "root", "rootpw")
-        r.isRight shouldBe true
+        r.isLeft shouldBe true
       finally auth.close()
     }
 

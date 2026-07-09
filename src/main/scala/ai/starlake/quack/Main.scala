@@ -3,6 +3,7 @@ package ai.starlake.quack
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.{
+  AuthQueryPreconditions,
   AuthenticationService,
   OidcBearerAuthenticator,
   OidcDiscovery,
@@ -176,6 +177,24 @@ object Main extends IOApp with LazyLogging:
       .validate(mgrCfg.telemetry.store, mgrCfg.telemetry.stmtHistoryRetentionDays)
       .left
       .foreach(msg => sys.error(msg))
+
+    // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
+    // must each project (password_hash, role, enabled) -- exactly the shape
+    // DatabaseAuthenticator requires at runtime now that the tolerant
+    // two-column branch is gone. Caught here instead of at first login.
+    if authCfg.database.enabled then
+      Class.forName("org.postgresql.Driver")
+      val probeConn = java.sql.DriverManager.getConnection(
+        authCfg.database.jdbcUrl,
+        authCfg.database.username,
+        authCfg.database.password
+      )
+      try
+        AuthQueryPreconditions
+          .validate(probeConn, authCfg.database)
+          .left
+          .foreach(msg => sys.error(msg))
+      finally probeConn.close()
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows
