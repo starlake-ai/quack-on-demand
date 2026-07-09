@@ -36,7 +36,9 @@ final class TenantDbHandlers(
     if td.kind != TenantDbKind.DuckLake then None
     else
       catalog.flatMap { c =>
-        scala.util.Try(c.listSchemas(tenantName, td.name).map(_.tableCount).sum).toOption
+        // Unscoped on purpose: the calling handler has already scope-checked
+        // the tenant, and this is an in-process aggregation, not a route.
+        scala.util.Try(c.listSchemasUnscoped(tenantName, td.name).map(_.tableCount).sum).toOption
       }
 
   private def toResponse(tenantName: String, td: TenantDb): TenantDbResponse =
@@ -116,13 +118,25 @@ final class TenantDbHandlers(
                     IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
                 }
 
-  def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.blocking {
-    Right(
-      TenantDbListResponse(
-        sup.listTenantDbsByTenant(tenant).map(td => toResponse(tenant, td))
-      )
-    )
-  }
+  def listTenantDbs(tenant: String, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[TenantDbListResponse] =
+    // Resolve to the tenant id before the scope check (the query param may be a
+    // display name); an unknown tenant falls through on the raw value, so an
+    // out-of-scope session gets the same 403 whether the tenant exists or not
+    // (no existence leak) while superuser / static-key / open callers keep
+    // today's empty-list response.
+    val tid = sup.getTenantById(tenant).orElse(sup.getTenant(tenant)).map(_.id).getOrElse(tenant)
+    TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
+      case Some(err) => IO.pure(Left(err))
+      case None      =>
+        IO.blocking {
+          Right(
+            TenantDbListResponse(
+              sup.listTenantDbsByTenant(tenant).map(td => toResponse(tenant, td))
+            )
+          )
+        }
 
   def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

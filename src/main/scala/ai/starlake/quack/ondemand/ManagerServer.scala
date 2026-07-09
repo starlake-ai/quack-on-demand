@@ -164,56 +164,33 @@ final class ManagerServer(
 
     val catalogEndpoints: List[ServerEndpoint[Any, IO]] = catalog.toList.flatMap { h =>
       // Same gating as ACL: DuckLake catalog reads only make sense with a
-      // Postgres metastore. JDBC calls go on `IO.blocking` since Hikari
-      // semantics are synchronous.
+      // Postgres metastore. Session-gated per request via TenantScopeCheck
+      // inside the handlers (Spec 00 closed the former ungated drift); the
+      // asOf / asOfTag resolution also lives in the handler, behind the gate.
+      // JDBC calls go on `IO.blocking` since Hikari semantics are synchronous.
       List[ServerEndpoint[Any, IO]](
-        CatalogEndpoints.listSchemasEndpoint.serverLogicSuccess { case (tenant, tenantDb) =>
-          IO.blocking(h.listSchemas(tenant, tenantDb))
+        CatalogEndpoints.listSchemasEndpoint.serverLogic { case (tenant, tenantDb, token) =>
+          IO.blocking(h.listSchemas(tenant, tenantDb, token)(sessions.scopeOf))
         },
-        CatalogEndpoints.listTablesEndpoint.serverLogicSuccess { case (tenant, tenantDb, schema) =>
-          IO.blocking(h.listTables(tenant, tenantDb, schema))
+        CatalogEndpoints.listTablesEndpoint.serverLogic { case (tenant, tenantDb, schema, token) =>
+          IO.blocking(h.listTables(tenant, tenantDb, schema, token)(sessions.scopeOf))
         },
         CatalogEndpoints.getTableEndpoint.serverLogic {
-          case (tenant, tenantDb, schema, table, asOf, asOfTag) =>
-            // Spec 06: at most one of asOf / asOfTag; a tag resolves to its
-            // snapshot id and reuses the AS OF read path. A dangling tag
-            // (snapshot vacuumed) falls through to the table-not-found 404.
-            val resolved: Either[(sttp.model.StatusCode, String), Option[Long]] = tags match
-              case Some(t)                   => t.resolveAsOf(tenant, tenantDb, asOf, asOfTag)
-              case None if asOfTag.isDefined =>
-                Left(
-                  (
-                    sttp.model.StatusCode.BadRequest,
-                    "asOfTag is not supported on this manager (no tag handler wired)"
-                  )
-                )
-              case None => Right(asOf)
-            resolved match
-              case Left(e)     => IO.pure(Left(e))
-              case Right(snap) =>
-                IO.blocking(h.getTable(tenant, tenantDb, schema, table, snap)).map {
-                  case Some(d) => Right(d)
-                  case None    =>
-                    Left(
-                      (
-                        sttp.model.StatusCode.NotFound,
-                        s"table $schema.$table not found" +
-                          snap.fold("")(n => s" at snapshot $n")
-                      )
-                    )
-                }
+          case (tenant, tenantDb, schema, table, asOf, asOfTag, token) =>
+            IO.blocking(
+              h.getTable(tenant, tenantDb, schema, table, asOf, asOfTag, token)(sessions.scopeOf)
+            )
         },
-        CatalogEndpoints.listSnapshotsEndpoint.serverLogicSuccess {
-          case (tenant, tenantDb, limit, before) =>
-            IO.blocking(h.listSnapshots(tenant, tenantDb, limit, before))
+        CatalogEndpoints.listSnapshotsEndpoint.serverLogic {
+          case (tenant, tenantDb, limit, before, token) =>
+            IO.blocking(h.listSnapshots(tenant, tenantDb, limit, before, token)(sessions.scopeOf))
         }
       )
     }
 
     // Snapshot tags (EPIC P2 / Spec 06). Session-gated per request via
-    // TenantScopeCheck inside the handlers - not part of catalogEndpoints
-    // on purpose, so the tag surface never inherits the browser GETs'
-    // ungated PublicEndpoint shape.
+    // TenantScopeCheck inside the handlers, same shape as the browser GETs
+    // above (both surfaces have been gated since Spec 00).
     val tagEndpoints: List[ServerEndpoint[Any, IO]] = tags.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         TagEndpoints.listTagsEndpoint.serverLogic { case (tenant, tenantDb, token) =>
@@ -494,7 +471,9 @@ final class ManagerServer(
       TenantEndpoints.createTenantDb.serverLogic { case (req, token) =>
         tenantDbs.createTenantDb(req, token)(sessions.scopeOf)
       },
-      TenantEndpoints.listTenantDbs.serverLogic(tenant => tenantDbs.listTenantDbs(tenant)),
+      TenantEndpoints.listTenantDbs.serverLogic { case (tenant, token) =>
+        tenantDbs.listTenantDbs(tenant, token)(sessions.scopeOf)
+      },
       TenantEndpoints.deleteTenantDb.serverLogic { case (req, token) =>
         tenantDbs.deleteTenantDb(req, token)(sessions.scopeOf)
       },

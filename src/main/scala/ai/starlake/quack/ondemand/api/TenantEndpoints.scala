@@ -87,9 +87,17 @@ object TenantEndpoints:
       .in(authToken)
       .out(jsonBody[TenantDbResponse])
 
-  val listTenantDbs
-      : PublicEndpoint[String, (sttp.model.StatusCode, ErrorResponse), TenantDbListResponse, Any] =
-    base.get.in("database" / "list").in(query[String]("tenant")).out(jsonBody[TenantDbListResponse])
+  val listTenantDbs: PublicEndpoint[
+    (String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    TenantDbListResponse,
+    Any
+  ] =
+    base.get
+      .in("database" / "list")
+      .in(query[String]("tenant"))
+      .in(authToken)
+      .out(jsonBody[TenantDbListResponse])
 
   val deleteTenantDb: PublicEndpoint[
     (TenantDbOpRequest, Option[String]),

@@ -98,12 +98,12 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "stage", kind = "memory", metastore = Map.empty, dataPath = ""
     ), None)((_: String) => None).unsafeRunSync()
-    val out = h.listTenantDbs("acme").unsafeRunSync().toOption.get
+    val out = h.listTenantDbs("acme", None)((_: String) => None).unsafeRunSync().toOption.get
     out.tenantDbs.map(_.name).sorted shouldBe List("acme_prod", "acme_stage")
 
   it should "return an empty list for an unknown tenant" in:
     val h = freshHandlers()
-    val out = h.listTenantDbs("ghost").unsafeRunSync().toOption.get
+    val out = h.listTenantDbs("ghost", None)((_: String) => None).unsafeRunSync().toOption.get
     out.tenantDbs shouldBe Nil
 
   "TenantDbHandlers.deleteTenantDb" should "remove a database with no pools" in:
@@ -112,7 +112,11 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
     ), None)((_: String) => None).unsafeRunSync()
     h.deleteTenantDb(TenantDbOpRequest("acme", "acme_prod"), None)((_: String) => None).unsafeRunSync().isRight shouldBe true
-    h.listTenantDbs("acme").unsafeRunSync().toOption.get.tenantDbs shouldBe Nil
+    h.listTenantDbs("acme", None)((_: String) => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .tenantDbs shouldBe Nil
 
   it should "404 when the database doesn't exist" in:
     val h = freshHandlers()

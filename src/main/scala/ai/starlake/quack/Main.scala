@@ -372,21 +372,18 @@ object Main extends IOApp with LazyLogging:
       Some(tenantOidcRegistry)
     )
 
-    // Catalog browser handlers. Only mounted in postgres mode: the DuckLake
+    // Catalog reader resolver. Only meaningful in postgres mode: the DuckLake
     // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
     // Postgres metastore. One reader per tenant, cached so we don't reopen
     // Hikari on every request. The resolver reads the effective metastore
     // (default <- tenant overrides) the same way PoolSupervisor does for
-    // spawn-node.
+    // spawn-node. The CatalogHandlers themselves are constructed further
+    // down, after the audit recorder and the tag handlers they depend on.
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaderCache.computeIfAbsent(
         (tenant, tenantDb),
         { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
       )
-    val catalogHandlers: Option[CatalogHandlers] =
-      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
-        sup.findTenantDb(tenant, tenantDb).map(_.kind)
-      Some(new CatalogHandlers(catalogReader, kindOf))
 
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
@@ -443,13 +440,6 @@ object Main extends IOApp with LazyLogging:
       onAuthChanged = tenantOidcRegistry.invalidate,
       audit = auditRecorder
     )
-    val tenantDbs = new TenantDbHandlers(
-      sup,
-      manifestFedStore,
-      catalog = catalogHandlers,
-      audit = auditRecorder
-    )
-
     // Snapshot-tag CRUD (EPIC P2 / Spec 06). Snapshot existence resolves
     // through the same cached per-tenant-db DuckLake reader as the catalog
     // browser; tag rows live in the control-plane store.
@@ -461,6 +451,33 @@ object Main extends IOApp with LazyLogging:
         snapshotsExist = (t, td, ids) => catalogReader(t, td).snapshotsExist(ids),
         audit = auditRecorder
       )
+    )
+
+    // Catalog browser handlers (session-gated since Spec 00). asOfTag
+    // resolution delegates to the tag handlers; reads are audited only when
+    // catalog.auditCatalogReads is on.
+    val catalogHandlers: Option[CatalogHandlers] =
+      def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
+        sup.findTenantDb(tenant, tenantDb).map(_.kind)
+      val resolveTag = tagHandlers match
+        case Some(t) => t.resolveAsOf
+        case None    => CatalogHandlers.asOfOnly
+      Some(
+        new CatalogHandlers(
+          catalogReader,
+          sup,
+          kindOf,
+          resolveAsOfTag = resolveTag,
+          audit = auditRecorder,
+          auditReads = mgrCfg.catalog.auditCatalogReads
+        )
+      )
+
+    val tenantDbs = new TenantDbHandlers(
+      sup,
+      manifestFedStore,
+      catalog = catalogHandlers,
+      audit = auditRecorder
     )
 
     // Managed maintenance (EPIC Spec 09). REST surface only; the scheduler + drain-loop

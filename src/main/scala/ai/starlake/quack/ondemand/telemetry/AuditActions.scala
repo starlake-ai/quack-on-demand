@@ -67,6 +67,10 @@ object AuditActions:
   val TagDelete     = "tag.delete"
   val TagHoldCreate = "tag.hold.create"
   val TagHoldRemove = "tag.hold.remove"
+  // catalog browser reads (Spec 00; emitted only when catalog.auditCatalogReads is on)
+  val CatalogRead           = "catalog.read"
+  val CatalogPreviewRead    = "catalog.preview.read"
+  val CatalogSchemaDiffRead = "catalog.schemadiff.read"
   // managed maintenance (Spec 09)
   val MaintenanceRun          = "maintenance.run"
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
@@ -135,6 +139,9 @@ object AuditActions:
     TagDelete,
     TagHoldCreate,
     TagHoldRemove,
+    CatalogRead,
+    CatalogPreviewRead,
+    CatalogSchemaDiffRead,
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,

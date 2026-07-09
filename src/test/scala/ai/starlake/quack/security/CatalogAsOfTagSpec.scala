@@ -5,7 +5,6 @@ import ai.starlake.quack.model.SnapshotTag
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
   CatalogDataFileEntry,
-  CatalogHandlers,
   CatalogTableDetailResponse,
   CatalogTableEntry
 }
@@ -50,8 +49,6 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
           Some(detail)
         else None
 
-    val handlers = new CatalogHandlers((_, _) => reader)
-
   private def get(client: HttpClient, url: String): HttpResponse[String] =
     client.send(
       HttpRequest.newBuilder(URI.create(url)).GET().build(),
@@ -65,7 +62,7 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
     fix.store.createSnapshotTag(
       SnapshotTag("stag-dead", Tenant, TenantDb, "dead", VacuumedSnapshot)
     )
-    val h = ManagerServerHarness.boot(fix.store, catalog = Some(stub.handlers))
+    val h = ManagerServerHarness.boot(fix.store, catalogReader = Some((_, _) => stub.reader))
     try test(h, stub)
     finally h.shutdown()
 

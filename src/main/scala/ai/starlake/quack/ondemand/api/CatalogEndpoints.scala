@@ -9,65 +9,83 @@ import sttp.tapir.json.circe._
   * 64KB `<clinit>` ceiling (see [[RbacEndpoints]] for the full rationale). Registered in
   * [[EndpointModules.all]].
   *
-  * These endpoints carry no session input; they are admitted per-request by
-  * `ManagerServer.apiKeyGuard` + the perimeter URL-tenant check only. Known drift, tracked in
-  * docs/AUDIT-FOLLOWUPS.md; new catalog-adjacent surfaces (see [[TagEndpoints]]) must NOT copy this
-  * shape.
+  * Every endpoint carries the session input ([[Endpoints.authToken]]) and the standard
+  * [[ErrorResponse]] envelope: the handlers enforce [[TenantScopeCheck]] per request, same as
+  * [[TagEndpoints]] (Spec 00 closed the former ungated PublicEndpoint drift).
   */
 object CatalogEndpoints:
 
-  val listSchemasEndpoint: PublicEndpoint[(String, String), Unit, List[CatalogSchemaEntry], Any] =
-    endpoint.get
+  private val base = endpoint
+    .in("api")
+    .errorOut(statusCode.and(jsonBody[ErrorResponse]))
+
+  val listSchemasEndpoint: PublicEndpoint[
+    (String, String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    List[CatalogSchemaEntry],
+    Any
+  ] =
+    base.get
       .in(
-        "api" / "catalog" / "tenant" / path[String]("tenant") /
+        "catalog" / "tenant" / path[String]("tenant") /
           "database" / path[String]("tenantDb") / "schemas"
       )
+      .in(Endpoints.authToken)
       .out(jsonBody[List[CatalogSchemaEntry]])
       .description("List schemas in the DuckLake catalog of the (tenant, tenantDb).")
 
-  val listTablesEndpoint
-      : PublicEndpoint[(String, String, String), Unit, List[CatalogTableEntry], Any] =
-    endpoint.get
+  val listTablesEndpoint: PublicEndpoint[
+    (String, String, String, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    List[CatalogTableEntry],
+    Any
+  ] =
+    base.get
       .in(
-        "api" / "catalog" / "tenant" / path[String]("tenant") /
+        "catalog" / "tenant" / path[String]("tenant") /
           "database" / path[String]("tenantDb") /
           "schemas" / path[String]("schema") / "tables"
       )
+      .in(Endpoints.authToken)
       .out(jsonBody[List[CatalogTableEntry]])
       .description("List tables in a schema of the (tenant, tenantDb)'s catalog.")
 
   val getTableEndpoint: PublicEndpoint[
-    (String, String, String, String, Option[Long], Option[String]),
-    (sttp.model.StatusCode, String),
+    (String, String, String, String, Option[Long], Option[String], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
     CatalogTableDetailResponse,
     Any
   ] =
-    endpoint.get
+    base.get
       .in(
-        "api" / "catalog" / "tenant" / path[String]("tenant") /
+        "catalog" / "tenant" / path[String]("tenant") /
           "database" / path[String]("tenantDb") /
           "schemas" / path[String]("schema") /
           "tables" / path[String]("table")
       )
       .in(query[Option[Long]]("asOf"))
       .in(query[Option[String]]("asOfTag"))
+      .in(Endpoints.authToken)
       .out(jsonBody[CatalogTableDetailResponse])
-      .errorOut(statusCode.and(stringBody))
       .description(
         "Get one table's columns + parquet data files, optionally as of a DuckLake snapshot " +
           "(asOf=<id>) or a snapshot tag (asOfTag=<name>); supplying both is a 400."
       )
 
-  val listSnapshotsEndpoint: PublicEndpoint[(String, String, Option[Int], Option[Long]), Unit, List[
-    CatalogSnapshotEntry
-  ], Any] =
-    endpoint.get
+  val listSnapshotsEndpoint: PublicEndpoint[
+    (String, String, Option[Int], Option[Long], Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    List[CatalogSnapshotEntry],
+    Any
+  ] =
+    base.get
       .in(
-        "api" / "catalog" / "tenant" / path[String]("tenant") /
+        "catalog" / "tenant" / path[String]("tenant") /
           "database" / path[String]("tenantDb") / "snapshots"
       )
       .in(query[Option[Int]]("limit"))
       .in(query[Option[Long]]("before"))
+      .in(Endpoints.authToken)
       .out(jsonBody[List[CatalogSnapshotEntry]])
       .description(
         "List DuckLake snapshots of the (tenant, tenantDb), newest first; keyset pagination via limit + before=snapshotId."
