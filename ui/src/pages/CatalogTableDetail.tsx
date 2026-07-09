@@ -10,6 +10,7 @@ import type {
 } from '../api/types';
 import Breadcrumb from '../components/Breadcrumb';
 import SnapshotPicker, { parseSnapshotSelector, type SnapshotSelectorValue } from '../components/SnapshotPicker';
+import Tabs from '../components/Tabs';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -62,7 +63,7 @@ export default function CatalogTableDetail() {
   const [snaps, setSnaps] = useState<CatalogSnapshotEntry[]>([]);
   const [tags, setTags] = useState<CatalogTagEntry[]>([]);
 
-  // ----- Preview (fetch on demand only) -----
+  // ----- Preview (fetched when the Preview tab is activated) -----
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -79,6 +80,11 @@ export default function CatalogTableDetail() {
   const [diff, setDiff] = useState<SchemaDiffResponse | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+
+  // Which tab is showing. Tabs owns its own active state; this mirror only
+  // exists so the selector-change effect knows whether to refetch the preview.
+  const initialTab = diffFromParam && diffToParam ? 'compare' : 'columns';
+  const [activeTab, setActiveTab] = useState(initialTab);
 
   useEffect(() => {
     if (!tenant || !tenantDb || !schema || !table) return;
@@ -104,12 +110,15 @@ export default function CatalogTableDetail() {
     return () => { cancelled = true; };
   }, [tenant, tenantDb]);
 
-  // Reset the on-demand preview whenever the table or its selector changes;
-  // never auto-fetch (the brief requires an explicit "Load preview" click).
+  // Reset the preview whenever the table or its selector changes; refetch
+  // right away when the Preview tab is the one showing, so the visible rows
+  // always match the selected snapshot.
   useEffect(() => {
     setPreview(null);
     setPreviewError(null);
     setPreviewLoading(false);
+    if (activeTab === 'preview') loadPreview(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, tenantDb, schema, table, selector]);
 
   // Same for the compare diff -- but if the URL already carries diffFrom/diffTo,
@@ -123,8 +132,9 @@ export default function CatalogTableDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, tenantDb, schema, table]);
 
-  function loadPreview() {
+  function loadPreview(force = false) {
     if (!tenant || !tenantDb || !schema || !table) return;
+    if (!force && previewLoading) return;
     setPreviewLoading(true);
     setPreviewError(null);
     api.previewCatalogTable(tenant, tenantDb, schema, table, parseSnapshotSelector(selector), 100)
@@ -262,192 +272,210 @@ export default function CatalogTableDetail() {
             </table>
           </section>
 
-          <section style={{ marginBottom: 24 }}>
-            <h3>Columns</h3>
-            {detail.columns.length === 0
-              ? <em style={{ color: '#888' }}>no columns</em>
-              : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th align="right">#</th>
-                      <th align="left">Name</th>
-                      <th align="left">Type</th>
-                      <th align="left">Nullable</th>
-                      <th align="left">PK</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.columns.map(c => (
-                      <tr key={c.ordinal} style={{ borderTop: '1px solid #eee' }}>
-                        <td align="right">{c.ordinal}</td>
-                        <td>{c.name}</td>
-                        <td><code>{c.typeName}</code></td>
-                        <td>{c.nullable ? 'yes' : 'no'}</td>
-                        <td>{c.isPrimaryKey ? 'yes' : ''}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-          </section>
-
-          <section style={{ marginBottom: 24 }}>
-            <h3>Parquet files</h3>
-            {detail.dataFiles.length === 0
-              ? <em style={{ color: '#888' }}>no parquet files</em>
-              : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th align="left">Path</th>
-                      <th align="right">Size</th>
-                      <th align="right">Rows</th>
-                      <th align="right">Snapshot</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.dataFiles.map(f => (
-                      <tr key={f.path} style={{ borderTop: '1px solid #eee' }}>
-                        <td><code style={{ wordBreak: 'break-all' }}>{f.path}</code></td>
-                        <td align="right">{fmtBytes(f.sizeBytes)}</td>
-                        <td align="right">{f.rowCount.toLocaleString()}</td>
-                        <td align="right">{f.snapshotId}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-          </section>
-
-          <section style={{ marginBottom: 24 }}>
-            <h3>Preview</h3>
-            <button type="button" onClick={loadPreview} disabled={previewLoading}>
-              {previewLoading ? 'Loading...' : 'Load preview'}
-            </button>
-            {previewError && (
-              <p style={{ color: 'red', marginTop: 8 }}>Error: {previewError}</p>
-            )}
-            {preview && (
-              <div style={{ marginTop: 12 }}>
-                {preview.truncated && (
-                  <p className="subtle">
-                    Showing the first {preview.rows.length} rows; the result set is truncated.
-                  </p>
-                )}
-                {preview.rows.length === 0
-                  ? <em style={{ color: '#888' }}>no rows</em>
-                  : (
-                    <div style={{ overflowX: 'auto' }}>
-                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead>
-                          <tr>
-                            {preview.columns.map(c => (
-                              <th key={c.name} align="left">
-                                {c.name}<br />
-                                <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {preview.rows.map((row, i) => (
-                            <tr key={i} style={{ borderTop: '1px solid #eee' }}>
-                              {row.map((v, j) => (
-                                <td key={j}>
-                                  {v === null || v === undefined
-                                    ? <em style={{ color: '#888' }}>null</em>
-                                    : String(v)}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-              </div>
-            )}
-          </section>
-
-          <section>
-            <h3>Compare</h3>
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-              <SnapshotPicker
-                tenant={tenant!}
-                tenantDb={tenantDb!}
-                value={diffFrom}
-                onChange={setDiffFrom}
-                snapshots={snaps}
-                tags={tags}
-                label="From"
-              />
-              <SnapshotPicker
-                tenant={tenant!}
-                tenantDb={tenantDb!}
-                value={diffTo}
-                onChange={setDiffTo}
-                snapshots={snaps}
-                tags={tags}
-                label="To"
-              />
-              <button type="button" onClick={() => loadDiff()} disabled={diffLoading}>
-                {diffLoading ? 'Comparing...' : 'Compare'}
-              </button>
-            </div>
-            {diffError && <p style={{ color: 'red' }}>Error: {diffError}</p>}
-            {diff && (
-              <div>
-                <p className="subtle">
-                  Diffing snapshot {diff.from} against snapshot {diff.to}.
-                </p>
-                {diff.added.length === 0 && diff.removed.length === 0 &&
-                  diff.typeChanged.length === 0 && diff.nullabilityChanged.length === 0
-                  ? <em style={{ color: '#888' }}>no schema differences</em>
+          {/* Preview/diff state lives in this component, so the Tabs
+              remount-on-switch behavior does not drop loaded results. */}
+          <Tabs
+            initialId={initialTab}
+            onSelect={id => {
+              setActiveTab(id);
+              if (id === 'preview') loadPreview();
+            }}
+            tabs={[
+              {
+                id: 'columns',
+                label: 'Columns',
+                body: detail.columns.length === 0
+                  ? <em style={{ color: '#888' }}>no columns</em>
                   : (
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                       <thead>
                         <tr>
-                          <th align="left">Change</th>
-                          <th align="left">Column</th>
-                          <th align="left">Detail</th>
+                          <th align="right">#</th>
+                          <th align="left">Name</th>
+                          <th align="left">Type</th>
+                          <th align="left">Nullable</th>
+                          <th align="left">PK</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {diff.added.map(c => (
-                          <tr key={`added-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(34, 197, 94, 0.1)' }}>
-                            <td>added</td>
+                        {detail.columns.map(c => (
+                          <tr key={c.ordinal} style={{ borderTop: '1px solid #eee' }}>
+                            <td align="right">{c.ordinal}</td>
                             <td>{c.name}</td>
-                            <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
-                          </tr>
-                        ))}
-                        {diff.removed.map(c => (
-                          <tr key={`removed-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(239, 68, 68, 0.1)' }}>
-                            <td>removed</td>
-                            <td>{c.name}</td>
-                            <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
-                          </tr>
-                        ))}
-                        {diff.typeChanged.map(c => (
-                          <tr key={`type-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
-                            <td>type changed</td>
-                            <td>{c.column}</td>
-                            <td><code>{c.fromType}</code> {'->'} <code>{c.toType}</code></td>
-                          </tr>
-                        ))}
-                        {diff.nullabilityChanged.map(c => (
-                          <tr key={`null-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
-                            <td>nullability changed</td>
-                            <td>{c.column}</td>
-                            <td>{c.fromNullable ? 'nullable' : 'not null'} {'->'} {c.toNullable ? 'nullable' : 'not null'}</td>
+                            <td><code>{c.typeName}</code></td>
+                            <td>{c.nullable ? 'yes' : 'no'}</td>
+                            <td>{c.isPrimaryKey ? 'yes' : ''}</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                  )}
-              </div>
-            )}
-          </section>
+                  ),
+              },
+              {
+                id: 'files',
+                label: 'Parquet files',
+                body: detail.dataFiles.length === 0
+                  ? <em style={{ color: '#888' }}>no parquet files</em>
+                  : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr>
+                          <th align="left">Path</th>
+                          <th align="right">Size</th>
+                          <th align="right">Rows</th>
+                          <th align="right">Snapshot</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.dataFiles.map(f => (
+                          <tr key={f.path} style={{ borderTop: '1px solid #eee' }}>
+                            <td><code style={{ wordBreak: 'break-all' }}>{f.path}</code></td>
+                            <td align="right">{fmtBytes(f.sizeBytes)}</td>
+                            <td align="right">{f.rowCount.toLocaleString()}</td>
+                            <td align="right">{f.snapshotId}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ),
+              },
+              {
+                id: 'preview',
+                label: 'Preview',
+                body: (
+                  <>
+                    {previewLoading && <p className="subtle">Loading preview...</p>}
+                    {previewError && (
+                      <p style={{ color: 'red', marginTop: 8 }}>Error: {previewError}</p>
+                    )}
+                    {preview && (
+                      <div style={{ marginTop: 12 }}>
+                        {preview.truncated && (
+                          <p className="subtle">
+                            Showing the first {preview.rows.length} rows; the result set is truncated.
+                          </p>
+                        )}
+                        {preview.rows.length === 0
+                          ? <em style={{ color: '#888' }}>no rows</em>
+                          : (
+                            <div style={{ overflowX: 'auto' }}>
+                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead>
+                                  <tr>
+                                    {preview.columns.map(c => (
+                                      <th key={c.name} align="left">
+                                        {c.name}<br />
+                                        <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {preview.rows.map((row, i) => (
+                                    <tr key={i} style={{ borderTop: '1px solid #eee' }}>
+                                      {row.map((v, j) => (
+                                        <td key={j}>
+                                          {v === null || v === undefined
+                                            ? <em style={{ color: '#888' }}>null</em>
+                                            : String(v)}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                      </div>
+                    )}
+                  </>
+                ),
+              },
+              {
+                id: 'compare',
+                label: 'Compare',
+                body: (
+                  <>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+                      <SnapshotPicker
+                        tenant={tenant!}
+                        tenantDb={tenantDb!}
+                        value={diffFrom}
+                        onChange={setDiffFrom}
+                        snapshots={snaps}
+                        tags={tags}
+                        label="From"
+                      />
+                      <SnapshotPicker
+                        tenant={tenant!}
+                        tenantDb={tenantDb!}
+                        value={diffTo}
+                        onChange={setDiffTo}
+                        snapshots={snaps}
+                        tags={tags}
+                        label="To"
+                      />
+                      <button type="button" onClick={() => loadDiff()} disabled={diffLoading}>
+                        {diffLoading ? 'Comparing...' : 'Compare'}
+                      </button>
+                    </div>
+                    {diffError && <p style={{ color: 'red' }}>Error: {diffError}</p>}
+                    {diff && (
+                      <div>
+                        <p className="subtle">
+                          Diffing snapshot {diff.from} against snapshot {diff.to}.
+                        </p>
+                        {diff.added.length === 0 && diff.removed.length === 0 &&
+                          diff.typeChanged.length === 0 && diff.nullabilityChanged.length === 0
+                          ? <em style={{ color: '#888' }}>no schema differences</em>
+                          : (
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                              <thead>
+                                <tr>
+                                  <th align="left">Change</th>
+                                  <th align="left">Column</th>
+                                  <th align="left">Detail</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {diff.added.map(c => (
+                                  <tr key={`added-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(34, 197, 94, 0.1)' }}>
+                                    <td>added</td>
+                                    <td>{c.name}</td>
+                                    <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
+                                  </tr>
+                                ))}
+                                {diff.removed.map(c => (
+                                  <tr key={`removed-${c.name}`} style={{ borderTop: '1px solid #eee', background: 'rgba(239, 68, 68, 0.1)' }}>
+                                    <td>removed</td>
+                                    <td>{c.name}</td>
+                                    <td><code>{c.typeName}</code>{c.nullable ? '' : ' not null'}</td>
+                                  </tr>
+                                ))}
+                                {diff.typeChanged.map(c => (
+                                  <tr key={`type-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                    <td>type changed</td>
+                                    <td>{c.column}</td>
+                                    <td><code>{c.fromType}</code> {'->'} <code>{c.toType}</code></td>
+                                  </tr>
+                                ))}
+                                {diff.nullabilityChanged.map(c => (
+                                  <tr key={`null-${c.column}`} style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                    <td>nullability changed</td>
+                                    <td>{c.column}</td>
+                                    <td>{c.fromNullable ? 'nullable' : 'not null'} {'->'} {c.toNullable ? 'nullable' : 'not null'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                      </div>
+                    )}
+                  </>
+                ),
+              },
+            ]}
+          />
         </>
       )}
     </div>

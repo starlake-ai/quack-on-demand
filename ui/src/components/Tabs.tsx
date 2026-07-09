@@ -24,9 +24,13 @@ export interface TabSpec {
 export default function Tabs({
   tabs,
   initialId,
+  onSelect,
 }: {
   tabs:       TabSpec[];
   initialId?: string;
+  /** Fired on every header click (incl. re-clicks of the active tab),
+    * after the tab becomes active. Not fired for the initial tab. */
+  onSelect?:  (id: string) => void;
 }) {
   const [active, setActive] = useState<string>(initialId ?? tabs[0]?.id ?? '');
   // Bumped on every header click (incl. re-clicks of the active tab)
@@ -47,6 +51,7 @@ export default function Tabs({
             onClick={() => {
               setActive(t.id);
               setNonce(n => n + 1);
+              onSelect?.(t.id);
             }}
           >
             {t.label}
