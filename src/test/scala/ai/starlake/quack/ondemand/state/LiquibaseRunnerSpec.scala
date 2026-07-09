@@ -27,8 +27,7 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
     TestPostgres.psql(targetDb, sql)
 
   private def withFreshDb(test: String => Unit): Unit =
-    if !TestPostgres.reachable then
-      TestPostgres.reachableOrCancel()
+    TestPostgres.ensureReachable()
     val dbName = s"qodlb_test_${System.nanoTime()}"
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try test(dbName)

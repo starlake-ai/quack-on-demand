@@ -6,17 +6,17 @@ import scala.util.Try
 
 /** Shared Postgres test helpers. Two responsibilities:
   *
-  *   - `dropDatabase(name)` issues a Postgres 13+ `DROP DATABASE IF
-  *     EXISTS "name" WITH (FORCE)` so the cleanup succeeds even if a
-  *     test left an idle backend connection open.
-  *   - `dropStrayTestDatabases(prefix)` runs at suite-start so any
-  *     leftover `${prefix}_test_*` databases from a SIGKILL'd previous
-  *     run get reaped before the new run starts allocating names. */
+  *   - `dropDatabase(name)` issues a Postgres 13+ `DROP DATABASE IF EXISTS "name" WITH (FORCE)` so
+  *     the cleanup succeeds even if a test left an idle backend connection open.
+  *   - `dropStrayTestDatabases(prefix)` runs at suite-start so any leftover `${prefix}_test_*`
+  *     databases from a SIGKILL'd previous run get reaped before the new run starts allocating
+  *     names.
+  */
 object TestPostgres:
 
-  val pgHost: String = sys.env.getOrElse("SL_TEST_PG_HOST",     "localhost")
-  val pgPort: Int    = sys.env.getOrElse("SL_TEST_PG_PORT",     "5432").toInt
-  val pgUser: String = sys.env.getOrElse("SL_TEST_PG_USER",     "postgres")
+  val pgHost: String = sys.env.getOrElse("SL_TEST_PG_HOST", "localhost")
+  val pgPort: Int    = sys.env.getOrElse("SL_TEST_PG_PORT", "5432").toInt
+  val pgUser: String = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
   val pgPass: String = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
 
   Class.forName("org.postgresql.Driver")
@@ -27,21 +27,27 @@ object TestPostgres:
   def reachable: Boolean =
     Try {
       val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
-      try c.isValid(2) finally c.close()
+      try c.isValid(2)
+      finally c.close()
     }.getOrElse(false)
 
-  def reachableOrCancel(message: String => String = identity): Nothing =
-    org.scalatest.Assertions.cancel(message(s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"))
+  /** Cancel the calling test when local Postgres is unreachable; no-op otherwise. */
+  def ensureReachable(): Unit =
+    if !reachable then
+      org.scalatest.Assertions.cancel(
+        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
+      )
 
-  /** Drop a database via psql, forcing connection termination so a
-    * lingering idle backend can't block the test cleanup. */
+  /** Drop a database via psql, forcing connection termination so a lingering idle backend can't
+    * block the test cleanup.
+    */
   def dropDatabase(name: String): Unit =
     psql("postgres", s"""DROP DATABASE IF EXISTS "$name" WITH (FORCE)""")
 
-  /** Reap any `${prefix}_test_%` database left behind by a previous,
-    * interrupted suite run. Each spec calls this once at suite start
-    * so a clean test run is the steady state regardless of how the
-    * prior JVM died. */
+  /** Reap any `${prefix}_test_%` database left behind by a previous, interrupted suite run. Each
+    * spec calls this once at suite start so a clean test run is the steady state regardless of how
+    * the prior JVM died.
+    */
   def dropStrayTestDatabases(prefix: String): Unit =
     if !reachable then ()
     else

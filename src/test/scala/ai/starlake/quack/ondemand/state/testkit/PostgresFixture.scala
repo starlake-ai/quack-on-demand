@@ -29,8 +29,7 @@ trait PostgresFixture:
   def withCatalog[A](catalogPrefix: String, extraSql: String = "")(
       test: (DuckLakeCatalogReader, Path) => A
   ): A =
-    if !TestPostgres.reachable then
-      TestPostgres.reachableOrCancel()
+    TestPostgres.ensureReachable()
     val dbName   = s"${catalogPrefix}_test_${System.nanoTime()}"
     val dataPath = Files.createTempDirectory(s"$catalogPrefix-data-")
     try
