@@ -35,6 +35,16 @@ object CatalogPreviewHandlers:
     * `PostgresAclValidator`'s superuser bypass applies -- NOT `effectiveSet = None`, which the
     * validator treats as "no RBAC principal bound to this session" and denies fail-safe. Public
     * (not `private[api]`) so Main's adapter, in a different package, can match on it.
+    *
+    * SAFETY INVARIANT (perimeter-enforced): this fallback is only sound because
+    * `ManagerServer.apiKeyGuard` guarantees that when a static API key is configured, the only
+    * requests reaching this handler carry either a VALID admin session or the static key itself; an
+    * expired/revoked/forged session token is rejected with 401 at the perimeter and never reaches
+    * this fallback. In open mode (no static key) everything is trusted by definition. If the
+    * perimeter contract ever changes (for example per-endpoint guards), this conflation of
+    * "unresolved token" with "trusted static key" must be revisited: the durable shape is a typed
+    * caller identity minted by the guard (see the authz-consolidation item in
+    * docs/AUDIT-FOLLOWUPS.md P3).
     */
   val SuperuserIdentity = "superuser"
 

@@ -1029,6 +1029,17 @@ object Main extends IOApp with LazyLogging:
       // also means a running, boundary-free synchronous tail cannot be preempted mid-flight: it
       // either finishes and wins the race, or the timeout fires strictly before that tail even
       // starts (in which case no QueryResult was ever built and there's nothing to close).
+      //
+      // SCOPE OF THIS PROOF: it covers the QueryResult only. It does NOT cover the wire-level
+      // node connection: the underlying call runs in IO.blocking, whose cancellation is
+      // best-effort (Thread.interrupt), so a timed-out preview can leave the abandoned blocking
+      // call to complete on its own and open a node connection/reader that nobody closes. That
+      // window is bounded by previewTimeoutSec and is a PRE-EXISTING property of the shared
+      // executor path (the FlightSQL prepare-probe has the identical exposure); the durable fix
+      // is bracketing the connection inside QuackHttpClient/QuackProtocol, tracked as a repo
+      // follow-up. Do not cite this comment as proof that a cancelled preview leaks nothing.
+      // The timeout also wraps the EffectiveSet-resolution leg, not just the HTTP leg
+      // (harmless: that leg holds no closeable resource).
       // Reading FlightSqlRouter.execute's final flatMap chain (the `QuackResponse.Ok` arm)
       // confirms there is no such boundary to worry about here: once the HTTP call to the Quack
       // node returns `QuackResponse.Ok(reader, latency, close)`, every step to
