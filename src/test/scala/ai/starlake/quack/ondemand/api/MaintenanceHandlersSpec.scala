@@ -184,6 +184,31 @@ class MaintenanceHandlersSpec extends AnyFlatSpec with Matchers:
     store.listMaintenancePolicies("acme", tenantDbName).size shouldBe 1
   }
 
+  it should "persist normalized scope fields, not the raw request's stray scopeSchema (F1)" in {
+    val (h, store) = setup()
+    // scopeKind=tenantdb with a stray scopeSchema must be normalized away before persisting,
+    // both times, so the two upserts collide on the same canonical tenantdb-scope row instead
+    // of creating a second distinct row under the COALESCE(scope_schema,'') unique index.
+    val first = h
+      .upsertPolicy(upsertReq(scopeKind = "tenantdb", scopeSchema = Some("junk")), None)(_ => None)
+      .unsafeRunSync()
+    first.isRight shouldBe true
+    first.toOption.get.scopeSchema shouldBe None
+
+    val second = h
+      .upsertPolicy(
+        upsertReq(scopeKind = "tenantdb", scopeSchema = Some("junk"), retentionDays = Some(14)),
+        None
+      )(_ => None)
+      .unsafeRunSync()
+    second.isRight shouldBe true
+    second.toOption.get.scopeSchema shouldBe None
+
+    val rows = store.listMaintenancePolicies("acme", tenantDbName)
+    rows.size shouldBe 1
+    rows.head.scopeSchema shouldBe None
+  }
+
   "deletePolicy" should "404 an unknown id and resolve the owning tenant for the scope gate" in {
     val (h, _) = setup()
     h.deletePolicy(MaintenancePolicyDeleteRequest("nope"), None)(_ => None)

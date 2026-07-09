@@ -181,13 +181,20 @@ final class MaintenanceHandlers(
         validateUpsert(req) match
           case Some((code, msg)) => err(StatusCode.BadRequest, code, msg)
           case None              =>
-            val policy = MaintenancePolicy(
+            // Normalize away any stray scopeSchema/scopeTable the request carries for a
+            // tenantdb-level scope before persisting (F1): the unique index keys off
+            // COALESCE(scope_schema,'') / COALESCE(scope_table,''), so persisting the raw
+            // request fields verbatim could create a second distinct tenantdb-scope row
+            // instead of colliding with the canonical one.
+            val normalizedSchema = if req.scopeKind == "tenantdb" then None else req.scopeSchema
+            val normalizedTable  = if req.scopeKind == "tenantdb" then None else req.scopeTable
+            val policy           = MaintenancePolicy(
               id = Names.newSurrogateId("mpol"),
               tenant = tid,
               tenantDb = db,
               scopeKind = req.scopeKind,
-              scopeSchema = req.scopeSchema,
-              scopeTable = req.scopeTable,
+              scopeSchema = normalizedSchema,
+              scopeTable = normalizedTable,
               enabled = req.enabled,
               retentionDays = req.retentionDays,
               compactionEnabled = req.compactionEnabled,

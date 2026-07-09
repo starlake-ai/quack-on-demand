@@ -1211,7 +1211,13 @@ object Main extends IOApp with LazyLogging:
                   store = store,
                   smallFileCountsOf = (t, td, bytes) =>
                     try catalogReader(t, td).smallFileCounts(bytes)
-                    catch case _: Exception => Map.empty,
+                    catch
+                      case e: Exception =>
+                        logger.warn(
+                          s"maintenance: small-file count read failed for $t/$td, " +
+                            s"treating as no hot tables this tick: ${e.getMessage}"
+                        )
+                        Map.empty,
                   minIntervalMinutes = mgrCfg.maintenance.minIntervalMin,
                   runTimeoutMinutes = mgrCfg.maintenance.runTimeoutMin,
                   staggerOf = ai.starlake.quack.ondemand.maintenance.PolicyMath.staggerMinutes,
@@ -1225,7 +1231,16 @@ object Main extends IOApp with LazyLogging:
                 spawn = (t, td) =>
                   sup.maintenanceNodeSpec(t, td) match
                     case Some(spec) =>
-                      backend.start(spec).map(Some(_)).handleErrorWith(_ => IO.pure(None))
+                      backend
+                        .start(spec)
+                        .map(Some(_))
+                        .handleErrorWith { e =>
+                          IO.delay(
+                            logger.warn(
+                              s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
+                            )
+                          ).as(None)
+                        }
                     case None => IO.pure(None),
                 stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
                 exec = (node, sql) =>

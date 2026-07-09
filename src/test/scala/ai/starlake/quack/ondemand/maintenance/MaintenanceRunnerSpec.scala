@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.maintenance
 
 import ai.starlake.quack.model._
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, InMemoryControlPlaneStore}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -186,3 +186,75 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     fin.error.getOrElse("") should include("policy lookup boom")
     f.stopped shouldBe List("maint-n1")
   }
+
+  /** Delegates every [[ControlPlaneStore]] call to a real in-memory store, except
+    * `heartbeatMaintenanceRun`: the first call (the pre-chain heartbeat in `executeRun`) passes
+    * through normally, but every call after that answers `false` -- as if a sweeper reaped the run
+    * as a zombie in between -- while independently flipping the underlying row to `"failed"`, the
+    * status a real sweep would have left behind. This lets a test prove the runner stops the chain
+    * and does not clobber that sweeper-set status (F2).
+    */
+  private class SweptAfterFirstHeartbeatStore(inner: InMemoryControlPlaneStore)
+      extends ControlPlaneStore:
+    export inner.{heartbeatMaintenanceRun as _, *}
+
+    private var heartbeatCalls = 0
+
+    override def heartbeatMaintenanceRun(id: Long, counters: RunCounters): Boolean =
+      heartbeatCalls += 1
+      if heartbeatCalls <= 1 then inner.heartbeatMaintenanceRun(id, counters)
+      else
+        inner.finishMaintenanceRun(id, "failed", RunCounters(), Some("stale: heartbeat timeout"))
+        false
+
+  "executeRun" should "stop the chain at the next heartbeat after a zombie sweep, without " +
+    "clobbering the sweeper's status (F2)" in {
+      val inner    = new InMemoryControlPlaneStore()
+      val store    = new SweptAfterFirstHeartbeatStore(inner)
+      var executed = List.empty[String]
+      var stopped  = List.empty[String]
+      val node     = RunningNode(
+        "maint-n1",
+        PoolKey("acme", "acme_db", "__maint"),
+        Role.Dual,
+        "127.0.0.1",
+        21999,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 1
+      )
+      val runner = new MaintenanceRunner(
+        store = store,
+        spawn = (_, _) => IO.pure(Some(node)),
+        stop = id => IO { stopped = stopped :+ id },
+        exec = (_, sql) => IO { executed = executed :+ sql; Right(()) },
+        snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
+        pinnedSnapshotsOf = (_, _) => Set.empty,
+        pinnedFilesOf = (_, _) => Set.empty,
+        scheduledForDeletion = (_, _) => Nil,
+        totalBytesOf = (_, _) => 100L,
+        effectivePolicyOf = (_, _, _, _) => EffectivePolicy.defaults.copy(enabled = true),
+        catalogAlias = (_, _) => "acme_db",
+        audit = ai.starlake.quack.ondemand.telemetry.AuditRecorder.noop
+      )
+
+      val r = inner.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", None)
+      inner.claimQueuedMaintenanceRun()
+      runner.executeRun(r.copy(status = "running")).unsafeRunSync()
+
+      // Only the flush step ran: the heartbeat gating step 2 (expire) already reported the run
+      // swept, so the chain stopped there.
+      executed.size shouldBe 1
+      executed.head should include("ducklake_flush_inlined_data")
+
+      // Node cleanup still happens regardless of how the chain ended.
+      stopped shouldBe List("maint-n1")
+
+      // The sweeper's status is left exactly as it set it: the runner must not call the
+      // store's finish-with-success path or otherwise flip status back.
+      val finalRun = inner.listMaintenanceRuns("acme", "acme_db", 10, None).head
+      finalRun.status shouldBe "failed"
+      finalRun.error shouldBe Some("stale: heartbeat timeout")
+    }
