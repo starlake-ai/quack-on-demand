@@ -61,6 +61,21 @@ class DuckLakeCatalogReaderTimeTravelSpec extends AnyFlatSpec with Matchers with
       ) shouldBe None
     }
 
+  "tableExistsAt" should "see a dropped table at the pre-drop snapshot only, and never a bogus one" in
+    withCatalog(
+      "tt",
+      extraSql = "DROP TABLE lake.tpch1.region;\n"
+    ) { (reader, _) =>
+      val snaps = reader.listSnapshots(limit = 100).map(_.snapshotId).sorted
+      // The drop is the newest snapshot; the one before it still sees the table. snaps.head is
+      // NOT used for the positive probe: the fixture's first snapshot (schema creation) may
+      // predate CREATE TABLE, and tableExistsAt deliberately has no begin_snapshot clamping
+      // (unlike schemaDiff's `from` clamp).
+      reader.tableExistsAt("tpch1", "region", snaps(snaps.size - 2)) shouldBe true
+      reader.tableExistsAt("tpch1", "region", snaps.last) shouldBe false
+      reader.tableExistsAt("tpch1", "no_such_table", snaps.last) shouldBe false
+    }
+
   "schemaDiff" should "report added, removed, retyped, and renamed-table identity" in
     withCatalog(
       "tt",

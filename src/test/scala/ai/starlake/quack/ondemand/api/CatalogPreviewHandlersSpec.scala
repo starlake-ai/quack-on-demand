@@ -108,8 +108,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     (sup, store)
 
   /** Stub `DuckLakeCatalogReader`: snapshots 12 and 42 exist, 42 is the max; everything else is
-    * absent. `knownTables` gates `getTable` (empty set = every (schema, table) resolves, matching
-    * the original preview-only behavior); `diffResult` is returned verbatim by `schemaDiff`.
+    * absent. `knownTables` gates `tableExistsAt` (empty set = every (schema, table) resolves,
+    * matching the original preview-only behavior); `diffResult` is returned verbatim by
+    * `schemaDiff`.
     */
   private def stubReader(
       knownTables: Set[(String, String)] = Set.empty,
@@ -119,14 +120,8 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       override def snapshotExists(id: Long): Boolean                       = id == 12L || id == 42L
       override def maxSnapshotId(): Option[Long]                           = Some(42L)
       override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(42L)
-      override def getTable(
-          schema: String,
-          table: String,
-          asOf: Option[Long] = None
-      ): Option[CatalogTableDetailResponse] =
-        if knownTables.isEmpty || knownTables.contains((schema, table)) then
-          Some(CatalogTableDetailResponse(CatalogTableEntry(schema, table, 0L, 0, None), Nil, Nil))
-        else None
+      override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
+        knownTables.isEmpty || knownTables.contains((schema, table))
       override def schemaDiff(
           schema: String,
           table: String,
@@ -431,6 +426,8 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val e = telemetryStore.events.last
     e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
     e.outcome shouldBe "ok"
+    e.detail.get("from") shouldBe Some("12")
+    e.detail.get("to") shouldBe Some("42")
 
   it should "audit CatalogSchemaDiffRead denied on a gate rejection" in new Stubs:
     val h = handlers()
@@ -439,6 +436,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val e = telemetryStore.events.last
     e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
     e.outcome shouldBe "denied"
+    // Pre-resolution denial: no snapshot ids exist yet, so the detail map stays empty.
+    e.detail.get("from") shouldBe None
+    e.detail.get("to") shouldBe None
 
   it should "audit CatalogSchemaDiffRead denied on an unknown table" in new Stubs:
     val h = handlers(readerOverride = stubReader(knownTables = Set(("tpch1", "other"))))
@@ -447,3 +447,6 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val e = telemetryStore.events.last
     e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
     e.outcome shouldBe "denied"
+    // Post-resolution denial: the resolved snapshot bounds are carried in the detail map.
+    e.detail.get("from") shouldBe Some("12")
+    e.detail.get("to") shouldBe Some("42")

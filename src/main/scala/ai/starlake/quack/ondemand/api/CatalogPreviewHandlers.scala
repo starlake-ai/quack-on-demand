@@ -198,7 +198,8 @@ final class CatalogPreviewHandlers(
         exists = (id: Long) => reader.snapshotExists(id)
       )
       .map {
-        case SnapshotSelector.Resolution.Current   => 0L // unreachable: raw is never empty here
+        case SnapshotSelector.Resolution.Current =>
+          sys.error("unreachable: parseBound never yields no selector")
         case SnapshotSelector.Resolution.At(id, _) => id
       }
 
@@ -207,11 +208,15 @@ final class CatalogPreviewHandlers(
     * each side gets its own 410 `snapshot_expired` / 422 `invalid_snapshot` / 404 `not_found`
     * (unknown tag) outcome. Once both bounds resolve to concrete snapshot ids, the table is looked
     * up at `to` falling back to `from` (mirrors [[DuckLakeCatalogReader.schemaDiff]]'s own
-    * resolution order) so an unknown table surfaces as 404 `not_found` from the handler instead of
-    * the reader's silent empty-diff fallback. `from == to` is a valid request and yields an
-    * all-empty diff (added/removed/typeChanged/nullabilityChanged all empty).
+    * resolution order, via the cheap [[DuckLakeCatalogReader.tableExistsAt]] probe) so an unknown
+    * table surfaces as 404 `not_found` from the handler instead of the reader's silent empty-diff
+    * fallback. `from == to` is a valid request and yields an all-empty diff
+    * (added/removed/typeChanged/nullabilityChanged all empty).
     *
-    * Audited unconditionally (denied + ok), same convention as [[preview]].
+    * Audited unconditionally (denied + ok), same convention as [[preview]]. Once the bounds are
+    * resolved, every audit event (ok, and the unknown-table denial) carries the resolved snapshot
+    * ids as `detail = {from, to}`; pre-resolution denials (gate rejection, selector error) have no
+    * ids yet and stay detail-less.
     */
   def schemaDiff(
       tenant: String,
@@ -230,14 +235,15 @@ final class CatalogPreviewHandlers(
         val reader = resolveReader(tid, db)
         val target = Some(s"$db/$schema/$table")
 
-        def denyAudit(): Unit =
+        def denyAudit(detail: Map[String, String] = Map.empty): Unit =
           audit.rest(
             apiKey,
             "control-plane",
             AuditActions.CatalogSchemaDiffRead,
             "denied",
             tenant = Some(tid),
-            target = target
+            target = target,
+            detail = detail
           )
 
         val resolved =
@@ -252,39 +258,38 @@ final class CatalogPreviewHandlers(
             denyAudit()
             IO.pure(err(sc, code, msg))
           case Right((fromId, toId)) =>
-            val tableExists =
-              reader
-                .getTable(schema, table, Some(toId))
-                .orElse(reader.getTable(schema, table, Some(fromId)))
-            tableExists match
-              case None =>
-                denyAudit()
-                IO.pure(
-                  err(StatusCode.NotFound, "not_found", s"table '$schema.$table' not found")
-                )
-              case Some(_) =>
-                val diff     = reader.schemaDiff(schema, table, fromId, toId)
-                val response = SchemaDiffResponse(
-                  from = fromId,
-                  to = toId,
-                  added = diff.added,
-                  removed = diff.removed,
-                  typeChanged = diff.typeChanged.map { case (col, f, t) =>
-                    SchemaDiffColumnType(col, f, t)
-                  },
-                  nullabilityChanged = diff.nullabilityChanged.map { case (col, f, t) =>
-                    SchemaDiffNullability(col, f, t)
-                  }
-                )
-                audit.rest(
-                  apiKey,
-                  "control-plane",
-                  AuditActions.CatalogSchemaDiffRead,
-                  "ok",
-                  tenant = Some(tid),
-                  target = target
-                )
-                IO.pure(Right(response))
+            val bounds = Map("from" -> fromId.toString, "to" -> toId.toString)
+            if !(reader.tableExistsAt(schema, table, toId) ||
+                reader.tableExistsAt(schema, table, fromId))
+            then
+              denyAudit(bounds)
+              IO.pure(
+                err(StatusCode.NotFound, "not_found", s"table '$schema.$table' not found")
+              )
+            else
+              val diff     = reader.schemaDiff(schema, table, fromId, toId)
+              val response = SchemaDiffResponse(
+                from = fromId,
+                to = toId,
+                added = diff.added,
+                removed = diff.removed,
+                typeChanged = diff.typeChanged.map { case (col, f, t) =>
+                  SchemaDiffColumnType(col, f, t)
+                },
+                nullabilityChanged = diff.nullabilityChanged.map { case (col, f, t) =>
+                  SchemaDiffNullability(col, f, t)
+                }
+              )
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.CatalogSchemaDiffRead,
+                "ok",
+                tenant = Some(tid),
+                target = target,
+                detail = bounds
+              )
+              IO.pure(Right(response))
 
   def preview(
       tenant: String,

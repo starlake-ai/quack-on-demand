@@ -541,6 +541,14 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
       (List(schema, table) ++ sArgs ++ tArgs)*
     )(_.getLong("table_id")).headOption
 
+  /** Cheap existence probe: does `(schema, table)` resolve to a `table_id` visible at snapshot
+    * `snapshotId`? One single-row SELECT (delegating to `tableIdAt`, the same query `schemaDiff`
+    * resolves identity with), exposed publicly so the schema-diff handler can 404 an unknown table
+    * without paying `getTable`'s multi-query cost (header + delete-count + columns + data files).
+    */
+  def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
+    tableIdAt(schema, table, snapshotId).isDefined
+
   /** Columns visible at snapshot `n` for a table pinned by `table_id` (not name) - the rename-proof
     * counterpart to `listColumns`/`columnsAt`, used internally by `schemaDiff`.
     */
