@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.catalog
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
   CatalogDataFileEntry,
+  CatalogHistoryCommit,
   CatalogSchemaEntry,
   CatalogSnapshotEntry,
   CatalogTableDetailResponse,
@@ -25,6 +26,23 @@ final case class SchemaDiffResult(
     removed: List[CatalogColumnEntry],
     typeChanged: List[(String, String, String)],
     nullabilityChanged: List[(String, Boolean, Boolean)]
+)
+
+/** Server-side filters of the per-table history timeline (EPIC Spec 01). All four push into SQL so
+  * keyset pagination and hasMore stay exact.
+  */
+final case class TableHistoryFilter(
+    from: Option[java.time.Instant] = None,
+    to: Option[java.time.Instant] = None,
+    operation: Option[String] = None,
+    author: Option[String] = None
+)
+
+/** One history page. `tableId` is the stable DuckLake table_id the page was resolved against. */
+final case class TableHistoryPage(
+    tableId: Long,
+    commits: List[CatalogHistoryCommit],
+    hasMore: Boolean
 )
 
 /** Reads schemas / tables / columns / data files out of the DuckLake metadata tables. The metadata
@@ -522,6 +540,211 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
                 case _ => Nil
     }
     refs.distinct
+
+  /** table_id of `(schema, table)` in the CURRENT catalog state. History identity: all history
+    * predicates key on this id, so the timeline survives renames (a rename inserts a new
+    * `ducklake_table` row under the SAME table_id; see `tableIdAt`).
+    */
+  private def currentTableId(schema: String, table: String): Option[Long] =
+    query(
+      """SELECT t.table_id
+        |  FROM ducklake_schema s
+        |  JOIN ducklake_table t ON t.schema_id = s.schema_id
+        | WHERE s.schema_name = ? AND t.table_name = ?
+        |   AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL""".stripMargin,
+      schema,
+      table
+    )(_.getLong("table_id")).headOption
+
+  /** Escapes POSIX-regex metacharacters so identifier names can be embedded in a `~` pattern. */
+  private def regexEscape(s: String): String =
+    s.replaceAll("""([.^$*+?()\[\]{}|\\])""", """\\$1""")
+
+  /** Escapes SQL LIKE metacharacters (`%`, `_`) so identifier names can be embedded in a `LIKE`
+    * pattern without accidentally matching more than the literal path segment.
+    */
+  private def likeEscape(s: String): String =
+    s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+  /** POSIX regex matching one `verb:payload` entry of `changes_made` that references this table, in
+    * either payload form DuckLake emits (numeric table id on older versions, quoted qualified name
+    * on newer ones - the same duality `affectedTables` parses in Scala).
+    */
+  private def changeRefPattern(
+      verbs: List[String],
+      tableId: Long,
+      schema: String,
+      table: String
+  ): String =
+    val quotedName = regexEscape(s"\"$schema\".\"$table\"")
+    s"(^|,)(${verbs.mkString("|")}):($tableId|$quotedName)(,|$$)"
+
+  /** Per-table commit history, newest first (EPIC Spec 01). One aggregated SQL query per page:
+    * membership, classification (SQL CASE - single source of truth so the `operation` filter and
+    * `hasMore` stay exact), row/file deltas, and all filters are computed in the catalog DB; Scala
+    * applies only `HistoryOperation.effectiveDeltas` on the way out. `rowsRemoved` is the
+    * delete-file DELTA (new delete file count minus the superseded one's), NOT an
+    * `end_snapshot = S` sum - delete files are backdated two-phase (see `visible`) and a naive sum
+    * would report compaction rewrites as phantom mass deletes. `filesRemoved` adds a `sched` CTE on
+    * top of the `end_snapshot`-based `tr` count: verified against a live catalog,
+    * `ducklake_merge_adjacent_files` does NOT end-date the superseded `ducklake_data_file` rows -
+    * it hard-deletes them and appends their paths to `ducklake_files_scheduled_for_deletion`
+    * (already used unscoped by `filesScheduledForDeletion`), which carries no `table_id` or
+    * `snapshot_id` column. `schedule_start` matches the triggering snapshot's `snapshot_time`
+    * exactly (same transaction), so `sched` joins on that equality and scopes to this table via a
+    * `path LIKE 'schema/table/%'` prefix. None = table name unknown in the current catalog state.
+    */
+  def listTableHistory(
+      schema: String,
+      table: String,
+      filter: TableHistoryFilter = TableHistoryFilter(),
+      limit: Int = 50,
+      before: Option[Long] = None
+  ): Option[TableHistoryPage] =
+    currentTableId(schema, table).map { tid =>
+      val creation = earliestBeginSnapshot(tid).getOrElse(-1L)
+      // Verb names pinned against a live DuckLake 0.3 (DuckDB 1.5.4) catalog - see
+      // task-2-report.md for the raw `changes_made` dump. Two verbs differ from the DuckLake docs'
+      // naming: unflushed inline writes emit `inlined_insert` / `inlined_delete` (NOT
+      // `inserted_into_table` / `deleted_from_table`, which only appear once a write is flushed to
+      // a real data/delete file), and adjacent-file compaction emits `merge_adjacent` (NOT
+      // `compacted_table`).
+      val allVerbs = List(
+        "created_table",
+        "dropped_table",
+        "altered_table",
+        "inserted_into_table",
+        "inlined_insert",
+        "deleted_from_table",
+        "inlined_delete",
+        "merge_adjacent"
+      )
+      val insRef =
+        changeRefPattern(List("inserted_into_table", "inlined_insert"), tid, schema, table)
+      val delRef =
+        changeRefPattern(List("deleted_from_table", "inlined_delete"), tid, schema, table)
+      val compRef  = changeRefPattern(List("merge_adjacent"), tid, schema, table)
+      val anyRef   = changeRefPattern(allVerbs, tid, schema, table)
+      val pathLike = s"${likeEscape(schema)}/${likeEscape(table)}/%"
+
+      val beforePred = if before.isDefined then "\n     AND s.snapshot_id < ?" else ""
+      val fromPred   = if filter.from.isDefined then "\n     AND s.snapshot_time >= ?" else ""
+      val toPred     = if filter.to.isDefined then "\n     AND s.snapshot_time <= ?" else ""
+      val authorPred = if filter.author.isDefined then "\n     AND c.author = ?" else ""
+      val opPred     = if filter.operation.isDefined then "\n WHERE h.operation = ?" else ""
+
+      val sql =
+        s"""WITH tf AS (SELECT begin_snapshot AS sid, sum(record_count) AS rows_added,
+           |                   count(*) AS files_added
+           |              FROM ducklake_data_file WHERE table_id = ? GROUP BY 1),
+           |     tr AS (SELECT end_snapshot AS sid, sum(record_count) AS rows_retired,
+           |                   count(*) AS files_removed
+           |              FROM ducklake_data_file
+           |             WHERE table_id = ? AND end_snapshot IS NOT NULL GROUP BY 1),
+           |     dn AS (SELECT begin_snapshot AS sid, sum(delete_count) AS del_new,
+           |                   count(*) AS del_files
+           |              FROM ducklake_delete_file WHERE table_id = ? GROUP BY 1),
+           |     dold AS (SELECT end_snapshot AS sid, sum(delete_count) AS del_old
+           |                FROM ducklake_delete_file
+           |               WHERE table_id = ? AND end_snapshot IS NOT NULL GROUP BY 1),
+           |     tb AS (SELECT begin_snapshot AS sid, count(*) AS n
+           |              FROM ducklake_table WHERE table_id = ? GROUP BY 1),
+           |     te AS (SELECT end_snapshot AS sid, count(*) AS n
+           |              FROM ducklake_table
+           |             WHERE table_id = ? AND end_snapshot IS NOT NULL GROUP BY 1),
+           |     cb AS (SELECT begin_snapshot AS sid, count(*) AS n
+           |              FROM ducklake_column WHERE table_id = ? GROUP BY 1),
+           |     ce AS (SELECT end_snapshot AS sid, count(*) AS n
+           |              FROM ducklake_column
+           |             WHERE table_id = ? AND end_snapshot IS NOT NULL GROUP BY 1),
+           |     sched AS (SELECT s2.snapshot_id AS sid, count(*) AS n
+           |                 FROM ducklake_files_scheduled_for_deletion d
+           |                 JOIN ducklake_snapshot s2 ON s2.snapshot_time = d.schedule_start
+           |                WHERE d.path LIKE ? ESCAPE '\' GROUP BY 1)
+           |SELECT * FROM (
+           |  SELECT s.snapshot_id,
+           |         s.snapshot_time,
+           |         s.schema_version,
+           |         c.author,
+           |         c.commit_message,
+           |         coalesce(tf.rows_added, 0)    AS rows_added,
+           |         coalesce(tf.files_added, 0)   AS files_added,
+           |         coalesce(tr.rows_retired, 0)  AS rows_retired,
+           |         coalesce(tr.files_removed, 0) + coalesce(sched.n, 0) AS files_removed,
+           |         greatest(coalesce(dn.del_new, 0) - coalesce(dold.del_old, 0), 0)
+           |           AS rows_deleted,
+           |         ((coalesce(cb.n, 0) + coalesce(ce.n, 0)) > 0 AND s.snapshot_id <> ?)
+           |           AS schema_changed,
+           |         CASE
+           |           WHEN s.snapshot_id = ? THEN 'create'
+           |           WHEN coalesce(te.n, 0) > 0 AND coalesce(tb.n, 0) = 0 THEN 'drop'
+           |           WHEN coalesce(tb.n, 0) > 0 OR coalesce(cb.n, 0) > 0
+           |                OR coalesce(ce.n, 0) > 0 THEN 'alter'
+           |           WHEN coalesce(c.changes_made, '') ~ ? THEN 'maintenance'
+           |           WHEN (coalesce(dn.del_files, 0) > 0 OR coalesce(c.changes_made, '') ~ ?)
+           |            AND (coalesce(tf.files_added, 0) > 0 OR coalesce(c.changes_made, '') ~ ?)
+           |             THEN 'update'
+           |           WHEN coalesce(dn.del_files, 0) > 0 OR coalesce(tr.files_removed, 0) > 0
+           |                OR coalesce(c.changes_made, '') ~ ? THEN 'delete'
+           |           WHEN coalesce(tf.files_added, 0) > 0
+           |                OR coalesce(c.changes_made, '') ~ ? THEN 'insert'
+           |           ELSE 'unknown'
+           |         END AS operation
+           |    FROM ducklake_snapshot s
+           |    LEFT JOIN ducklake_snapshot_changes c ON c.snapshot_id = s.snapshot_id
+           |    LEFT JOIN tf   ON tf.sid   = s.snapshot_id
+           |    LEFT JOIN tr   ON tr.sid   = s.snapshot_id
+           |    LEFT JOIN dn   ON dn.sid   = s.snapshot_id
+           |    LEFT JOIN dold ON dold.sid = s.snapshot_id
+           |    LEFT JOIN tb   ON tb.sid   = s.snapshot_id
+           |    LEFT JOIN te   ON te.sid   = s.snapshot_id
+           |    LEFT JOIN cb    ON cb.sid    = s.snapshot_id
+           |    LEFT JOIN ce    ON ce.sid    = s.snapshot_id
+           |    LEFT JOIN sched ON sched.sid = s.snapshot_id
+           |   WHERE (tf.sid IS NOT NULL OR tr.sid IS NOT NULL OR dn.sid IS NOT NULL
+           |          OR dold.sid IS NOT NULL OR tb.sid IS NOT NULL OR te.sid IS NOT NULL
+           |          OR cb.sid IS NOT NULL OR ce.sid IS NOT NULL OR sched.sid IS NOT NULL
+           |          OR coalesce(c.changes_made, '') ~ ?)$beforePred$fromPred$toPred$authorPred
+           |) h$opPred
+           |ORDER BY h.snapshot_id DESC
+           |LIMIT ?""".stripMargin
+
+      val params: List[Any] =
+        List[Any](tid, tid, tid, tid, tid, tid, tid, tid) ++ // 8 CTEs
+          List[Any](pathLike) ++                             // sched CTE
+          List[Any](creation, creation, compRef, delRef, insRef, delRef, insRef) ++
+          List[Any](anyRef) ++ // membership
+          before.toList ++
+          filter.from.map(java.sql.Timestamp.from).toList ++
+          filter.to.map(java.sql.Timestamp.from).toList ++
+          filter.author.toList ++
+          filter.operation.toList ++
+          List[Any](limit + 1) // hasMore sentinel
+
+      val raw = query(sql, params*) { rs =>
+        val op                       = rs.getString("operation")
+        val (rowsAdded, rowsRemoved) = HistoryOperation.effectiveDeltas(
+          op,
+          rs.getLong("rows_added"),
+          rs.getLong("rows_retired"),
+          rs.getLong("rows_deleted")
+        )
+        CatalogHistoryCommit(
+          snapshotId = rs.getLong("snapshot_id"),
+          committedAt = rs.getTimestamp("snapshot_time").toInstant.toString,
+          operation = op,
+          author = Option(rs.getString("author")),
+          commitMessage = Option(rs.getString("commit_message")),
+          schemaChanged = rs.getBoolean("schema_changed"),
+          schemaVersion = rs.getLong("schema_version"),
+          rowsAdded = rowsAdded,
+          rowsRemoved = rowsRemoved,
+          filesAdded = rs.getInt("files_added"),
+          filesRemoved = rs.getInt("files_removed")
+        )
+      }
+      TableHistoryPage(tid, raw.take(limit), hasMore = raw.length > limit)
+    }
 
   /** Resolves `table_id` for (schema, table) visible at snapshot `n`. Table identity survives a
     * rename (verified against a live catalog: `ALTER TABLE ... RENAME TO` inserts a new
