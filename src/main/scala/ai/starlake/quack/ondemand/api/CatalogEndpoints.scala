@@ -94,3 +94,43 @@ object CatalogEndpoints:
         "List DuckLake snapshots of the (tenant, tenantDb), newest first; keyset pagination via limit + before=snapshotId. " +
           "Optional table=<schema>.<table> filters to snapshots affecting that table."
       )
+
+  val tableHistoryEndpoint: PublicEndpoint[
+    (
+        String,
+        String,
+        String,
+        String,
+        Option[Int],
+        Option[Long],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String],
+        Option[String]
+    ),
+    (sttp.model.StatusCode, ErrorResponse),
+    CatalogHistoryResponse,
+    Any
+  ] =
+    base.get
+      .in(
+        "catalog" / "tenant" / path[String]("tenant") /
+          "database" / path[String]("tenantDb") /
+          "schemas" / path[String]("schema") /
+          "tables" / path[String]("table") / "history"
+      )
+      .in(query[Option[Int]]("limit"))
+      .in(query[Option[Long]]("before"))
+      .in(query[Option[String]]("from"))
+      .in(query[Option[String]]("to"))
+      .in(query[Option[String]]("operation"))
+      .in(query[Option[String]]("author"))
+      .in(Endpoints.authToken)
+      .out(jsonBody[CatalogHistoryResponse])
+      .description(
+        "Per-table DuckLake commit history, newest first (EPIC Spec 01): operation, author, " +
+          "commit message, schema-changed flag, and row/file deltas attributable to the table. " +
+          "Keyset pagination via limit (default 50, max 200) + before=snapshotId; optional " +
+          "from/to (ISO-8601), operation, and author filters."
+      )
