@@ -111,37 +111,63 @@ final class UserStore(
     * first; if that yields nothing AND `email` is given, retries with `username = email` so
     * operators can provision either form. tenant=NULL rows are superuser grants.
     *
+    * A row that exists but is disabled short-circuits to a deny (no grants) WITHOUT falling through
+    * to the email lookup: otherwise a disabled username-keyed row would look identical to a
+    * genuinely-missing row (both yield an empty grant list from a naive `AND enabled` filter), and
+    * an enabled email-keyed row for the same person would silently grant access despite the
+    * disable. The fallback to email is reserved for identities that are genuinely absent by
+    * username, not merely disabled.
+    *
     * Returns one `UserGrant` per row. Order is unspecified.
     */
   def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
     withConn { c =>
-      val first = grantsByUsername(c, identity)
-      if first.nonEmpty then first
-      else
-        email
-          .filter(e => e.nonEmpty && e != identity)
-          .map(grantsByUsername(c, _))
-          .getOrElse(Nil)
+      lookupByUsername(c, identity) match
+        case Lookup.Disabled  => Nil
+        case Lookup.Found(gs) => gs
+        case Lookup.Missing   =>
+          email
+            .filter(e => e.nonEmpty && e != identity)
+            .map(lookupByUsername(c, _))
+            .map {
+              case Lookup.Disabled  => Nil
+              case Lookup.Found(gs) => gs
+              case Lookup.Missing   => Nil
+            }
+            .getOrElse(Nil)
     }
 
-  private def grantsByUsername(c: Connection, username: String): List[UserGrant] =
-    // A disabled user contributes no grants: the OIDC callback then hits the
-    // not_provisioned gate instead of minting a session, mirroring the
-    // password-login and FlightSQL-handshake enforcement of the same flag.
+  /** Outcome of a single username lookup, distinguishing "row absent" from "row present but
+    * disabled" so callers can short-circuit the disabled case instead of treating it the same as
+    * absent.
+    */
+  private enum Lookup:
+    case Missing
+    case Disabled
+    case Found(grants: List[UserGrant])
+
+  private def lookupByUsername(c: Connection, username: String): Lookup =
+    // No `AND enabled` filter here: the row must be fetched regardless of
+    // its enabled state so a disabled row can be distinguished from a
+    // genuinely-missing one (see grantsForIdentity's doc).
     val ps = c.prepareStatement(
-      "SELECT tenant, role FROM qodstate_user WHERE username = ? AND enabled"
+      "SELECT tenant, role, enabled FROM qodstate_user WHERE username = ?"
     )
     try
       ps.setString(1, username)
-      val rs  = ps.executeQuery()
-      val buf = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      val rs          = ps.executeQuery()
+      val buf         = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      var anyDisabled = false
       try
         while rs.next() do
-          val t = Option(rs.getString(1)).filter(_.nonEmpty)
-          val r = Option(rs.getString(2)).getOrElse("user")
-          buf += UserGrant(t, r)
+          val t       = Option(rs.getString(1)).filter(_.nonEmpty)
+          val r       = Option(rs.getString(2)).getOrElse("user")
+          val enabled = rs.getBoolean(3)
+          if !enabled then anyDisabled = true else buf += UserGrant(t, r)
       finally rs.close()
-      buf.toList
+      if anyDisabled then Lookup.Disabled
+      else if buf.isEmpty then Lookup.Missing
+      else Lookup.Found(buf.toList)
     finally ps.close()
 
   private def lookupId(c: Connection, tenant: Option[String], username: String): Option[String] =

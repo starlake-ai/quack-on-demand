@@ -140,3 +140,16 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       try us.grantsForIdentity("dave", None).map(_.role) shouldBe List("admin")
       finally us.close()
     }
+
+  it should "yield no grants when the username row is disabled, even if an enabled email-keyed row exists for the same person" in
+    withFreshDb { (store, url) =>
+      // A person provisioned twice: once under a username, once under their
+      // email address (a common OIDC-provisioning pattern). The username
+      // row is disabled; the email row is enabled. Disabling by username
+      // must not be bypassable via the email fallback.
+      store.upsertUserWithHash(None, "erin", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(None, "erin@example.com", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try us.grantsForIdentity("erin", Some("erin@example.com")) shouldBe Nil
+      finally us.close()
+    }
