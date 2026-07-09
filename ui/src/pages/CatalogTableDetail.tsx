@@ -11,6 +11,7 @@ import type {
 import Breadcrumb from '../components/Breadcrumb';
 import SnapshotPicker, { parseSnapshotSelector, type SnapshotSelectorValue } from '../components/SnapshotPicker';
 import Tabs from '../components/Tabs';
+import CatalogHistoryPanel from '../components/CatalogHistoryPanel';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -170,6 +171,23 @@ export default function CatalogTableDetail() {
       })
       .catch(e => setDiffError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setDiffLoading(false));
+  }
+
+  function viewAsOfSnapshot(snapshotId: number) {
+    const next = new URLSearchParams(searchParams);
+    writeSelectorToSearchParams(next, `id:${snapshotId}`);
+    setSearchParams(next);
+  }
+
+  // compareFromHistory loads the diff and stamps ?diffFrom/&diffTo; the result is visible when
+  // the user opens the Compare tab (the Tabs component owns tab state and remounts bodies, so
+  // the page cannot switch tabs programmatically without changing the shared component - out
+  // of scope here). viewAsOfSnapshot sets the page-wide AS OF selector, so the banner appears
+  // immediately and every tab reflects the chosen snapshot.
+  function compareFromHistory(from: number, to: number) {
+    setDiffFrom(`id:${from}`);
+    setDiffTo(`id:${to}`);
+    loadDiff(String(from), String(to));
   }
 
   const tEnc  = encodeURIComponent(tenant!);
@@ -472,6 +490,20 @@ export default function CatalogTableDetail() {
                       </div>
                     )}
                   </>
+                ),
+              },
+              {
+                id: 'history',
+                label: 'History',
+                body: (
+                  <CatalogHistoryPanel
+                    tenant={tenant!}
+                    tenantDb={tenantDb!}
+                    schema={schema!}
+                    table={table!}
+                    onViewAsOf={viewAsOfSnapshot}
+                    onCompare={compareFromHistory}
+                  />
                 ),
               },
             ]}

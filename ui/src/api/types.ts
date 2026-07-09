@@ -596,6 +596,34 @@ export interface CatalogSnapshotEntry {
   commitMessage: string | null; // ducklake_snapshot_changes.commit_message
 }
 
+// ----- Per-table history / audit timeline (EPIC Spec 01) -----
+
+export interface CatalogHistoryTableRef {
+  schema: string;
+  name: string;
+  tableId: number;
+}
+
+export interface CatalogHistoryCommit {
+  snapshotId: number;
+  committedAt: string; // ISO-8601
+  operation: string;   // create|insert|delete|update|alter|drop|maintenance|unknown
+  author: string | null;        // null on pre-stamping snapshots
+  commitMessage: string | null;
+  schemaChanged: boolean;
+  schemaVersion: number;
+  rowsAdded: number;
+  rowsRemoved: number;
+  filesAdded: number;
+  filesRemoved: number;
+}
+
+export interface CatalogHistoryResponse {
+  table: CatalogHistoryTableRef;
+  commits: CatalogHistoryCommit[]; // snapshotId DESC
+  hasMore: boolean;
+}
+
 export interface CatalogTagEntry {
   name: string;
   snapshotId: number;

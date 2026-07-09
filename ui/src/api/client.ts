@@ -34,6 +34,7 @@ import type {
   CatalogTableEntry,
   CatalogTableDetailResponse,
   CatalogSnapshotEntry,
+  CatalogHistoryResponse,
   CatalogTagEntry,
   PreviewResponse,
   SchemaDiffResponse,
@@ -429,6 +430,24 @@ export const api = {
     return get<SchemaDiffResponse>(
       `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
         `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/schema-diff?${qs.toString()}`
+    );
+  },
+
+  listTableHistory: (
+    tenant: string, tenantDb: string, schema: string, table: string,
+    params?: { limit?: number; before?: number; from?: string; to?: string; operation?: string; author?: string }
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.limit != null) qs.set('limit', String(params.limit));
+    if (params?.before != null) qs.set('before', String(params.before));
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.operation) qs.set('operation', params.operation);
+    if (params?.author) qs.set('author', params.author);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<CatalogHistoryResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/history${q}`
     );
   },
 
