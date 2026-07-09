@@ -14,6 +14,18 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import java.sql.ResultSet
 import scala.collection.mutable.ListBuffer
 
+/** Result of a column-level schema diff between two snapshots of one table (time-travel viewer).
+  * `typeChanged` / `nullabilityChanged` tuples are `(column, from, to)`; only columns present at
+  * BOTH ends are considered for retyping/nullability (a column that was added or removed shows up
+  * in `added`/`removed` instead).
+  */
+final case class SchemaDiffResult(
+    added: List[CatalogColumnEntry],
+    removed: List[CatalogColumnEntry],
+    typeChanged: List[(String, String, String)],
+    nullabilityChanged: List[(String, Boolean, Boolean)]
+)
+
 /** Reads schemas / tables / columns / data files out of the DuckLake metadata tables. The metadata
   * schema is fixed by DuckLake itself (`ducklake_schema`, `ducklake_table`, `ducklake_column`,
   * `ducklake_data_file`) and lives in the same Postgres DB the catalog is attached to.
@@ -109,6 +121,23 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
 
   def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
+
+  /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
+  def maxSnapshotId(): Option[Long] =
+    query("SELECT max(snapshot_id) AS m FROM ducklake_snapshot") { rs =>
+      Option(rs.getObject("m")).map(_ => rs.getLong("m"))
+    }.headOption.flatten
+
+  /** Nearest snapshot committed at or before `ts` - the time-travel viewer's "as of this instant"
+    * resolution. None when `ts` is before the catalog's first snapshot.
+    */
+  def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] =
+    query(
+      "SELECT max(snapshot_id) AS m FROM ducklake_snapshot WHERE snapshot_time <= ?",
+      java.sql.Timestamp.from(ts)
+    ) { rs =>
+      Option(rs.getObject("m")).map(_ => rs.getLong("m"))
+    }.headOption.flatten
 
   /** Subset of `ids` that exist in the catalog. One round-trip; used to flag dangling tags. */
   def snapshotsExist(ids: Set[Long]): Set[Long] =
@@ -257,6 +286,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
   def columnNames(schema: String, table: String): List[String] =
     listColumns(schema, table).map(_.name)
 
+  /** Public, snapshot-pinned form of the as-of column listing (Task 1 / time-travel viewer). Thin
+    * wrapper: `listColumns` already accepts `asOf`, this just names the pinned form so callers
+    * outside the package don't have to pass `asOf` as a bare `Option[Long]`.
+    */
+  def columnsAt(schema: String, table: String, snapshotId: Long): List[CatalogColumnEntry] =
+    listColumns(schema, table, Some(snapshotId))
+
   def listColumns(
       schema: String,
       table: String,
@@ -323,12 +359,26 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
   /** All snapshots, newest first. Counts are computed from `ducklake_data_file`: a file "added at"
     * snapshot n has begin_snapshot = n, "removed at" n has end_snapshot = n. `affectedTables`
     * resolves the table ids referenced by `changes_made` to (schema, table) names visible at that
-    * snapshot.
+    * snapshot. `author` / `commitMessage` are the P1 stamping columns - they live on
+    * `ducklake_snapshot_changes`, not `ducklake_snapshot` (verified against a live DuckLake 0.3
+    * catalog; `information_schema.columns` for `ducklake_snapshot` carries only
+    * `snapshot_id/snapshot_time/schema_version/next_catalog_id/next_file_id`). Both are SQL NULL
+    * (not empty string) on an unstamped snapshot, so `Option(rs.getString(...))` maps them to None
+    * directly.
     *
     * `limit` is the page size (caller is responsible for clamping). `before` is the exclusive
     * keyset cursor: only snapshots with snapshot_id strictly less than `before` are returned.
+    * `table` is an optional (schema, table) filter: only snapshots whose `affectedTables` include
+    * it survive. Filtering happens after resolving `affectedTables` (same in-memory parse
+    * `affectedTables` already does - no second SQL-level parser for `changes_made`), and `limit` is
+    * applied AFTER the filter so a caller asking for the last 20 snapshots touching one table
+    * actually gets 20, not up to 20 after truncating the unfiltered page.
     */
-  def listSnapshots(limit: Int = 200, before: Option[Long] = None): List[CatalogSnapshotEntry] =
+  def listSnapshots(
+      limit: Int = 200,
+      before: Option[Long] = None,
+      table: Option[(String, String)] = None
+  ): List[CatalogSnapshotEntry] =
     val (whereClause, whereParams) = before match
       case None    => ("", Nil)
       case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
@@ -337,6 +387,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
          |       s.snapshot_time,
          |       s.schema_version,
          |       coalesce(c.changes_made, '')       AS changes_made,
+         |       c.author                           AS author,
+         |       c.commit_message                    AS commit_message,
          |       coalesce(added.rows_added, 0)      AS rows_added,
          |       coalesce(added.files_added, 0)     AS files_added,
          |       coalesce(removed.files_removed, 0) AS files_removed
@@ -352,15 +404,15 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
          |               FROM ducklake_data_file
          |              WHERE end_snapshot IS NOT NULL
          |              GROUP BY end_snapshot) removed ON removed.sid = s.snapshot_id$whereClause
-         | ORDER BY s.snapshot_id DESC
-         | LIMIT ?""".stripMargin
-    val snapParams = whereParams :+ limit
-    val rows       = query(snapSql, snapParams*) { rs =>
+         | ORDER BY s.snapshot_id DESC""".stripMargin
+    val rows = query(snapSql, whereParams*) { rs =>
       (
         rs.getLong("snapshot_id"),
         rs.getTimestamp("snapshot_time").toInstant.toString,
         rs.getLong("schema_version"),
         rs.getString("changes_made"),
+        Option(rs.getString("author")),
+        Option(rs.getString("commit_message")),
         rs.getLong("rows_added"),
         rs.getInt("files_added"),
         rs.getInt("files_removed")
@@ -385,18 +437,27 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
         Option(rs.getObject("end_snapshot")).map(_ => rs.getLong("end_snapshot"))
       )
     }
-    rows.map { case (sid, at, ver, changes, rowsAdded, filesAdded, filesRemoved) =>
-      CatalogSnapshotEntry(
-        snapshotId = sid,
-        committedAt = at,
-        schemaVersion = ver,
-        changes = changes,
-        rowsAdded = rowsAdded,
-        filesAdded = filesAdded,
-        filesRemoved = filesRemoved,
-        affectedTables = affectedTables(sid, changes, history)
-      )
-    }
+    val entries =
+      rows.map {
+        case (sid, at, ver, changes, author, commitMessage, rowsAdded, filesAdded, filesRemoved) =>
+          CatalogSnapshotEntry(
+            snapshotId = sid,
+            committedAt = at,
+            schemaVersion = ver,
+            changes = changes,
+            rowsAdded = rowsAdded,
+            filesAdded = filesAdded,
+            filesRemoved = filesRemoved,
+            affectedTables = affectedTables(sid, changes, history),
+            author = author,
+            commitMessage = commitMessage
+          )
+      }
+    val filtered = table match
+      case None                    => entries
+      case Some((schema, tblName)) =>
+        entries.filter(_.affectedTables.exists(t => t.schema == schema && t.name == tblName))
+    filtered.take(limit)
 
   private case class TableVersion(
       tableId: Long,
@@ -449,6 +510,93 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
                 case _ => Nil
     }
     refs.distinct
+
+  /** Resolves `table_id` for (schema, table) visible at snapshot `n`. Table identity survives a
+    * rename (verified against a live catalog: `ALTER TABLE ... RENAME TO` inserts a new
+    * `ducklake_table` row with the SAME `table_id`, end-dating the old name's row) - so resolving
+    * by name at a specific snapshot and then walking columns by that id is rename-proof, unlike
+    * resolving columns by name at each snapshot independently.
+    */
+  private def tableIdAt(schema: String, table: String, n: Long): Option[Long] =
+    val (sPred, sArgs) = visible("s", Some(n))
+    val (tPred, tArgs) = visible("t", Some(n))
+    query(
+      s"""SELECT t.table_id
+         |  FROM ducklake_schema s
+         |  JOIN ducklake_table  t ON t.schema_id = s.schema_id
+         | WHERE s.schema_name = ? AND t.table_name = ?
+         |   AND $sPred AND $tPred""".stripMargin,
+      (List(schema, table) ++ sArgs ++ tArgs)*
+    )(_.getLong("table_id")).headOption
+
+  /** Columns visible at snapshot `n` for a table pinned by `table_id` (not name) - the rename-proof
+    * counterpart to `listColumns`/`columnsAt`, used internally by `schemaDiff`.
+    */
+  private def columnsAtByTableId(tableId: Long, n: Long): List[CatalogColumnEntry] =
+    val (cPred, cArgs) = visible("c", Some(n))
+    query(
+      s"""SELECT c.column_order, c.column_name, c.column_type, c.nulls_allowed
+         |  FROM ducklake_column c
+         | WHERE c.table_id = ? AND $cPred
+         | ORDER BY c.column_order""".stripMargin,
+      (List[Any](tableId) ++ cArgs)*
+    ) { rs =>
+      CatalogColumnEntry(
+        ordinal = rs.getInt("column_order"),
+        name = rs.getString("column_name"),
+        typeName = rs.getString("column_type"),
+        nullable = rs.getBoolean("nulls_allowed"),
+        isPrimaryKey = false
+      )
+    }
+
+  /** Earliest `begin_snapshot` across every `ducklake_table` row sharing `tableId` - the table's
+    * true creation point across renames (a rename inserts a new row under the SAME table_id rather
+    * than updating in place; see `tableIdAt`).
+    */
+  private def earliestBeginSnapshot(tableId: Long): Long =
+    query(
+      "SELECT min(begin_snapshot) AS m FROM ducklake_table WHERE table_id = ?",
+      tableId
+    )(_.getLong("m")).headOption.getOrElse(0L)
+
+  /** Column-level diff of one table between two snapshots (EPIC time-travel viewer). `table` is
+    * resolved by its CURRENT name at `to`; if that name doesn't exist yet at `to` (e.g. comparing
+    * against an earlier pre-rename snapshot where only the old name existed) we fall back to
+    * resolving at `from` instead, so a rename between the two snapshots doesn't make the table
+    * "disappear" from the diff. Columns are then loaded at both ends keyed by that stable
+    * `table_id`, so `added`/`removed` reflect real column lifecycle instead of a name coincidence.
+    *
+    * `from` is clamped up to the table's own earliest `begin_snapshot` when the caller passes a
+    * `from` that predates the table's creation (e.g. diffing against the catalog's very first
+    * snapshot): "columns at a point before the table existed" is otherwise vacuously empty, which
+    * would misreport every column the table has ever had as "added" instead of surfacing the ones
+    * dropped since creation.
+    */
+  def schemaDiff(schema: String, table: String, from: Long, to: Long): SchemaDiffResult =
+    val tableId = tableIdAt(schema, table, to).orElse(tableIdAt(schema, table, from))
+    tableId match
+      case None     => SchemaDiffResult(Nil, Nil, Nil, Nil)
+      case Some(id) =>
+        val effectiveFrom = from.max(earliestBeginSnapshot(id))
+        val colsFrom      = columnsAtByTableId(id, effectiveFrom)
+        val colsTo        = columnsAtByTableId(id, to)
+        val byNameFrom    = colsFrom.map(c => c.name -> c).toMap
+        val byNameTo      = colsTo.map(c => c.name -> c).toMap
+        val added         = colsTo.filterNot(c => byNameFrom.contains(c.name))
+        val removed       = colsFrom.filterNot(c => byNameTo.contains(c.name))
+        val common        = byNameFrom.keySet.intersect(byNameTo.keySet).toList.sorted
+        val typeChanged   = common.flatMap { name =>
+          val f = byNameFrom(name)
+          val t = byNameTo(name)
+          if f.typeName != t.typeName then Some((name, f.typeName, t.typeName)) else None
+        }
+        val nullabilityChanged = common.flatMap { name =>
+          val f = byNameFrom(name)
+          val t = byNameTo(name)
+          if f.nullable != t.nullable then Some((name, f.nullable, t.nullable)) else None
+        }
+        SchemaDiffResult(added, removed, typeChanged, nullabilityChanged)
 
   private def query[A](sql: String, params: Any*)(map: ResultSet => A): List[A] =
     val conn = ds.getConnection

@@ -37,7 +37,8 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
         if schema == "tpch1" then List(region) else Nil
       override def listSnapshots(
           limit: Int = 200,
-          before: Option[Long] = None
+          before: Option[Long] = None,
+          table: Option[(String, String)] = None
       ): List[CatalogSnapshotEntry] =
         seenLimit = Some(limit)
         seenBefore = before

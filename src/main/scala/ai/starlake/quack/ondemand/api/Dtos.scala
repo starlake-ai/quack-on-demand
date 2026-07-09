@@ -723,7 +723,9 @@ final case class CatalogSnapshotEntry(
     rowsAdded: Long,
     filesAdded: Int,
     filesRemoved: Int,
-    affectedTables: List[CatalogTableRef]
+    affectedTables: List[CatalogTableRef],
+    author: Option[String] = None,       // ducklake_snapshot_changes.author, P1 stamping
+    commitMessage: Option[String] = None // ducklake_snapshot_changes.commit_message
 )
 
 // ----- Snapshot tags (EPIC P2 / Spec 06) -----

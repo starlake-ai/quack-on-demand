@@ -62,6 +62,20 @@ trait PostgresFixture:
             .forEach(p => Files.deleteIfExists(p))
       }
 
+  /** P1 author-stamping prelude (see `FlightSqlRouter.stampPrelude`) applied through a plain duckdb
+    * session rather than the FlightSQL wire bracket: `BEGIN` + `ducklake_set_commit_message` + the
+    * actual write, `COMMIT`ted explicitly before the caller's own flush runs. Without the explicit
+    * `COMMIT` the session is left inside an open transaction and every statement that follows
+    * silently no-ops (verified empirically while building this fixture). Author is
+    * `tenant:acme/user:alice`, message `fixture insert` - matching the values
+    * `DuckLakeCatalogReaderTimeTravelSpec` asserts on.
+    */
+  protected def stampedInsertSql: String =
+    """BEGIN; CALL ducklake_set_commit_message('lake', 'tenant:acme/user:alice', 'fixture insert');
+      |INSERT INTO lake.tpch1.nation VALUES (2, 'DE');
+      |COMMIT;
+      |CALL ducklake_flush_inlined_data('lake');""".stripMargin
+
   /** Run SQL against the catalog currently open under `withCatalog`, in a fresh duckdb CLI session
     * (same mechanism the fixture's own seeder uses). The ATTACH alias is always `lake`. Fails the
     * test on a non-zero exit. Must be called from within a `withCatalog` block.
