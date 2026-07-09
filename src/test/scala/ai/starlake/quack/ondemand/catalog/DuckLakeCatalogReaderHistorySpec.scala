@@ -133,3 +133,89 @@ class DuckLakeCatalogReaderHistorySpec extends AnyFlatSpec with Matchers with Po
         c.filesRemoved shouldBe 3
       }
     }
+
+  it should "filter by author" in
+    withCatalog("hist", extraSql = extra) { (reader, _) =>
+      val page = reader
+        .listTableHistory(
+          "tpch1",
+          "nation2",
+          filter = TableHistoryFilter(author = Some("tenant:acme/user:alice")),
+          limit = 100
+        )
+        .getOrElse(fail("nation2 must resolve"))
+      page.commits should have size 1
+      page.commits.head.author shouldBe Some("tenant:acme/user:alice")
+    }
+
+  it should "filter by operation with exact hasMore" in
+    withCatalog("hist", extraSql = extra) { (reader, _) =>
+      val inserts = reader
+        .listTableHistory(
+          "tpch1",
+          "nation2",
+          filter = TableHistoryFilter(operation = Some(HistoryOperation.Insert)),
+          limit = 100
+        )
+        .getOrElse(fail("nation2 must resolve"))
+      inserts.commits should not be empty
+      inserts.commits.foreach(_.operation shouldBe HistoryOperation.Insert)
+      inserts.hasMore shouldBe false
+      // page size 1 over >1 inserts: hasMore must be true (the sentinel row must be
+      // counted AFTER the operation filter, not before)
+      val first = reader
+        .listTableHistory(
+          "tpch1",
+          "nation2",
+          filter = TableHistoryFilter(operation = Some(HistoryOperation.Insert)),
+          limit = 1
+        )
+        .getOrElse(fail("nation2 must resolve"))
+      first.commits should have size 1
+      first.hasMore shouldBe true
+    }
+
+  it should "filter by a from/to time window" in
+    withCatalog("hist", extraSql = extra) { (reader, _) =>
+      val all      = history(reader).commits.sortBy(_.snapshotId)
+      val second   = java.time.Instant.parse(all(1).committedAt)
+      val last     = java.time.Instant.parse(all.last.committedAt)
+      val windowed = reader
+        .listTableHistory(
+          "tpch1",
+          "nation2",
+          filter = TableHistoryFilter(from = Some(second), to = Some(last)),
+          limit = 100
+        )
+        .getOrElse(fail("nation2 must resolve"))
+      windowed.commits.map(_.snapshotId) should not contain all.head.snapshotId
+      windowed.commits.size shouldBe all.size - 1
+      val none = reader
+        .listTableHistory(
+          "tpch1",
+          "nation2",
+          filter = TableHistoryFilter(from = Some(last.plusSeconds(3600))),
+          limit = 100
+        )
+        .getOrElse(fail("nation2 must resolve"))
+      none.commits shouldBe empty
+      none.hasMore shouldBe false
+    }
+
+  it should "paginate with an exact hasMore boundary and a stable union" in
+    withCatalog("hist", extraSql = extra) { (reader, _) =>
+      val full                 = history(reader).commits.map(_.snapshotId)
+      var pages                = List.empty[List[Long]]
+      var cursor: Option[Long] = None
+      var more                 = true
+      while more do
+        val p = reader
+          .listTableHistory("tpch1", "nation2", limit = 3, before = cursor)
+          .getOrElse(fail("nation2 must resolve"))
+        pages = pages :+ p.commits.map(_.snapshotId)
+        cursor = p.commits.lastOption.map(_.snapshotId)
+        more = p.hasMore
+        if p.commits.isEmpty then more = false
+      pages.flatten shouldBe full
+      pages.dropRight(1).foreach(p => p should have size 3)
+    }
