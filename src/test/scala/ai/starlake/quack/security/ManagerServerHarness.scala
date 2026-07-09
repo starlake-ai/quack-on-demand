@@ -326,8 +326,9 @@ object ManagerServerHarness:
     )
 
     // Catalog browser handlers over the harness's supervisor: tenant
-    // resolution + TenantScopeCheck run against the fixture store, asOfTag
-    // resolution against the tag handlers above. kindOf stays always-DuckLake
+    // resolution + TenantScopeCheck run against the fixture store; AS OF
+    // selector resolution (asOf / asOfTag / asOfTs) runs inside getTable via
+    // SnapshotSelector against the same store. kindOf stays always-DuckLake
     // so the stub reader is reached despite InMemory fixture tenant-dbs.
     val catalogHandlers: Option[CatalogHandlers] =
       catalogReader.map { rr =>
@@ -335,7 +336,6 @@ object ManagerServerHarness:
           rr,
           sup,
           store,
-          resolveAsOfTag = tagHandlers.resolveAsOf,
           audit = audit,
           auditReads = auditCatalogReads
         )

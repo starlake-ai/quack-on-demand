@@ -28,10 +28,6 @@ final class CatalogHandlers(
     sup: PoolSupervisor,
     store: ControlPlaneStore,
     kindOf: (String, String) => Option[TenantDbKind] = (_, _) => Some(TenantDbKind.DuckLake),
-    resolveAsOfTag: (String, String, Option[Long], Option[String]) => Either[
-      (StatusCode, String),
-      Option[Long]
-    ] = CatalogHandlers.asOfOnly,
     audit: AuditRecorder = AuditRecorder.noop,
     auditReads: Boolean = false
 ):
@@ -131,6 +127,10 @@ final class CatalogHandlers(
   /** Spec 00: at most one of asOf / asOfTag / asOfTs; a tag resolves to its snapshot id, asOfTs
     * resolves via timestamp lookup. A dangling tag/id (snapshot vacuumed) returns 410 expired; a
     * timestamp before first snapshot returns 422 invalid_snapshot.
+    *
+    * `resolvedAt` is timestamp-selector-only: it echoes the requested asOfTs instant. The asOf /
+    * asOfTag arms leave it None because the reader has no by-id snapshot lookup, so fetching the
+    * snapshot's committedAt would cost an extra JDBC roundtrip per table read.
     */
   def getTable(
       tenant: String,
@@ -169,28 +169,31 @@ final class CatalogHandlers(
         )
         selectorRes match
           case Left(e) =>
-            val (sc, errCode) = e match
+            val (sc, errCode, msg) = e match
               case SnapshotSelector.SelectorError.MultipleSelectors =>
-                (StatusCode.BadRequest, "invalid_selector")
-              case SnapshotSelector.SelectorError.TagNotFound(_) =>
-                (StatusCode.NotFound, "not_found")
-              case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
-                (StatusCode.UnprocessableEntity, "invalid_snapshot")
-              case SnapshotSelector.SelectorError.BeyondLatest(_) =>
-                (StatusCode.UnprocessableEntity, "invalid_snapshot")
-              case SnapshotSelector.SelectorError.Expired(_) =>
-                (StatusCode.Gone, "snapshot_expired")
-            val msg = e match
-              case SnapshotSelector.SelectorError.MultipleSelectors =>
-                "supply only one of asOf, asOfTag, or asOfTs"
+                (
+                  StatusCode.BadRequest,
+                  "invalid_selector",
+                  "supply only one of asOf, asOfTag, or asOfTs"
+                )
               case SnapshotSelector.SelectorError.TagNotFound(tag) =>
-                s"tag '$tag' not found"
+                (StatusCode.NotFound, "not_found", s"tag '$tag' not found")
               case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
-                "timestamp is before the first snapshot"
+                (
+                  StatusCode.UnprocessableEntity,
+                  "invalid_snapshot",
+                  "timestamp is before the first snapshot"
+                )
+              case SnapshotSelector.SelectorError.EmptyCatalog =>
+                (StatusCode.UnprocessableEntity, "invalid_snapshot", "catalog has no snapshots")
               case SnapshotSelector.SelectorError.BeyondLatest(id) =>
-                s"snapshot $id is beyond the latest snapshot"
+                (
+                  StatusCode.UnprocessableEntity,
+                  "invalid_snapshot",
+                  s"snapshot $id is beyond the latest snapshot"
+                )
               case SnapshotSelector.SelectorError.Expired(id) =>
-                s"snapshot $id has been vacuumed"
+                (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
             err(sc, errCode, msg)
           case Right(res) =>
             res match
@@ -222,22 +225,3 @@ final class CatalogHandlers(
     */
   private[api] def listSchemasUnscoped(tenant: String, tenantDb: String): List[CatalogSchemaEntry] =
     if !isDuckLake(tenant, tenantDb) then Nil else resolveReader(tenant, tenantDb).listSchemas()
-
-object CatalogHandlers:
-
-  /** Fallback AS OF resolution when no tag handler is wired: a numeric asOf passes through, asOfTag
-    * is rejected.
-    */
-  val asOfOnly: (String, String, Option[Long], Option[String]) => Either[
-    (StatusCode, String),
-    Option[Long]
-  ] =
-    (_, _, asOf, asOfTag) =>
-      if asOfTag.isDefined then
-        Left(
-          (
-            StatusCode.BadRequest,
-            "asOfTag is not supported on this manager (no tag handler wired)"
-          )
-        )
-      else Right(asOf)

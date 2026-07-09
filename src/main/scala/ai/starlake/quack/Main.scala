@@ -453,22 +453,18 @@ object Main extends IOApp with LazyLogging:
       )
     )
 
-    // Catalog browser handlers (session-gated since Spec 00). asOfTag
-    // resolution delegates to the tag handlers; reads are audited only when
-    // catalog.auditCatalogReads is on.
+    // Catalog browser handlers (session-gated since Spec 00). AS OF selector
+    // resolution (asOf / asOfTag / asOfTs) runs inside getTable via
+    // SnapshotSelector; reads are audited only when catalog.auditCatalogReads is on.
     val catalogHandlers: Option[CatalogHandlers] =
       def kindOf(tenant: String, tenantDb: String): Option[ai.starlake.quack.model.TenantDbKind] =
         sup.findTenantDb(tenant, tenantDb).map(_.kind)
-      val resolveTag = tagHandlers match
-        case Some(t) => t.resolveAsOf
-        case None    => CatalogHandlers.asOfOnly
       Some(
         new CatalogHandlers(
           catalogReader,
           sup,
           store,
           kindOf,
-          resolveAsOfTag = resolveTag,
           audit = auditRecorder,
           auditReads = mgrCfg.catalog.auditCatalogReads
         )
