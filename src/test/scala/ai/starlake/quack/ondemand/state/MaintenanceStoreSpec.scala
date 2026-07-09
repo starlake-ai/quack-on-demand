@@ -65,6 +65,37 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
     s.listMaintenancePolicies("acme", "acme_db") shouldBe empty
   }
 
+  it should "round-trip a policy with all optional fields None" in withStore { s =>
+    val policyAllNone = MaintenancePolicy(
+      id = Names.newSurrogateId("mpol"),
+      tenant = "acme",
+      tenantDb = "acme_db",
+      scopeKind = "tenantdb",
+      scopeSchema = None,
+      scopeTable = None,
+      enabled = None,
+      retentionDays = None,
+      compactionEnabled = None,
+      targetFileSize = None,
+      smallFileMinCount = None,
+      rewriteDeleteThreshold = None,
+      cleanupGraceDays = None,
+      orphanMinAgeDays = None,
+      cron = None
+    )
+    val upserted = s.upsertMaintenancePolicy(policyAllNone)
+    val retrieved = s.findMaintenancePolicy(upserted.id).get
+    retrieved.enabled shouldBe None
+    retrieved.retentionDays shouldBe None
+    retrieved.compactionEnabled shouldBe None
+    retrieved.targetFileSize shouldBe None
+    retrieved.smallFileMinCount shouldBe None
+    retrieved.rewriteDeleteThreshold shouldBe None
+    retrieved.cleanupGraceDays shouldBe None
+    retrieved.orphanMinAgeDays shouldBe None
+    retrieved.cron shouldBe None
+  }
+
   it should "scope rows by (tenant, tenantDb)" in withStore { s =>
     s.upsertMaintenancePolicy(pol())
     s.listMaintenancePolicies("acme", "other_db") shouldBe empty
@@ -129,4 +160,18 @@ class MaintenanceStoreSpec extends AnyFlatSpec with Matchers:
     val page2 = s.listMaintenanceRuns("acme", "acme_db", limit = 2, before = Some(page1.last.id))
     page2.size shouldBe 1
     (page1 ++ page2).map(_.id).distinct.size shouldBe 3
+  }
+
+  it should "round-trip operations CSV with explicit operations list" in withStore { s =>
+    val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", Some("flush,merge"))
+    s.claimQueuedMaintenanceRun()
+    val listed = s.listMaintenanceRuns("acme", "acme_db", limit = 10, before = None)
+    listed.head.operations shouldBe Some("flush,merge")
+  }
+
+  it should "round-trip operations CSV with empty string" in withStore { s =>
+    val r = s.enqueueMaintenanceRun("acme", "acme_db", "tenantdb", "manual", Some(""))
+    s.claimQueuedMaintenanceRun()
+    val listed = s.listMaintenanceRuns("acme", "acme_db", limit = 10, before = None)
+    listed.head.operations shouldBe Some("")
   }

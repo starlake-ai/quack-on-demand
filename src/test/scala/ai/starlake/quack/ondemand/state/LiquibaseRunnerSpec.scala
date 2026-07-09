@@ -4,8 +4,7 @@ import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.sql.{Connection, DriverManager}
-import scala.sys.process._
+import java.sql.DriverManager
 import scala.util.Try
 
 /** Integration test for [[LiquibaseRunner]]. Requires a local Postgres reachable with the
@@ -19,36 +18,17 @@ class LiquibaseRunnerSpec extends AnyFlatSpec with Matchers:
   // previously-interrupted suite.
   TestPostgres.dropStrayTestDatabases("qodlb")
 
-  private val pgHost = sys.env.getOrElse("SL_TEST_PG_HOST", "localhost")
-  private val pgPort = sys.env.getOrElse("SL_TEST_PG_PORT", "5432").toInt
-  private val pgUser = sys.env.getOrElse("SL_TEST_PG_USER", "postgres")
-  private val pgPass = sys.env.getOrElse("SL_TEST_PG_PASSWORD", "azizam")
+  private val pgUser = TestPostgres.pgUser
+  private val pgPass = TestPostgres.pgPass
 
-  Class.forName("org.postgresql.Driver")
-
-  private def adminUrl: String          = s"jdbc:postgresql://$pgHost:$pgPort/postgres"
-  private def dbUrl(db: String): String = s"jdbc:postgresql://$pgHost:$pgPort/$db"
-
-  private def pgReachable: Boolean =
-    Try {
-      val c = DriverManager.getConnection(adminUrl, pgUser, pgPass)
-      try c.isValid(2)
-      finally c.close()
-    }.getOrElse(false)
+  private def dbUrl(db: String): String = TestPostgres.dbUrl(db)
 
   private def psql(targetDb: String, sql: String): Unit =
-    val rc = Process(
-      Seq("psql", "-h", pgHost, "-p", pgPort.toString, "-U", pgUser, "-d", targetDb, "-tAc", sql),
-      None,
-      "PGPASSWORD" -> pgPass
-    ).!
-    assert(rc == 0, s"psql ($sql) exit=$rc")
+    TestPostgres.psql(targetDb, sql)
 
   private def withFreshDb(test: String => Unit): Unit =
-    if !pgReachable then
-      cancel(
-        s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
-      )
+    if !TestPostgres.reachable then
+      TestPostgres.reachableOrCancel()
     val dbName = s"qodlb_test_${System.nanoTime()}"
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try test(dbName)

@@ -30,6 +30,9 @@ object TestPostgres:
       try c.isValid(2) finally c.close()
     }.getOrElse(false)
 
+  def reachableOrCancel(message: String => String = identity): Nothing =
+    org.scalatest.Assertions.cancel(message(s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"))
+
   /** Drop a database via psql, forcing connection termination so a
     * lingering idle backend can't block the test cleanup. */
   def dropDatabase(name: String): Unit =
