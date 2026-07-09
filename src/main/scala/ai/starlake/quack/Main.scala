@@ -3,6 +3,7 @@ package ai.starlake.quack
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.{
+  AuthQueryPreconditions,
   AuthenticationService,
   OidcBearerAuthenticator,
   OidcDiscovery,
@@ -176,6 +177,34 @@ object Main extends IOApp with LazyLogging:
       .validate(mgrCfg.telemetry.store, mgrCfg.telemetry.stmtHistoryRetentionDays)
       .left
       .foreach(msg => sys.error(msg))
+
+    // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
+    // must each project (password_hash, role, enabled) -- exactly the shape
+    // DatabaseAuthenticator requires at runtime now that the tolerant
+    // two-column branch is gone. Caught here instead of at first login.
+    // The probe result is computed first and sys.error'd after, so an
+    // unreachable auth database surfaces as the same clean config-error
+    // framing as the sibling gates above, not a raw JDBC exception.
+    if authCfg.database.enabled then
+      val probeResult: Either[String, Unit] =
+        try
+          Class.forName("org.postgresql.Driver")
+          val probeConn = java.sql.DriverManager.getConnection(
+            authCfg.database.jdbcUrl,
+            authCfg.database.username,
+            authCfg.database.password
+          )
+          try AuthQueryPreconditions.validate(probeConn, authCfg.database)
+          finally probeConn.close()
+        catch
+          case e: Exception =>
+            Left(
+              "auth.database startup validation failed: could not probe " +
+                s"systemQuery/tenantQuery against '${authCfg.database.jdbcUrl}' " +
+                s"(${e.getMessage}). Check QOD_AUTH_DB_JDBC_URL / QOD_AUTH_DB_USER / " +
+                "QOD_AUTH_DB_PASSWORD and that the auth database is reachable."
+            )
+      probeResult.left.foreach(msg => sys.error(msg))
 
     // AuthenticationService construction is deferred until after `sup` is built
     // so the optional per-tenant OIDC registry can read tenant authConfig rows

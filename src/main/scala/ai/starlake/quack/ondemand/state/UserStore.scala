@@ -111,37 +111,68 @@ final class UserStore(
     * first; if that yields nothing AND `email` is given, retries with `username = email` so
     * operators can provision either form. tenant=NULL rows are superuser grants.
     *
-    * Returns one `UserGrant` per row. Order is unspecified.
+    * The disabled check is per-row, not per-username: the same username may exist once per tenant
+    * plus once as global superuser, and a multi-tenant admin must keep every enabled row's grant
+    * even when another tenant's row for the same username is disabled. Three cases per lookup:
+    *
+    *   - rows exist, at least one enabled: return ONLY the enabled rows' grants (disabled rows
+    *     dropped). The email fallback does NOT run: rows existed under this key.
+    *   - rows exist, ALL disabled: deny outright (no grants) WITHOUT falling through to the email
+    *     lookup. Otherwise an all-disabled username would look identical to a genuinely-missing one
+    *     and an enabled email-keyed row for the same person would silently restore access.
+    *   - no rows: fall back to the email lookup (same per-row logic there).
+    *
+    * Returns one `UserGrant` per enabled row. Order is unspecified.
     */
   def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
     withConn { c =>
-      val first = grantsByUsername(c, identity)
-      if first.nonEmpty then first
-      else
-        email
-          .filter(e => e.nonEmpty && e != identity)
-          .map(grantsByUsername(c, _))
-          .getOrElse(Nil)
+      lookupByUsername(c, identity) match
+        case Lookup.AllDisabled => Nil
+        case Lookup.Found(gs)   => gs
+        case Lookup.Missing     =>
+          email
+            .filter(e => e.nonEmpty && e != identity)
+            .map(lookupByUsername(c, _))
+            .map {
+              case Lookup.AllDisabled => Nil
+              case Lookup.Found(gs)   => gs
+              case Lookup.Missing     => Nil
+            }
+            .getOrElse(Nil)
     }
 
-  private def grantsByUsername(c: Connection, username: String): List[UserGrant] =
-    // A disabled user contributes no grants: the OIDC callback then hits the
-    // not_provisioned gate instead of minting a session, mirroring the
-    // password-login and FlightSQL-handshake enforcement of the same flag.
+  /** Outcome of a single username lookup, distinguishing "no rows at all" from "rows exist but
+    * every one is disabled" so callers can short-circuit the all-disabled case instead of treating
+    * it the same as absent. `Found` carries only the enabled rows' grants.
+    */
+  private enum Lookup:
+    case Missing
+    case AllDisabled
+    case Found(grants: List[UserGrant])
+
+  private def lookupByUsername(c: Connection, username: String): Lookup =
+    // No `AND enabled` filter here: rows must be fetched regardless of
+    // their enabled state so an all-disabled username can be distinguished
+    // from a genuinely-missing one (see grantsForIdentity's doc).
     val ps = c.prepareStatement(
-      "SELECT tenant, role FROM qodstate_user WHERE username = ? AND enabled"
+      "SELECT tenant, role, enabled FROM qodstate_user WHERE username = ?"
     )
     try
       ps.setString(1, username)
-      val rs  = ps.executeQuery()
-      val buf = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      val rs        = ps.executeQuery()
+      val buf       = scala.collection.mutable.ListBuffer.empty[UserGrant]
+      var rowsFound = false
       try
         while rs.next() do
-          val t = Option(rs.getString(1)).filter(_.nonEmpty)
-          val r = Option(rs.getString(2)).getOrElse("user")
-          buf += UserGrant(t, r)
+          rowsFound = true
+          val t       = Option(rs.getString(1)).filter(_.nonEmpty)
+          val r       = Option(rs.getString(2)).getOrElse("user")
+          val enabled = rs.getBoolean(3)
+          if enabled then buf += UserGrant(t, r)
       finally rs.close()
-      buf.toList
+      if !rowsFound then Lookup.Missing
+      else if buf.isEmpty then Lookup.AllDisabled
+      else Lookup.Found(buf.toList)
     finally ps.close()
 
   private def lookupId(c: Connection, tenant: Option[String], username: String): Option[String] =

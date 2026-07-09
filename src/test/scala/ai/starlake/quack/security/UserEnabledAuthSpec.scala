@@ -17,8 +17,8 @@ import scala.util.Try
   *   - [[DatabaseAuthenticator]] (REST/UI password login): the default `systemQuery` /
   *     `tenantQuery` project `enabled` as a third column; a disabled user presenting the CORRECT
   *     password must be rejected with the exact same error as a wrong password so the response does
-  *     not reveal which one failed. A custom operator query that projects only two columns must
-  *     keep working (enabled defaults to true when not projected).
+  *     not reveal which one failed. A custom operator query that projects only two columns is
+  *     REQUIRED to project `enabled`; a two-column result set fails authentication outright.
   *   - [[UserStore.grantsForIdentity]] (OIDC login): a disabled user must yield no grants, so the
   *     OIDC callback hits the not_provisioned gate instead of minting a session.
   *
@@ -38,7 +38,8 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
   private val DefaultTenantQuery =
     "SELECT password_hash, role, enabled FROM qodstate_user WHERE tenant = ? AND username = ? LIMIT 1"
 
-  // A pre-0022-style operator override that does not project `enabled`.
+  // A pre-0022-style operator override that does not project `enabled`. Must
+  // now be rejected outright: the enabled column is mandatory.
   private val LegacySystemQuery =
     "SELECT password_hash, role FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
 
@@ -108,7 +109,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       finally auth.close()
     }
 
-  it should "keep working with a legacy custom query that does not project enabled" in
+  it should "reject authentication when a legacy custom query does not project the enabled column" in
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
       val auth = new DatabaseAuthenticator(
@@ -117,7 +118,7 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       )
       try
         val r = auth.authenticate(AuthScope.System, "root", "rootpw")
-        r.isRight shouldBe true
+        r.isLeft shouldBe true
       finally auth.close()
     }
 
@@ -138,5 +139,52 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       store.upsertUserWithHash(None, "dave", hash("x"), "admin", enabled = true)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
       try us.grantsForIdentity("dave", None).map(_.role) shouldBe List("admin")
+      finally us.close()
+    }
+
+  it should "yield no grants when the username row is disabled, even if an enabled email-keyed row exists for the same person" in
+    withFreshDb { (store, url) =>
+      // A person provisioned twice: once under a username, once under their
+      // email address (a common OIDC-provisioning pattern). The username
+      // row is disabled; the email row is enabled. Disabling by username
+      // must not be bypassable via the email fallback.
+      store.upsertUserWithHash(None, "erin", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(None, "erin@example.com", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try us.grantsForIdentity("erin", Some("erin@example.com")) shouldBe Nil
+      finally us.close()
+    }
+
+  it should "keep tenant B's enabled grant when the same username's tenant A row is disabled" in
+    withFreshDb { (store, url) =>
+      // The same username may exist once per tenant (plus once as global
+      // superuser). Disabling one tenant's row must not zero the other
+      // tenant's untouched grant: the disabled check is per-row, not
+      // per-username. mintSessionFor depends on multi-tenant admins
+      // getting one UserGrant per enabled row.
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertTenant(Tenant(id = "globex", displayName = "globex"))
+      store.upsertUserWithHash(Some("acme"), "frank", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(Some("globex"), "frank", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try
+        us.grantsForIdentity("frank", None).map(_.tenant) shouldBe List(Some("globex"))
+      finally us.close()
+    }
+
+  it should "yield no grants and skip the email fallback when ALL rows for the username are disabled" in
+    withFreshDb { (store, url) =>
+      // Multi-row variant of the erin case: every username-keyed row
+      // (two tenants) is disabled, and an enabled email-keyed row exists.
+      // All-disabled must deny outright, not fall through to email.
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertTenant(Tenant(id = "globex", displayName = "globex"))
+      store.upsertUserWithHash(Some("acme"), "gina", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(Some("globex"), "gina", hash("x"), "admin", enabled = false)
+      store.upsertUserWithHash(None, "gina@example.com", hash("x"), "admin", enabled = true)
+      val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass, poolSize = 2)
+      try us.grantsForIdentity("gina", Some("gina@example.com")) shouldBe Nil
       finally us.close()
     }

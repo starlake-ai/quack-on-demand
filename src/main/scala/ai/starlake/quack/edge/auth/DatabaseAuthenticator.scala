@@ -17,6 +17,10 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
   *
   * No fallback between scopes: a tenant credential cannot authenticate a system login and vice
   * versa.
+  *
+  * Both queries MUST return exactly three columns: `(password_hash, role, enabled)`. The third
+  * column is mandatory, not optional -- a result set with fewer than three columns fails the login
+  * outright (config error, not a tolerant default-to-enabled).
   */
 class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
     extends BasicAuthProvider,
@@ -55,34 +59,46 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
               ps.setString(1, username)
           val rs = ps.executeQuery()
           if rs.next() then
-            val storedHash = rs.getString(1)
-            val role       = Option(rs.getString(2)).getOrElse("user")
-            // Third column (`enabled`) is optional so a pre-existing operator
-            // override of systemQuery/tenantQuery that projects only two
-            // columns keeps working; the bundled defaults project it.
-            val enabled =
-              if rs.getMetaData.getColumnCount >= 3 then rs.getBoolean(3) else true
-            if !BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
-              Left("Invalid password")
-            else if !enabled then
-              // Same failure shape as a wrong password so the response does
-              // not reveal that the account exists but is disabled. The
-              // distinct reason is only visible in the manager log. bcrypt
-              // verification ran above regardless, so timing does not
-              // distinguish the two either.
-              logger.info(s"login rejected for '$username': user is disabled")
+            // The enabled column is mandatory: systemQuery/tenantQuery MUST
+            // project exactly (password_hash, role, enabled). A two-column
+            // result set used to be tolerated with enabled defaulted to
+            // true, which silently dropped enforcement for any operator
+            // still running a legacy 2-column custom query. That tolerant
+            // branch is gone -- a short projection now fails the login
+            // instead of admitting it.
+            if rs.getMetaData.getColumnCount < 3 then
+              logger.error(
+                s"login rejected for '$username': the configured auth query returns " +
+                  s"${rs.getMetaData.getColumnCount} column(s); it must project the enabled " +
+                  "column as a third column (password_hash, role, enabled) -- update " +
+                  "systemQuery/tenantQuery (QOD_AUTH_DB_SYSTEM_QUERY / QOD_AUTH_DB_TENANT_QUERY)"
+              )
               Left("Invalid password")
             else
-              Right(
-                AuthenticatedProfile(
-                  username = username,
-                  role = role,
-                  groups = Set(role),
-                  claims = Map("sub" -> username, "role" -> role, "auth_method" -> "database"),
-                  authMethod = "database",
-                  tenant = scope.tenantId
+              val storedHash = rs.getString(1)
+              val role       = Option(rs.getString(2)).getOrElse("user")
+              val enabled    = rs.getBoolean(3)
+              if !BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
+                Left("Invalid password")
+              else if !enabled then
+                // Same failure shape as a wrong password so the response does
+                // not reveal that the account exists but is disabled. The
+                // distinct reason is only visible in the manager log. bcrypt
+                // verification ran above regardless, so timing does not
+                // distinguish the two either.
+                logger.info(s"login rejected for '$username': user is disabled")
+                Left("Invalid password")
+              else
+                Right(
+                  AuthenticatedProfile(
+                    username = username,
+                    role = role,
+                    groups = Set(role),
+                    claims = Map("sub" -> username, "role" -> role, "auth_method" -> "database"),
+                    authMethod = "database",
+                    tenant = scope.tenantId
+                  )
                 )
-              )
           else Left("User not found")
         finally ps.close()
       finally conn.close()
