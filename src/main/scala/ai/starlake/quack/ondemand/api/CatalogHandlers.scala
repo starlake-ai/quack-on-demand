@@ -4,6 +4,7 @@ import ai.starlake.quack.model.TenantDbKind
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import sttp.model.StatusCode
 
@@ -25,6 +26,7 @@ import sttp.model.StatusCode
 final class CatalogHandlers(
     resolveReader: (String, String) => DuckLakeCatalogReader,
     sup: PoolSupervisor,
+    store: ControlPlaneStore,
     kindOf: (String, String) => Option[TenantDbKind] = (_, _) => Some(TenantDbKind.DuckLake),
     resolveAsOfTag: (String, String, Option[Long], Option[String]) => Either[
       (StatusCode, String),
@@ -126,8 +128,9 @@ final class CatalogHandlers(
       )
     }
 
-  /** Spec 06: at most one of asOf / asOfTag; a tag resolves to its snapshot id and reuses the AS OF
-    * read path. A dangling tag (snapshot vacuumed) falls through to the table-not-found 404.
+  /** Spec 00: at most one of asOf / asOfTag / asOfTs; a tag resolves to its snapshot id, asOfTs
+    * resolves via timestamp lookup. A dangling tag/id (snapshot vacuumed) returns 410 expired; a
+    * timestamp before first snapshot returns 422 invalid_snapshot.
     */
   def getTable(
       tenant: String,
@@ -136,24 +139,82 @@ final class CatalogHandlers(
       table: String,
       asOf: Option[Long],
       asOfTag: Option[String],
+      asOfTs: Option[java.time.Instant],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Res[CatalogTableDetailResponse] =
     gated("table", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
-      resolveAsOfTag(tid, db, asOf, asOfTag) match
-        case Left((sc, msg)) =>
-          err(sc, if sc == StatusCode.BadRequest then "invalid" else "not_found", msg)
-        case Right(snap) =>
-          val detail =
-            if !isDuckLake(tid, db) then None
-            else resolveReader(tid, db).getTable(schema, table, snap)
-          detail match
-            case Some(d) => Right(d)
-            case None    =>
-              err(
-                StatusCode.NotFound,
-                "not_found",
-                s"table $schema.$table not found" + snap.fold("")(n => s" at snapshot $n")
-              )
+      if !isDuckLake(tid, db) then
+        val detail = resolveReader(tid, db).getTable(schema, table, None)
+        detail match
+          case Some(d) => Right(d)
+          case None    =>
+            err(
+              StatusCode.NotFound,
+              "not_found",
+              s"table $schema.$table not found"
+            )
+      else
+        val reader      = resolveReader(tid, db)
+        val selectorRes = SnapshotSelector.resolve(
+          asOf,
+          asOfTag,
+          asOfTs,
+          maxId = () => reader.maxSnapshotId(),
+          atOrBefore = (ts: java.time.Instant) => reader.snapshotAtOrBefore(ts),
+          tagSnapshot = (tag: String) =>
+            sup
+              .findTenantDb(tid, tenantDb)
+              .flatMap(td => store.findSnapshotTag(tid, td.name, tag).map(_.snapshotId)),
+          exists = (id: Long) => reader.snapshotExists(id)
+        )
+        selectorRes match
+          case Left(e) =>
+            val (sc, errCode) = e match
+              case SnapshotSelector.SelectorError.MultipleSelectors =>
+                (StatusCode.BadRequest, "invalid_selector")
+              case SnapshotSelector.SelectorError.TagNotFound(_) =>
+                (StatusCode.NotFound, "not_found")
+              case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
+                (StatusCode.UnprocessableEntity, "invalid_snapshot")
+              case SnapshotSelector.SelectorError.BeyondLatest(_) =>
+                (StatusCode.UnprocessableEntity, "invalid_snapshot")
+              case SnapshotSelector.SelectorError.Expired(_) =>
+                (StatusCode.Gone, "snapshot_expired")
+            val msg = e match
+              case SnapshotSelector.SelectorError.MultipleSelectors =>
+                "supply only one of asOf, asOfTag, or asOfTs"
+              case SnapshotSelector.SelectorError.TagNotFound(tag) =>
+                s"tag '$tag' not found"
+              case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
+                "timestamp is before the first snapshot"
+              case SnapshotSelector.SelectorError.BeyondLatest(id) =>
+                s"snapshot $id is beyond the latest snapshot"
+              case SnapshotSelector.SelectorError.Expired(id) =>
+                s"snapshot $id has been vacuumed"
+            err(sc, errCode, msg)
+          case Right(res) =>
+            res match
+              case SnapshotSelector.Resolution.Current =>
+                val detail = reader.getTable(schema, table, None)
+                detail match
+                  case Some(d) => Right(d)
+                  case None    =>
+                    err(
+                      StatusCode.NotFound,
+                      "not_found",
+                      s"table $schema.$table not found"
+                    )
+              case SnapshotSelector.Resolution.At(snapshotId, committedAt) =>
+                val detail = reader.getTable(schema, table, Some(snapshotId))
+                detail match
+                  case Some(d) =>
+                    Right(d.copy(resolvedSnapshot = Some(snapshotId), resolvedAt = committedAt))
+                  case None =>
+                    err(
+                      StatusCode.NotFound,
+                      "not_found",
+                      s"table $schema.$table not found at snapshot $snapshotId"
+                    )
     }
 
   /** Ungated schema listing for in-process composition ([[TenantDbHandlers]]' table counts). The

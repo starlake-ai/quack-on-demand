@@ -176,10 +176,28 @@ final class ManagerServer(
           IO.blocking(h.listTables(tenant, tenantDb, schema, token)(sessions.scopeOf))
         },
         CatalogEndpoints.getTableEndpoint.serverLogic {
-          case (tenant, tenantDb, schema, table, asOf, asOfTag, token) =>
-            IO.blocking(
-              h.getTable(tenant, tenantDb, schema, table, asOf, asOfTag, token)(sessions.scopeOf)
-            )
+          case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, token) =>
+            val asOfTs: Option[java.time.Instant] = asOfTsRaw.flatMap { raw =>
+              try Some(java.time.Instant.parse(raw))
+              catch case _ => None
+            }
+            val parseError =
+              if asOfTsRaw.isDefined && asOfTs.isEmpty then
+                Some(
+                  (
+                    sttp.model.StatusCode.BadRequest,
+                    ErrorResponse("invalid_selector", "asOfTs must be ISO-8601")
+                  )
+                )
+              else None
+            parseError match
+              case Some(e) => IO.pure(Left(e))
+              case None    =>
+                IO.blocking(
+                  h.getTable(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, token)(
+                    sessions.scopeOf
+                  )
+                )
         },
         CatalogEndpoints.listSnapshotsEndpoint.serverLogic {
           case (tenant, tenantDb, limit, before, token) =>

@@ -334,6 +334,7 @@ object ManagerServerHarness:
         new CatalogHandlers(
           rr,
           sup,
+          store,
           resolveAsOfTag = tagHandlers.resolveAsOf,
           audit = audit,
           auditReads = auditCatalogReads

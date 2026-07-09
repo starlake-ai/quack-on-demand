@@ -466,6 +466,7 @@ object Main extends IOApp with LazyLogging:
         new CatalogHandlers(
           catalogReader,
           sup,
+          store,
           kindOf,
           resolveAsOfTag = resolveTag,
           audit = auditRecorder,

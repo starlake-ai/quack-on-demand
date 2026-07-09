@@ -707,7 +707,9 @@ final case class CatalogDataFileEntry(
 final case class CatalogTableDetailResponse(
     table: CatalogTableEntry,
     columns: List[CatalogColumnEntry],
-    dataFiles: List[CatalogDataFileEntry]
+    dataFiles: List[CatalogDataFileEntry],
+    resolvedSnapshot: Option[Long] = None,
+    resolvedAt: Option[java.time.Instant] = None
 )
 
 final case class CatalogTableRef(

@@ -45,7 +45,7 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     * the handlers' gate (tenant resolve -> scope check -> tenant-db lookup) admits the fixture
     * coordinates. Kind checks go through the injectable `kindOf`, not the store row.
     */
-  private def supervisor(): PoolSupervisor =
+  private def supervisor(): (PoolSupervisor, InMemoryControlPlaneStore) =
     val store = new InMemoryControlPlaneStore()
     store.upsertTenant(Tenant(id = "acme", displayName = "acme", authProvider = "db"))
     store.upsertTenantDb(
@@ -60,7 +60,7 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     )
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
     sup.restore()
-    sup
+    (sup, store)
 
   // Stub reader the handler talks to; the resolveReader function lets us
   // control per-tenant routing without spinning up Hikari.
@@ -103,11 +103,15 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
         if schema == "tpch1" && table == "region" then
           Some(CatalogTableDetailResponse(region, List(column), List(file)))
         else None
+      override def snapshotExists(id: Long): Boolean = id == 3L
+      override def maxSnapshotId(): Option[Long] = Some(3L)
+      override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(3L)
 
-    val handlers = new CatalogHandlers((_, _) => reader, supervisor())
+    val (sup, store)  = supervisor()
+    val handlers = new CatalogHandlers((_, _) => reader, sup, store)
 
     def getTable(table: String, asOf: Option[Long] = None) =
-      handlers.getTable("acme", "acme_default", "tpch1", table, asOf, None, NoKey)(NoScope)
+      handlers.getTable("acme", "acme_default", "tpch1", table, asOf, None, None, NoKey)(NoScope)
 
   "listSchemas" should "return what the reader returns" in new Stubs:
     handlers.listSchemas("acme", "acme_default", NoKey)(NoScope) shouldBe Right(schemas)
@@ -139,7 +143,7 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
   "listSnapshots" should "return Nil for non-DuckLake tenant-dbs" in new Stubs:
     val gated =
-      new CatalogHandlers((_, _) => reader, supervisor(), (_, _) => Some(TenantDbKind.InMemory))
+      new CatalogHandlers((_, _) => reader, sup, store, (_, _) => Some(TenantDbKind.InMemory))
     gated.listSnapshots("acme", "acme_default", None, None, NoKey)(NoScope) shouldBe Right(Nil)
 
   "listSnapshots" should "default limit to 200 when None" in new Stubs:
