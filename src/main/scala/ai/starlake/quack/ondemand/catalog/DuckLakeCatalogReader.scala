@@ -9,6 +9,7 @@ import ai.starlake.quack.ondemand.api.{
   CatalogTableEntry,
   CatalogTableRef
 }
+import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
 import java.sql.ResultSet
@@ -33,7 +34,7 @@ final case class SchemaDiffResult(
   * `meta` is the resolved per-tenant map produced by `PoolSupervisor.metastoreFor(...)` - same
   * shape the rest of the stack uses.
   */
-class DuckLakeCatalogReader(private val ds: HikariDataSource):
+class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLogging:
 
   def listSchemas(): List[CatalogSchemaEntry] =
     val sql =
@@ -373,6 +374,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
     * `affectedTables` already does - no second SQL-level parser for `changes_made`), and `limit` is
     * applied AFTER the filter so a caller asking for the last 20 snapshots touching one table
     * actually gets 20, not up to 20 after truncating the unfiltered page.
+    *
+    * The SQL-side `LIMIT` is `limit` exactly when `table` is None (the UI panel's hot path stays a
+    * bounded read, identical to the pre-filter behavior). When `table` is set, the SQL window is
+    * widened to `limit * 50` newest-first rows before the Scala-side filter runs - a best-effort
+    * window, not a full-history guarantee: a table touched fewer than `limit` times within the
+    * newest `limit * 50` snapshots returns fewer rows than a full scan would, but a pathological
+    * catalog with a huge snapshot history can never drag the listing into an unbounded scan.
     */
   def listSnapshots(
       limit: Int = 200,
@@ -382,6 +390,9 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
     val (whereClause, whereParams) = before match
       case None    => ("", Nil)
       case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
+    val fetchLimit = table match
+      case None    => limit
+      case Some(_) => math.min(limit.toLong * 50L, Int.MaxValue.toLong).toInt
     val snapSql =
       s"""SELECT s.snapshot_id,
          |       s.snapshot_time,
@@ -404,8 +415,9 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
          |               FROM ducklake_data_file
          |              WHERE end_snapshot IS NOT NULL
          |              GROUP BY end_snapshot) removed ON removed.sid = s.snapshot_id$whereClause
-         | ORDER BY s.snapshot_id DESC""".stripMargin
-    val rows = query(snapSql, whereParams*) { rs =>
+         | ORDER BY s.snapshot_id DESC
+         | LIMIT ?""".stripMargin
+    val rows = query(snapSql, (whereParams :+ fetchLimit)*) { rs =>
       (
         rs.getLong("snapshot_id"),
         rs.getTimestamp("snapshot_time").toInstant.toString,
@@ -552,13 +564,16 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
 
   /** Earliest `begin_snapshot` across every `ducklake_table` row sharing `tableId` - the table's
     * true creation point across renames (a rename inserts a new row under the SAME table_id rather
-    * than updating in place; see `tableIdAt`).
+    * than updating in place; see `tableIdAt`). None when the aggregate comes back NULL, i.e. no
+    * `ducklake_table` row carries this id - impossible when the id was just resolved by
+    * `tableIdAt`, but surfaced as an Option (and warned on by the caller) rather than silently
+    * defaulting.
     */
-  private def earliestBeginSnapshot(tableId: Long): Long =
+  private def earliestBeginSnapshot(tableId: Long): Option[Long] =
     query(
       "SELECT min(begin_snapshot) AS m FROM ducklake_table WHERE table_id = ?",
       tableId
-    )(_.getLong("m")).headOption.getOrElse(0L)
+    )(rs => Option(rs.getObject("m")).map(_ => rs.getLong("m"))).headOption.flatten
 
   /** Column-level diff of one table between two snapshots (EPIC time-travel viewer). `table` is
     * resolved by its CURRENT name at `to`; if that name doesn't exist yet at `to` (e.g. comparing
@@ -578,15 +593,22 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource):
     tableId match
       case None     => SchemaDiffResult(Nil, Nil, Nil, Nil)
       case Some(id) =>
-        val effectiveFrom = from.max(earliestBeginSnapshot(id))
-        val colsFrom      = columnsAtByTableId(id, effectiveFrom)
-        val colsTo        = columnsAtByTableId(id, to)
-        val byNameFrom    = colsFrom.map(c => c.name -> c).toMap
-        val byNameTo      = colsTo.map(c => c.name -> c).toMap
-        val added         = colsTo.filterNot(c => byNameFrom.contains(c.name))
-        val removed       = colsFrom.filterNot(c => byNameTo.contains(c.name))
-        val common        = byNameFrom.keySet.intersect(byNameTo.keySet).toList.sorted
-        val typeChanged   = common.flatMap { name =>
+        val effectiveFrom = earliestBeginSnapshot(id) match
+          case Some(created) => from.max(created)
+          case None          =>
+            logger.warn(
+              s"schemaDiff: no ducklake_table row for table_id=$id " +
+                s"($schema.$table) despite name resolution; using from=$from unclamped"
+            )
+            from
+        val colsFrom    = columnsAtByTableId(id, effectiveFrom)
+        val colsTo      = columnsAtByTableId(id, to)
+        val byNameFrom  = colsFrom.map(c => c.name -> c).toMap
+        val byNameTo    = colsTo.map(c => c.name -> c).toMap
+        val added       = colsTo.filterNot(c => byNameFrom.contains(c.name))
+        val removed     = colsFrom.filterNot(c => byNameTo.contains(c.name))
+        val common      = byNameFrom.keySet.intersect(byNameTo.keySet).toList.sorted
+        val typeChanged = common.flatMap { name =>
           val f = byNameFrom(name)
           val t = byNameTo(name)
           if f.typeName != t.typeName then Some((name, f.typeName, t.typeName)) else None
