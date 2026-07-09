@@ -252,9 +252,7 @@ final class ManagerServer(
 
     // Time-travel preview + schema-diff (Spec 00). Session-gated per request via
     // TenantScopeCheck inside the handler, same shape as tagEndpoints /
-    // maintenanceEndpoints. schema-diff is a 501 not_implemented stub until Task 6
-    // wires the real handler; it is still gated the same way so the guardrail specs
-    // (TenantScopeCompletenessSpec, DocEndpointsSpec) see it from this task on.
+    // maintenanceEndpoints.
     val timeTravelEndpoints: List[ServerEndpoint[Any, IO]] = preview.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         TimeTravelEndpoints.previewEndpoint.serverLogic {
@@ -281,7 +279,7 @@ final class ManagerServer(
         },
         TimeTravelEndpoints.schemaDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, token) =>
-            h.schemaDiffStub(tenant, tenantDb, token)(sessions.scopeOf)
+            h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(sessions.scopeOf)
         }
       )
     }

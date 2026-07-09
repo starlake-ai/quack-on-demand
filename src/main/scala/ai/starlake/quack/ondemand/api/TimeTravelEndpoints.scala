@@ -12,10 +12,7 @@ import sttp.tapir.json.circe._
   *
   * Both endpoints carry the session input ([[Endpoints.authToken]]): the handlers enforce
   * [[TenantScopeCheck]] per request, same as every other catalog-adjacent surface gated since Spec
-  * 00. `schemaDiffEndpoint` is registered here so [[EndpointModules.all]] (and therefore
-  * `TenantScopeCompletenessSpec` + `DocEndpointsSpec`) see it from the moment the route exists on
-  * the wire; its handler is a 501 `not_implemented` stub until Task 6 wires the real schema-diff
-  * reader.
+  * 00.
   */
 object TimeTravelEndpoints:
 
@@ -80,6 +77,5 @@ object TimeTravelEndpoints:
       .out(jsonBody[SchemaDiffResponse])
       .description(
         "Column-level schema diff between two snapshot selectors (`from`, `to`; each a snapshot " +
-          "id, a tag name, or an ISO-8601 timestamp). Not implemented yet: this route currently " +
-          "returns 501 not_implemented."
+          "id or a tag name)."
       )

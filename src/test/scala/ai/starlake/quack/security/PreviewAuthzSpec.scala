@@ -303,7 +303,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers:
     finally h.shutdown()
   }
 
-  it should "501 not_implemented for a superuser once past the gate" in {
+  it should "reach the real handler for a superuser once past the gate" in {
     val (h, _) = bootWithFixtures()
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
@@ -312,9 +312,12 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers:
         h.baseUrl + schemaDiffUrl(SecurityFixtures.TenantId, DuckLakeTenantDb, "main", "region"),
         apiKey = Some(token)
       )
+      // The harness wires a no-snapshot reader stub (empty catalog): `from=1` resolves via
+      // SnapshotSelector to EmptyCatalog -> 422 invalid_snapshot. That 422 (not 401/403) proves
+      // the gate was cleared and the real schema-diff handler was reached.
       withClue(s"superuser -> own-tenant /schema-diff body: ${resp.body()}") {
-        resp.statusCode() shouldBe 501
-        errorCode(resp.body()) shouldBe Some("not_implemented")
+        resp.statusCode() shouldBe 422
+        errorCode(resp.body()) shouldBe Some("invalid_snapshot")
       }
     finally h.shutdown()
   }

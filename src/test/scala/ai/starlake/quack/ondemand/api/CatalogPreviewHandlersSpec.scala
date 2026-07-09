@@ -9,12 +9,13 @@ import ai.starlake.quack.model.{
   PoolKey,
   RoleDistribution,
   RunningNode,
+  SnapshotTag,
   Tenant,
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, SchemaDiffResult}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
@@ -106,12 +107,32 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       sup.createPool(PoolKey("acme", "acme_tpch1", "bi"), RoleDistribution(1, 0, 0)).unsafeRunSync()
     (sup, store)
 
-  /** Stub `DuckLakeCatalogReader`: snapshot 42 exists and is the max; everything else is absent. */
-  private def stubReader(): DuckLakeCatalogReader =
+  /** Stub `DuckLakeCatalogReader`: snapshots 12 and 42 exist, 42 is the max; everything else is
+    * absent. `knownTables` gates `getTable` (empty set = every (schema, table) resolves, matching
+    * the original preview-only behavior); `diffResult` is returned verbatim by `schemaDiff`.
+    */
+  private def stubReader(
+      knownTables: Set[(String, String)] = Set.empty,
+      diffResult: SchemaDiffResult = SchemaDiffResult(Nil, Nil, Nil, Nil)
+  ): DuckLakeCatalogReader =
     new DuckLakeCatalogReader(null):
-      override def snapshotExists(id: Long): Boolean                       = id == 42L
+      override def snapshotExists(id: Long): Boolean                       = id == 12L || id == 42L
       override def maxSnapshotId(): Option[Long]                           = Some(42L)
       override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(42L)
+      override def getTable(
+          schema: String,
+          table: String,
+          asOf: Option[Long] = None
+      ): Option[CatalogTableDetailResponse] =
+        if knownTables.isEmpty || knownTables.contains((schema, table)) then
+          Some(CatalogTableDetailResponse(CatalogTableEntry(schema, table, 0L, 0, None), Nil, Nil))
+        else None
+      override def schemaDiff(
+          schema: String,
+          table: String,
+          from: Long,
+          to: Long
+      ): SchemaDiffResult = diffResult
 
   private val cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
 
@@ -136,14 +157,15 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
 
     def handlers(
         cfgOverride: CatalogConfig = cfg,
-        sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None
+        sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
+        readerOverride: DuckLakeCatalogReader = stubReader()
     ): CatalogPreviewHandlers =
       new CatalogPreviewHandlers(
         sup,
         store,
         sessionsOverride,
         executor,
-        (_, _) => stubReader(),
+        (_, _) => readerOverride,
         cfgOverride,
         audit
       )
@@ -162,6 +184,18 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     ) =
       h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, apiKey)(NoScope)
         .unsafeRunSync()
+
+    def schemaDiff(
+        h: CatalogPreviewHandlers,
+        tenant: String = "acme",
+        tenantDb: String = "acme_tpch1",
+        schema: String = "tpch1",
+        table: String = "region",
+        from: String = "12",
+        to: String = "42",
+        apiKey: Option[String] = NoKey
+    ) =
+      h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(NoScope).unsafeRunSync()
 
   "preview" should "404 an unknown tenant" in new Stubs:
     val h   = handlers()
@@ -308,3 +342,108 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     telemetryStore.events.count(
       _.action == ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogPreviewRead
     ) shouldBe 1
+
+  // ---------- schema-diff (Task 6) ----------
+
+  "schemaDiff" should "404 an unknown tenant" in new Stubs:
+    val h   = handlers()
+    val out = schemaDiff(h, tenant = "nope")
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+
+  it should "403 a cross-tenant caller" in new Stubs:
+    val h                                            = handlers()
+    val foreignScope: String => Option[SessionScope] =
+      _ => Some(SessionScope(superuser = false, manageableTenants = Set("other")))
+    val out = h
+      .schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", Some("tok"))(foreignScope)
+      .unsafeRunSync()
+    out.left.toOption.get._1 shouldBe StatusCode.Forbidden
+
+  it should "accept a numeric snapshot id for both from and to" in new Stubs:
+    val h   = handlers()
+    val out = schemaDiff(h, from = "12", to = "42")
+    out.isRight shouldBe true
+    out.toOption.get.from shouldBe 12L
+    out.toOption.get.to shouldBe 42L
+
+  it should "accept a tag name for from or to" in new Stubs:
+    store.createSnapshotTag(
+      SnapshotTag(
+        id = "tag-1",
+        tenant = "acme",
+        tenantDb = "acme_tpch1",
+        name = "v1",
+        snapshotId = 12L
+      )
+    )
+    val h   = handlers()
+    val out = schemaDiff(h, from = "v1", to = "42")
+    out.isRight shouldBe true
+    out.toOption.get.from shouldBe 12L
+    out.toOption.get.to shouldBe 42L
+
+  it should "yield an all-empty diff when from == to" in new Stubs:
+    val h   = handlers()
+    val out = schemaDiff(h, from = "42", to = "42")
+    out.isRight shouldBe true
+    val body = out.toOption.get
+    body.added shouldBe empty
+    body.removed shouldBe empty
+    body.typeChanged shouldBe empty
+    body.nullabilityChanged shouldBe empty
+
+  it should "404 not_found for an unknown tag on either bound" in new Stubs:
+    val h   = handlers()
+    val out = schemaDiff(h, from = "nope-tag", to = "42")
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+    out.left.toOption.get._2.error shouldBe "not_found"
+
+  it should "410 an expired snapshot id on either bound" in new Stubs:
+    val h   = handlers()
+    val out = schemaDiff(h, from = "1", to = "42")
+    out.left.toOption.get._1 shouldBe StatusCode.Gone
+
+  it should "404 not_found for a table unknown at both bounds" in new Stubs:
+    val h   = handlers(readerOverride = stubReader(knownTables = Set(("tpch1", "other"))))
+    val out = schemaDiff(h, schema = "tpch1", table = "region")
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+    out.left.toOption.get._2.error shouldBe "not_found"
+
+  it should "surface added/removed/typeChanged/nullabilityChanged from the reader" in new Stubs:
+    val diff = SchemaDiffResult(
+      added = List(CatalogColumnEntry(2, "new_col", "BIGINT", true, false)),
+      removed = List(CatalogColumnEntry(1, "old_col", "VARCHAR", true, false)),
+      typeChanged = List(("renamed_type", "VARCHAR", "TEXT")),
+      nullabilityChanged = List(("nullable_col", false, true))
+    )
+    val h    = handlers(readerOverride = stubReader(diffResult = diff))
+    val out  = schemaDiff(h)
+    val body = out.toOption.get
+    body.added.map(_.name) shouldBe List("new_col")
+    body.removed.map(_.name) shouldBe List("old_col")
+    body.typeChanged shouldBe List(SchemaDiffColumnType("renamed_type", "VARCHAR", "TEXT"))
+    body.nullabilityChanged shouldBe List(SchemaDiffNullability("nullable_col", false, true))
+
+  it should "audit CatalogSchemaDiffRead on success" in new Stubs:
+    val h = handlers()
+    schemaDiff(h)
+    telemetryStore.events should not be empty
+    val e = telemetryStore.events.last
+    e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
+    e.outcome shouldBe "ok"
+
+  it should "audit CatalogSchemaDiffRead denied on a gate rejection" in new Stubs:
+    val h = handlers()
+    schemaDiff(h, tenant = "nope")
+    telemetryStore.events should not be empty
+    val e = telemetryStore.events.last
+    e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
+    e.outcome shouldBe "denied"
+
+  it should "audit CatalogSchemaDiffRead denied on an unknown table" in new Stubs:
+    val h = handlers(readerOverride = stubReader(knownTables = Set(("tpch1", "other"))))
+    schemaDiff(h, schema = "tpch1", table = "region")
+    telemetryStore.events should not be empty
+    val e = telemetryStore.events.last
+    e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogSchemaDiffRead
+    e.outcome shouldBe "denied"

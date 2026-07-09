@@ -173,30 +173,118 @@ final class CatalogPreviewHandlers(
     case SnapshotSelector.SelectorError.Expired(id) =>
       (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
 
-  /** Schema-diff route stub (Spec 00 Task 5): the endpoint is registered and gated NOW (tenant
-    * resolve -> [[TenantScopeCheck]] -> tenant-db lookup, same as [[preview]]) so
-    * `TenantScopeCompletenessSpec` and `DocEndpointsSpec` see it from this task on; Task 6 replaces
-    * the body with the real column-diff computation. A caller that clears the gate always gets 501
-    * `not_implemented` here, never a gate bypass.
+  /** Parse one `from`/`to` bound: all-digits is a snapshot id (`asOf`), anything else is a tag name
+    * (`asOfTag`). Fed into [[SnapshotSelector.resolve]] per bound so each side gets the same
+    * expired/beyond-max/tag-not-found/empty-catalog semantics as [[preview]]'s single selector.
     */
-  def schemaDiffStub(
+  private def parseBound(raw: String): (Option[Long], Option[String]) =
+    if raw.nonEmpty && raw.forall(_.isDigit) then (Some(raw.toLong), None) else (None, Some(raw))
+
+  private def resolveBound(
+      raw: String,
+      reader: DuckLakeCatalogReader,
+      tid: String,
+      db: String
+  ): Either[SnapshotSelector.SelectorError, Long] =
+    val (asOf, asOfTag) = parseBound(raw)
+    SnapshotSelector
+      .resolve(
+        asOf,
+        asOfTag,
+        None,
+        maxId = () => reader.maxSnapshotId(),
+        atOrBefore = (ts: Instant) => reader.snapshotAtOrBefore(ts),
+        tagSnapshot = (tag: String) => store.findSnapshotTag(tid, db, tag).map(_.snapshotId),
+        exists = (id: Long) => reader.snapshotExists(id)
+      )
+      .map {
+        case SnapshotSelector.Resolution.Current   => 0L // unreachable: raw is never empty here
+        case SnapshotSelector.Resolution.At(id, _) => id
+      }
+
+  /** Two-snapshot column-level schema diff (Spec 00 Task 6). `from`/`to` each accept EITHER a
+    * snapshot id (all-digits) or a tag name, resolved independently through [[SnapshotSelector]] so
+    * each side gets its own 410 `snapshot_expired` / 422 `invalid_snapshot` / 404 `not_found`
+    * (unknown tag) outcome. Once both bounds resolve to concrete snapshot ids, the table is looked
+    * up at `to` falling back to `from` (mirrors [[DuckLakeCatalogReader.schemaDiff]]'s own
+    * resolution order) so an unknown table surfaces as 404 `not_found` from the handler instead of
+    * the reader's silent empty-diff fallback. `from == to` is a valid request and yields an
+    * all-empty diff (added/removed/typeChanged/nullabilityChanged all empty).
+    *
+    * Audited unconditionally (denied + ok), same convention as [[preview]].
+    */
+  def schemaDiff(
       tenant: String,
       tenantDb: String,
+      schema: String,
+      table: String,
+      from: String,
+      to: String,
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[SchemaDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
         IO.pure(Left(e))
-      case Right(_) =>
-        audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
-        IO.pure(
-          err(
-            StatusCode.NotImplemented,
-            "not_implemented",
-            "schema-diff is not implemented yet"
+      case Right((tid, db)) =>
+        val reader = resolveReader(tid, db)
+        val target = Some(s"$db/$schema/$table")
+
+        def denyAudit(): Unit =
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.CatalogSchemaDiffRead,
+            "denied",
+            tenant = Some(tid),
+            target = target
           )
-        )
+
+        val resolved =
+          for
+            fromId <- resolveBound(from, reader, tid, db)
+            toId   <- resolveBound(to, reader, tid, db)
+          yield (fromId, toId)
+
+        resolved match
+          case Left(se) =>
+            val (sc, code, msg) = selectorError(se)
+            denyAudit()
+            IO.pure(err(sc, code, msg))
+          case Right((fromId, toId)) =>
+            val tableExists =
+              reader
+                .getTable(schema, table, Some(toId))
+                .orElse(reader.getTable(schema, table, Some(fromId)))
+            tableExists match
+              case None =>
+                denyAudit()
+                IO.pure(
+                  err(StatusCode.NotFound, "not_found", s"table '$schema.$table' not found")
+                )
+              case Some(_) =>
+                val diff     = reader.schemaDiff(schema, table, fromId, toId)
+                val response = SchemaDiffResponse(
+                  from = fromId,
+                  to = toId,
+                  added = diff.added,
+                  removed = diff.removed,
+                  typeChanged = diff.typeChanged.map { case (col, f, t) =>
+                    SchemaDiffColumnType(col, f, t)
+                  },
+                  nullabilityChanged = diff.nullabilityChanged.map { case (col, f, t) =>
+                    SchemaDiffNullability(col, f, t)
+                  }
+                )
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.CatalogSchemaDiffRead,
+                  "ok",
+                  tenant = Some(tid),
+                  target = target
+                )
+                IO.pure(Right(response))
 
   def preview(
       tenant: String,
