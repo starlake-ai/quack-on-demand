@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{
@@ -133,7 +133,8 @@ final class UserHandlers(
                     ErrorResponse("missing", s"created user ${u.id} not found")
                   )
                 )
-          case Left(err) => Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err)))
+          case Left(err) =>
+            Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
         }
 
   // ---------- /user/update ----------
@@ -169,10 +170,10 @@ final class UserHandlers(
               case None    =>
                 Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
           case Left(err) =>
-            val code =
-              if err.startsWith("user not found") then StatusCode.NotFound
-              else StatusCode.BadRequest
-            Left((code, ErrorResponse("invalid_user", err)))
+            val code = err match
+              case SupervisorError.NotFound(_) => StatusCode.NotFound
+              case _                           => StatusCode.BadRequest
+            Left((code, ErrorResponse("invalid_user", err.message)))
         }
 
   // ---------- /user/delete ----------
@@ -204,10 +205,38 @@ final class UserHandlers(
               target = usernameLookup
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   // ---------- /user/list ----------
+
+  /** How `listUsers` resolves the requested tenant against the caller's session scope. Replaces a
+    * former `"__forbidden__"` sentinel string threaded through `sup.listUsers`.
+    */
+  private enum UserListPlan:
+    /** Query the store for this tenant (or all tenants when `None`); no further filtering. */
+    case Query(tenant: Option[String])
+
+    /** Query for all tenants, then filter rows down to `allowed` after the mapper runs. */
+    case QueryAllFilterTo(allowed: Set[String])
+
+    /** The caller asked for a specific tenant it cannot manage: always empty, no store round-trip
+      * needed.
+      */
+    case Empty
+
+  private def planListUsers(
+      tenant: Option[String],
+      sessionScope: Option[SessionScope]
+  ): UserListPlan =
+    sessionScope match
+      case None                   => UserListPlan.Query(tenant)
+      case Some(s) if s.superuser => UserListPlan.Query(tenant)
+      case Some(s)                =>
+        tenant match
+          case Some(t) if s.manageableTenants.contains(t) => UserListPlan.Query(Some(t))
+          case Some(_)                                    => UserListPlan.Empty
+          case None => UserListPlan.QueryAllFilterTo(s.manageableTenants)
 
   def listUsers(tenant: Option[String], apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -216,26 +245,20 @@ final class UserHandlers(
     // clamp to the requested tenant if it is in `manageableTenants`,
     // otherwise constrain the listing to the union of manageable tenants
     // (collected after the listUsers call below).
-    val sessionScope                          = apiKey.flatMap(scopeOf)
-    val (effectiveTenant, filterToManageable) = sessionScope match
-      case None                   => (tenant, false)
-      case Some(s) if s.superuser => (tenant, false)
-      case Some(s)                =>
-        tenant match
-          case Some(t) if s.manageableTenants.contains(t) => (Some(t), false)
-          // Asking for a tenant we don't manage => empty result.
-          case Some(_) => (Some("__forbidden__"), false)
-          // Implicit: ask for all and filter against manageable set.
-          case None => (None, true)
-    val users     = sup.listUsers(effectiveTenant)
-    val tenantMap = tenantNameMap
-    val effs      = sup.effectiveSetsForUsers(users)
-    val rows0     = users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
-    val rows      =
-      if !filterToManageable then rows0
-      else
-        val allowed = sessionScope.map(_.manageableTenants).getOrElse(Set.empty)
-        rows0.filter { r =>
+    val sessionScope = apiKey.flatMap(scopeOf)
+    val plan         = planListUsers(tenant, sessionScope)
+    val tenantMap    = tenantNameMap
+
+    def mappedRows(effectiveTenant: Option[String]): List[UserResponse] =
+      val users = sup.listUsers(effectiveTenant)
+      val effs  = sup.effectiveSetsForUsers(users)
+      users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
+
+    val rows = plan match
+      case UserListPlan.Empty                     => Nil
+      case UserListPlan.Query(effectiveTenant)    => mappedRows(effectiveTenant)
+      case UserListPlan.QueryAllFilterTo(allowed) =>
+        mappedRows(None).filter { r =>
           // r.tenant carries the display NAME; map back to id via tenantMap.
           r.tenant.flatMap(name => tenantMap.find(_._2 == name).map(_._1)) match
             case Some(id) => allowed.contains(id)

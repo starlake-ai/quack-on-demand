@@ -1,8 +1,8 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ConfigManifest.scala
 package ai.starlake.quack.ondemand.manifest
 
-import io.circe.{Codec, Decoder, Encoder, HCursor}
-import io.circe.generic.semiauto.{deriveCodec, deriveDecoder, deriveEncoder}
+import io.circe.Codec
+import io.circe.derivation.{Configuration, ConfiguredCodec}
 
 import java.time.Instant
 
@@ -155,237 +155,31 @@ object ConfigManifest:
   val ApiVersion: String = "quack-on-demand/v1"
   val Kind: String       = "ConfigManifest"
 
-  // Case classes with no defaulted fields keep the derived codec.
-  given Codec[ExportedFrom]             = deriveCodec
-  given Codec[ManifestRoleDistribution] = deriveCodec
-  given Codec[ManifestTablePermission]  = deriveCodec
-  given Codec[ManifestPoolGrant]        = deriveCodec
+  // Every manifest case class derives its Codec through circe's Scala 3
+  // ConfiguredCodec with `useDefaults = true`, so a field omitted from the
+  // YAML/JSON falls back to the case class's own default value instead of
+  // failing to decode. This replaces ~150 lines of hand-rolled
+  // `Codec.from(Decoder.instance(...), deriveEncoder[T])` bodies that each
+  // re-implemented `c.getOrElse[T](name)(default)` per defaulted field --
+  // circe's plain `deriveCodec` ignores Scala 3 default values and always
+  // requires every field.
+  given Configuration = Configuration.default.withDefaults
 
-  given Codec[ManifestRoleColumnPolicy] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        catalog      <- c.getOrElse[String]("catalog")("*")
-        schema       <- c.get[String]("schema")
-        table        <- c.get[String]("table")
-        column       <- c.get[String]("column")
-        action       <- c.get[String]("action")
-        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
-      yield ManifestRoleColumnPolicy(catalog, schema, table, column, action, transformSql)
-    },
-    deriveEncoder[ManifestRoleColumnPolicy]
-  )
-
-  given Codec[ManifestRoleRowPolicy] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        catalog      <- c.getOrElse[String]("catalog")("*")
-        schema       <- c.get[String]("schema")
-        table        <- c.get[String]("table")
-        predicateSql <- c.get[String]("predicateSql")
-      yield ManifestRoleRowPolicy(catalog, schema, table, predicateSql)
-    },
-    deriveEncoder[ManifestRoleRowPolicy]
-  )
-
-  // Placement codecs: every field but `key` (tolerations) and
-  // `distribution` (cohorts) is optional in YAML.
-  given Codec[ManifestNodeToleration] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        key      <- c.get[String]("key")
-        operator <- c.getOrElse[String]("operator")("Equal")
-        value    <- c.getOrElse[Option[String]]("value")(None)
-        effect   <- c.getOrElse[Option[String]]("effect")(None)
-      yield ManifestNodeToleration(key, operator, value, effect)
-    },
-    deriveEncoder[ManifestNodeToleration]
-  )
-  given Codec[ManifestNodePlacement] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        nodeSelector <- c.getOrElse[Map[String, String]]("nodeSelector")(Map.empty)
-        tolerations  <- c.getOrElse[List[ManifestNodeToleration]]("tolerations")(Nil)
-      yield ManifestNodePlacement(nodeSelector, tolerations)
-    },
-    deriveEncoder[ManifestNodePlacement]
-  )
-  given Codec[ManifestPoolCohort] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        placement    <- c.getOrElse[ManifestNodePlacement]("placement")(ManifestNodePlacement())
-        distribution <- c.get[ManifestRoleDistribution]("distribution")
-      yield ManifestPoolCohort(placement, distribution)
-    },
-    deriveEncoder[ManifestPoolCohort]
-  )
-
-  // Case classes with default values get hand-rolled decoders that honor
-  // those defaults when the field is omitted in YAML. circe's deriveCodec
-  // generates strict decoders that always require every field, regardless
-  // of Scala 3 defaults. The encoder side is still derived.
-  //
-  // Pattern: `Codec.from(handDecoder, deriveEncoder[T])`. The decoder uses
-  // `c.getOrElse[T](name)(default)` for every field that the case class
-  // declares a default for; required fields stay `c.get[T](name)`.
-
-  given Codec[ManifestFederatedSecret] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name        <- c.get[String]("name")
-        value       <- c.getOrElse[Option[String]]("value")(None)
-        externalRef <- c.getOrElse[Option[String]]("externalRef")(None)
-      yield ManifestFederatedSecret(name, value, externalRef)
-    },
-    deriveEncoder[ManifestFederatedSecret]
-  )
-
-  given Codec[ManifestFederatedSource] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        alias       <- c.get[String]("alias")
-        setupSql    <- c.get[String]("setupSql")
-        description <- c.getOrElse[Option[String]]("description")(None)
-        disabled    <- c.getOrElse[Boolean]("disabled")(false)
-        secrets     <- c.getOrElse[List[ManifestFederatedSecret]]("secrets")(Nil)
-      yield ManifestFederatedSource(alias, setupSql, description, disabled, secrets)
-    },
-    deriveEncoder[ManifestFederatedSource]
-  )
-
-  given Codec[ManifestTenantDb] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name             <- c.get[String]("name")
-        kind             <- c.getOrElse[String]("kind")("ducklake")
-        metastore        <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
-        dataPath         <- c.getOrElse[String]("dataPath")("")
-        objectStore      <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
-        defaultDatabase  <- c.getOrElse[Option[String]]("defaultDatabase")(None)
-        defaultSchema    <- c.getOrElse[Option[String]]("defaultSchema")(None)
-        initSql          <- c.getOrElse[String]("initSql")("")
-        federatedSources <- c.getOrElse[List[ManifestFederatedSource]]("federatedSources")(Nil)
-      yield ManifestTenantDb(
-        name,
-        kind,
-        metastore,
-        dataPath,
-        objectStore,
-        defaultDatabase,
-        defaultSchema,
-        initSql,
-        federatedSources
-      )
-    },
-    deriveEncoder[ManifestTenantDb]
-  )
-
-  given Codec[ManifestPool] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name                 <- c.get[String]("name")
-        tenantDb             <- c.get[String]("tenantDb")
-        roleDistribution     <- c.get[ManifestRoleDistribution]("roleDistribution")
-        maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
-        disabled             <- c.getOrElse[Boolean]("disabled")(false)
-        cohorts              <- c.getOrElse[List[ManifestPoolCohort]]("cohorts")(Nil)
-        initSql              <- c.getOrElse[String]("initSql")("")
-        cpu                  <- c.getOrElse[String]("cpu")("")
-        memory               <- c.getOrElse[String]("memory")("")
-        podTemplateYaml      <- c.getOrElse[String]("podTemplateYaml")("")
-      yield ManifestPool(
-        name,
-        tenantDb,
-        roleDistribution,
-        maxConcurrentPerNode,
-        disabled,
-        cohorts,
-        initSql,
-        cpu,
-        memory,
-        podTemplateYaml
-      )
-    },
-    deriveEncoder[ManifestPool]
-  )
-
-  given Codec[ManifestTenant] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name         <- c.get[String]("name")
-        displayName  <- c.getOrElse[String]("displayName")("")
-        disabled     <- c.getOrElse[Boolean]("disabled")(false)
-        authProvider <- c.getOrElse[String]("authProvider")("db")
-        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
-        tenantDbs    <- c.getOrElse[List[ManifestTenantDb]]("tenantDbs")(Nil)
-        pools        <- c.getOrElse[List[ManifestPool]]("pools")(Nil)
-      yield ManifestTenant(name, displayName, disabled, authProvider, authConfig, tenantDbs, pools)
-    },
-    deriveEncoder[ManifestTenant]
-  )
-
-  given Codec[ManifestRole] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant         <- c.get[String]("tenant")
-        name           <- c.get[String]("name")
-        description    <- c.getOrElse[Option[String]]("description")(None)
-        permissions    <- c.getOrElse[List[ManifestTablePermission]]("permissions")(Nil)
-        columnPolicies <- c.getOrElse[List[ManifestRoleColumnPolicy]]("columnPolicies")(Nil)
-        rowPolicies    <- c.getOrElse[List[ManifestRoleRowPolicy]]("rowPolicies")(Nil)
-      yield ManifestRole(tenant, name, description, permissions, columnPolicies, rowPolicies)
-    },
-    deriveEncoder[ManifestRole]
-  )
-
-  given Codec[ManifestGroup] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant      <- c.get[String]("tenant")
-        name        <- c.get[String]("name")
-        description <- c.getOrElse[Option[String]]("description")(None)
-        roles       <- c.getOrElse[List[String]]("roles")(Nil)
-      yield ManifestGroup(tenant, name, description, roles)
-    },
-    deriveEncoder[ManifestGroup]
-  )
-
-  given Codec[ManifestUser] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant     <- c.get[Option[String]]("tenant")
-        username   <- c.get[String]("username")
-        password   <- c.getOrElse[Option[String]]("password")(None)
-        role       <- c.getOrElse[String]("role")("user")
-        enabled    <- c.getOrElse[Boolean]("enabled")(true)
-        roles      <- c.getOrElse[List[String]]("roles")(Nil)
-        groups     <- c.getOrElse[List[String]]("groups")(Nil)
-        poolGrants <- c.getOrElse[List[ManifestPoolGrant]]("poolGrants")(Nil)
-      yield ManifestUser(tenant, username, password, role, enabled, roles, groups, poolGrants)
-    },
-    deriveEncoder[ManifestUser]
-  )
-
-  given Codec[ConfigManifest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        apiVersion   <- c.get[String]("apiVersion")
-        kind         <- c.get[String]("kind")
-        exportedAt   <- c.get[Instant]("exportedAt")
-        exportedFrom <- c.get[ExportedFrom]("exportedFrom")
-        tenants      <- c.getOrElse[List[ManifestTenant]]("tenants")(Nil)
-        roles        <- c.getOrElse[List[ManifestRole]]("roles")(Nil)
-        groups       <- c.getOrElse[List[ManifestGroup]]("groups")(Nil)
-        users        <- c.getOrElse[List[ManifestUser]]("users")(Nil)
-      yield ConfigManifest(
-        apiVersion,
-        kind,
-        exportedAt,
-        exportedFrom,
-        tenants,
-        roles,
-        groups,
-        users
-      )
-    },
-    deriveEncoder[ConfigManifest]
-  )
+  given Codec[ExportedFrom]             = ConfiguredCodec.derived
+  given Codec[ManifestRoleDistribution] = ConfiguredCodec.derived
+  given Codec[ManifestTablePermission]  = ConfiguredCodec.derived
+  given Codec[ManifestPoolGrant]        = ConfiguredCodec.derived
+  given Codec[ManifestRoleColumnPolicy] = ConfiguredCodec.derived
+  given Codec[ManifestRoleRowPolicy]    = ConfiguredCodec.derived
+  given Codec[ManifestNodeToleration]   = ConfiguredCodec.derived
+  given Codec[ManifestNodePlacement]    = ConfiguredCodec.derived
+  given Codec[ManifestPoolCohort]       = ConfiguredCodec.derived
+  given Codec[ManifestFederatedSecret]  = ConfiguredCodec.derived
+  given Codec[ManifestFederatedSource]  = ConfiguredCodec.derived
+  given Codec[ManifestTenantDb]         = ConfiguredCodec.derived
+  given Codec[ManifestPool]             = ConfiguredCodec.derived
+  given Codec[ManifestTenant]           = ConfiguredCodec.derived
+  given Codec[ManifestRole]             = ConfiguredCodec.derived
+  given Codec[ManifestGroup]            = ConfiguredCodec.derived
+  given Codec[ManifestUser]             = ConfiguredCodec.derived
+  given Codec[ConfigManifest]           = ConfiguredCodec.derived

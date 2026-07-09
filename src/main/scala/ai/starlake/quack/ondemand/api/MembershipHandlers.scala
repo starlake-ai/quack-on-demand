@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -28,11 +28,13 @@ final class MembershipHandlers(
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  private def mapErr(io: IO[Either[String, Unit]]): Out[Unit] = io.map {
+  private def mapErr(io: IO[Either[SupervisorError, Unit]]): Out[Unit] = io.map {
     case Right(_)  => Right(())
     case Left(err) =>
-      val code = if err.contains("not found") then StatusCode.NotFound else StatusCode.BadRequest
-      Left((code, ErrorResponse("invalid_membership", err)))
+      val code = err match
+        case SupervisorError.NotFound(_) => StatusCode.NotFound
+        case _                           => StatusCode.BadRequest
+      Left((code, ErrorResponse("invalid_membership", err.message)))
   }
 
   private def gateOnUser(apiKey: Option[String], userId: String)(

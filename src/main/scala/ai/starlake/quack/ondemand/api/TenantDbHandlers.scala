@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
-import ai.starlake.quack.ondemand.{PoolSupervisor, TenantDbPatch}
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -24,7 +24,7 @@ final class TenantDbHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def redact(m: Map[String, String]): Map[String, String] =
-    m.filterNot(_._1.equalsIgnoreCase("pgPassword"))
+    HandlerResolvers.redactPassword(m)
 
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)
@@ -106,12 +106,14 @@ final class TenantDbHandlers(
                       detail = Map("kind" -> kind.wireValue)
                     )
                     IO.blocking(Right(toResponse(req.tenant, td)))
-                  case Left(msg) if msg.startsWith("tenant not found") =>
-                    IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", msg))))
-                  case Left(msg) if msg.startsWith("invalid kind=") =>
-                    IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", msg))))
-                  case Left(msg) =>
-                    IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", msg))))
+                  case Left(err: SupervisorError.NotFound) =>
+                    IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
+                  case Left(err: SupervisorError.InvalidArgument) =>
+                    IO.pure(
+                      Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message)))
+                    )
+                  case Left(err) =>
+                    IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
                 }
 
   def listTenantDbs(tenant: String): Out[TenantDbListResponse] = IO.blocking {
@@ -147,10 +149,10 @@ final class TenantDbHandlers(
               target = Some(req.name)
             )
             Right(())
-          case Left(msg) if msg.contains("active pool") =>
-            Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
-          case Left(msg) =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+          case Left(err: SupervisorError.Conflict) =>
+            Left((StatusCode.Conflict, ErrorResponse("has_pools", err.message)))
+          case Left(err) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   def update(req: UpdateTenantDbRequest, apiKey: Option[String])(
@@ -203,8 +205,8 @@ final class TenantDbHandlers(
                 )
               )
             )
-          case Left(msg) if msg.startsWith("invalid") =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
-          case Left(msg) =>
-            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", msg))))
+          case Left(err: SupervisorError.InvalidArgument) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", err.message))))
+          case Left(err) =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
         }

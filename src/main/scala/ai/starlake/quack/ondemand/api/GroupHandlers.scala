@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -16,11 +16,7 @@ final class GroupHandlers(
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   private def resolveTenantId(raw: String): Option[String] =
-    val tenants = sup.listTenants()
-    tenants
-      .find(_.id == raw)
-      .map(_.id)
-      .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
+    HandlerResolvers.resolveTenantId(sup, raw)
 
   def createGroup(req: GroupCreateRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -60,9 +56,10 @@ final class GroupHandlers(
                 )
                 Right(mappers.toGroupResponse(g))
               case Left(err) =>
-                val code =
-                  if err.startsWith("group '") then StatusCode.Conflict else StatusCode.BadRequest
-                Left((code, ErrorResponse("invalid_group", err)))
+                val code = err match
+                  case SupervisorError.AlreadyExists(_) => StatusCode.Conflict
+                  case _                                => StatusCode.BadRequest
+                Left((code, ErrorResponse("invalid_group", err.message)))
             }
 
   def deleteGroup(req: GroupDeleteRequest, apiKey: Option[String])(
@@ -91,7 +88,7 @@ final class GroupHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   def listGroups(tenant: String, apiKey: Option[String])(

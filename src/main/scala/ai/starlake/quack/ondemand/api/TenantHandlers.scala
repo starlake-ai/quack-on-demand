@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.auth.TenantOidcRegistry
 import ai.starlake.quack.model.Tenant
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -108,7 +108,7 @@ final class TenantHandlers(
                   detail = Map("displayName" -> t.displayName, "authProvider" -> t.authProvider)
                 )
                 Right(toResponse(t))
-              case Left(msg) => Left((StatusCode.Conflict, ErrorResponse("exists", msg)))
+              case Left(err) => Left((StatusCode.Conflict, ErrorResponse("exists", err.message)))
             }
 
   def listTenants(apiKey: Option[String])(
@@ -152,10 +152,10 @@ final class TenantHandlers(
               target = Some(req.name)
             )
             Right(())
-          case Left(msg) =>
-            if msg.startsWith("tenant not found") then
-              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-            else Left((StatusCode.Conflict, ErrorResponse("has_pools", msg)))
+          case Left(err: SupervisorError.NotFound) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(err) =>
+            Left((StatusCode.Conflict, ErrorResponse("has_pools", err.message)))
         }
 
   def setTenantDisabled(req: SetTenantDisabledRequest, apiKey: Option[String])(
@@ -184,10 +184,10 @@ final class TenantHandlers(
               detail = Map("disabled" -> req.disabled.toString)
             )
             Right(toResponse(t))
-          case Left(msg) =>
-            if msg.startsWith("tenant not found") then
-              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-            else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+          case Left(err: SupervisorError.NotFound) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(err) =>
+            Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
         }
 
   def setTenantAuth(req: SetTenantAuthRequest, apiKey: Option[String])(
@@ -217,10 +217,10 @@ final class TenantHandlers(
               detail = Map("authProvider" -> req.authProvider)
             )
             Right(toResponse(t))
-          case Left(msg) =>
-            if msg.startsWith("tenant not found") then
-              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-            else if msg.startsWith("authProvider must be") then
-              Left((StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", msg)))
-            else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+          case Left(err: SupervisorError.NotFound) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(err: SupervisorError.InvalidArgument) =>
+            Left((StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", err.message)))
+          case Left(err) =>
+            Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
         }

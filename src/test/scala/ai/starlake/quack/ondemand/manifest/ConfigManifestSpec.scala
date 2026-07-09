@@ -13,34 +13,47 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
 
   private val sample = ConfigManifest(
     apiVersion = "quack-on-demand/v1",
-    kind       = "ConfigManifest",
+    kind = "ConfigManifest",
     exportedAt = Instant.parse("2026-06-05T12:00:00Z"),
     exportedFrom = ExportedFrom(managerVersion = "0.2.0", hostname = "qod-test"),
     tenants = List(
       ManifestTenant(
-        name         = "tpch",
-        disabled     = false,
+        name = "tpch",
+        disabled = false,
         authProvider = "db",
-        authConfig   = Map.empty,
-        tenantDbs    = List(ManifestTenantDb(name = "tpch_tpch1")),
-        pools        = List(ManifestPool(
-          name = "sales", tenantDb = "tpch_tpch1",
-          roleDistribution = ManifestRoleDistribution(1, 1, 1),
-          maxConcurrentPerNode = 0, disabled = false
-        ))
+        authConfig = Map.empty,
+        tenantDbs = List(ManifestTenantDb(name = "tpch_tpch1")),
+        pools = List(
+          ManifestPool(
+            name = "sales",
+            tenantDb = "tpch_tpch1",
+            roleDistribution = ManifestRoleDistribution(1, 1, 1),
+            maxConcurrentPerNode = 0,
+            disabled = false
+          )
+        )
       )
     ),
     roles = List(
-      ManifestRole("tpch", "reader", Some("read-only"), List(
-        ManifestTablePermission("tpch_tpch1", "tpch1", "customer", "RO")
-      ))
+      ManifestRole(
+        "tpch",
+        "reader",
+        Some("read-only"),
+        List(
+          ManifestTablePermission("tpch_tpch1", "tpch1", "customer", "RO")
+        )
+      )
     ),
     groups = Nil,
-    users  = List(
+    users = List(
       ManifestUser(
-        tenant = Some("tpch"), username = "alice", password = None,
-        role = "user", enabled = true,
-        roles = List("reader"), groups = Nil,
+        tenant = Some("tpch"),
+        username = "alice",
+        password = None,
+        role = "user",
+        enabled = true,
+        roles = List("reader"),
+        groups = Nil,
         poolGrants = List(ManifestPoolGrant(pool = Some("sales")))
       )
     )
@@ -59,10 +72,10 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
     yaml should not include "password"
   }
 
-  // Regression: hand-rolled decoders must honor Scala 3 default values when
+  // Regression: the manifest codecs must honor Scala 3 default values when
   // a field is omitted from the YAML. circe's deriveCodec generates strict
-  // decoders that always require every field; we replaced them with
-  // Decoder.instance bodies that call `c.getOrElse[T](name)(default)`.
+  // decoders that always require every field; the codecs are derived via
+  // ConfiguredCodec with `Configuration.default.withDefaults` instead.
   it should "decode a manifest that omits every defaulted field" in {
     val minimal =
       """apiVersion: quack-on-demand/v1
@@ -72,9 +85,9 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
         |""".stripMargin
     val parsed = parser.parse(minimal).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
     parsed.tenants shouldBe empty
-    parsed.roles   shouldBe empty
-    parsed.groups  shouldBe empty
-    parsed.users   shouldBe empty
+    parsed.roles shouldBe empty
+    parsed.groups shouldBe empty
+    parsed.users shouldBe empty
   }
 
   it should "decode a tenant that omits authProvider / tenantDbs / pools" in {
@@ -88,12 +101,12 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
         |""".stripMargin
     val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
     val tenant = parsed.tenants.head
-    tenant.name         shouldBe "tpch"
-    tenant.disabled     shouldBe false
+    tenant.name shouldBe "tpch"
+    tenant.disabled shouldBe false
     tenant.authProvider shouldBe "db"
-    tenant.authConfig   shouldBe Map.empty[String, String]
-    tenant.tenantDbs    shouldBe empty
-    tenant.pools        shouldBe empty
+    tenant.authConfig shouldBe Map.empty[String, String]
+    tenant.tenantDbs shouldBe empty
+    tenant.pools shouldBe empty
   }
 
   it should "decode a user that omits role / enabled / roles / groups / poolGrants" in {
@@ -107,13 +120,13 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
         |    username: admin
         |""".stripMargin
     val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
-    val user = parsed.users.head
-    user.tenant     shouldBe None
-    user.username   shouldBe "admin"
-    user.password   shouldBe None
-    user.role       shouldBe "user"
-    user.enabled    shouldBe true
-    user.roles      shouldBe empty
-    user.groups     shouldBe empty
+    val user   = parsed.users.head
+    user.tenant shouldBe None
+    user.username shouldBe "admin"
+    user.password shouldBe None
+    user.role shouldBe "user"
+    user.enabled shouldBe true
+    user.roles shouldBe empty
+    user.groups shouldBe empty
     user.poolGrants shouldBe empty
   }

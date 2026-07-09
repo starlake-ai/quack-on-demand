@@ -109,5 +109,5 @@ final class NodeHandlers(
               target = Some(req.nodeId)
             )
             Right(())
-          case Left(msg) => Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
