@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -58,10 +58,10 @@ final class PoolPermissionHandlers(
                 )
                 Right(mappers.toPoolPermissionResponse(p))
               case Left(err) =>
-                val code =
-                  if err.contains("not found") then StatusCode.NotFound
-                  else StatusCode.BadRequest
-                Left((code, ErrorResponse("invalid_grant", err)))
+                val code = err match
+                  case SupervisorError.NotFound(_) => StatusCode.NotFound
+                  case _                           => StatusCode.BadRequest
+                Left((code, ErrorResponse("invalid_grant", err.message)))
             }
 
   def revoke(req: PoolPermissionRevokeRequest, apiKey: Option[String])(
@@ -90,7 +90,7 @@ final class PoolPermissionHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   /** Tenant-scope semantics: if `tenant` is supplied, check against that. If not, clamp the

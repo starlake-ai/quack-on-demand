@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -63,9 +63,10 @@ final class RoleHandlers(
                 )
                 Right(mappers.toRoleResponse(r))
               case Left(err) =>
-                val code =
-                  if err.startsWith("role '") then StatusCode.Conflict else StatusCode.BadRequest
-                Left((code, ErrorResponse("invalid_role", err)))
+                val code = err match
+                  case SupervisorError.AlreadyExists(_) => StatusCode.Conflict
+                  case _                                => StatusCode.BadRequest
+                Left((code, ErrorResponse("invalid_role", err.message)))
             }
 
   def deleteRole(req: RoleDeleteRequest, apiKey: Option[String])(
@@ -94,7 +95,7 @@ final class RoleHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   def listRoles(tenant: String, apiKey: Option[String])(
@@ -142,10 +143,10 @@ final class RoleHandlers(
             )
             Right(mappers.toRolePermissionResponse(p))
           case Left(err) =>
-            val code =
-              if err.startsWith("role not found") then StatusCode.NotFound
-              else StatusCode.BadRequest
-            Left((code, ErrorResponse("invalid_permission", err)))
+            val code = err match
+              case SupervisorError.NotFound(_) => StatusCode.NotFound
+              case _                           => StatusCode.BadRequest
+            Left((code, ErrorResponse("invalid_permission", err.message)))
         }
 
   def revokePermission(req: RolePermissionRevokeRequest, apiKey: Option[String])(
@@ -174,7 +175,7 @@ final class RoleHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   def listPermissions(roleId: String, apiKey: Option[String])(

@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -56,8 +56,8 @@ final class RoleRowPolicyHandlers(
                 detail = Map("table" -> req.tableName)
               )
               Right(toDto(p))
-            case Left(reason) =>
-              Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", reason)))
+            case Left(err) =>
+              Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", err.message)))
           }
 
   def update(req: UpdateRowPolicyRequest, apiKey: Option[String])(
@@ -86,10 +86,10 @@ final class RoleRowPolicyHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(r) if r.endsWith("not found") =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
-          case Left(r) =>
-            Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", r)))
+          case Left(err: SupervisorError.NotFound) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(err) =>
+            Left((StatusCode.BadRequest, ErrorResponse("invalid_policy", err.message)))
         }
 
   def delete(req: DeleteRowPolicyRequest, apiKey: Option[String])(
@@ -118,7 +118,7 @@ final class RoleRowPolicyHandlers(
               target = Some(req.id)
             )
             Right(())
-          case Left(r) => Left((StatusCode.NotFound, ErrorResponse("not_found", r)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   def list(roleId: String, apiKey: Option[String])(

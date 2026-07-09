@@ -333,7 +333,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val (sup, _) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("foo")).unsafeRunSync()
     val res = sup.createTenant(Tenant("foo")).unsafeRunSync()
-    res.left.toOption.getOrElse("") should include("already exists")
+    res.left.toOption.map(_.message).getOrElse("") should include("already exists")
 
   "PoolSupervisor.deleteTenant" should "remove a tenant with no tenant-dbs" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -345,7 +345,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenant("acme").unsafeRunSync()
-    out.left.toOption.getOrElse("") should include("active pool")
+    out.left.toOption.map(_.message).getOrElse("") should include("active pool")
     sup.getTenant("acme") shouldBe defined
 
   it should "cascade-delete tenant-dbs (no pools) when deleting the tenant" in:
@@ -383,7 +383,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createTenantDb("tpch", "tpch1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val again = sup.createTenantDb("tpch", "tpch1", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     again.isLeft shouldBe true
-    again.swap.toOption.get should include("already exists")
+    again.swap.toOption.get.message should include("already exists")
 
   it should "reject a tenant-db when the tenant doesn't exist" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -462,7 +462,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
     out.isLeft shouldBe true
-    out.swap.toOption.get should include("active pool")
+    out.swap.toOption.get.message should include("active pool")
     admin.dropped.toList shouldBe Nil
 
   // ---------- Per-tenant-db metastore + dataPath ----------
@@ -631,7 +631,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     store.upsertUserIdentity(userA)
     val res = sup.addUserRole(userA.id, roleB.id).unsafeRunSync()
     res.isLeft shouldBe true
-    res.left.toOption.get should include("cross-tenant")
+    res.left.toOption.get.message should include("cross-tenant")
     sup.effectiveSetForUser(userA.id).map(_.permissions).getOrElse(Nil) shouldBe Nil
 
   it should "accept a same-tenant role membership" in:
@@ -652,7 +652,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     store.upsertUserIdentity(root)
     val res = sup.addUserRole(root.id, roleA.id).unsafeRunSync()
     res.isLeft shouldBe true
-    res.left.toOption.get should include("cross-tenant")
+    res.left.toOption.get.message should include("cross-tenant")
 
   "addUserGroup" should "reject attaching a tenant-B group to a tenant-A user" in:
     val store = new InMemoryControlPlaneStore()
@@ -664,7 +664,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     store.upsertUserIdentity(userA)
     val res = sup.addUserGroup(userA.id, groupB.id).unsafeRunSync()
     res.isLeft shouldBe true
-    res.left.toOption.get should include("cross-tenant")
+    res.left.toOption.get.message should include("cross-tenant")
 
   it should "accept a same-tenant group membership" in:
     val store = new InMemoryControlPlaneStore()
@@ -684,7 +684,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val roleB  = sup.createRole(b.id, "analyst").unsafeRunSync().toOption.get
     val res    = sup.addGroupRole(groupA.id, roleB.id).unsafeRunSync()
     res.isLeft shouldBe true
-    res.left.toOption.get should include("cross-tenant")
+    res.left.toOption.get.message should include("cross-tenant")
 
   it should "accept a same-tenant group-role edge" in:
     val store = new InMemoryControlPlaneStore()
@@ -835,7 +835,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       metastore = Some(Map("pgPassword" -> "x"))
     )).unsafeRunSync()
     out.isLeft shouldBe true
-    out.swap.toOption.get should include("drops required")
+    out.swap.toOption.get.message should include("drops required")
   }
 
   it should "succeed when a patch drops only a non-required custom key" in {

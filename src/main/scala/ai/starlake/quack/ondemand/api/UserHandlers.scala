@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{
@@ -133,7 +133,8 @@ final class UserHandlers(
                     ErrorResponse("missing", s"created user ${u.id} not found")
                   )
                 )
-          case Left(err) => Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err)))
+          case Left(err) =>
+            Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
         }
 
   // ---------- /user/update ----------
@@ -169,10 +170,10 @@ final class UserHandlers(
               case None    =>
                 Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
           case Left(err) =>
-            val code =
-              if err.startsWith("user not found") then StatusCode.NotFound
-              else StatusCode.BadRequest
-            Left((code, ErrorResponse("invalid_user", err)))
+            val code = err match
+              case SupervisorError.NotFound(_) => StatusCode.NotFound
+              case _                           => StatusCode.BadRequest
+            Left((code, ErrorResponse("invalid_user", err.message)))
         }
 
   // ---------- /user/delete ----------
@@ -204,7 +205,7 @@ final class UserHandlers(
               target = usernameLookup
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err)))
+          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
         }
 
   // ---------- /user/list ----------

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -382,10 +382,10 @@ final class PoolHandlers(
                     ErrorResponse("not_found", s"pool $key disappeared after update")
                   )
                 )
-          case Left(msg) =>
-            if msg.startsWith("pool not found") then
-              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-            else Left((StatusCode.Conflict, ErrorResponse("update_failed", msg)))
+          case Left(err: SupervisorError.NotFound) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(err) =>
+            Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
         }
 
   def setResources(req: SetPoolResourcesRequest, apiKey: Option[String])(
@@ -423,8 +423,8 @@ final class PoolHandlers(
         else
           val key = PoolKey(req.tenant, req.tenantDb, req.pool)
           sup.setPoolResources(key, req.cpu, req.memory).map {
-            case Left(msg) =>
-              Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+            case Left(err) =>
+              Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
             case Right(_) =>
               val cpuDetail    = if req.cpu.nonEmpty then Map("cpu" -> req.cpu) else Map.empty
               val memoryDetail =
@@ -487,8 +487,8 @@ final class PoolHandlers(
             case Right(()) =>
               val key = PoolKey(req.tenant, req.tenantDb, req.pool)
               sup.setPoolTemplate(key, req.podTemplateYaml).map {
-                case Left(msg) =>
-                  Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
+                case Left(err) =>
+                  Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
                 case Right(_) =>
                   // Never include the template body in detail (may contain secrets/paths).
                   audit.rest(
