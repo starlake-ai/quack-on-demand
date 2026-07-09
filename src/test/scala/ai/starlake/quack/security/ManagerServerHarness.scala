@@ -347,6 +347,19 @@ object ManagerServerHarness:
         )
       }
 
+    // History handlers (EPIC Spec 01 Task 5). Same reader + kindOf default (always DuckLake) as
+    // catalogHandlers above, so authz specs exercise the same DuckLake-reachable path despite
+    // InMemory fixture tenant-dbs.
+    val catalogHistoryHandlers: Option[CatalogHistoryHandlers] =
+      catalogReader.map { rr =>
+        new CatalogHistoryHandlers(
+          rr,
+          sup,
+          audit = audit,
+          auditReads = auditCatalogReads
+        )
+      }
+
     val maintenanceHandlers = new MaintenanceHandlers(sup, store, audit = audit)
 
     // Preview handlers (Spec 00 Task 5). Reader defaults to a no-snapshot stub (null
@@ -400,6 +413,7 @@ object ManagerServerHarness:
       tags = Some(tagHandlers),
       maintenance = Some(maintenanceHandlers),
       preview = Some(previewHandlers),
+      catalogHistory = catalogHistoryHandlers,
       metricsEndpoint,
       userHandlers,
       roleHandlers,
