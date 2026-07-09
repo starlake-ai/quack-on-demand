@@ -860,6 +860,12 @@ final case class PreviewResponse(
     truncated: Boolean
 )
 
+/** Placeholder shape for the schema-diff endpoint (Task 5 wires the route as a 501
+  * `not_implemented` stub; Task 6 replaces the handler and, if needed, this DTO with the real
+  * column-diff payload).
+  */
+final case class SchemaDiffResponse(message: String)
+
 object Dtos:
   given Codec[RoleDistribution] = deriveCodec
   // Hand-rolled codecs so optional fields with case-class defaults survive
@@ -1627,3 +1633,6 @@ object Dtos:
   // Catalog data preview
   given Codec[PreviewColumn]   = deriveCodec
   given Codec[PreviewResponse] = deriveCodec
+
+  // Schema diff (Task 6 stub payload)
+  given Codec[SchemaDiffResponse] = deriveCodec

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
-import ai.starlake.quack.model.{PoolKey, TenantDbKind}
+import ai.starlake.quack.model.{PoolKey, Role, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -25,16 +25,18 @@ object CatalogPreviewHandlers:
     */
   type PreviewExecutor = (String, String, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
 
-  /** Identity contract for the executor call (documented here since Task 5 wires the real ACL
-    * resolution): a valid session token resolves to its `(profile.username)`; no token, an
-    * unresolved token (static API key), or open/dev mode all fall back to `"superuser"` as the
-    * executor `user` -- mirroring the data-plane's superuser-bypass semantics (a static-key /
-    * no-session caller is treated as trusted, exactly like every other REST handler in this
-    * codebase). Task 5's real executor adapter is expected to pass `effectiveSet = None` for that
-    * identity so `PostgresAclValidator`'s superuser bypass applies, rather than inventing a fake
-    * ACL closure.
+  /** Identity contract for the executor call: a valid session token resolves to its
+    * `(profile.username)`; no token, an unresolved token (static API key), or open/dev mode all
+    * fall back to `"superuser"` as the executor `user` -- mirroring the data-plane's
+    * superuser-bypass semantics (a static-key / no-session caller is treated as trusted, exactly
+    * like every other REST handler in this codebase). The real executor adapter
+    * ([[ai.starlake.quack.Main]]) maps this identity to a synthetic superuser
+    * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] (`user.tenant = None`) so
+    * `PostgresAclValidator`'s superuser bypass applies -- NOT `effectiveSet = None`, which the
+    * validator treats as "no RBAC principal bound to this session" and denies fail-safe. Public
+    * (not `private[api]`) so Main's adapter, in a different package, can match on it.
     */
-  private[api] val SuperuserIdentity = "superuser"
+  val SuperuserIdentity = "superuser"
 
 /** Bounded, ACL-routed snapshot preview (Spec 00 time-travel viewer). `preview` runs the same
   * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (a non-
@@ -103,12 +105,28 @@ final class CatalogPreviewHandlers(
                 )
               case Some(td) => Right((tid, td.name))
 
-  /** First pool registered under `(tenant, tenantDb)`. Preview needs a live pool with at least one
-    * ReadOnly/Dual node to route the query to; `sup.list()` returns every pool across every
-    * tenant-db, so this filters by key rather than relying on a narrower listing helper.
+  /** Pool pick for `(tenant, tenantDb)`, stable across calls (Task 4 review carry-forward:
+    * `sup.list()` iterates a mutable map, so picking "the first" without a deterministic sort could
+    * return a different pool on every call). Sorted by pool name; among the candidates, prefer one
+    * whose CURRENT [[ai.starlake.quack.route.PoolSnapshot]] carries at least one `ReadOnly` or
+    * `Dual` node (a `SELECT` needs [[ai.starlake.quack.route.RoleMatcher]]'s read-eligible roles to
+    * route at all) -- `sup.snapshot(key)` is an O(1) map lookup plus the tracker's
+    * already-materialized load map, so this preference costs nothing extra to compute. A tenant-db
+    * whose only pool is WriteOnly still resolves (falls through to the first candidate by name)
+    * rather than 404 `no_pool`; `Router.pick` inside the real executor is the authority on whether
+    * the query can actually route, and surfaces `RouterFailure.Unavailable` if it can't.
     */
   private def firstPoolKey(tenant: String, tenantDb: String): Option[PoolKey] =
-    sup.list().map(_.key).find(k => k.tenant == tenant && k.tenantDb == tenantDb)
+    val candidates = sup
+      .list()
+      .map(_.key)
+      .filter(k => k.tenant == tenant && k.tenantDb == tenantDb)
+      .sortBy(_.pool)
+    def hasReadEligibleNode(key: PoolKey): Boolean =
+      sup
+        .snapshot(key)
+        .exists(_.nodes.exists(n => n.role == Role.ReadOnly || n.role == Role.Dual))
+    candidates.find(hasReadEligibleNode).orElse(candidates.headOption)
 
   private def identityOf(apiKey: Option[String]): String =
     apiKey.flatMap(sessions) match
@@ -144,6 +162,31 @@ final class CatalogPreviewHandlers(
       )
     case SnapshotSelector.SelectorError.Expired(id) =>
       (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
+
+  /** Schema-diff route stub (Spec 00 Task 5): the endpoint is registered and gated NOW (tenant
+    * resolve -> [[TenantScopeCheck]] -> tenant-db lookup, same as [[preview]]) so
+    * `TenantScopeCompletenessSpec` and `DocEndpointsSpec` see it from this task on; Task 6 replaces
+    * the body with the real column-diff computation. A caller that clears the gate always gets 501
+    * `not_implemented` here, never a gate bypass.
+    */
+  def schemaDiffStub(
+      tenant: String,
+      tenantDb: String,
+      apiKey: Option[String]
+  )(scopeOf: String => Option[SessionScope]): Out[SchemaDiffResponse] =
+    gate(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
+        IO.pure(Left(e))
+      case Right(_) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogSchemaDiffRead, "denied")
+        IO.pure(
+          err(
+            StatusCode.NotImplemented,
+            "not_implemented",
+            "schema-diff is not implemented yet"
+          )
+        )
 
   def preview(
       tenant: String,

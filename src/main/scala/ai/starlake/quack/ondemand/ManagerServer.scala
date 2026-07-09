@@ -36,6 +36,7 @@ final class ManagerServer(
     catalog: Option[CatalogHandlers],
     tags: Option[TagHandlers],
     maintenance: Option[MaintenanceHandlers],
+    preview: Option[CatalogPreviewHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -245,6 +246,42 @@ final class ManagerServer(
         },
         MaintenanceEndpoints.triggerRunEndpoint.serverLogic { case (req, token) =>
           h.triggerRun(req, token)(sessions.scopeOf)
+        }
+      )
+    }
+
+    // Time-travel preview + schema-diff (Spec 00). Session-gated per request via
+    // TenantScopeCheck inside the handler, same shape as tagEndpoints /
+    // maintenanceEndpoints. schema-diff is a 501 not_implemented stub until Task 6
+    // wires the real handler; it is still gated the same way so the guardrail specs
+    // (TenantScopeCompletenessSpec, DocEndpointsSpec) see it from this task on.
+    val timeTravelEndpoints: List[ServerEndpoint[Any, IO]] = preview.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        TimeTravelEndpoints.previewEndpoint.serverLogic {
+          case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, limit, token) =>
+            val asOfTs: Option[java.time.Instant] = asOfTsRaw.flatMap { raw =>
+              try Some(java.time.Instant.parse(raw))
+              catch case _ => None
+            }
+            val parseError =
+              if asOfTsRaw.isDefined && asOfTs.isEmpty then
+                Some(
+                  (
+                    sttp.model.StatusCode.BadRequest,
+                    ErrorResponse("invalid_selector", "asOfTs must be ISO-8601")
+                  )
+                )
+              else None
+            parseError match
+              case Some(e) => IO.pure(Left(e))
+              case None    =>
+                h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, token)(
+                  sessions.scopeOf
+                )
+        },
+        TimeTravelEndpoints.schemaDiffEndpoint.serverLogic {
+          case (tenant, tenantDb, schema, table, from, to, token) =>
+            h.schemaDiffStub(tenant, tenantDb, token)(sessions.scopeOf)
         }
       )
     }
@@ -532,7 +569,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

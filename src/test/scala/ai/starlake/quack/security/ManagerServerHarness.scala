@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack._
-import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore}
+import ai.starlake.quack.edge.{ActiveStatementRegistry, RouterFailure, StatementHistoryStore}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.model.{NodeSpec, RunningNode}
@@ -260,7 +260,13 @@ object ManagerServerHarness:
       // how tags are wired. kindOf defaults to always-DuckLake so stub
       // readers are reached even though the fixture tenant-dbs are InMemory.
       catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None,
-      auditCatalogReads: Boolean = false
+      auditCatalogReads: Boolean = false,
+      // Preview executor stub (Spec 00 Task 5). Defaults to a non-denied RouterFailure so
+      // authz specs that never intend to exercise a real query still get a deterministic,
+      // non-403 outcome once past the gate; the acl_denied spec case overrides this to return
+      // Left(RouterFailure.AccessDenied(...)) instead.
+      previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _, _) =>
+        IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness")))
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -343,6 +349,28 @@ object ManagerServerHarness:
 
     val maintenanceHandlers = new MaintenanceHandlers(sup, store, audit = audit)
 
+    // Preview handlers (Spec 00 Task 5). Reader defaults to a no-snapshot stub (null
+    // datasource, every lookup overridden) so authz specs that never reach the
+    // selector-resolution step don't need a real Postgres-backed reader; catalogReader,
+    // when supplied, is reused so specs already wiring one for CatalogHandlers get the
+    // same behavior here.
+    val noSnapshotReader: DuckLakeCatalogReader =
+      new DuckLakeCatalogReader(null):
+        override def snapshotExists(id: Long): Boolean                       = false
+        override def maxSnapshotId(): Option[Long]                           = None
+        override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = None
+    val previewReader: (String, String) => DuckLakeCatalogReader =
+      catalogReader.getOrElse((_, _) => noSnapshotReader)
+    val previewHandlers = new CatalogPreviewHandlers(
+      sup,
+      store,
+      sessions.get,
+      previewExecutor,
+      previewReader,
+      CatalogConfig(),
+      audit = audit
+    )
+
     val liveConfig    = ConfigFactory.load()
     val configEntries = ConfigRegistry.collect(List.empty) // empty: no annotations to reflect
     val serverConfigHandlers = new ConfigHandlers(liveConfig, configEntries)
@@ -371,6 +399,7 @@ object ManagerServerHarness:
       catalog = catalogHandlers,
       tags = Some(tagHandlers),
       maintenance = Some(maintenanceHandlers),
+      preview = Some(previewHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,
