@@ -41,6 +41,8 @@
     LOAD_TPCDS=N           seed TPC-DS SF=N into globex/globex_tpcds (tpcds1)
     LOAD_SSB=N             seed SSB SF=N into acme/acme_tpch (schema ssb1)
     LOAD_TPC=N             legacy shortcut for LOAD_TPCH=LOAD_TPCDS=LOAD_SSB=N
+    DEMO=full|minimal      which bundled demo manifest a LOAD_* boot imports
+                           (minimal = acme only, one pool, single dual node)
     DUCKDB_VERSION         pin a DuckDB release (default: derived from build.sbt)
     DUCKDB_CACHE_DIR       relocate the duckdb cache (default: <repo>\.duckdb)
     QOD_NATIVE_CLIENT      false = embedded DuckDB-JDBC path (no quackwire.dll)
@@ -53,6 +55,8 @@
   $env:QOD_VERSION='latest-snapshot'; .\scripts\run-jar.ps1
 .EXAMPLE
   $env:NUKE='1'; $env:LOAD_TPCH='1'; .\scripts\run-jar.ps1
+.EXAMPLE
+  $env:NUKE='1'; $env:DEMO='minimal'; $env:LOAD_TPCH='1'; .\scripts\run-jar.ps1
 #>
 [CmdletBinding()]
 param()
@@ -144,6 +148,22 @@ foreach ($pair in @(@('LOAD_TPCH',$LoadTpch), @('LOAD_TPCDS',$LoadTpcds), @('LOA
     Write-Error "$($pair[0]) must be a positive integer scale factor (got: '$($pair[1])')."
     exit 1
   }
+}
+
+$DemoExplicit = -not [string]::IsNullOrEmpty((Get-EnvOr 'DEMO' ''))
+$Demo = Get-EnvOr 'DEMO' 'full'
+if ($Demo -notin @('full', 'minimal')) {
+  Write-Error "DEMO must be 'full' or 'minimal' (got: '$Demo')."
+  exit 1
+}
+if ($Demo -eq 'minimal' -and $LoadTpcds) {
+  Write-Warning "DEMO=minimal has no globex tenant; skipping the TPC-DS loader."
+  $LoadTpcds = ''
+}
+# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
+# that no demo seed remains and bootstrap will not run.
+if ($DemoExplicit -and -not ($LoadTpch -or $LoadTpcds -or $LoadSsb)) {
+  Write-Warning "DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed."
 }
 
 # ---- sbt bootstrap (download into .sbt-bootstrap\ when not on PATH) --------
@@ -378,9 +398,10 @@ if ($stateMode -eq 'postgres' -and $pgReachable -and $pgDbName) {
 # ---- Optional: TPC demo loaders (background, before the JVM starts) ----
 if ($LoadTpch -or $LoadTpcds -or $LoadSsb) {
   if ([string]::IsNullOrEmpty($env:QOD_BOOTSTRAP_YAML)) {
-    $env:QOD_BOOTSTRAP_YAML = Join-Path $RepoDir 'src\main\resources\bootstrap-demo.yaml'
+    $demoManifest = if ($Demo -eq 'minimal') { 'bootstrap-demo-minimal.yaml' } else { 'bootstrap-demo.yaml' }
+    $env:QOD_BOOTSTRAP_YAML = Join-Path $RepoDir "src\main\resources\$demoManifest"
   }
-  Write-Host "load-tpc: TPC-H=$(if($LoadTpch){$LoadTpch}else{'skip'}), TPC-DS=$(if($LoadTpcds){$LoadTpcds}else{'skip'}), SSB=$(if($LoadSsb){$LoadSsb}else{'skip'}), bootstrap=$($env:QOD_BOOTSTRAP_YAML)"
+  Write-Host "load-tpc: profile=$Demo, TPC-H=$(if($LoadTpch){$LoadTpch}else{'skip'}), TPC-DS=$(if($LoadTpcds){$LoadTpcds}else{'skip'}), SSB=$(if($LoadSsb){$LoadSsb}else{'skip'}), bootstrap=$($env:QOD_BOOTSTRAP_YAML)"
   $ducklakeParent = Split-Path -Parent $env:QOD_DUCKLAKE_DATA_PATH
 
   # Launch one loader in the background. Sets the loader's env-var contract, then

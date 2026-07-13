@@ -32,6 +32,9 @@
 #                       QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml in
 #                       the quack container so the JVM imports the bundled
 #                       manifest on first boot.
+#   DEMO=full|minimal   Which bundled demo manifest a LOAD_* boot imports
+#                       (minimal = acme only, one pool, single dual node).
+#                       Only consulted when injecting QOD_BOOTSTRAP_YAML.
 #   NUKE                "1" tears down any existing stack and wipes
 #                       ./pgdata, ./ducklake, ./certs before starting.
 #                       Irreversible.            (default 0)
@@ -56,6 +59,7 @@
 #   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + all three SF=1 (legacy)
 #   LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh  # + both, independent SFs
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
+#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-docker-compose.sh  # smallest demo
 #   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
 
 set -euo pipefail
@@ -65,6 +69,14 @@ cd "$REPO_DIR"
 
 QOD_VERSION="${QOD_VERSION:-latest}"
 NUKE="${NUKE:-0}"
+
+# ---- Validate DEMO early (before any destructive NUKE operations) ----
+_demo_explicit="${DEMO:+1}"
+DEMO="${DEMO:-full}"
+if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
+  echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
+  exit 1
+fi
 
 # ---- Optional nuke: tear down + wipe before starting ----
 # Container uids (postgres uid 70, root) own the bind-mount contents, so
@@ -120,6 +132,15 @@ LOAD_TPC="${LOAD_TPC:-}"
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
 LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
 LOAD_SSB="${LOAD_SSB:-$LOAD_TPC}"
+if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]]; then
+  echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
+  LOAD_TPCDS=""
+fi
+# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
+# that no demo seed remains and bootstrap will not run.
+if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
+  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
+fi
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -301,9 +322,18 @@ _want_tpch=0; [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "fals
 _want_tpcds=0; [[ -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]] && _want_tpcds=1
 _want_ssb=0; [[ -n "$LOAD_SSB" && "$LOAD_SSB" != "0" && "$LOAD_SSB" != "false" ]] && _want_ssb=1
 if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; then
-  if ! grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
-    printf '\nQOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml  # added by run-docker-compose.sh\n' >> "$ENV_FILE"
-    echo "injected QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml into $ENV_FILE"
+  _demo_manifest="bootstrap-demo.yaml"
+  [[ "$DEMO" == "minimal" ]] && _demo_manifest="bootstrap-demo-minimal.yaml"
+  _demo_line="QOD_BOOTSTRAP_YAML=classpath:$_demo_manifest  # added by run-docker-compose.sh"
+  if grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=.*# added by run-docker-compose.sh' "$ENV_FILE" 2>/dev/null; then
+    # Rewrite our own earlier injection so a profile switch takes effect;
+    # an operator-authored line (no marker comment) is left alone below.
+    _tmp="$(mktemp)"
+    sed "s|^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=.*# added by run-docker-compose.sh|$_demo_line|" "$ENV_FILE" > "$_tmp" && mv "$_tmp" "$ENV_FILE"
+    echo "updated injected QOD_BOOTSTRAP_YAML to classpath:$_demo_manifest in $ENV_FILE"
+  elif ! grep -qE '^[[:space:]]*QOD_BOOTSTRAP_YAML[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    printf '\n%s\n' "$_demo_line" >> "$ENV_FILE"
+    echo "injected QOD_BOOTSTRAP_YAML=classpath:$_demo_manifest into $ENV_FILE"
   fi
 fi
 

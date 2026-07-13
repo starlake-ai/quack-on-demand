@@ -51,6 +51,17 @@ The start script is idempotent on CWD (anchors at the repo root). Default creden
 
 Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` to `run-jar.sh`, or the equivalent bench flag to `run-docker-compose.sh`. In that case the script sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`run-jar.sh` uses the filesystem path `src/main/resources/bootstrap-demo.yaml`; `run-docker-compose.sh` uses `classpath:bootstrap-demo.yaml`). A bare `./scripts/run-jar.sh` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe.
 
+A second profile ships for minimal demos: `DEMO=minimal` (with any `LOAD_*` flag) imports
+`bootstrap-demo-minimal.yaml` instead: tenant `acme` only, one pool `bi` with a single
+dual node, and the analyst RLS/CLS demo. `DEMO=full` is the default. The profile is only
+consulted when `QOD_BOOTSTRAP_YAML` is unset, and bootstrap only imports into a fresh
+control plane, so switch profiles with `NUKE=1`:
+
+    NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+
+`DEMO=minimal` plus `LOAD_TPCDS` warns and skips the TPC-DS loader (no globex tenant in
+this profile).
+
 ## Auth flow (REST + UI)
 
 The REST API has two acceptable credentials:
