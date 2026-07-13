@@ -9,6 +9,9 @@ import type {
 
 const RUNS_PAGE = 20;
 
+/** Chain order; mirrors the server's ValidOperations vocabulary. */
+const ALL_OPERATIONS = ['flush', 'expire', 'merge', 'rewrite', 'cleanup', 'orphans'] as const;
+
 const chipBtn: React.CSSProperties = {
   background: 'none', border: 'none', cursor: 'pointer', padding: 0,
   font: 'inherit', fontSize: '0.9em', color: 'inherit', textDecoration: 'underline',
@@ -98,8 +101,10 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
   const [loadingMore, setLoadingMore] = useState(false);
 
   // Manual run form.
-  const [runScope, setRunScope] = useState('');
-  const [runOps, setRunOps] = useState('');
+  const [runScopeKind, setRunScopeKind] = useState<'tenantdb' | 'table'>('tenantdb');
+  const [runScopeSchema, setRunScopeSchema] = useState('');
+  const [runScopeTable, setRunScopeTable] = useState('');
+  const [runOps, setRunOps] = useState<string[]>([...ALL_OPERATIONS]);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNote, setRunNote] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
@@ -212,6 +217,10 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
       .finally(() => { if (genRef.current === gen) setLoadingMore(false); });
   }
 
+  function toggleOp(op: string) {
+    setRunOps(prev => prev.includes(op) ? prev.filter(o => o !== op) : [...prev, op]);
+  }
+
   function handleTriggerRun(ev: React.FormEvent) {
     ev.preventDefault();
     setRunError(null);
@@ -219,8 +228,11 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
     setTriggering(true);
     const req: { tenant: string; tenantDb: string; scope?: string; operations?: string } =
       { tenant, tenantDb };
-    if (runScope.trim() !== '') req.scope = runScope.trim();
-    if (runOps.trim() !== '') req.operations = runOps.trim();
+    if (runScopeKind === 'table')
+      req.scope = `table:${runScopeSchema.trim()}.${runScopeTable.trim()}`;
+    // All boxes checked = full chain = omit the field (same as the API default).
+    if (runOps.length < ALL_OPERATIONS.length)
+      req.operations = ALL_OPERATIONS.filter(o => runOps.includes(o)).join(',');
     const gen = genRef.current;
     api.triggerMaintenanceRun(req)
       .then(r => {
@@ -378,7 +390,16 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
           </table>
         )}
 
-      <h4 style={{ marginTop: '1.5rem' }}>Run history</h4>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: '1.5rem' }}>
+        <h4 style={{ margin: 0 }}>Run history</h4>
+        <button
+          type="button"
+          className="copy-btn"
+          onClick={() => { setRunsError(null); reloadRuns(genRef.current); }}
+        >
+          Refresh
+        </button>
+      </div>
       {runsError && <p style={{ color: 'red' }}>Runs error: {runsError}</p>}
       {!runs
         ? <p>Loading runs...</p>
@@ -442,32 +463,76 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
           Advanced: run maintenance now
         </summary>
         <p className="subtle" style={{ marginBottom: 4 }}>
-          Enqueues a manual run for this database. Scope <code>tenantdb</code> (or
-          blank) runs the full chain; <code>table:&lt;schema&gt;.&lt;table&gt;</code>{' '}
-          runs only the table-safe steps. Operations is an optional csv subset of{' '}
-          <code>flush,expire,merge,rewrite,cleanup,orphans</code>; blank = full chain.
+          Enqueues a manual run for this database. Whole database runs the full
+          chain; single table runs only the table-safe steps. Unchecking
+          operations restricts the run to the checked subset.
         </p>
         <form onSubmit={handleTriggerRun}>
           <label>
             Scope
-            <input
-              value={runScope}
-              onChange={ev => setRunScope(ev.target.value)}
-              placeholder="tenantdb"
-            />
+            <select
+              value={runScopeKind}
+              onChange={ev => setRunScopeKind(ev.target.value as 'tenantdb' | 'table')}
+            >
+              <option value="tenantdb">whole database (full chain)</option>
+              <option value="table">single table (table-safe steps)</option>
+            </select>
           </label>
-          <label>
-            Operations
-            <input
-              value={runOps}
-              onChange={ev => setRunOps(ev.target.value)}
-              placeholder="flush,expire,merge,rewrite,cleanup,orphans"
-            />
-          </label>
+          {runScopeKind === 'table' && (
+            <>
+              <label>
+                Schema
+                <input
+                  value={runScopeSchema}
+                  onChange={ev => setRunScopeSchema(ev.target.value)}
+                  placeholder="tpch1"
+                />
+              </label>
+              <label>
+                Table
+                <input
+                  value={runScopeTable}
+                  onChange={ev => setRunScopeTable(ev.target.value)}
+                  placeholder="lineitem"
+                />
+              </label>
+            </>
+          )}
+          <fieldset style={{ border: 'none', margin: '0.5rem 0 0', padding: 0 }}>
+            <legend className="subtle" style={{ padding: 0 }}>Operations</legend>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem 1rem' }}>
+              {ALL_OPERATIONS.map(op => (
+                <label key={op} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <input
+                    type="checkbox"
+                    checked={runOps.includes(op)}
+                    onChange={() => toggleOp(op)}
+                  />
+                  {op}
+                </label>
+              ))}
+            </div>
+          </fieldset>
           {runError && <p style={{ color: 'red' }}>Run error: {runError}</p>}
           {runNote && <p style={{ color: 'var(--ok, #15803d)' }}>{runNote}</p>}
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
-            <button type="submit" disabled={triggering}>
+            <button
+              type="submit"
+              disabled={
+                triggering ||
+                runOps.length === 0 ||
+                (runScopeKind === 'table' &&
+                  (runScopeSchema.trim() === '' || runScopeTable.trim() === ''))
+              }
+              title={
+                runOps.length === 0
+                  ? 'check at least one operation'
+                  : runScopeKind === 'table' &&
+                      (runScopeSchema.trim() === '' || runScopeTable.trim() === '')
+                    ? 'schema and table are required for a single-table run'
+                    : undefined
+              }
+            >
               {triggering ? 'Queuing...' : 'Run maintenance now'}
             </button>
           </div>
