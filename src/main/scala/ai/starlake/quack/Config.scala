@@ -260,7 +260,14 @@ final case class MaintenanceConfig(
       description =
         "Minutes without a heartbeat before a running maintenance run is swept as failed."
     )
-    runTimeoutMin: Int = 60
+    runTimeoutMin: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_MAINT_NODE_READY_TIMEOUT_SEC",
+      description =
+        "Seconds to wait for the ephemeral maintenance node to accept connections after spawn " +
+          "before the run is failed as 'node spawn failed'. Covers cold-start extension installs."
+    )
+    nodeReadyTimeoutSec: Int = 180
 )
 
 // runTimeoutMin must exceed the longest single chain step (flush/expire/merge/rewrite/cleanup/

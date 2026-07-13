@@ -1400,7 +1400,34 @@ object Main extends IOApp with LazyLogging:
                     case Some(spec) =>
                       backend
                         .start(spec)
-                        .map(Some(_))
+                        .flatMap { node =>
+                          // start() returns at fork time (local backend); the node only listens
+                          // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
+                          // first statement dies with ConnectException.
+                          ai.starlake.quack.ondemand.runtime.NodeReadiness
+                            .awaitReachable(
+                              node.host,
+                              node.port,
+                              timeout = scala.concurrent.duration
+                                .DurationInt(mgrCfg.maintenance.nodeReadyTimeoutSec)
+                                .seconds,
+                              isAlive = () => backend.isAlive(node.nodeId)
+                            )
+                            .flatMap { ready =>
+                              if ready then IO.pure(Some(node))
+                              else
+                                IO.delay(
+                                  logger.warn(
+                                    s"maintenance: node ${node.nodeId} for $t/$td did not " +
+                                      "accept connections within " +
+                                      s"${mgrCfg.maintenance.nodeReadyTimeoutSec}s; stopping it"
+                                  )
+                                ) *> backend
+                                  .stop(node.nodeId)
+                                  .handleErrorWith(_ => IO.unit)
+                                  .as(None)
+                            }
+                        }
                         .handleErrorWith { e =>
                           IO.delay(
                             logger.warn(
