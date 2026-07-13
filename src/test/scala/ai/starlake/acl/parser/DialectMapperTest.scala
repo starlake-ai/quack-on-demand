@@ -78,38 +78,40 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
   }
 
   test("DuckDB mapper delegates to ANSI for three-part names") {
-    val config = Config.forDuckDB("defaultdb", "defaultschema")
-    val table  = makeTable("orders", schema = "public", database = "mydb")
+    val config       = Config.forDuckDB("defaultdb", "defaultschema")
+    val table        = makeTable("orders", schema = "public", database = "mydb")
     val ansiResult   = DialectMapper.ansi.toTableRef(table, config)
     val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
     ansiResult.toOption.get shouldEqual duckdbResult.toOption.get
   }
 
-  test("DuckDB mapper treats two-part name as catalog.table (not schema.table)") {
-    val config = Config.forDuckDB("defaultdb", "main")
-    val table  = makeTable("orders", schema = "sales") // JSqlParser: schema=sales
+  test("DuckDB mapper treats two-part name as schema.table under the default catalog") {
+    val config       = Config.forDuckDB("defaultdb", "main")
+    val table        = makeTable("orders", schema = "sales") // JSqlParser: schema=sales
     val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
-    // DuckDB: sales is the catalog, main is the default schema
-    duckdbResult shouldBe Right(TableRef("sales", "main", "orders"))
+    // sales is the schema, the session's default catalog fills the database part
+    duckdbResult shouldBe Right(TableRef("defaultdb", "sales", "orders"))
   }
 
-  test("DuckDB mapper uses config defaultSchema for two-part names") {
-    val config = Config.forDuckDB("defaultdb", "public")
-    val table  = makeTable("orders", schema = "mycat")
+  test("DuckDB mapper keeps the written schema for two-part names regardless of defaultSchema") {
+    val config       = Config.forDuckDB("defaultdb", "public")
+    val table        = makeTable("orders", schema = "tpch1")
     val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
-    duckdbResult shouldBe Right(TableRef("mycat", "public", "orders"))
+    duckdbResult shouldBe Right(TableRef("defaultdb", "tpch1", "orders"))
   }
 
-  test("DuckDB mapper falls back to 'main' when no defaultSchema configured") {
-    val config = Config.forDuckDB(defaultDatabase = Some("defaultdb"))
-    val table  = makeTable("orders", schema = "mycat")
-    val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
-    duckdbResult shouldBe Right(TableRef("mycat", "main", "orders"))
+  test("DuckDB mapper two-part name without defaultDatabase yields UnqualifiedTable") {
+    val config = Config.forDuckDB(defaultSchema = Some("main"))
+    val table  = makeTable("orders", schema = "tpch1")
+    val result = DialectMapper.duckdb.toTableRef(table, config)
+    result shouldBe a[Left[?, ?]]
+    val reason = result.left.toOption.get.asInstanceOf[DenyReason.UnqualifiedTable]
+    reason.missingPart shouldBe "database"
   }
 
   test("DuckDB mapper delegates to ANSI for one-part names") {
-    val config = Config.forDuckDB("defaultdb", "main")
-    val table  = makeTable("orders")
+    val config       = Config.forDuckDB("defaultdb", "main")
+    val table        = makeTable("orders")
     val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
     duckdbResult shouldBe Right(TableRef("defaultdb", "main", "orders"))
   }
@@ -119,16 +121,23 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
     // handles quote stripping differently when using setName directly
     import net.sf.jsqlparser.parser.CCJSqlParserUtil
     import net.sf.jsqlparser.statement.select.{PlainSelect, Select}
-    val stmt = CCJSqlParserUtil.parse("SELECT * FROM 'file.parquet'")
-    val select = stmt.asInstanceOf[Select]
+    val stmt        = CCJSqlParserUtil.parse("SELECT * FROM 'file.parquet'")
+    val select      = stmt.asInstanceOf[Select]
     val plainSelect = select.getPlainSelect
-    val fromItem = plainSelect.getFromItem
+    val fromItem    = plainSelect.getFromItem
     fromItem shouldBe a[Table]
     DuckDBDialectMapper.isFileReference(fromItem.asInstanceOf[Table]) shouldBe true
 
     val normalTable = new Table()
     normalTable.setName("orders"): Unit
     DuckDBDialectMapper.isFileReference(normalTable) shouldBe false
+  }
+
+  test("DuckDB mapper resolves the demo pattern schema.table to the pool catalog") {
+    val config       = Config.forDuckDB("acme_tpch", "main")
+    val table        = makeTable("customer", schema = "tpch1")
+    val duckdbResult = DialectMapper.duckdb.toTableRef(table, config)
+    duckdbResult shouldBe Right(TableRef("acme_tpch", "tpch1", "customer"))
   }
 
   test("ANSI mapper reports database missing before schema when both absent") {
