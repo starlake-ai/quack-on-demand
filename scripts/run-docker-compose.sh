@@ -70,6 +70,14 @@ cd "$REPO_DIR"
 QOD_VERSION="${QOD_VERSION:-latest}"
 NUKE="${NUKE:-0}"
 
+# ---- Validate DEMO early (before any destructive NUKE operations) ----
+_demo_explicit="${DEMO:+1}"
+DEMO="${DEMO:-full}"
+if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
+  echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
+  exit 1
+fi
+
 # ---- Optional nuke: tear down + wipe before starting ----
 # Container uids (postgres uid 70, root) own the bind-mount contents, so
 # a plain `rm -rf` from the host user fails with EACCES. Wipe via an
@@ -124,12 +132,6 @@ LOAD_TPC="${LOAD_TPC:-}"
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
 LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
 LOAD_SSB="${LOAD_SSB:-$LOAD_TPC}"
-_demo_explicit="${DEMO:+1}"
-DEMO="${DEMO:-full}"
-if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
-  echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
-  exit 1
-fi
 if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
   echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
 fi
