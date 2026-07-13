@@ -53,11 +53,11 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
   /** DuckDB partial-name resolution.
     *
     * A two-part name `X.Y` resolves as `schema=X, table=Y` under the session's default catalog
-    * (ANSI semantics) -- the grant model, the demo manifests, and the RLS/CLS rewriters all
-    * qualify two-part names this way. But DuckDB's runtime tries a catalog interpretation of `X`
-    * first, and this gateway may have other catalogs attached on the session (the tenant-db ATTACH
-    * alias, federation aliases, DuckDB built-ins like `memory`/`system`/`temp`). If `X` matches one
-    * of those attached catalogs, the engine would bind `X.Y` catalog-first while the ACL check just
+    * (ANSI semantics) -- the grant model, the demo manifests, and the RLS/CLS rewriters all qualify
+    * two-part names this way. But DuckDB's runtime tries a catalog interpretation of `X` first, and
+    * this gateway may have other catalogs attached on the session (the tenant-db ATTACH alias,
+    * federation aliases, DuckDB built-ins like `memory`/`system`/`temp`). If `X` matches one of
+    * those attached catalogs, the engine would bind `X.Y` catalog-first while the ACL check just
     * resolved it schema-first -- a potential grant mismatch. Such names are refused with
     * [[DenyReason.AmbiguousCatalogRef]] instead of guessed at; the caller must fully qualify
     * (`catalog.schema.table`).
@@ -72,8 +72,7 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     val schemaName = Option(table.getUnquotedSchemaName)
     val dbName     = Option(table.getUnquotedDatabaseName)
     (dbName, schemaName) match
-      case (None, Some(head))
-          if config.normalizedAttachedCatalogs.contains(head.toLowerCase) =>
+      case (None, Some(head)) if config.normalizedAttachedCatalogs.contains(head.toLowerCase) =>
         Left(DenyReason.AmbiguousCatalogRef(s"$head.$tableName", head))
       case _ =>
         AnsiDialectMapper.toTableRef(table, config)
