@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.model.FederatedSecret
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 
 import java.time.Instant
@@ -13,7 +14,7 @@ import java.time.Instant
   */
 object ManifestExporter:
 
-  private val Redacted = "***REDACTED***"
+  private val Redacted = FederatedSecret.RedactedMarker
 
   /** Build a [[ConfigManifest]] from the live control-plane store. Named `build` rather than
     * `export` because `export` is a reserved keyword in Scala 3.

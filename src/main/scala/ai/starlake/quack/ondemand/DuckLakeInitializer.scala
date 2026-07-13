@@ -121,84 +121,94 @@ object DuckLakeInitializer extends LazyLogging:
       try adminConn.close()
       catch case _: Throwable => ()
 
-    // Side-channel Postgres connection that holds the per-dbname
-    // advisory lock for the duration of the DuckLake ATTACH. Concurrent
-    // initializers (e.g. multiple managers or a manager racing with a
-    // K8s pod's spawn-quack-node.sh) serialize on this lock, so only
-    // one process ever runs the CREATE TABLE __ducklake_metadata that
-    // DuckLake's ATTACH performs on a fresh catalog. See issue #3.
-    val pgUrl  = s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(dbName, "UTF-8")}"
-    val pgConn = DriverManager.getConnection(pgUrl, pgUser, pgPassword)
+    val conn = DriverManager.getConnection("jdbc:duckdb:")
     try
-      val lockStmt = pgConn.prepareStatement(
-        "SELECT pg_advisory_lock(hashtext(?))"
-      )
+      val stmt = conn.createStatement()
       try
-        lockStmt.setString(1, s"qod-ducklake-init:$dbName")
-        lockStmt.execute()
-      finally
-        try lockStmt.close()
-        catch case _: Throwable => ()
+        // Proxy passthrough so INSTALL works behind corporate firewalls.
+        // Mirrors spawn-quack-node.sh's SET http_proxy handling. Source is
+        // a sanitized env var (host:port), interpolated into a DuckDB
+        // string literal via the same escape helper as ATTACH.
+        //
+        // Extension INSTALL/LOAD and the proxy/storage SET statements touch
+        // only this DuckDB connection's own state -- no shared Postgres
+        // catalog -- so they run OUTSIDE the advisory lock. Only the ATTACH
+        // below (and its CREATE TABLE __ducklake_metadata) races across
+        // initializers, so the lock is taken just around it. Extensions must
+        // still be loaded on THIS connection before the ATTACH runs.
+        proxyHostPort.foreach { hp =>
+          stmt.execute(s"SET http_proxy = ${duckdbLiteral(hp)}")
+        }
+        stmt.execute("INSTALL ducklake; LOAD ducklake;")
+        stmt.execute("INSTALL postgres; LOAD postgres;")
+        storageSqlFor(dataPath).foreach(stmt.execute)
+        // Two-layer escape: libpq parses the post-`ducklake:postgres:`
+        // payload as a keyword=value connstring, which is itself wrapped
+        // in a DuckDB string literal. Naive single-quote doubling alone
+        // breaks for an apostrophe in pgPassword: `foo'bar` ->
+        // `password=foo''bar` -> DuckDB un-escapes to `password=foo'bar`
+        // -> libpq parses `password=foo` and chokes on the orphan
+        // `'bar`. [[libpqValue]] wraps + escapes per libpq's rules,
+        // [[duckdbLiteral]] then wraps the whole thing in a DuckDB
+        // literal and doubles any `'` that appears (including the ones
+        // [[libpqValue]] introduced).
+        val connstr =
+          s"ducklake:postgres:" +
+            s"host=${libpqValue(pgHost)} " +
+            s"port=${libpqValue(pgPort)} " +
+            s"dbname=${libpqValue(dbName)} " +
+            s"user=${libpqValue(pgUser)} " +
+            s"password=${libpqValue(pgPassword)}"
+        val attach =
+          s"ATTACH ${duckdbLiteral(connstr)} " +
+            s"AS ${quoteIdent(dbName)} (DATA_PATH ${duckdbLiteral(dataPath)})"
 
-      val conn = DriverManager.getConnection("jdbc:duckdb:")
-      try
-        val stmt = conn.createStatement()
+        // Side-channel Postgres connection that holds the per-dbname
+        // advisory lock only for the duration of the DuckLake ATTACH.
+        // Concurrent initializers (e.g. multiple managers or a manager
+        // racing with a K8s pod's spawn-quack-node.sh) serialize on this
+        // lock, so only one process ever runs the CREATE TABLE
+        // __ducklake_metadata that DuckLake's ATTACH performs on a fresh
+        // catalog. See issue #3.
+        val pgUrl =
+          s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(dbName, "UTF-8")}"
+        val pgConn = DriverManager.getConnection(pgUrl, pgUser, pgPassword)
         try
-          // Proxy passthrough so INSTALL works behind corporate firewalls.
-          // Mirrors spawn-quack-node.sh's SET http_proxy handling. Source is
-          // a sanitized env var (host:port), interpolated into a DuckDB
-          // string literal via the same escape helper as ATTACH.
-          proxyHostPort.foreach { hp =>
-            stmt.execute(s"SET http_proxy = ${duckdbLiteral(hp)}")
-          }
-          stmt.execute("INSTALL ducklake; LOAD ducklake;")
-          stmt.execute("INSTALL postgres; LOAD postgres;")
-          storageSqlFor(dataPath).foreach(stmt.execute)
-          // Two-layer escape: libpq parses the post-`ducklake:postgres:`
-          // payload as a keyword=value connstring, which is itself wrapped
-          // in a DuckDB string literal. Naive single-quote doubling alone
-          // breaks for an apostrophe in pgPassword: `foo'bar` ->
-          // `password=foo''bar` -> DuckDB un-escapes to `password=foo'bar`
-          // -> libpq parses `password=foo` and chokes on the orphan
-          // `'bar`. [[libpqValue]] wraps + escapes per libpq's rules,
-          // [[duckdbLiteral]] then wraps the whole thing in a DuckDB
-          // literal and doubles any `'` that appears (including the ones
-          // [[libpqValue]] introduced).
-          val connstr =
-            s"ducklake:postgres:" +
-              s"host=${libpqValue(pgHost)} " +
-              s"port=${libpqValue(pgPort)} " +
-              s"dbname=${libpqValue(dbName)} " +
-              s"user=${libpqValue(pgUser)} " +
-              s"password=${libpqValue(pgPassword)}"
-          val attach =
-            s"ATTACH ${duckdbLiteral(connstr)} " +
-              s"AS ${quoteIdent(dbName)} (DATA_PATH ${duckdbLiteral(dataPath)})"
+          val lockStmt = pgConn.prepareStatement(
+            "SELECT pg_advisory_lock(hashtext(?))"
+          )
+          try
+            lockStmt.setString(1, s"qod-ducklake-init:$dbName")
+            lockStmt.execute()
+          finally
+            try lockStmt.close()
+            catch case _: Throwable => ()
+
           stmt.execute(attach)
           stmt.execute(s"USE ${quoteIdent(dbName)}")
           stmt.execute(s"CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schemaName)}")
           logger.info(s"DuckLake pre-init OK: $dbName.$schemaName ready at $dataPath")
+
+          // Release the lock. pg_advisory_lock is session-scoped so closing
+          // pgConn below would also release it, but doing it explicitly
+          // shrinks the window during which the lock is held.
+          val unlockStmt = pgConn.prepareStatement(
+            "SELECT pg_advisory_unlock(hashtext(?))"
+          )
+          try
+            unlockStmt.setString(1, s"qod-ducklake-init:$dbName")
+            unlockStmt.execute()
+          finally
+            try unlockStmt.close()
+            catch case _: Throwable => ()
         finally
-          try stmt.close()
+          try pgConn.close()
           catch case _: Throwable => ()
       finally
-        try conn.close()
-        catch case _: Throwable => ()
-
-      // Release the lock. pg_advisory_lock is session-scoped so closing
-      // pgConn below would also release it, but doing it explicitly
-      // shrinks the window during which the lock is held.
-      val unlockStmt = pgConn.prepareStatement(
-        "SELECT pg_advisory_unlock(hashtext(?))"
-      )
-      try
-        unlockStmt.setString(1, s"qod-ducklake-init:$dbName")
-        unlockStmt.execute()
-      finally
-        try unlockStmt.close()
+        try stmt.close()
         catch case _: Throwable => ()
     finally
-      try pgConn.close()
+      try conn.close()
       catch case _: Throwable => ()
 
   /** Emit the SQL needed for httpfs / azure secrets when the data path lives on object storage.

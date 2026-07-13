@@ -497,54 +497,10 @@ final class PostgresControlPlaneStore(
       role: String,
       enabled: Boolean = true
   ): String = withConn { c =>
-    // Look up the existing id first so the upsert can preserve it
-    // (mirrors [[UserStore.upsertUser]]). The partial unique indexes
-    // (admin vs scoped) mean ON CONFLICT cannot target a single index
-    // without knowing the tenant kind.
-    val lookup = tenant match
-      case Some(t) =>
-        val p = c.prepareStatement(
-          "SELECT id FROM qodstate_user WHERE tenant = ? AND username = ?"
-        )
-        p.setString(1, t)
-        p.setString(2, username)
-        p
-      case None =>
-        val p = c.prepareStatement(
-          "SELECT id FROM qodstate_user WHERE tenant IS NULL AND username = ?"
-        )
-        p.setString(1, username)
-        p
-    val existingId =
-      try
-        val rs = lookup.executeQuery()
-        try if rs.next() then Some(rs.getString(1)) else None
-        finally rs.close()
-      finally lookup.close()
-
-    val id = existingId.getOrElse(ai.starlake.quack.model.Names.newSurrogateId("u"))
-
-    val ps = c.prepareStatement(
-      """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, enabled, updated_at)
-        |VALUES (?, ?, ?, ?, ?, ?, NOW())
-        |ON CONFLICT (id) DO UPDATE SET
-        |  password_hash = EXCLUDED.password_hash,
-        |  role          = EXCLUDED.role,
-        |  enabled       = EXCLUDED.enabled,
-        |  updated_at    = NOW()""".stripMargin
-    )
-    try
-      ps.setString(1, id)
-      tenant match
-        case Some(t) => ps.setString(2, t)
-        case None    => ps.setNull(2, Types.VARCHAR)
-      ps.setString(3, username)
-      ps.setString(4, passwordHash)
-      ps.setString(5, role)
-      ps.setBoolean(6, enabled)
-      ps.executeUpdate()
-      id
-    finally ps.close()
+    // Delegate to the shared upsert. enabled = Some(enabled): this path owns
+    // the disabled flag (manifest import, admin provisioning) and writes it on
+    // both insert and update.
+    UserUpsert(c, tenant, username, passwordHash, role, enabled = Some(enabled)).id
   }
 
   def getUserById(id: String): Option[RbacUser] = withConn { c =>
