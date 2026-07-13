@@ -1,0 +1,81 @@
+# Minimal demo bootstrap manifest (DEMO=minimal) -- loaded by
+# DemoBootstrapHook when QOD_BOOTSTRAP_YAML points here. Triggered by
+# `DEMO=minimal LOAD_TPCH=N` (run-jar.sh / run-jar.ps1 /
+# run-docker-compose.sh).
+#
+# Shows off the smallest useful topology: one tenant (acme), one
+# database (acme_tpch), one pool (bi) with a single dual node, and the
+# RLS/CLS demo on the analyst role. For multi-tenancy, federation, and
+# the full verb matrix use the default profile (bootstrap-demo.yaml).
+#
+# Plaintext passwords are bcrypted at import time. Anyone reading this
+# file in the jar sees the credentials -- that is the point of a demo.
+
+apiVersion: quack-on-demand/v1
+kind: ConfigManifest
+exportedAt: '1970-01-01T00:00:00Z'
+exportedFrom:
+  managerVersion: bootstrap
+  hostname: bundled
+
+tenants:
+  - name: acme
+    displayName: Acme Corporation
+    tenantDbs:
+      - name: acme_tpch
+        defaultDatabase: acme_tpch
+        defaultSchema: tpch1
+    pools:
+      - name: bi
+        tenantDb: acme_tpch
+        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
+
+roles:
+  - tenant: acme
+    name: analyst
+    description: Read-only analyst for curated TPC-H sales tables
+    permissions:
+      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: orders,   verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: nation,   verb: RO }
+      - { catalog: acme_tpch, schema: tpch1, table: region,   verb: RO }
+    columnPolicies:
+      - { catalog: "*", schema: tpch1, table: customer, column: c_phone, action: mask, transformSql: "'***'" }
+    rowPolicies:
+      - { catalog: "*", schema: tpch1, table: customer, predicateSql: "c_mktsegment = 'BUILDING'" }
+
+  - tenant: acme
+    name: tenant_admin
+    description: Full ALL within acme (catalog wildcard is tenant-scoped)
+    permissions:
+      - { catalog: '*', schema: '*', table: '*', verb: ALL }
+
+groups:
+  - { tenant: acme, name: analysts, description: BI analysts, roles: [analyst] }
+
+users:
+  - username: root
+    password: demo-root
+    role: admin
+
+  # Matches the Keycloak realm user `admin` so an OIDC login maps to
+  # this superuser row; the password is only used for Basic/DB auth.
+  - username: admin
+    password: admin
+    role: admin
+
+  - tenant: acme
+    username: alice
+    password: demo-alice
+    role: admin
+    roles: [analyst, tenant_admin]
+    poolGrants:
+      - { pool: bi }
+
+  - tenant: acme
+    username: acme-admin
+    password: demo-acme-admin
+    role: admin
+    roles: [tenant_admin]
+    poolGrants:
+      - { pool: bi }
