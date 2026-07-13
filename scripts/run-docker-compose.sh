@@ -132,12 +132,14 @@ LOAD_TPC="${LOAD_TPC:-}"
 LOAD_TPCH="${LOAD_TPCH:-$LOAD_TPC}"
 LOAD_TPCDS="${LOAD_TPCDS:-$LOAD_TPC}"
 LOAD_SSB="${LOAD_SSB:-$LOAD_TPC}"
-if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
-  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
-fi
 if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]]; then
   echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
   LOAD_TPCDS=""
+fi
+# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
+# that no demo seed remains and bootstrap will not run.
+if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
+  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
 fi
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"

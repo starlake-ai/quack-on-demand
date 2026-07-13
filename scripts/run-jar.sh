@@ -256,12 +256,14 @@ if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
   echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
   exit 1
 fi
-if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
-  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
-fi
 if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" ]]; then
   echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
   LOAD_TPCDS=""
+fi
+# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
+# that no demo seed remains and bootstrap will not run.
+if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
+  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
 fi
 
 # ---- Resolve jar ----

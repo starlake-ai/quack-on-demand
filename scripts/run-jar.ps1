@@ -156,12 +156,14 @@ if ($Demo -notin @('full', 'minimal')) {
   Write-Error "DEMO must be 'full' or 'minimal' (got: '$Demo')."
   exit 1
 }
-if ($DemoExplicit -and -not ($LoadTpch -or $LoadTpcds -or $LoadSsb)) {
-  Write-Warning "DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed."
-}
 if ($Demo -eq 'minimal' -and $LoadTpcds) {
   Write-Warning "DEMO=minimal has no globex tenant; skipping the TPC-DS loader."
   $LoadTpcds = ''
+}
+# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
+# that no demo seed remains and bootstrap will not run.
+if ($DemoExplicit -and -not ($LoadTpch -or $LoadTpcds -or $LoadSsb)) {
+  Write-Warning "DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed."
 }
 
 # ---- sbt bootstrap (download into .sbt-bootstrap\ when not on PATH) --------
