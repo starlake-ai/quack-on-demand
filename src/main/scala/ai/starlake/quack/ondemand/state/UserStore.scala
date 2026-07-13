@@ -4,7 +4,7 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
-import java.sql.{Connection, Types}
+import java.sql.Connection
 
 /** Manages the `qodstate_user` table -- the principal directory used by
   * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] and as the FK target for the RBAC
@@ -80,31 +80,11 @@ final class UserStore(
     )
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, plaintext.toCharArray)
-      // Two queries: look up the existing id first so the upsert can
-      // preserve it. The partial unique indexes (admin vs scoped) mean
-      // ON CONFLICT cannot target a single index without knowing the
-      // tenant kind, so the lookup is the cleanest path.
-      val existing = lookupId(c, tenant, username)
-      val id       = existing.getOrElse(UserStore.newId())
-      val sql      =
-        """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, updated_at)
-          |VALUES (?, ?, ?, ?, ?, NOW())
-          |ON CONFLICT (id) DO UPDATE SET
-          |  password_hash = EXCLUDED.password_hash,
-          |  role          = EXCLUDED.role,
-          |  updated_at    = NOW()""".stripMargin
-      val ps = c.prepareStatement(sql)
-      try
-        ps.setString(1, id)
-        tenant match
-          case Some(t) => ps.setString(2, t)
-          case None    => ps.setNull(2, Types.VARCHAR)
-        ps.setString(3, username)
-        ps.setString(4, hash)
-        ps.setString(5, role)
-        ps.executeUpdate()
-        UserStore.Upsert(id = id, inserted = existing.isEmpty)
-      finally ps.close()
+      // Delegate to the shared upsert. enabled = None: a credential/role
+      // rotation through this path must never re-enable a disabled user, so
+      // the enabled column is left untouched on update (DB default on insert).
+      val r = UserUpsert(c, tenant, username, hash, role, enabled = None)
+      UserStore.Upsert(id = r.id, inserted = r.inserted)
     }
 
   /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
@@ -175,35 +155,12 @@ final class UserStore(
       else Lookup.Found(buf.toList)
     finally ps.close()
 
-  private def lookupId(c: Connection, tenant: Option[String], username: String): Option[String] =
-    val ps = tenant match
-      case Some(t) =>
-        val p = c.prepareStatement(
-          "SELECT id FROM qodstate_user WHERE tenant = ? AND username = ?"
-        )
-        p.setString(1, t)
-        p.setString(2, username)
-        p
-      case None =>
-        val p = c.prepareStatement(
-          "SELECT id FROM qodstate_user WHERE tenant IS NULL AND username = ?"
-        )
-        p.setString(1, username)
-        p
-    try
-      val rs = ps.executeQuery()
-      try if rs.next() then Some(rs.getString(1)) else None
-      finally rs.close()
-    finally ps.close()
-
 object UserStore:
 
   /** Outcome of an upsert: the persisted id and whether the row was freshly inserted (`true`) or an
     * existing row got its password + role refreshed (`false`).
     */
   final case class Upsert(id: String, inserted: Boolean)
-
-  private def newId(): String = ai.starlake.quack.model.Names.newSurrogateId("u")
 
   /** Build a store from the global `defaultMetastore` map. Same shape as
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next to the state table by

@@ -599,7 +599,7 @@ object ManifestImporter:
         msrc.secrets.foreach { msec =>
           val resolved: (Option[String], Option[String]) =
             (msec.value, msec.externalRef) match
-              case (Some("***REDACTED***"), None) | (None, None) =>
+              case (Some(FederatedSecret.RedactedMarker), None) | (None, None) =>
                 existing.get((msrc.alias, msec.name)) match
                   case Some(old) => (old.value, old.externalRef)
                   case None      =>

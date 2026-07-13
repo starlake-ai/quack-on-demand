@@ -88,3 +88,36 @@ class UserStoreGrantsSpec extends AnyFlatSpec, Matchers, BeforeAndAfterAll:
     val gs = store.grantsForIdentity(identity = s"$u-not-real", email = Some(email))
     gs.map(_.tenant) should contain(Some("t-grants-test"))
   }
+
+  // A password/role rotation through upsertUser must not silently flip a
+  // deliberately-disabled row back on. upsertUser has no `enabled` setter, so
+  // the disabled state is seeded directly and must survive the update.
+  it should "not re-enable a disabled row on a password/role update" in {
+    requirePg()
+    val t = "t-enabled-preserve"
+    store.upsertUser(tenant = Some(t), username = u, plaintext = "x", role = "admin")
+    withRawConn { c =>
+      val ps =
+        c.prepareStatement(
+          "UPDATE qodstate_user SET enabled = false WHERE tenant = ? AND username = ?"
+        )
+      ps.setString(1, t)
+      ps.setString(2, u)
+      ps.executeUpdate()
+      ps.close()
+    }
+    // Sanity: disabled row contributes no grant.
+    store.grantsForIdentity(u, None).filter(_.tenant.contains(t)) shouldBe Nil
+    // Rotate password + role; enabled must stay false.
+    store.upsertUser(tenant = Some(t), username = u, plaintext = "y", role = "reader")
+    store.grantsForIdentity(u, None).filter(_.tenant.contains(t)) shouldBe Nil
+  }
+
+  private def withRawConn(f: java.sql.Connection => Unit): Unit =
+    val c = java.sql.DriverManager.getConnection(
+      s"jdbc:postgresql://$pgHost:$pgPort/$pgDb",
+      pgUser,
+      pgPassword
+    )
+    try f(c)
+    finally c.close()

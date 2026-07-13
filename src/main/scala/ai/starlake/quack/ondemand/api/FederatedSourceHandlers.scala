@@ -24,7 +24,7 @@ final class FederatedSourceHandlers(
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
-  private val REDACTED = "***REDACTED***"
+  private val REDACTED = FederatedSecret.RedactedMarker
 
   // ---- helpers ------------------------------------------------------------
 
