@@ -50,6 +50,13 @@
 #                                 bundled demo manifest on first boot. Loaders
 #                                 run in background before exec java.   (default unset)
 #
+#   DEMO=full|minimal             Which bundled demo manifest a LOAD_* boot
+#                                 imports. full = acme + globex, multi-pool,
+#                                 federation. minimal = acme only, one pool
+#                                 with a single dual node. Only consulted
+#                                 when a LOAD_* flag is set and
+#                                 QOD_BOOTSTRAP_YAML is unset.  (default full)
+#
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
 #                                 Mirrors run-docker-compose.sh's NUKE flag for
@@ -77,6 +84,7 @@
 #   LOAD_TPCDS=10 ./scripts/run-jar.sh                     # + TPC-DS demo seed SF=10
 #   LOAD_SSB=1 ./scripts/run-jar.sh                        # + SSB star schema SF=1
 #   LOAD_TPC=1 ./scripts/run-jar.sh                        # + all three demos SF=1 (legacy shortcut)
+#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh  # smallest demo: acme, 1 dual node
 #   NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh                 # wipe + fresh boot + all SF=1
 
 set -euo pipefail
@@ -240,6 +248,21 @@ for _v in LOAD_TPCH LOAD_TPCDS LOAD_SSB; do
   fi
 done
 unset _v _val
+
+# Demo profile: which bundled bootstrap manifest a LOAD_* boot imports.
+_demo_explicit="${DEMO:+1}"
+DEMO="${DEMO:-full}"
+if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
+  echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
+  exit 1
+fi
+if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
+  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
+fi
+if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" ]]; then
+  echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
+  LOAD_TPCDS=""
+fi
 
 # ---- Resolve jar ----
 # BUILD=1 always builds locally. BUILD=0 (default) tries Maven Central
@@ -623,10 +646,12 @@ fi
 # Backgrounded BEFORE `exec java` because exec replaces this shell.
 # Each loader is idempotent (CREATE TABLE IF NOT EXISTS + insert-if-empty).
 if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
-  : "${QOD_BOOTSTRAP_YAML:=$REPO_DIR/src/main/resources/bootstrap-demo.yaml}"
+  _demo_manifest="bootstrap-demo.yaml"
+  [[ "$DEMO" == "minimal" ]] && _demo_manifest="bootstrap-demo-minimal.yaml"
+  : "${QOD_BOOTSTRAP_YAML:=$REPO_DIR/src/main/resources/$_demo_manifest}"
   export QOD_BOOTSTRAP_YAML
 
-  echo "load-tpc: TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}, SSB=${LOAD_SSB:-skip}, bootstrap=$QOD_BOOTSTRAP_YAML"
+  echo "load-tpc: profile=$DEMO, TPC-H=${LOAD_TPCH:-skip}, TPC-DS=${LOAD_TPCDS:-skip}, SSB=${LOAD_SSB:-skip}, bootstrap=$QOD_BOOTSTRAP_YAML"
 
   if [[ -n "$LOAD_TPCH" ]]; then
     (
