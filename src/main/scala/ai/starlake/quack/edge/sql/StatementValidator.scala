@@ -13,6 +13,11 @@ case class ValidationContext(
     // to the validator's construction-time defaults when None.
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
+    // Catalog names attached on the pool's node sessions (tenant-db ATTACH alias,
+    // enabled federation aliases, DuckDB built-ins). Drives the parser's
+    // ambiguous-two-part-name denial. Empty set = feature off (safe default for
+    // tests and non-DuckDB dialects).
+    attachedCatalogs: Set[String] = Set.empty,
     // The closure of (roles, groups, permissions, pool grants)
     // computed once at handshake. PostgresAclValidator reads
     // `effectiveSet.permissions` instead of querying

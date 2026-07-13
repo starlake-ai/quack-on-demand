@@ -199,3 +199,44 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
     val ctx = mkCtx("SELECT * FROM anything.schema.table", eff)
     validator.validate(ctx) shouldBe Allowed
   }
+
+  // ---- attached-catalog ambiguity (cross-catalog bypass regression) ----
+
+  private def attachedCtx(sql: String, eff: EffectiveSet): ValidationContext =
+    ValidationContext(
+      username = "alice",
+      database = "t-1/td-1/p-1",
+      statement = sql,
+      peer = "conn-1",
+      defaultDatabase = Some("acme_tpch"),
+      defaultSchema = Some("tpch1"),
+      attachedCatalogs = Set("acme_tpch", "fedpg", "memory", "system", "temp"),
+      effectiveSet = Some(eff)
+    )
+
+  "attached-catalog resolution" should
+    "deny a two-part read of a federated alias despite a broad own-catalog grant" in {
+      val eff = effectiveWith(List(perm("acme_tpch", "*", "*", "ALL")))
+      val r   = catalogAware.validate(attachedCtx("SELECT * FROM fedpg.orders", eff))
+      r shouldBe a[Denied]
+      r.asInstanceOf[Denied].reason should include("fedpg")
+    }
+
+  it should "deny a two-part write to a federated alias despite an ALL grant" in {
+    val eff = effectiveWith(List(perm("acme_tpch", "*", "*", "ALL")))
+    catalogAware.validate(
+      attachedCtx("INSERT INTO fedpg.orders VALUES (1)", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "deny the ambiguous form even under the tenant wildcard ALL" in {
+    val eff = effectiveWith(List(perm("*", "*", "*", "ALL")))
+    catalogAware.validate(attachedCtx("SELECT * FROM fedpg.orders", eff)) shouldBe a[Denied]
+  }
+
+  it should "allow a two-part schema reference that is not an attached catalog" in {
+    val eff = effectiveWith(List(perm("acme_tpch", "tpch1", "customer", "RO")))
+    catalogAware.validate(
+      attachedCtx("SELECT * FROM tpch1.customer", eff)
+    ) shouldBe Allowed
+  }
