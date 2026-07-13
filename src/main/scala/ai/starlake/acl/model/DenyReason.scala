@@ -8,4 +8,10 @@ package ai.starlake.acl.model
 enum DenyReason {
   case ParseError(message: String)
   case UnqualifiedTable(tableName: String, missingPart: String)
+
+  /** A two-part name whose head matches a catalog attached on the session. The engine
+    * would bind it catalog-first while the schema interpretation may hold different
+    * grants, so the statement must be fully qualified instead of guessed at.
+    */
+  case AmbiguousCatalogRef(tableName: String, catalog: String)
 }

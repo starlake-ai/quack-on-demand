@@ -53,12 +53,14 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
   /** DuckDB partial-name resolution.
     *
     * A two-part name `X.Y` resolves as `schema=X, table=Y` under the session's default catalog
-    * (ANSI semantics). DuckDB's runtime tries a catalog interpretation of `X` first, but this
-    * gateway attaches one DuckLake catalog per pool and pins it as the session default, so in
-    * practice `X.Y` means schema.table -- and the grant model, the demo manifests, and the RLS/CLS
-    * rewriters all qualify two-part names ANSI-style. Resolving them the same way here keeps the
-    * ACL check, the policy rewriters, and the grants consistent. Sessions that target another
-    * catalog must fully qualify (`catalog.schema.table`).
+    * (ANSI semantics) -- the grant model, the demo manifests, and the RLS/CLS rewriters all
+    * qualify two-part names this way. But DuckDB's runtime tries a catalog interpretation of `X`
+    * first, and this gateway may have other catalogs attached on the session (the tenant-db ATTACH
+    * alias, federation aliases, DuckDB built-ins like `memory`/`system`/`temp`). If `X` matches one
+    * of those attached catalogs, the engine would bind `X.Y` catalog-first while the ACL check just
+    * resolved it schema-first -- a potential grant mismatch. Such names are refused with
+    * [[DenyReason.AmbiguousCatalogRef]] instead of guessed at; the caller must fully qualify
+    * (`catalog.schema.table`).
     *
     * Three-part names (`X.Y.Z`) and single names (`X`) are handled identically to ANSI.
     *
@@ -66,7 +68,15 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     * calling toTableRef. If encountered here, they are treated as regular table names.
     */
   def toTableRef(table: Table, config: Config): Either[DenyReason, TableRef] =
-    AnsiDialectMapper.toTableRef(table, config)
+    val tableName  = table.getUnquotedName
+    val schemaName = Option(table.getUnquotedSchemaName)
+    val dbName     = Option(table.getUnquotedDatabaseName)
+    (dbName, schemaName) match
+      case (None, Some(head))
+          if config.normalizedAttachedCatalogs.contains(head.toLowerCase) =>
+        Left(DenyReason.AmbiguousCatalogRef(s"$head.$tableName", head))
+      case _ =>
+        AnsiDialectMapper.toTableRef(table, config)
 
   /** Check whether a JSqlParser Table represents a string-literal file reference. The caller should
     * use this to filter before calling toTableRef.

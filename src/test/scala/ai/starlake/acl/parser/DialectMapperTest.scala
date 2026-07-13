@@ -148,4 +148,53 @@ class DialectMapperTest extends AnyFunSuite with Matchers {
     val reason = result.left.toOption.get.asInstanceOf[DenyReason.UnqualifiedTable]
     reason.missingPart shouldBe "database"
   }
+
+  // ---- attached-catalog awareness ----
+
+  private val attachedCfg = Config
+    .forDuckDB(Some("acme_tpch"), Some("tpch1"))
+    .copy(attachedCatalogs = Set("acme_tpch", "fedpg", "memory", "system", "temp"))
+
+  test("DuckDB mapper with attachedCatalogs denies a two-part name whose head is an attached catalog") {
+    val table  = makeTable("orders", schema = "fedpg")
+    val result = DuckDBDialectMapper.toTableRef(table, attachedCfg)
+    result match
+      case Left(DenyReason.AmbiguousCatalogRef(name, catalog)) =>
+        name shouldBe "fedpg.orders"
+        catalog shouldBe "fedpg"
+      case other => fail(s"expected AmbiguousCatalogRef, got $other")
+  }
+
+  test("DuckDB mapper with attachedCatalogs denies when the head equals the session default catalog itself") {
+    val table = makeTable("customer", schema = "acme_tpch")
+    DuckDBDialectMapper.toTableRef(table, attachedCfg) match
+      case Left(DenyReason.AmbiguousCatalogRef(_, catalog)) => catalog shouldBe "acme_tpch"
+      case other => fail(s"expected AmbiguousCatalogRef, got $other")
+  }
+
+  test("DuckDB mapper with attachedCatalogs matches attached catalogs case-insensitively") {
+    val table = makeTable("orders", schema = "FedPG")
+    DuckDBDialectMapper.toTableRef(table, attachedCfg) match
+      case Left(DenyReason.AmbiguousCatalogRef(_, _)) => succeed
+      case other => fail(s"expected AmbiguousCatalogRef, got $other")
+  }
+
+  test("DuckDB mapper with attachedCatalogs resolves a non-attached head schema-first") {
+    val table = makeTable("customer", schema = "tpch1")
+    DuckDBDialectMapper.toTableRef(table, attachedCfg) shouldBe
+      Right(TableRef("acme_tpch", "tpch1", "customer"))
+  }
+
+  test("DuckDB mapper resolves everything schema-first when attachedCatalogs is empty (standalone parser)") {
+    val cfg   = Config.forDuckDB(Some("acme_tpch"), Some("tpch1"))
+    val table = makeTable("orders", schema = "fedpg")
+    DuckDBDialectMapper.toTableRef(table, cfg) shouldBe
+      Right(TableRef("acme_tpch", "fedpg", "orders"))
+  }
+
+  test("DuckDB mapper leaves three-part names untouched even when the head is attached") {
+    val table = makeTable("orders", schema = "public", database = "fedpg")
+    DuckDBDialectMapper.toTableRef(table, attachedCfg) shouldBe
+      Right(TableRef("fedpg", "public", "orders"))
+  }
 }
