@@ -4,6 +4,37 @@ import typer
 from ..sql import SqlClient, render_table
 
 
+def repl(client, mode: str, input_fn=input) -> None:
+    try:
+        import readline  # noqa: F401  (line editing + history; pyreadline3 provides it on Windows)
+    except ImportError:
+        pass
+    import sys
+
+    buffer: list[str] = []
+    while True:
+        prompt = "qod> " if not buffer else "...> "
+        try:
+            line = input_fn(prompt)
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            buffer.clear()
+            print(file=sys.stderr)
+            continue
+        if not buffer and line.strip() == "\\q":
+            break
+        buffer.append(line)
+        if not line.rstrip().endswith(";"):
+            continue
+        statement = "\n".join(buffer)
+        buffer.clear()
+        try:
+            render_table(client.query(statement), mode)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+
+
 def _mode(ctx: typer.Context, csv_flag: bool) -> str:
     if csv_flag and ctx.obj.json_output:
         raise typer.BadParameter("--csv and --json are mutually exclusive")
@@ -37,8 +68,15 @@ def sql(
         settings.superuser = superuser
     mode = _mode(ctx, csv_flag)
     if statement is None:
-        typer.echo("interactive mode arrives with the REPL", err=True)
-        raise typer.Exit(2)
+        try:
+            with _connect(ctx) as client:
+                repl(client, mode)
+        except (click.ClickException, typer.Exit):
+            raise
+        except Exception as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1)
+        return
     try:
         with _connect(ctx) as client:
             render_table(client.query(statement), mode)
