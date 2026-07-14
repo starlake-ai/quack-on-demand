@@ -372,6 +372,9 @@ object ManagerServerHarness:
         override def snapshotExists(id: Long): Boolean                       = false
         override def maxSnapshotId(): Option[Long]                           = None
         override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = None
+        override def listDroppedTables(
+            limit: Int
+        ): List[ai.starlake.quack.ondemand.catalog.DroppedTableEntry] = Nil
     val previewReader: (String, String) => DuckLakeCatalogReader =
       catalogReader.getOrElse((_, _) => noSnapshotReader)
     val previewHandlers = new CatalogPreviewHandlers(
@@ -381,6 +384,14 @@ object ManagerServerHarness:
       previewExecutor,
       previewReader,
       CatalogConfig(),
+      audit = audit
+    )
+    val undropHandlers = new CatalogUndropHandlers(
+      sup,
+      previewExecutor,
+      previewReader,
+      CatalogConfig(),
+      sessions.get,
       audit = audit
     )
 
@@ -414,6 +425,7 @@ object ManagerServerHarness:
       maintenance = Some(maintenanceHandlers),
       preview = Some(previewHandlers),
       catalogHistory = catalogHistoryHandlers,
+      undrop = Some(undropHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,

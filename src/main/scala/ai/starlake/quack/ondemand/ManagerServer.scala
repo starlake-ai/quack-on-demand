@@ -38,6 +38,7 @@ final class ManagerServer(
     maintenance: Option[MaintenanceHandlers],
     preview: Option[CatalogPreviewHandlers],
     catalogHistory: Option[CatalogHistoryHandlers],
+    undrop: Option[CatalogUndropHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -269,6 +270,18 @@ final class ManagerServer(
 
     // Per-table history timeline (EPIC Spec 01). Session-gated per request via
     // TenantScopeCheck inside the handler, same shape as the browser GETs above.
+    // Undrop (Spec 03). Session-gated per request via TenantScopeCheck inside the handler.
+    val undropEndpoints: List[ServerEndpoint[Any, IO]] = undrop.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        UndropEndpoints.recoverableEndpoint.serverLogic { case (tenant, tenantDb, limit, token) =>
+          h.recoverable(tenant, tenantDb, limit, token)(sessions.scopeOf)
+        },
+        UndropEndpoints.undropEndpoint.serverLogic { case (req, token) =>
+          h.undrop(req, token)(sessions.scopeOf)
+        }
+      )
+    }
+
     val catalogHistoryEndpoints: List[ServerEndpoint[Any, IO]] = catalogHistory.toList.map { h =>
       CatalogEndpoints.tableHistoryEndpoint.serverLogic {
         case (
@@ -593,7 +606,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

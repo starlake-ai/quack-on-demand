@@ -19,5 +19,6 @@ object EndpointModules:
     TagEndpoints,
     MaintenanceEndpoints,
     RbacEndpoints,
-    TimeTravelEndpoints
+    TimeTravelEndpoints,
+    UndropEndpoints
   )

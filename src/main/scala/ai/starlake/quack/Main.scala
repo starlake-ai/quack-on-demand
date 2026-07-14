@@ -1139,7 +1139,11 @@ object Main extends IOApp with LazyLogging:
       // background fiber). So the only place a preview's underlying connection can leak is if
       // the timeout fires WHILE the HTTP call itself is still in flight -- and in that case no
       // `QueryResult` was ever constructed, so there is nothing for this adapter to close.
-      val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
+      // `recordExecution = false` for read-only probes (preview, data diff: never stamp);
+      // `true` for undrop's CTAS so the recovery snapshot carries the author stamp.
+      def routedExecutor(
+          recordExecution: Boolean
+      ): ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
         (connectionId, user, poolKey, sql) =>
           val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
             ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -1175,9 +1179,12 @@ object Main extends IOApp with LazyLogging:
                 poolKey,
                 sql,
                 effectiveSet = eff,
-                recordExecution = false
+                recordExecution = recordExecution
               )
           }
+
+      val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
+        routedExecutor(recordExecution = false)
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(
@@ -1188,6 +1195,17 @@ object Main extends IOApp with LazyLogging:
           catalogReader,
           mgrCfg.catalog,
           catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+          audit = auditRecorder
+        )
+      )
+
+      val undropHandlers: Option[ai.starlake.quack.ondemand.api.CatalogUndropHandlers] = Some(
+        new ai.starlake.quack.ondemand.api.CatalogUndropHandlers(
+          sup,
+          routedExecutor(recordExecution = true),
+          catalogReader,
+          mgrCfg.catalog,
+          sessionTokens.get,
           audit = auditRecorder
         )
       )
@@ -1209,6 +1227,7 @@ object Main extends IOApp with LazyLogging:
         maintenanceHandlers,
         previewHandlers,
         catalogHistoryHandlers,
+        undropHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,
