@@ -912,6 +912,35 @@ object Main extends IOApp with LazyLogging:
         )
       auditRecorder.onDropCounter(journalDropped)
 
+      // Per-pool attached-catalogs lookup for ACL resolution (attached-catalog-aware ACL):
+      // the tenant-db's own dbName + its enabled federation aliases + the DuckDB
+      // built-in catalogs (memory/system/temp) that are always attached. Cached 60s
+      // per PoolKey -- federation-source edits only reach the engine on node respawn
+      // anyway (documented lifecycle), so a short TTL is not a staleness regression.
+      val attachedCatalogsCache =
+        new java.util.concurrent.ConcurrentHashMap[
+          ai.starlake.quack.model.PoolKey,
+          (Long, Set[String])
+        ]()
+      val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
+        val now    = System.currentTimeMillis()
+        val cached = Option(attachedCatalogsCache.get(key)).collect {
+          case (at, set) if now - at < 60000L => set
+        }
+        cached.getOrElse {
+          val builtins = Set("memory", "system", "temp")
+          val dbName   = sup
+            .effectiveMetastoreFor(key.tenant, key.tenantDb)
+            .getOrElse("dbName", key.tenantDb)
+          val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+            case (Some(td), Some(fedStore)) =>
+              fedStore.listSources(td.id).filterNot(_.disabled).map(_.alias).toSet
+            case _ => Set.empty[String]
+          val result = builtins + dbName ++ aliases
+          attachedCatalogsCache.put(key, (now, result))
+          result
+        }
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -925,7 +954,8 @@ object Main extends IOApp with LazyLogging:
         rowPolicyRewriter,
         activeStatements,
         eventJournal,
-        stampWrites = mgrCfg.stampWrites
+        stampWrites = mgrCfg.stampWrites,
+        attachedCatalogsOf = attachedCatalogsOf
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

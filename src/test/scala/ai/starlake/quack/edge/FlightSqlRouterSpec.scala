@@ -314,6 +314,25 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturer.lastCtx.defaultDatabase shouldBe Some("memory")
     capturer.lastCtx.defaultSchema shouldBe Some("main")
 
+  it should "pass the pool's attached catalogs into the validation context" in:
+    var seen: Set[String] = Set.empty
+    val capturing         = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult =
+        seen = ctx.attachedCatalogs
+        Allowed
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      validator = capturing,
+      stmtInstruments = si,
+      attachedCatalogsOf = _ => Set("acme_tpch", "fedx", "memory", "system", "temp")
+    )
+    router.execute("attach-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    seen shouldBe Set("acme_tpch", "fedx", "memory", "system", "temp")
+
   // ---- preferredNode (soft pin) tests ----
 
   /** Spin up a pool with N dual-role nodes so we have routing choices to make. */
