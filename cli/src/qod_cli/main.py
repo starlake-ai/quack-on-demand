@@ -81,6 +81,12 @@ app.add_typer(maintenance.app, name="maintenance")
 app.add_typer(manifest.app, name="manifest")
 app.add_typer(federation.app, name="federation")
 
+from .commands import telemetry  # noqa: E402
+
+app.add_typer(telemetry.audit_app, name="audit")
+app.add_typer(telemetry.history_app, name="history")
+app.command()(telemetry.usage)
+
 
 def main() -> None:
     app()

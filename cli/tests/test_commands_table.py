@@ -372,6 +372,26 @@ CASES = [
         ["federation", "secret", "delete", "acme", "tpch1", "pgsrc", "pgpass"],
         "DELETE", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc/secrets/pgpass", {}, None,
     ),
+    (
+        ["audit", "list", "--tenant", "acme", "--action", "login", "--limit", "10", "--no-tenant"],
+        "GET", "/api/audit/list",
+        {"tenant": "acme", "action": "login", "limit": "10", "noTenant": "true"}, None,
+    ),
+    (["audit", "actions"], "GET", "/api/audit/actions", {}, None),
+    (
+        ["usage", "--from", "2026-07-01", "--to", "2026-07-14", "--group-by", "tenant"],
+        "GET", "/api/usage",
+        {"from": "2026-07-01", "to": "2026-07-14", "groupBy": "tenant"}, None,
+    ),
+    (
+        ["history", "statements", "--tenant", "acme", "--status", "error", "--limit", "5"],
+        "GET", "/api/history/statements",
+        {"tenant": "acme", "status": "error", "limit": "5"}, None,
+    ),
+    (
+        ["history", "trends", "--granularity", "hour", "--pool", "bi"],
+        "GET", "/api/history/trends", {"granularity": "hour", "pool": "bi"}, None,
+    ),
 ]
 
 
