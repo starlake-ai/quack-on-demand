@@ -253,6 +253,68 @@ CASES = [
         ["membership", "group-role", "list", "--group-id", "g1"],
         "GET", "/api/membership/group-role/list", {"groupId": "g1"}, None,
     ),
+    (
+        ["catalog", "schemas", "acme", "tpch1"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas", {}, None,
+    ),
+    (
+        ["catalog", "tables", "acme", "tpch1", "main"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables", {}, None,
+    ),
+    (
+        ["catalog", "describe", "acme", "tpch1", "main", "orders", "--as-of", "42"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables/orders",
+        {"asOf": "42"}, None,
+    ),
+    (
+        ["catalog", "snapshots", "acme", "tpch1", "--limit", "5", "--table", "main.orders"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/snapshots",
+        {"limit": "5", "table": "main.orders"}, None,
+    ),
+    (
+        ["catalog", "history", "acme", "tpch1", "main", "orders", "--limit", "10", "--operation", "DELETE"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables/orders/history",
+        {"limit": "10", "operation": "DELETE"}, None,
+    ),
+    (
+        ["catalog", "preview", "acme", "tpch1", "main", "orders", "--as-of-tag", "v1", "--limit", "50"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables/orders/preview",
+        {"asOfTag": "v1", "limit": "50"}, None,
+    ),
+    (
+        ["catalog", "data-diff", "acme", "tpch1", "main", "orders", "--from", "10", "--to", "20", "--change-type", "insert"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables/orders/data-diff",
+        {"from": "10", "to": "20", "changeType": "insert"}, None,
+    ),
+    (
+        ["catalog", "schema-diff", "acme", "tpch1", "main", "orders", "--from", "10", "--to", "20"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/schemas/main/tables/orders/schema-diff",
+        {"from": "10", "to": "20"}, None,
+    ),
+    (
+        ["catalog", "recoverable", "acme", "tpch1", "--limit", "10"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/recoverable", {"limit": "10"}, None,
+    ),
+    (
+        ["catalog", "undrop", "--tenant", "acme", "--db", "tpch1", "--schema", "main", "--table", "orders", "--as-name", "orders_restored"],
+        "POST", "/api/catalog/undrop", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "schema": "main", "table": "orders", "asName": "orders_restored"},
+    ),
+    (
+        ["tag", "create", "--tenant", "acme", "--db", "tpch1", "--name", "v1", "--snapshot-id", "42", "--protected"],
+        "POST", "/api/catalog/tag/create", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "name": "v1", "snapshotId": 42, "isProtected": True},
+    ),
+    (
+        ["tag", "delete", "--tenant", "acme", "--db", "tpch1", "--name", "v1"],
+        "POST", "/api/catalog/tag/delete", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "name": "v1"},
+    ),
+    (
+        ["tag", "protect", "--tenant", "acme", "--db", "tpch1", "--name", "v1", "--unprotected"],
+        "POST", "/api/catalog/tag/protect", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "name": "v1", "isProtected": False},
+    ),
 ]
 
 

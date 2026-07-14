@@ -70,6 +70,11 @@ app.add_typer(role.app, name="role")
 app.add_typer(group.app, name="group")
 app.add_typer(membership.app, name="membership")
 
+from .commands import catalog, tag  # noqa: E402
+
+app.add_typer(catalog.app, name="catalog")
+app.add_typer(tag.app, name="tag")
+
 
 def main() -> None:
     app()
