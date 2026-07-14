@@ -45,6 +45,20 @@ final case class TableHistoryPage(
     hasMore: Boolean
 )
 
+/** One dropped-but-maybe-recoverable table (Spec 03 undrop). `lastLiveSnapshot` is the snapshot the
+  * table can be read AT to reconstruct its final state (`droppedAtSnapshot - 1`); `recoverable` is
+  * false once that snapshot has been expired. `droppedAt` is the drop snapshot's ISO-8601 commit
+  * time when that snapshot itself still exists.
+  */
+final case class DroppedTableEntry(
+    schema: String,
+    table: String,
+    droppedAtSnapshot: Long,
+    lastLiveSnapshot: Long,
+    droppedAt: Option[String],
+    recoverable: Boolean
+)
+
 /** Reads schemas / tables / columns / data files out of the DuckLake metadata tables. The metadata
   * schema is fixed by DuckLake itself (`ducklake_schema`, `ducklake_table`, `ducklake_column`,
   * `ducklake_data_file`) and lives in the same Postgres DB the catalog is attached to.
@@ -140,6 +154,41 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
 
   def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
+
+  /** Dropped tables, newest drop first (Spec 03 undrop). A renamed/altered table keeps a live
+    * `ducklake_table` row for its table_id, so the NOT EXISTS arm restricts to true drops. The drop
+    * transaction end-dates the row at the drop snapshot D, so last-live = D - 1 (verified live
+    * 2026-07-14, see the undrop design doc); `recoverable` checks that snapshot still exists (not
+    * expired). The schema row is deliberately joined without an end_snapshot filter so tables of a
+    * dropped schema still list.
+    */
+  def listDroppedTables(limit: Int = 50): List[DroppedTableEntry] =
+    val sql =
+      """SELECT s.schema_name,
+        |       t.table_name,
+        |       t.end_snapshot AS dropped_at_snapshot,
+        |       sn.snapshot_time AS dropped_at,
+        |       EXISTS(SELECT 1 FROM ducklake_snapshot e
+        |               WHERE e.snapshot_id = t.end_snapshot - 1) AS recoverable
+        |  FROM ducklake_table t
+        |  JOIN ducklake_schema s ON s.schema_id = t.schema_id
+        |  LEFT JOIN ducklake_snapshot sn ON sn.snapshot_id = t.end_snapshot
+        | WHERE t.end_snapshot IS NOT NULL
+        |   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
+        |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)
+        | ORDER BY t.end_snapshot DESC, t.table_name
+        | LIMIT ?""".stripMargin
+    query(sql, limit) { rs =>
+      val d = rs.getLong("dropped_at_snapshot")
+      DroppedTableEntry(
+        schema = rs.getString("schema_name"),
+        table = rs.getString("table_name"),
+        droppedAtSnapshot = d,
+        lastLiveSnapshot = d - 1,
+        droppedAt = Option(rs.getTimestamp("dropped_at")).map(_.toInstant.toString),
+        recoverable = rs.getBoolean("recoverable")
+      )
+    }
 
   /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
   def maxSnapshotId(): Option[Long] =
