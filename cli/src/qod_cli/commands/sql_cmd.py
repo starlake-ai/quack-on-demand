@@ -1,3 +1,4 @@
+import click
 import typer
 
 from ..sql import SqlClient, render_table
@@ -41,6 +42,8 @@ def sql(
     try:
         with _connect(ctx) as client:
             render_table(client.query(statement), mode)
+    except (click.ClickException, typer.Exit):
+        raise
     except Exception as exc:  # ADBC raises driver-specific exception types
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
