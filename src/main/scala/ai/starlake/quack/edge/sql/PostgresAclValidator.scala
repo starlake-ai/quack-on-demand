@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.sql
 
-import ai.starlake.acl.model.Config
+import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
@@ -44,7 +44,8 @@ final class PostgresAclValidator(
   private def parserConfigFor(context: ValidationContext): Config =
     val db     = context.defaultDatabase.getOrElse(defaultDatabase)
     val schema = context.defaultSchema.getOrElse(defaultSchema)
-    if dialect.equalsIgnoreCase("duckdb") then Config.forDuckDB(db, schema)
+    if dialect.equalsIgnoreCase("duckdb") then
+      Config.forDuckDB(Some(db), Some(schema), context.attachedCatalogs)
     else Config.forGeneric(db, schema)
 
   override def validate(context: ValidationContext): ValidationResult =
@@ -103,6 +104,37 @@ final class PostgresAclValidator(
         return Allowed
       else
         val msg = s"unsupported constructs (deny, fail-closed): ${unsupported.mkString(", ")}"
+        logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+        return Denied(msg)
+
+    // Qualification errors were previously ignored, silently DROPPING the
+    // offending ref from the access set (fail-open). AmbiguousCatalogRef denies
+    // unconditionally: admitting it under the wildcard would reopen the
+    // cross-catalog bypass the attached-catalog check exists to close. Other
+    // qualification errors mirror the unsupported arm (wildcard ALL covers them).
+    val qualErrors = extraction.statements.collect {
+      case StatementResult.Extracted(_, _, _, q, _) if q.nonEmpty => q
+    }.flatten
+    val ambiguous = qualErrors.collect { case a: DenyReason.AmbiguousCatalogRef => a }
+    if ambiguous.nonEmpty then
+      val msg = ambiguous
+        .map(a =>
+          s"ambiguous two-part name '${a.tableName}': '${a.catalog}' is an attached " +
+            s"catalog; qualify fully as '${a.catalog}.<schema>.<table>'"
+        )
+        .mkString("; ")
+      logger.warn(s"ACL DENIED: user=${context.username}: $msg")
+      return Denied(msg)
+    val otherQual = qualErrors.filterNot(_.isInstanceOf[DenyReason.AmbiguousCatalogRef])
+    if otherQual.nonEmpty then
+      if hasWildcardAll(eff) then
+        logger.info(
+          s"ACL: wildcard ALL covers qualification errors (${otherQual.mkString(", ")}) " +
+            s"for user=${context.username}"
+        )
+        return Allowed
+      else
+        val msg = s"unresolvable table references (deny, fail-closed): ${otherQual.mkString("; ")}"
         logger.warn(s"ACL DENIED: user=${context.username}: $msg")
         return Denied(msg)
 

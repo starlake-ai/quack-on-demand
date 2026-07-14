@@ -243,6 +243,13 @@ final class PoolSupervisor(
             disabled = p.disabled,
             dbInitSql = td.initSql,
             initSql = p.initSql,
+            // Session defaults for the SQL validation / policy-rewrite context.
+            // Omitting these here silently degraded every restored pool to the
+            // metastore's schemaName (usually "main"), so unqualified and
+            // schema-qualified refs stopped matching tenant-db grants after a
+            // restart or NOTIFY-driven rehydration.
+            defaultDatabase = td.defaultDatabase,
+            defaultSchema = td.defaultSchema,
             cpu = p.cpu,
             memory = p.memory,
             podTemplateYaml = p.podTemplateYaml

@@ -47,7 +47,8 @@ final class FlightSqlRouter(
       new ai.starlake.quack.edge.rls.RowPolicyRewriter(),
     val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
     val journal: EventJournal = EventJournal.noop,
-    val stampWrites: Boolean = false
+    val stampWrites: Boolean = false,
+    val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -238,7 +239,8 @@ final class FlightSqlRouter(
       peer = connectionId,
       defaultDatabase = maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
       defaultSchema = maybeState.flatMap(_.defaultSchema).orElse(perKindSchema),
-      effectiveSet = effectiveSet
+      effectiveSet = effectiveSet,
+      attachedCatalogs = attachedCatalogsOf(poolKey)
     )
     // No-op variant when the caller is the Prepare-time probe -- we don't want the LIMIT-0
     // wrapper to clutter the operator's history view or skew the per-pool metrics.

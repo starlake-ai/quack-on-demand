@@ -349,6 +349,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 - **Edits take effect on the next spawn.** Editing or disabling a source affects every Quack node spawned after the commit: idle-timeout replacement, manual restart, scale-up additions, pool recreation. Already-running nodes keep their attached catalogs until they exit.
 - **Boot-time failure is fatal.** If a source's `setupSql` errors at node startup (extension missing, bad credentials, DNS), the spawn script exits 91 and the supervisor surfaces the last lines of stderr.
 - **Disabled sources** are filtered out at blob assembly. No live DETACH.
+- **Deleting a federated source** removes its alias from the ACL ambiguity guard immediately, but running nodes keep the catalog attached until the pool recycles. Recycle the pool right after deleting a source.
 
 ### Troubleshooting
 
@@ -563,6 +564,8 @@ echo "SELECT 1" | scripts/adbc.sh --url grpc://localhost:31338 --tenant acme --p
 ```
 
 Flags: `--url` (required), `--user` / `--password` (or `LT_USER` / `LT_PASSWORD`), `--query` (or `LT_QUERY`, or stdin), `--tenant` / `--pool` (or `LT_TENANT` / `LT_POOL`), `--superuser`, `--insecure`. Unqualified table names resolve against the pool's default schema, but the FlightSQL prepare-time probe needs a real table - schema-qualify (`tpch1.customer`) if you hit "Table … does not exist" at prepare.
+
+Two-part names are only unambiguous when the head is a schema in the pool's default catalog, as in `tpch1.customer` above. When the head instead names an attached catalog (the tenant-db itself, e.g. `acme_tpch`, or a federation alias) under ACL, it's rejected as ambiguous - the engine would bind it catalog-first while the ACL check can't tell which catalog you meant. Write the full three-part form instead: `acme_tpch.tpch1.customer`.
 
 ## Load testing
 

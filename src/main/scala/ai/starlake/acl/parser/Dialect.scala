@@ -50,20 +50,17 @@ private[parser] object AnsiDialectMapper extends DialectMapper:
 
 private[parser] object DuckDBDialectMapper extends DialectMapper:
 
-  /** DuckDB name resolution for two-part names differs from ANSI SQL.
+  /** DuckDB partial-name resolution.
     *
-    * Per DuckDB docs: "When providing partial qualifications, DuckDB attempts to resolve the
-    * reference as either a catalog or a schema."
-    *
-    * For a two-part name `X.Y`:
-    *   - DuckDB tries `catalog=X, schema=<default>, table=Y` first (catalog interpretation)
-    *   - Then `catalog=<default>, schema=X, table=Y` (schema interpretation)
-    *   - If both match, it returns a binder error
-    *
-    * Since the ACL parser does not have access to the live catalog to check which interpretation is
-    * valid, we adopt the catalog-first convention: `X.Y` is resolved as
-    * `catalog=X, schema=main, table=Y`. This matches DuckDB's default behavior where the default
-    * schema is always `main`.
+    * A two-part name `X.Y` resolves as `schema=X, table=Y` under the session's default catalog
+    * (ANSI semantics) -- the grant model, the demo manifests, and the RLS/CLS rewriters all qualify
+    * two-part names this way. But DuckDB's runtime tries a catalog interpretation of `X` first, and
+    * this gateway may have other catalogs attached on the session (the tenant-db ATTACH alias,
+    * federation aliases, DuckDB built-ins like `memory`/`system`/`temp`). If `X` matches one of
+    * those attached catalogs, the engine would bind `X.Y` catalog-first while the ACL check just
+    * resolved it schema-first -- a potential grant mismatch. Such names are refused with
+    * [[DenyReason.AmbiguousCatalogRef]] instead of guessed at; the caller must fully qualify
+    * (`catalog.schema.table`).
     *
     * Three-part names (`X.Y.Z`) and single names (`X`) are handled identically to ANSI.
     *
@@ -74,23 +71,10 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     val tableName  = table.getUnquotedName
     val schemaName = Option(table.getUnquotedSchemaName)
     val dbName     = Option(table.getUnquotedDatabaseName)
-
     (dbName, schemaName) match
-      // Three-part: fully qualified - use as-is
-      case (Some(_), Some(_)) =>
-        AnsiDialectMapper.toTableRef(table, config)
-
-      // Two-part: DuckDB interprets the first part as catalog (database), not schema
-      case (None, Some(firstPart)) =>
-        val defaultSchema = config.normalizedDefaultSchema.getOrElse("main")
-        Right(TableRef(firstPart, defaultSchema, tableName))
-
-      // One-part or zero-part: apply defaults (same as ANSI)
-      case (None, None) =>
-        AnsiDialectMapper.toTableRef(table, config)
-
-      // dbName set without schema - unlikely from JSqlParser but handle gracefully
-      case (Some(_), None) =>
+      case (None, Some(head)) if config.normalizedAttachedCatalogs.contains(head.toLowerCase) =>
+        Left(DenyReason.AmbiguousCatalogRef(s"$head.$tableName", head))
+      case _ =>
         AnsiDialectMapper.toTableRef(table, config)
 
   /** Check whether a JSqlParser Table represents a string-literal file reference. The caller should

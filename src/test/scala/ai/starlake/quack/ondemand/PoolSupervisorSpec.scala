@@ -766,6 +766,25 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup2.get(key).get.dbInitSql shouldBe "SET x=1;"
   }
 
+  it should "carry the tenant-db session defaults into PoolState (demo regression)" in {
+    // Omitting these degraded every restored pool's SQL validation / policy
+    // rewrite context to the metastore schemaName ("main"), so grants keyed on
+    // the tenant-db's declared defaultSchema (e.g. tpch1) stopped matching
+    // after a restart or NOTIFY-driven rehydration.
+    val store2 = new InMemoryControlPlaneStore()
+    val sup2   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store2)
+    sup2.createTenant(Tenant("acme")).unsafeRunSync()
+    sup2.createTenantDb(
+      tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = "",
+      defaultDatabase = Some("acme_default"), defaultSchema = Some("tpch1")
+    ).unsafeRunSync()
+    sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup2.restore()
+    sup2.get(key).get.defaultDatabase shouldBe Some("acme_default")
+    sup2.get(key).get.defaultSchema shouldBe Some("tpch1")
+  }
+
   // ---------- updateTenantDb ----------
 
   /** Fresh supervisor + tenant acme + DuckDbFile tenant-db with pgPassword in metastore

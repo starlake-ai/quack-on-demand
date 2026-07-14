@@ -17,10 +17,15 @@ final case class Dialect(
 final case class Config(
     defaultDatabase: Option[String],
     defaultSchema: Option[String],
-    dialect: Dialect
+    dialect: Dialect,
+    // Catalog names attached on the executing session (tenant-db ATTACH alias,
+    // federation aliases, DuckDB built-ins). Empty = standalone parser use;
+    // two-part heads then always take the schema interpretation.
+    attachedCatalogs: Set[String] = Set.empty
 ) {
   val normalizedDefaultDatabase: Option[String] = defaultDatabase.map(_.toLowerCase)
   val normalizedDefaultSchema: Option[String]   = defaultSchema.map(_.toLowerCase)
+  val normalizedAttachedCatalogs: Set[String]   = attachedCatalogs.map(_.toLowerCase)
 }
 
 object Config {
@@ -52,12 +57,14 @@ object Config {
 
   def forDuckDB(
       defaultDatabase: Option[String] = None,
-      defaultSchema: Option[String] = None
+      defaultSchema: Option[String] = None,
+      attachedCatalogs: Set[String] = Set.empty
   ): Config =
     Config(
       defaultDatabase = defaultDatabase,
       defaultSchema = defaultSchema,
-      dialect = duckdbDialect
+      dialect = duckdbDialect,
+      attachedCatalogs = attachedCatalogs
     )
 
   def forDuckDB(defaultDatabase: String, defaultSchema: String): Config =
