@@ -100,10 +100,35 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  // Manual run form.
+  // Manual run form. Schema/table come from the catalog browser endpoints so
+  // they render as selects; when the catalog has no schemas (or the fetch
+  // fails, e.g. a non-DuckLake tenant-db) the form falls back to free text.
   const [runScopeKind, setRunScopeKind] = useState<'tenantdb' | 'table'>('tenantdb');
   const [runScopeSchema, setRunScopeSchema] = useState('');
   const [runScopeTable, setRunScopeTable] = useState('');
+  const [runSchemas, setRunSchemas] = useState<string[]>([]);
+  const [runTables, setRunTables] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (runScopeKind !== 'table') return;
+    let cancelled = false;
+    api.listCatalogSchemas(tenant, tenantDb)
+      .then(r => { if (!cancelled) setRunSchemas(r.map(s => s.name)); })
+      .catch(() => { if (!cancelled) setRunSchemas([]); });
+    return () => { cancelled = true; };
+  }, [tenant, tenantDb, runScopeKind]);
+
+  useEffect(() => {
+    if (runScopeKind !== 'table' || !runScopeSchema || runSchemas.length === 0) {
+      setRunTables([]);
+      return;
+    }
+    let cancelled = false;
+    api.listCatalogTables(tenant, tenantDb, runScopeSchema)
+      .then(r => { if (!cancelled) setRunTables(r.map(t => t.name)); })
+      .catch(() => { if (!cancelled) setRunTables([]); });
+    return () => { cancelled = true; };
+  }, [tenant, tenantDb, runScopeKind, runScopeSchema, runSchemas.length]);
   const [runOps, setRunOps] = useState<string[]>([...ALL_OPERATIONS]);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNote, setRunNote] = useState<string | null>(null);
@@ -482,19 +507,44 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
             <>
               <label>
                 Schema
-                <input
-                  value={runScopeSchema}
-                  onChange={ev => setRunScopeSchema(ev.target.value)}
-                  placeholder="tpch1"
-                />
+                {runSchemas.length > 0
+                  ? (
+                    <select
+                      value={runScopeSchema}
+                      onChange={ev => { setRunScopeSchema(ev.target.value); setRunScopeTable(''); }}
+                    >
+                      <option value="">pick a schema</option>
+                      {runSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  )
+                  : (
+                    <input
+                      value={runScopeSchema}
+                      onChange={ev => setRunScopeSchema(ev.target.value)}
+                      placeholder="tpch1"
+                    />
+                  )}
               </label>
               <label>
                 Table
-                <input
-                  value={runScopeTable}
-                  onChange={ev => setRunScopeTable(ev.target.value)}
-                  placeholder="lineitem"
-                />
+                {runSchemas.length > 0
+                  ? (
+                    <select
+                      value={runScopeTable}
+                      onChange={ev => setRunScopeTable(ev.target.value)}
+                      disabled={!runScopeSchema}
+                    >
+                      <option value="">{runScopeSchema ? 'pick a table' : 'pick a schema first'}</option>
+                      {runTables.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  )
+                  : (
+                    <input
+                      value={runScopeTable}
+                      onChange={ev => setRunScopeTable(ev.target.value)}
+                      placeholder="lineitem"
+                    />
+                  )}
               </label>
             </>
           )}
