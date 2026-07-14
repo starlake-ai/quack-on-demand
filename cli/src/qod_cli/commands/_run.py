@@ -23,3 +23,13 @@ def call(
         raise typer.Exit(1)
     render(data, ctx.obj.json_output)
     return data
+
+
+def kv_pairs(values: list[str] | None) -> dict:
+    out: dict = {}
+    for item in values or []:
+        if "=" not in item:
+            raise typer.BadParameter(f"expected KEY=VALUE, got {item!r}")
+        key, _, value = item.partition("=")
+        out[key] = value
+    return out
