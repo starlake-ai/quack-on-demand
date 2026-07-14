@@ -257,6 +257,12 @@ final class ManagerServer(
         TimeTravelEndpoints.schemaDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, token) =>
             h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(sessions.scopeOf)
+        },
+        TimeTravelEndpoints.dataDiffEndpoint.serverLogic {
+          case (tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token) =>
+            h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token)(
+              sessions.scopeOf
+            )
         }
       )
     }

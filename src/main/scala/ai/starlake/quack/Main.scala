@@ -1187,6 +1187,7 @@ object Main extends IOApp with LazyLogging:
           previewExecutor,
           catalogReader,
           mgrCfg.catalog,
+          catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
           audit = auditRecorder
         )
       )

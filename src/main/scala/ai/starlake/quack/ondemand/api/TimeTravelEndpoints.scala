@@ -58,6 +58,43 @@ object TimeTravelEndpoints:
           "configured max)."
       )
 
+  val dataDiffEndpoint: PublicEndpoint[
+    (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option[Int],
+        Option[String],
+        Option[String],
+        Option[String]
+    ),
+    (sttp.model.StatusCode, ErrorResponse),
+    DataDiffResponse,
+    Any
+  ] =
+    base.get
+      .in(
+        "catalog" / "tenant" / path[String]("tenant") /
+          "database" / path[String]("tenantDb") /
+          "schemas" / path[String]("schema") /
+          "tables" / path[String]("table") / "data-diff"
+      )
+      .in(query[String]("from"))
+      .in(query[String]("to"))
+      .in(query[Option[Int]]("limit"))
+      .in(query[Option[String]]("cursor"))
+      .in(query[Option[String]]("changeType"))
+      .in(Endpoints.authToken)
+      .out(jsonBody[DataDiffResponse])
+      .description(
+        "Row-level data diff between two snapshot selectors (`from`, `to`; each a snapshot id " +
+          "or a tag name). `changeType` filters to insert | delete | update; pages via the " +
+          "opaque `cursor` echoed back as nextCursor."
+      )
+
   val schemaDiffEndpoint: PublicEndpoint[
     (String, String, String, String, String, String, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),
