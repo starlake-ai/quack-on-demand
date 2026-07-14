@@ -63,6 +63,13 @@ app.add_typer(pool.app, name="pool")
 app.add_typer(node.app, name="node")
 app.add_typer(node.statement_app, name="statement")
 
+from .commands import group, membership, role, user  # noqa: E402
+
+app.add_typer(user.app, name="user")
+app.add_typer(role.app, name="role")
+app.add_typer(group.app, name="group")
+app.add_typer(membership.app, name="membership")
+
 
 def main() -> None:
     app()

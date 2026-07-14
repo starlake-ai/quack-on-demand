@@ -155,6 +155,104 @@ CASES = [
     (["node", "statements", "--limit", "20"], "GET", "/api/node/statements", {"limit": "20"}, None),
     (["node", "active-statements"], "GET", "/api/node/active-statements", {}, None),
     (["statement", "kill", "s1"], "POST", "/api/statement/kill", {}, {"id": "s1"}),
+    (["user", "list"], "GET", "/api/user/list", {}, None),
+    (["user", "list", "--tenant", "acme"], "GET", "/api/user/list", {"tenant": "acme"}, None),
+    (
+        ["user", "create", "--tenant", "acme", "--username", "bob", "--password", "pw", "--role", "admin"],
+        "POST", "/api/user/create", {},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin"},
+    ),
+    (
+        ["user", "create", "--superuser", "--username", "root", "--password", "pw"],
+        "POST", "/api/user/create", {},
+        {"tenant": None, "username": "root", "password": "pw", "role": "user"},
+    ),
+    (
+        ["user", "update", "u1", "--role", "admin"],
+        "POST", "/api/user/update", {}, {"id": "u1", "role": "admin"},
+    ),
+    (["user", "delete", "u1"], "POST", "/api/user/delete", {}, {"id": "u1"}),
+    (["user", "effective", "u1"], "GET", "/api/user/u1/effective", {}, None),
+    (["role", "list", "--tenant", "acme"], "GET", "/api/role/list", {"tenant": "acme"}, None),
+    (
+        ["role", "create", "--tenant", "acme", "--name", "analyst", "--description", "read-only"],
+        "POST", "/api/role/create", {},
+        {"tenant": "acme", "name": "analyst", "description": "read-only"},
+    ),
+    (["role", "delete", "r1"], "POST", "/api/role/delete", {}, {"id": "r1"}),
+    (
+        ["role", "permission", "list", "--role-id", "r1"],
+        "GET", "/api/role/permission/list", {"roleId": "r1"}, None,
+    ),
+    (
+        ["role", "permission", "grant", "--role-id", "r1", "--verb", "SELECT", "--schema", "main", "--table", "orders"],
+        "POST", "/api/role/permission/grant", {},
+        {"roleId": "r1", "catalog": "*", "schema": "main", "table": "orders", "verb": "SELECT"},
+    ),
+    (["role", "permission", "revoke", "rp1"], "POST", "/api/role/permission/revoke", {}, {"id": "rp1"}),
+    (
+        ["role", "row-policy", "list", "--role-id", "r1"],
+        "GET", "/api/role/row-policy/list", {"roleId": "r1"}, None,
+    ),
+    (
+        ["role", "row-policy", "create", "--role-id", "r1", "--catalog", "c", "--schema", "s", "--table", "t", "--predicate-sql", "region = 'EU'"],
+        "POST", "/api/role/row-policy/create", {},
+        {"roleId": "r1", "catalogName": "c", "schemaName": "s", "tableName": "t", "predicateSql": "region = 'EU'"},
+    ),
+    (
+        ["role", "row-policy", "update", "rw1", "--predicate-sql", "1=1"],
+        "POST", "/api/role/row-policy/update", {}, {"id": "rw1", "predicateSql": "1=1"},
+    ),
+    (["role", "row-policy", "delete", "rw1"], "POST", "/api/role/row-policy/delete", {}, {"id": "rw1"}),
+    (
+        ["role", "column-policy", "list", "--role-id", "r1"],
+        "GET", "/api/role/column-policy/list", {"roleId": "r1"}, None,
+    ),
+    (
+        ["role", "column-policy", "create", "--role-id", "r1", "--catalog", "c", "--schema", "s", "--table", "t", "--column", "email", "--action", "mask"],
+        "POST", "/api/role/column-policy/create", {},
+        {"roleId": "r1", "catalogName": "c", "schemaName": "s", "tableName": "t", "columnName": "email", "action": "mask"},
+    ),
+    (
+        ["role", "column-policy", "update", "cp1", "--action", "transform", "--transform-sql", "left(email, 3)"],
+        "POST", "/api/role/column-policy/update", {},
+        {"id": "cp1", "action": "transform", "transformSql": "left(email, 3)"},
+    ),
+    (["role", "column-policy", "delete", "cp1"], "POST", "/api/role/column-policy/delete", {}, {"id": "cp1"}),
+    (["group", "list", "--tenant", "acme"], "GET", "/api/group/list", {"tenant": "acme"}, None),
+    (
+        ["group", "create", "--tenant", "acme", "--name", "analysts"],
+        "POST", "/api/group/create", {}, {"tenant": "acme", "name": "analysts"},
+    ),
+    (["group", "delete", "g1"], "POST", "/api/group/delete", {}, {"id": "g1"}),
+    (
+        ["membership", "user-role", "add", "--user-id", "u1", "--role-id", "r1"],
+        "POST", "/api/membership/user-role/add", {}, {"userId": "u1", "roleId": "r1"},
+    ),
+    (
+        ["membership", "user-role", "remove", "--user-id", "u1", "--role-id", "r1"],
+        "POST", "/api/membership/user-role/remove", {}, {"userId": "u1", "roleId": "r1"},
+    ),
+    (
+        ["membership", "user-group", "add", "--user-id", "u1", "--group-id", "g1"],
+        "POST", "/api/membership/user-group/add", {}, {"userId": "u1", "groupId": "g1"},
+    ),
+    (
+        ["membership", "user-group", "remove", "--user-id", "u1", "--group-id", "g1"],
+        "POST", "/api/membership/user-group/remove", {}, {"userId": "u1", "groupId": "g1"},
+    ),
+    (
+        ["membership", "group-role", "add", "--group-id", "g1", "--role-id", "r1"],
+        "POST", "/api/membership/group-role/add", {}, {"groupId": "g1", "roleId": "r1"},
+    ),
+    (
+        ["membership", "group-role", "remove", "--group-id", "g1", "--role-id", "r1"],
+        "POST", "/api/membership/group-role/remove", {}, {"groupId": "g1", "roleId": "r1"},
+    ),
+    (
+        ["membership", "group-role", "list", "--group-id", "g1"],
+        "GET", "/api/membership/group-role/list", {"groupId": "g1"}, None,
+    ),
 ]
 
 
