@@ -87,6 +87,10 @@ app.add_typer(telemetry.audit_app, name="audit")
 app.add_typer(telemetry.history_app, name="history")
 app.command()(telemetry.usage)
 
+from .commands import sql_cmd  # noqa: E402
+
+app.command("sql")(sql_cmd.sql)
+
 
 def main() -> None:
     app()
