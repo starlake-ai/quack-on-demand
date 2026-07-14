@@ -23,6 +23,10 @@
 #
 # Env vars:
 #   BUILD=1                       run `sbt assembly` first instead of downloading
+#   LOCAL=1                       run the newest jar already in distrib/ without
+#                                 rebuilding or consulting Maven Central (falls
+#                                 back to a build when distrib/ is empty; ignored
+#                                 when BUILD=1)
 #   QOD_VERSION                 artifact version to download (default = latest
 #                                 release from Maven Central; `latest-snapshot`
 #                                 fetches from Central snapshots; ignored when
@@ -425,6 +429,9 @@ use_local_jar_or_build() {
 if [[ "$BUILD" == "1" ]]; then
   echo "BUILD=1: local build"
   build_locally
+elif [[ "${LOCAL:-0}" == "1" ]]; then
+  echo "LOCAL=1: newest distrib/ jar, no rebuild, no Central lookup"
+  use_local_jar_or_build
 else
   mkdir -p "$JAR_CACHE_DIR"
 
