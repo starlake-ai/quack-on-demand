@@ -668,6 +668,34 @@ export interface SchemaDiffResponse {
   nullabilityChanged: SchemaDiffNullability[];
 }
 
+// ----- Catalog data diff (Spec 02) -----
+
+export interface DataDiffSummary {
+  inserted: number;
+  deleted: number;
+  updated: number;
+}
+
+export interface DataDiffEntry {
+  changeType: string;            // insert | delete | update | raw update_* passthrough
+  snapshotId: number;
+  row?: unknown[] | null;        // insert/delete/bare entries
+  before?: unknown[] | null;     // paired updates
+  after?: unknown[] | null;
+}
+
+export interface DataDiffResponse {
+  schema: string;
+  table: string;
+  from: number;
+  to: number;
+  summary: DataDiffSummary;
+  columns: PreviewColumn[];
+  rows: DataDiffEntry[];
+  nextCursor?: string | null;
+  truncated: boolean;
+}
+
 // ----- Managed maintenance (EPIC Spec 09) -----
 // Mirrors the Scala DTOs in ondemand/api/Dtos.scala; field names must match
 // the circe codecs exactly. Absent optionals serialize as null on responses.
