@@ -75,6 +75,12 @@ from .commands import catalog, tag  # noqa: E402
 app.add_typer(catalog.app, name="catalog")
 app.add_typer(tag.app, name="tag")
 
+from .commands import federation, maintenance, manifest  # noqa: E402
+
+app.add_typer(maintenance.app, name="maintenance")
+app.add_typer(manifest.app, name="manifest")
+app.add_typer(federation.app, name="federation")
+
 
 def main() -> None:
     app()

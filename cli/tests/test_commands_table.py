@@ -315,6 +315,63 @@ CASES = [
         "POST", "/api/catalog/tag/protect", {},
         {"tenant": "acme", "tenantDb": "tpch1", "name": "v1", "isProtected": False},
     ),
+    (
+        ["maintenance", "policy", "--tenant", "acme", "--db", "tpch1"],
+        "GET", "/api/maintenance/policy", {"tenant": "acme", "tenantDb": "tpch1"}, None,
+    ),
+    (
+        ["maintenance", "policy-upsert", "--tenant", "acme", "--db", "tpch1", "--scope-kind", "table", "--scope-schema", "main", "--scope-table", "orders", "--enabled", "--retention-days", "7"],
+        "POST", "/api/maintenance/policy/upsert", {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "scopeKind": "table",
+            "scopeSchema": "main", "scopeTable": "orders", "enabled": True, "retentionDays": 7,
+        },
+    ),
+    (["maintenance", "policy-delete", "mp1"], "POST", "/api/maintenance/policy/delete", {}, {"id": "mp1"}),
+    (
+        ["maintenance", "run", "--tenant", "acme", "--db", "tpch1", "--operations", "compact,cleanup"],
+        "POST", "/api/maintenance/run", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "operations": "compact,cleanup"},
+    ),
+    (
+        ["maintenance", "runs", "--tenant", "acme", "--db", "tpch1", "--limit", "5"],
+        "GET", "/api/maintenance/runs", {"tenant": "acme", "tenantDb": "tpch1", "limit": "5"}, None,
+    ),
+    (
+        ["federation", "list", "acme", "tpch1"],
+        "GET", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources", {}, None,
+    ),
+    (
+        ["federation", "get", "acme", "tpch1", "pgsrc"],
+        "GET", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc", {}, None,
+    ),
+    (
+        ["federation", "create", "acme", "tpch1", "--alias", "pgsrc", "--setup-sql", "ATTACH ..."],
+        "POST", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources", {},
+        {"alias": "pgsrc", "setupSql": "ATTACH ...", "disabled": False},
+    ),
+    (
+        ["federation", "delete", "acme", "tpch1", "pgsrc"],
+        "DELETE", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc", {}, None,
+    ),
+    (
+        ["federation", "secret", "list", "acme", "tpch1", "pgsrc"],
+        "GET", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc/secrets", {}, None,
+    ),
+    (
+        ["federation", "secret", "set", "acme", "tpch1", "pgsrc", "--name", "pgpass", "--value", "s3cr3t"],
+        "PUT", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc/secrets", {},
+        {"name": "pgpass", "value": "s3cr3t"},
+    ),
+    (
+        ["federation", "secret", "set", "acme", "tpch1", "pgsrc", "--name", "pgpass", "--external-ref", "env:PGPASS"],
+        "PUT", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc/secrets", {},
+        {"name": "pgpass", "externalRef": "env:PGPASS"},
+    ),
+    (
+        ["federation", "secret", "delete", "acme", "tpch1", "pgsrc", "pgpass"],
+        "DELETE", "/api/tenants/acme/tenant-dbs/tpch1/federated-sources/pgsrc/secrets/pgpass", {}, None,
+    ),
 ]
 
 
