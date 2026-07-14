@@ -108,8 +108,8 @@ The tenant page's **Maintenance** tab manages [managed DuckLake maintenance](/op
 
 - **Policy form**, bound to the database-level scope: the enable toggle, retention days (annotated as the bound on time-travel, undrop, and history horizons), compaction knobs (target file size, small-file threshold, rewrite threshold), cleanup grace and orphan age, and the cadence cron. Unset fields show the effective defaults as placeholders; the first save creates the policy row.
 - **Overrides table** listing schema- and table-scope policy rows with their overriding fields; rows can be deleted here (creating overrides is REST-only for now).
-- **Run history**, newest first with load-more: trigger (cadence, threshold, or manual), scope, status (`succeeded` / `failed` / `partial`), per-step counters, bytes reclaimed, and duration.
-- **Run maintenance now** under an advanced disclosure, the manual escape hatch. It is refused with a conflict while a run is already queued or running for the database.
+- **Run history**, newest first with load-more and a **Refresh** button that re-fetches the list: trigger (cadence, threshold, or manual), scope, status (`succeeded` / `failed` / `partial`), per-step counters, bytes reclaimed, and duration.
+- **Run maintenance now** under an advanced disclosure, the manual escape hatch. Scope is a select: **whole database (full chain)** or **single table (table-safe steps)**, the latter revealing schema and table inputs. Operations are checkboxes over the chain vocabulary (`flush`, `expire`, `merge`, `rewrite`, `cleanup`, `orphans`); leaving all checked runs the full chain, unchecking restricts the run to the checked subset. It is refused with a conflict while a run is already queued or running for the database.
 
 Maintenance is double-opt-in: the service runs by default but every database starts disabled, and the first enable expires all unpinned snapshots older than the retention window on the next tick. Protect snapshots with tags first (see [Snapshots and time travel](#snapshots-and-time-travel)).
 

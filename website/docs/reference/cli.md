@@ -34,6 +34,7 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 | `LOAD_TPCDS` | unset | Positive integer scale factor: seeds TPC-DS sf=N into `globex/globex_tpcds`. |
 | `LOAD_SSB` | unset | Positive integer scale factor: derives the SSB star schema (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) from TPC-H dbgen at sf=N into `acme/acme_tpch` schema `ssb1`. |
 | `LOAD_TPC` | unset | Legacy shortcut: equivalent to setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N`. Explicit per-bench vars override it. Setting any of the four exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `DEMO` | `full` | Demo bootstrap profile: `full` imports `bootstrap-demo.yaml` (tenants `acme` + `globex`: multi-tenancy, multiple pools, federation); `minimal` imports `bootstrap-demo-minimal.yaml`, the single-DuckDB shape (one tenant `acme`, one pool `bi`, one dual node serving both reads and writes, analyst RLS/CLS demo). Only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader. Bootstrap only imports into a fresh control plane; switch profiles with `NUKE=1`. |
 | `DUCKDB_VERSION` | derived from `libquackwireVersion` in `build.sbt` | Pin a specific DuckDB release for the self-install (`run-jar.sh` always provisions the CLI + `libduckdb`). Pinning a version that disagrees with libquackwire's ABI can crash node spawn with an `UnsatisfiedLinkError`. |
 | `DUCKDB_CACHE_DIR` | `$REPO_DIR/.duckdb` | Relocate the DuckDB cache root. Each pinned version lives under `$DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}`. Pre-populating these for air-gapped / CI runs lets the fast-path skip the network fetch. |
 | `NUKE` | `0` | `1` drops the control-plane DB and wipes local state dirs first. Does NOT wipe the DuckDB cache. Irreversible. |
@@ -43,12 +44,13 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 BUILD=1 ./scripts/run-jar.sh
 NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh                       # fresh boot + TPC-H only
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-jar.sh         # both, independent SFs
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh          # single-DuckDB profile: acme, 1 dual node
 ./scripts/stop-jar.sh        # SIGTERM, wait, then SIGKILL
 ```
 
 ### `run-docker-compose.sh`
 
-Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` / `LOAD_TPC` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
+Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` / `LOAD_TPC` / `DEMO` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
 
 ```bash
 ./scripts/run-docker-compose.sh

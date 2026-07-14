@@ -24,6 +24,18 @@ NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 ./charts/quack-on-demand/local-stack-k8s/run-lo
 
 Each `N` is that benchmark's scale factor. SF=1 is the fast path (~10 s of TPC-H + ~30 s of TPC-DS); SF=10 is ~5-10 minutes; SF=100+ takes hours and spills to disk. The legacy `LOAD_TPC=N` env var still works as a shortcut for setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N` at the same SF; explicit per-benchmark vars override it.
 
+## Profiles: full and minimal
+
+`DEMO` selects which bundled manifest a seed boot imports. `DEMO=full` (the default) is the two-tenant demo documented on the rest of this page: it exercises multi-tenancy, multiple pools, and the cross-tenant federated catalog. `DEMO=minimal` imports `bootstrap-demo-minimal.yaml` instead - the shape for running the gateway in front of a **single DuckDB/DuckLake database**: one tenant (`acme`), one pool (`bi`), and one dual node serving both reads and writes, plus the analyst RLS/CLS demo (roles `analyst` and `tenant_admin`, group `analysts`, users `root`, `admin`, `alice`, and `acme-admin`; the `analyst` role masks `customer.c_phone` and restricts `customer` rows to `c_mktsegment = 'BUILDING'`).
+
+The profile is only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. Bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`:
+
+```bash
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+```
+
+`DEMO=minimal` plus `LOAD_TPCDS` warns and skips the TPC-DS loader (this profile has no `globex` tenant).
+
 ## What gets created
 
 | Component | Where it comes from |

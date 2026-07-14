@@ -60,6 +60,7 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 | `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
 | `LOAD_SSB=N` | Seeds the SSB (Star Schema Benchmark) star schema at sf=N: 5 tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) derived from TPC-H dbgen into schema `ssb1` of `acme/acme_tpch`, next to the TPC-H tables and served by the same acme pools. |
 | `LOAD_TPC=N` | Legacy shortcut: equivalent to setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N`. Explicit per-bench vars override it. |
+| `DEMO=full\|minimal` | Bootstrap profile for the demo seed. `full` (the default) imports the two-tenant `acme` + `globex` manifest and exercises multi-tenancy, multiple pools, and federation; `minimal` imports `bootstrap-demo-minimal.yaml` instead - the shape for fronting a single DuckDB/DuckLake database: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, plus the analyst RLS/CLS demo. Only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile). |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
 | `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
@@ -71,6 +72,12 @@ NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-docker-compose.sh
 ```
 
 Any seed flag (or the legacy `LOAD_TPC=1` shortcut, which enables all three) imports the bundled manifest under `src/main/resources/bootstrap-demo.yaml`, which declares the tenants, roles, groups, and users for both `acme` and `globex`; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+
+To run the gateway in front of a single DuckDB instance instead, `DEMO=minimal` swaps in `bootstrap-demo-minimal.yaml`: one tenant (`acme`), one pool (`bi`), and one dual node serving both reads and writes, plus the analyst RLS/CLS demo. Bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`:
+
+```bash
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+```
 
 Pick one benchmark to keep boot snappy:
 

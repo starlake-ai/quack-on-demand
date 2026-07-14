@@ -98,6 +98,12 @@ For a completely fresh start (drops the control-plane DB and wipes local state d
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
 ```
 
+To front a single DuckDB instance instead of the multi-tenant demo, `DEMO=minimal` imports `bootstrap-demo-minimal.yaml`: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, and the analyst RLS/CLS demo. `DEMO=full` is the default and covers the multi-tenant, multi-pool, and federation demos. The profile is only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset; bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile).
+
+```bash
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+```
+
 ### Run on Windows
 
 :::warning Experimental

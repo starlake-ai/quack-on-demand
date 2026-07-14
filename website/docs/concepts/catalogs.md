@@ -28,6 +28,8 @@ When a tenant-db is created the supervisor provisions its Postgres database and 
 
 A DuckLake database is addressed by a catalog name (`dbName`) and a default schema (`schemaName`). These must differ: a same-named catalog and schema is an ambiguous two-part identifier in DuckDB, which JDBC clients hit on identifier resolution. The router prepends `USE <dbName>.<schemaName>;` to each statement so unqualified names resolve against the right catalog and schema; see [Routing and statement classification](/concepts/routing).
 
+A related guard applies under ACL: a two-part name whose first part matches an attached catalog (the tenant-db itself, a federation alias, or `memory` / `system` / `temp`) is denied as ambiguous and must be written as the full `catalog.schema.table`. See [Table name resolution](/administration/access-control#table-name-resolution).
+
 ## Data path derivation
 
 The global default `dataPath` is a root; each tenant-db gets its own subdirectory under it. The supervisor derives the per-database path by replacing the last component of the global default with the composed `${tenant}_${tenantDb}` name. For example a global default of `/var/ducklake/tpch` yields `/var/ducklake/tpch_tpch1` for the `tpch/tpch1` database. Object-store URIs are handled string-wise (so the `//` after the scheme is preserved), because the path DuckLake records in the catalog must match the operator-supplied URI exactly or the next `ATTACH` is refused.

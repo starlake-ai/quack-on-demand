@@ -28,7 +28,7 @@ Compaction alone reclaims nothing; only the full chain reduces on-disk bytes. Th
 
 - **Threshold**: the scheduler watches per-table small-file counts in each database's Postgres catalog (metadata reads, no node involved). A table with at least `smallFileMinCount` files under the target size gets a table-scoped run (flush + merge + rewrite only; nothing lake-wide is expired from a threshold trigger).
 - **Cadence**: a per-database cron (default `0 3 * * *` UTC, staggered per database) runs the full chain, including expiry and cleanup.
-- **Manual**: `POST /api/maintenance/run` as an escape hatch for backfills and incident response. Returns 409 `run_active` when a run is already queued or running for the database.
+- **Manual**: `POST /api/maintenance/run` as an escape hatch for backfills and incident response. Returns 409 `run_active` when a run is already queued or running for the database. The Maintenance tab's "Run maintenance now" form drives the same endpoint: scope is a select (whole database runs the full chain; single table takes schema and table inputs and runs only the table-safe steps), and operations are checkboxes (`flush`, `expire`, `merge`, `rewrite`, `cleanup`, `orphans`) - all checked runs the full chain, unchecking restricts the run to the checked subset. See the [admin UI guide](/operating/admin-ui#maintenance).
 
 Runs are queued in the control plane and drained with bounded concurrency (`maxConcurrent`, default 2), serialized per database. Under HA only the leader schedules and drains.
 
@@ -80,6 +80,7 @@ Before expiring anything, the runner subtracts the pin-set: every snapshot carry
 
 A run moves `queued` to `running` (with a heartbeat per chain step) to `succeeded`, `failed`, or `partial`. The run history records per-step counters: snapshots expired and skipped-as-pinned, files merged, rewritten, cleaned, orphans deleted, and bytes reclaimed (measured as the catalog-bytes delta across the run; physical deletion lags by the grace window).
 
+- Each run spawns its ephemeral node and waits up to `nodeReadyTimeoutSec` (default 180, env `QOD_MAINT_NODE_READY_TIMEOUT_SEC`) for it to accept connections before the first chain statement is sent; the wait covers cold-start extension installs. A node that is not reachable in time is stopped and the run fails as a node spawn failure ("did not accept connections within Ns" in the manager log); an exception during the spawn itself logs "node spawn failed" and fails the run the same way.
 - A run whose heartbeat goes stale for `runTimeoutMin` (default 60) is swept to `failed`. Size `runTimeoutMin` above your longest single chain step, or a long compaction will be swept while still executing.
 - A `partial` run means the pinned-file guard fired or a non-fatal step was skipped; the error column names the cause.
 - With `QOD_MAINT_ENABLED=false` the fibers do not run at all: nothing is scheduled, and manually enqueued runs stay `queued` until the service is re-enabled.

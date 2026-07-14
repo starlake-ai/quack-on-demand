@@ -147,6 +147,22 @@ Replace `verb` with `UPDATE`, `DELETE`, `CREATE`, `DROP`, or `ALTER` as needed. 
 
 ---
 
+## Table name resolution
+
+When ACL is on, a two-part name `schema.table` resolves against the session's default catalog (ANSI semantics): `tpch1.customer` works when the pool's database is `acme_tpch` and a grant covers `acme_tpch.tpch1.customer`.
+
+DuckDB's runtime, however, tries a catalog interpretation of the first part first. So when the first part of a two-part name matches a possibly-attached catalog - the tenant-db itself, any federation alias (enabled or disabled), or the DuckDB built-ins `memory` / `system` / `temp` - the engine would bind it catalog-first while the ACL check just resolved it schema-first. Rather than guessing, the validator denies such names as ambiguous:
+
+```
+access denied: ambiguous two-part name 'acme_tpch.customer': 'acme_tpch' is an attached catalog; qualify fully as 'acme_tpch.<schema>.<table>'
+```
+
+Write the full three-part form (`catalog.schema.table`, e.g. `acme_tpch.tpch1.customer`) to proceed. This denial fails closed and is unconditional: no wildcard grant, including `*.*.* ALL`, admits an ambiguous reference.
+
+After **deleting** a federated source, recycle the pool: running nodes keep the deleted alias attached until they exit, while the ambiguity guard no longer covers it. See [Federation](/operating/federation).
+
+---
+
 ## Revoke access
 
 **Goal:** Remove a user's, group's, or role's access to a pool or table.
