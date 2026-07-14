@@ -31,10 +31,10 @@ export default function CatalogBrowser({
   // Recently dropped (Spec 03 undrop). Absent silently on tenant-dbs where the
   // endpoint rejects (non-DuckLake kinds return 400 invalid_kind).
   const [dropped, setDropped] = useState<RecoverableTableEntry[]>([]);
-  const [recoverTarget, setRecoverTarget] = useState<string | null>(null); // "schema.table"
-  const [recoverAs, setRecoverAs] = useState('');
-  const [recoverError, setRecoverError] = useState<string | null>(null);
-  const [recovering, setRecovering] = useState(false);
+  const [undropTarget, setUndropTarget] = useState<string | null>(null); // "schema.table"
+  const [undropAs, setUndropAs] = useState('');
+  const [undropError, setUndropError] = useState<string | null>(null);
+  const [undropping, setUndropping] = useState(false);
   const droppedSeq = useRef(0);
 
   function reloadDropped() {
@@ -53,7 +53,7 @@ export default function CatalogBrowser({
   useEffect(() => {
     if (!tenant || !tenantDb) { setSchemas([]); setDropped([]); return; }
     setError(null);
-    setRecoverTarget(null);
+    setUndropTarget(null);
     api.listCatalogSchemas(tenant, tenantDb)
       .then(setSchemas)
       .catch(e => setError(String(e)));
@@ -61,10 +61,10 @@ export default function CatalogBrowser({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, tenantDb]);
 
-  function recover(entry: RecoverableTableEntry) {
-    setRecovering(true);
-    setRecoverError(null);
-    const asName = recoverAs.trim();
+  function undrop(entry: RecoverableTableEntry) {
+    setUndropping(true);
+    setUndropError(null);
+    const asName = undropAs.trim();
     api.undropTable({
       tenant,
       tenantDb,
@@ -73,7 +73,7 @@ export default function CatalogBrowser({
       asName: asName && asName !== entry.table ? asName : undefined,
     })
       .then(() => {
-        setRecoverTarget(null);
+        setUndropTarget(null);
         reloadDropped();
         // Refresh the live lists: the restored table appears in its schema.
         api.listCatalogSchemas(tenant, tenantDb).then(setSchemas).catch(() => {});
@@ -81,8 +81,8 @@ export default function CatalogBrowser({
           api.listCatalogTables(tenant, tenantDb, schema).then(setTables).catch(() => {});
         }
       })
-      .catch(e => setRecoverError(e instanceof ApiError ? e.message : String(e)))
-      .finally(() => setRecovering(false));
+      .catch(e => setUndropError(e instanceof ApiError ? e.message : String(e)))
+      .finally(() => setUndropping(false));
   }
 
   useEffect(() => {
@@ -240,7 +240,7 @@ export default function CatalogBrowser({
             <tbody>
               {dropped.map(d => {
                 const key = `${d.schema}.${d.table}`;
-                const open = recoverTarget === key;
+                const open = undropTarget === key;
                 return (
                   <tr key={key} style={{ borderTop: '1px solid #eee' }}>
                     <td><code>{key}</code></td>
@@ -253,15 +253,15 @@ export default function CatalogBrowser({
                           ? (
                             <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
                               <input
-                                value={recoverAs}
-                                onChange={e => setRecoverAs(e.target.value)}
+                                value={undropAs}
+                                onChange={e => setUndropAs(e.target.value)}
                                 style={{ width: 180 }}
                                 title="restore under this name"
                               />
-                              <button type="button" disabled={recovering} onClick={() => recover(d)}>
-                                {recovering ? 'Recovering...' : 'Confirm'}
+                              <button type="button" disabled={undropping} onClick={() => undrop(d)}>
+                                {undropping ? 'Undropping...' : 'Confirm'}
                               </button>
-                              <button type="button" onClick={() => setRecoverTarget(null)}>
+                              <button type="button" onClick={() => setUndropTarget(null)}>
                                 Cancel
                               </button>
                             </span>
@@ -270,12 +270,12 @@ export default function CatalogBrowser({
                             <button
                               type="button"
                               onClick={() => {
-                                setRecoverTarget(key);
-                                setRecoverAs(d.table);
-                                setRecoverError(null);
+                                setUndropTarget(key);
+                                setUndropAs(d.table);
+                                setUndropError(null);
                               }}
                             >
-                              Recover
+                              Undrop
                             </button>
                           )}
                     </td>
@@ -284,7 +284,7 @@ export default function CatalogBrowser({
               })}
             </tbody>
           </table>
-          {recoverError && <p style={{ color: 'red' }}>Recover error: {recoverError}</p>}
+          {undropError && <p style={{ color: 'red' }}>Undrop error: {undropError}</p>}
         </details>
       )}
     </>
