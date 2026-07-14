@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { CatalogHistoryCommit } from '../api/types';
 
@@ -55,8 +55,21 @@ export default function CatalogHistoryPanel({
   const [toTs, setToTs] = useState('');
   const [op, setOp] = useState('');
   const [author, setAuthor] = useState('');
+  const [authorQuery, setAuthorQuery] = useState('');
+  // Monotonic request sequence: only the newest in-flight request may commit
+  // its result (or its error/loading flip), so a slow older response cannot
+  // clobber a newer one.
+  const seqRef = useRef(0);
+
+  // Debounce the free-text author input: one request per typing pause, not
+  // one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setAuthorQuery(author), 300);
+    return () => clearTimeout(t);
+  }, [author]);
 
   function load(reset: boolean) {
+    const seq = ++seqRef.current;
     setLoading(true);
     setError(null);
     const before = reset ? undefined : commits[commits.length - 1]?.snapshotId;
@@ -66,14 +79,15 @@ export default function CatalogHistoryPanel({
       from: localToIso(fromTs),
       to: localToIso(toTs),
       operation: op || undefined,
-      author: author.trim() || undefined,
+      author: authorQuery.trim() || undefined,
     })
       .then(r => {
+        if (seq !== seqRef.current) return;
         setCommits(prev => (reset ? r.commits : [...prev, ...r.commits]));
         setHasMore(r.hasMore);
       })
-      .catch(e => setError(String(e)))
-      .finally(() => setLoading(false));
+      .catch(e => { if (seq === seqRef.current) setError(String(e)); })
+      .finally(() => { if (seq === seqRef.current) setLoading(false); });
   }
 
   // Initial load + reload whenever a filter changes (pagination resets with it).
@@ -81,7 +95,7 @@ export default function CatalogHistoryPanel({
     setExpanded(null);
     load(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, tenantDb, schema, table, fromTs, toTs, op, author]);
+  }, [tenant, tenantDb, schema, table, fromTs, toTs, op, authorQuery]);
 
   return (
     <div>

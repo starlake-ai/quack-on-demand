@@ -82,8 +82,9 @@ export default function CatalogTableDetail() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
 
-  // Which tab is showing. Tabs owns its own active state; this mirror only
-  // exists so the selector-change effect knows whether to refetch the preview.
+  // Which tab is showing. Tabs runs controlled off this state so the
+  // selector-change effect knows whether to refetch the preview AND the
+  // history panel's Compare action can switch tabs programmatically.
   const initialTab = diffFromParam && diffToParam ? 'compare' : 'columns';
   const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -179,15 +180,14 @@ export default function CatalogTableDetail() {
     setSearchParams(next);
   }
 
-  // compareFromHistory loads the diff and stamps ?diffFrom/&diffTo; the result is visible when
-  // the user opens the Compare tab (the Tabs component owns tab state and remounts bodies, so
-  // the page cannot switch tabs programmatically without changing the shared component - out
-  // of scope here). viewAsOfSnapshot sets the page-wide AS OF selector, so the banner appears
-  // immediately and every tab reflects the chosen snapshot.
+  // compareFromHistory loads the diff, stamps ?diffFrom/&diffTo, and switches to the Compare
+  // tab (Tabs runs controlled off activeTab). viewAsOfSnapshot sets the page-wide AS OF
+  // selector, so the banner appears immediately and every tab reflects the chosen snapshot.
   function compareFromHistory(from: number, to: number) {
     setDiffFrom(`id:${from}`);
     setDiffTo(`id:${to}`);
     loadDiff(String(from), String(to));
+    setActiveTab('compare');
   }
 
   const tEnc  = encodeURIComponent(tenant!);
@@ -294,6 +294,7 @@ export default function CatalogTableDetail() {
               remount-on-switch behavior does not drop loaded results. */}
           <Tabs
             initialId={initialTab}
+            activeId={activeTab}
             onSelect={id => {
               setActiveTab(id);
               if (id === 'preview') loadPreview();

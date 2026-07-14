@@ -9,8 +9,12 @@ export interface TabSpec {
   body:  ReactNode;
 }
 
-/** Plain useState-driven tab strip. The first tab in `tabs` is active
+/** Tab strip, uncontrolled by default. The first tab in `tabs` is active
   * on mount; clicking a header swaps the visible body.
+  *
+  * Passing `activeId` switches to controlled mode: the caller owns the
+  * active tab (updating it from `onSelect` and, when needed, switching
+  * programmatically, e.g. a "Compare" action jumping to the Compare tab).
   *
   * Only the active tab body is mounted. Each tab switch (or re-click
   * of the active tab) unmounts the previous body and mounts a fresh
@@ -24,15 +28,21 @@ export interface TabSpec {
 export default function Tabs({
   tabs,
   initialId,
+  activeId,
   onSelect,
 }: {
   tabs:       TabSpec[];
   initialId?: string;
+  /** Controlled active tab id. When set, the caller must update it from
+    * `onSelect` for header clicks to take effect. */
+  activeId?:  string;
   /** Fired on every header click (incl. re-clicks of the active tab),
-    * after the tab becomes active. Not fired for the initial tab. */
+    * after the tab becomes active. Not fired for the initial tab or a
+    * programmatic `activeId` change. */
   onSelect?:  (id: string) => void;
 }) {
-  const [active, setActive] = useState<string>(initialId ?? tabs[0]?.id ?? '');
+  const [uncontrolled, setUncontrolled] = useState<string>(initialId ?? tabs[0]?.id ?? '');
+  const active = activeId ?? uncontrolled;
   // Bumped on every header click (incl. re-clicks of the active tab)
   // so the keyed panel below remounts. That gives callers the same
   // state they'd see on first display of the tab.
@@ -49,7 +59,7 @@ export default function Tabs({
             aria-selected={t.id === active}
             className={'tab' + (t.id === active ? ' active' : '')}
             onClick={() => {
-              setActive(t.id);
+              setUncontrolled(t.id);
               setNonce(n => n + 1);
               onSelect?.(t.id);
             }}
