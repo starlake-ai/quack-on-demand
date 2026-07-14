@@ -248,6 +248,9 @@ $Jar = $null
 if ($env:BUILD -eq '1') {
   Write-Host "BUILD=1: local build"
   $Jar = Invoke-Build
+} elseif ($env:LOCAL -eq '1') {
+  Write-Host "LOCAL=1: newest distrib\ jar, no rebuild, no Central lookup"
+  $Jar = Use-LocalJarOrBuild
 } else {
   New-Item -ItemType Directory -Force -Path $JarCacheDir | Out-Null
   $version = Get-EnvOr 'QOD_VERSION' 'latest'
