@@ -187,6 +187,15 @@ export default function CatalogTableDetail() {
       .finally(() => setDiffLoading(false));
   }
 
+  // A bounds change invalidates any loaded data diff: clearing it removes the
+  // Load more / filter controls, so a stale cursor can never append rows from
+  // a different (from, to) range; bumping the sequence drops in-flight replies.
+  useEffect(() => {
+    setDataDiff(null);
+    setDataDiffError(null);
+    dataDiffSeq.current++;
+  }, [diffFrom, diffTo]);
+
   function loadDataDiff(opts?: { cursor?: string; changeType?: string }) {
     if (!tenant || !tenantDb || !schema || !table) return;
     const from = selectorToBound(diffFrom);

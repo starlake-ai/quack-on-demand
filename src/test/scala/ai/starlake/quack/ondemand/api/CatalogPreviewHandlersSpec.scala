@@ -690,3 +690,34 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     r.rows shouldBe Nil
     r.truncated shouldBe false
     seenSqls shouldBe Nil
+
+  it should "pair correctly when postimage precedes preimage (the engine's actual sort order)" in new Stubs:
+    // ORDER BY snapshot_id, rowid, change_type sorts 'update_postimage' BEFORE
+    // 'update_preimage' ('post' < 'pre'), so production always sees this order.
+    queueDiffResults(
+      summary = List(("update_preimage", 1L), ("update_postimage", 1L)),
+      page = List((13L, 7L, "update_postimage", 2), (13L, 7L, "update_preimage", 1))
+    )
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    val r   = out.toOption.get
+    r.rows should have size 1
+    r.rows.head.changeType shouldBe "update"
+    r.rows.head.before.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(1)
+    r.rows.head.after.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(2)
+
+  it should "400 invalid_cursor on an all-digit cursor beyond Long range" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, cursor = Some("99999999999999999999:1"))
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_cursor"
+    seenSqls shouldBe Nil
+
+  it should "404 not_found on from == to for an unknown table (agreeing with from < to)" in new Stubs:
+    val h = handlers(
+      executorOverride = queuedExecutor,
+      readerOverride = stubReader(knownTables = Set(("tpch1", "other")))
+    )
+    val out = dataDiff(h, from = "42", to = "42")
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+    out.left.toOption.get._2.error shouldBe "not_found"

@@ -115,7 +115,8 @@ final class CatalogPreviewHandlers(
   private def parseCursor(raw: String): Option[(Long, Long)] =
     raw.split(':') match
       case Array(a, b) if a.nonEmpty && b.nonEmpty && a.forall(_.isDigit) && b.forall(_.isDigit) =>
-        Some((a.toLong, b.toLong))
+        // Try: an all-digit value beyond Long.MaxValue must be a 400, not a NumberFormatException.
+        scala.util.Try((a.toLong, b.toLong)).toOption
       case _ => None
 
   /** Map the request's `changeType` filter onto the raw change_type values; Left = unknown value.
@@ -526,35 +527,45 @@ final class CatalogPreviewHandlers(
                   case Right((fromId, toId)) if fromId == toId =>
                     // Empty diff by definition; also load-bearing: the (from + 1, to) call would
                     // name snapshot to + 1, which the engine rejects as an error when it does not
-                    // exist (verified live), not as an empty result.
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      AuditActions.CatalogDataDiffRead,
-                      "ok",
-                      tenant = Some(tid),
-                      target = target,
-                      detail = Map(
-                        "from"         -> fromId.toString,
-                        "to"           -> toId.toString,
-                        "rowsReturned" -> "0"
-                      )
-                    )
-                    IO.pure(
-                      Right(
-                        DataDiffResponse(
-                          schema,
-                          table,
-                          fromId,
-                          toId,
-                          DataDiffSummary(0, 0, 0),
-                          Nil,
-                          Nil,
-                          None,
-                          truncated = false
+                    // exist (verified live), not as an empty result. The table probe still runs so
+                    // from == to and from < to agree on the 404 for an unknown table.
+                    if !reader.tableExistsAt(schema, table, toId) then
+                      IO.pure(
+                        denied(
+                          StatusCode.NotFound,
+                          "not_found",
+                          s"table '$schema.$table' not found"
                         )
                       )
-                    )
+                    else
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.CatalogDataDiffRead,
+                        "ok",
+                        tenant = Some(tid),
+                        target = target,
+                        detail = Map(
+                          "from"         -> fromId.toString,
+                          "to"           -> toId.toString,
+                          "rowsReturned" -> "0"
+                        )
+                      )
+                      IO.pure(
+                        Right(
+                          DataDiffResponse(
+                            schema,
+                            table,
+                            fromId,
+                            toId,
+                            DataDiffSummary(0, 0, 0),
+                            Nil,
+                            Nil,
+                            None,
+                            truncated = false
+                          )
+                        )
+                      )
                   case Right((fromId, toId)) =>
                     if !(reader.tableExistsAt(schema, table, toId) ||
                         reader.tableExistsAt(schema, table, fromId))
@@ -664,7 +675,12 @@ final class CatalogPreviewHandlers(
               case None    =>
                 val pageResult = pageOutcome.toOption.get.toOption.get
                 try
-                  val (cols, rawRows, decoderTruncated) =
+                  // The decoder's truncation flag is structurally always false here (the SQL
+                  // LIMIT equals the decode cap, unlike preview's limit + 1 fetch), so hasMore
+                  // is decided purely by whether the entry loop consumed every decoded row: a
+                  // full fetch always renders more than `limit` entries (2 source rows max per
+                  // entry), so the loop stopping early implies unconsumed rows iff more exist.
+                  val (cols, rawRows, _) =
                     ArrowRowsDecoder.decode(pageResult.rows, fetch)
                   val snapIdx = cols.indexWhere(_.name.equalsIgnoreCase("snapshot_id"))
                   val rowIdx  = cols.indexWhere(_.name.equalsIgnoreCase("rowid"))
@@ -722,7 +738,7 @@ final class CatalogPreviewHandlers(
                           entries += DataDiffEntry(rendered, snap, row = Some(data))
                           lastKey = Some((snap, rid))
                           i += 1
-                    val hasMore    = decoderTruncated || i < src.length
+                    val hasMore    = i < src.length
                     val nextCursor = if hasMore then lastKey.map((s, r) => s"$s:$r") else None
                     audit.rest(
                       apiKey,
