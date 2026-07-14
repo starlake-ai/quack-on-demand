@@ -17,7 +17,8 @@ Boot the manager from the uber-jar (with TLS cert auto-gen + Postgres reachabili
 
 ```bash
 ./scripts/run-jar.sh           # foreground
-BUILD=1 ./scripts/run-jar.sh   # sbt assembly first
+QOD_VERSION=BUILD ./scripts/run-jar.sh   # sbt assembly first
+QOD_VERSION=LOCAL ./scripts/run-jar.sh   # newest distrib/ jar, no rebuild
 ./scripts/stop-jar.sh            # SIGTERM → wait → SIGKILL
 ```
 

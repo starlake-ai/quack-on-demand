@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { useEffect, useRef, useState } from 'react';
+import { api, ApiError } from '../api/client';
 import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
+  RecoverableTableEntry,
 } from '../api/types';
 import TableSchemaCard from './TableSchemaCard';
 
@@ -27,13 +28,62 @@ export default function CatalogBrowser({
   // the parent schema changes.
   const [expandedTable, setExpandedTable] = useState<string | null>(null);
 
+  // Recently dropped (Spec 03 undrop). Absent silently on tenant-dbs where the
+  // endpoint rejects (non-DuckLake kinds return 400 invalid_kind).
+  const [dropped, setDropped] = useState<RecoverableTableEntry[]>([]);
+  const [recoverTarget, setRecoverTarget] = useState<string | null>(null); // "schema.table"
+  const [recoverAs, setRecoverAs] = useState('');
+  const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const droppedSeq = useRef(0);
+
+  function reloadDropped() {
+    const seq = ++droppedSeq.current;
+    api.listRecoverable(tenant, tenantDb)
+      .then(r => { if (seq === droppedSeq.current) setDropped(r.tables); })
+      .catch(e => {
+        if (seq !== droppedSeq.current) return;
+        // Only the expected rejection (400 invalid_kind on non-DuckLake
+        // tenant-dbs) empties the section; a transient failure keeps the
+        // last known list instead of silently hiding recoverable tables.
+        if (e instanceof ApiError && e.status === 400) setDropped([]);
+      });
+  }
+
   useEffect(() => {
-    if (!tenant || !tenantDb) { setSchemas([]); return; }
+    if (!tenant || !tenantDb) { setSchemas([]); setDropped([]); return; }
     setError(null);
+    setRecoverTarget(null);
     api.listCatalogSchemas(tenant, tenantDb)
       .then(setSchemas)
       .catch(e => setError(String(e)));
+    reloadDropped();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, tenantDb]);
+
+  function recover(entry: RecoverableTableEntry) {
+    setRecovering(true);
+    setRecoverError(null);
+    const asName = recoverAs.trim();
+    api.undropTable({
+      tenant,
+      tenantDb,
+      schema: entry.schema,
+      table: entry.table,
+      asName: asName && asName !== entry.table ? asName : undefined,
+    })
+      .then(() => {
+        setRecoverTarget(null);
+        reloadDropped();
+        // Refresh the live lists: the restored table appears in its schema.
+        api.listCatalogSchemas(tenant, tenantDb).then(setSchemas).catch(() => {});
+        if (schema === entry.schema) {
+          api.listCatalogTables(tenant, tenantDb, schema).then(setTables).catch(() => {});
+        }
+      })
+      .catch(e => setRecoverError(e instanceof ApiError ? e.message : String(e)))
+      .finally(() => setRecovering(false));
+  }
 
   useEffect(() => {
     if (!tenant || !tenantDb || !schema) { setTables([]); return; }
@@ -168,6 +218,75 @@ export default function CatalogBrowser({
           )}
         </main>
       </div>
+
+      {dropped.length > 0 && (
+        <details style={{ marginTop: '1.5rem' }} open>
+          <summary style={{ cursor: 'pointer', color: 'var(--text-mute)' }}>
+            Recently dropped ({dropped.length})
+          </summary>
+          <p className="subtle" style={{ marginBottom: 4 }}>
+            Dropped tables stay recoverable until snapshot expiry reaps their last-live
+            snapshot; retention is the undo horizon.
+          </p>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th align="left">Table</th>
+                <th align="left">Dropped at</th>
+                <th align="right">Last-live snapshot</th>
+                <th align="left"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {dropped.map(d => {
+                const key = `${d.schema}.${d.table}`;
+                const open = recoverTarget === key;
+                return (
+                  <tr key={key} style={{ borderTop: '1px solid #eee' }}>
+                    <td><code>{key}</code></td>
+                    <td>{d.droppedAt ? new Date(d.droppedAt).toLocaleString() : '--'}</td>
+                    <td align="right">{d.lastLiveSnapshot}</td>
+                    <td>
+                      {!d.recoverable
+                        ? <em style={{ color: '#888' }}>no longer recoverable</em>
+                        : open
+                          ? (
+                            <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                              <input
+                                value={recoverAs}
+                                onChange={e => setRecoverAs(e.target.value)}
+                                style={{ width: 180 }}
+                                title="restore under this name"
+                              />
+                              <button type="button" disabled={recovering} onClick={() => recover(d)}>
+                                {recovering ? 'Recovering...' : 'Confirm'}
+                              </button>
+                              <button type="button" onClick={() => setRecoverTarget(null)}>
+                                Cancel
+                              </button>
+                            </span>
+                          )
+                          : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRecoverTarget(key);
+                                setRecoverAs(d.table);
+                                setRecoverError(null);
+                              }}
+                            >
+                              Recover
+                            </button>
+                          )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {recoverError && <p style={{ color: 'red' }}>Recover error: {recoverError}</p>}
+        </details>
+      )}
     </>
   );
 }

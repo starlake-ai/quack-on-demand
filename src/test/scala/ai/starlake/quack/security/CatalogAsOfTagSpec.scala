@@ -48,9 +48,9 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
         if schema == "tpch1" && table == "region" && !asOf.contains(VacuumedSnapshot) then
           Some(detail)
         else None
-      override def maxSnapshotId(): Option[Long] = Some(LiveSnapshot)
+      override def maxSnapshotId(): Option[Long]                           = Some(LiveSnapshot)
       override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(LiveSnapshot)
-      override def snapshotExists(id: Long): Boolean = id == LiveSnapshot
+      override def snapshotExists(id: Long): Boolean                       = id == LiveSnapshot
 
   private def get(client: HttpClient, url: String): HttpResponse[String] =
     client.send(
@@ -110,16 +110,26 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
     stub.seenAsOf shouldBe Some(Some(LiveSnapshot))
   }
 
+  it should "400 invalid_selector on a malformed asOfTs without touching the reader" in withHarness {
+    (h, stub) =>
+      val resp = get(h.httpClient, tableUrl(h, "?asOfTs=not-a-timestamp"))
+      withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 400)
+      resp.body() should include("invalid_selector")
+      resp.body() should include("asOfTs must be ISO-8601")
+      stub.seenAsOf shouldBe None
+  }
+
   it should "resolve asOfTs and return resolvedSnapshot in response" in withHarness { (h, stub) =>
-    val ts = "2026-01-01T00:00:00Z"
+    val ts   = "2026-01-01T00:00:00Z"
     val resp = get(h.httpClient, tableUrl(h, s"?asOfTs=$ts"))
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 200)
     resp.body() should include("\"resolvedSnapshot\"")
     stub.seenAsOf shouldBe Some(Some(LiveSnapshot))
   }
 
-  it should "return 410 snapshot_expired when asOf points to a vacuumed snapshot" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, s"?asOf=$VacuumedSnapshot"))
-    withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 410)
-    resp.body() should include("snapshot_expired")
+  it should "return 410 snapshot_expired when asOf points to a vacuumed snapshot" in withHarness {
+    (h, stub) =>
+      val resp = get(h.httpClient, tableUrl(h, s"?asOf=$VacuumedSnapshot"))
+      withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 410)
+      resp.body() should include("snapshot_expired")
   }

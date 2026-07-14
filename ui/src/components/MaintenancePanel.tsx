@@ -100,10 +100,35 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  // Manual run form.
+  // Manual run form. Schema/table come from the catalog browser endpoints so
+  // they render as selects; when the catalog has no schemas (or the fetch
+  // fails, e.g. a non-DuckLake tenant-db) the form falls back to free text.
   const [runScopeKind, setRunScopeKind] = useState<'tenantdb' | 'table'>('tenantdb');
   const [runScopeSchema, setRunScopeSchema] = useState('');
   const [runScopeTable, setRunScopeTable] = useState('');
+  const [runSchemas, setRunSchemas] = useState<string[]>([]);
+  const [runTables, setRunTables] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (runScopeKind !== 'table') return;
+    let cancelled = false;
+    api.listCatalogSchemas(tenant, tenantDb)
+      .then(r => { if (!cancelled) setRunSchemas(r.map(s => s.name)); })
+      .catch(() => { if (!cancelled) setRunSchemas([]); });
+    return () => { cancelled = true; };
+  }, [tenant, tenantDb, runScopeKind]);
+
+  useEffect(() => {
+    if (runScopeKind !== 'table' || !runScopeSchema || runSchemas.length === 0) {
+      setRunTables([]);
+      return;
+    }
+    let cancelled = false;
+    api.listCatalogTables(tenant, tenantDb, runScopeSchema)
+      .then(r => { if (!cancelled) setRunTables(r.map(t => t.name)); })
+      .catch(() => { if (!cancelled) setRunTables([]); });
+    return () => { cancelled = true; };
+  }, [tenant, tenantDb, runScopeKind, runScopeSchema, runSchemas.length]);
   const [runOps, setRunOps] = useState<string[]>([...ALL_OPERATIONS]);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNote, setRunNote] = useState<string | null>(null);
@@ -142,6 +167,22 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
       })
       .catch(e => { if (genRef.current === gen) setRunsError(String(e)); });
   }
+
+  // Auto-refresh the run history every 10s while any run is still active
+  // (queued or running), so a triggered run's progress shows up without a
+  // manual reload; the interval stops once everything has settled. Refresh
+  // re-fetches the first page, so any loaded-more tail collapses while a
+  // run is active.
+  useEffect(() => {
+    if (!runs?.some(r => r.status === 'queued' || r.status === 'running')) return;
+    // Capture the generation at install time: a tenant switch bumps genRef, so
+    // a tick that fires in the gap before this effect re-runs fails reloadRuns'
+    // generation check instead of fetching the old tenant under the new gen.
+    const gen = genRef.current;
+    const t = setInterval(() => reloadRuns(gen), 10_000);
+    return () => clearInterval(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs]);
 
   useEffect(() => {
     genRef.current += 1;
@@ -482,19 +523,46 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
             <>
               <label>
                 Schema
-                <input
-                  value={runScopeSchema}
-                  onChange={ev => setRunScopeSchema(ev.target.value)}
-                  placeholder="tpch1"
-                />
+                {runSchemas.length > 0
+                  ? (
+                    <select
+                      value={runScopeSchema}
+                      onChange={ev => { setRunScopeSchema(ev.target.value); setRunScopeTable(''); }}
+                    >
+                      <option value="">pick a schema</option>
+                      {runSchemas.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  )
+                  : (
+                    <input
+                      value={runScopeSchema}
+                      onChange={ev => setRunScopeSchema(ev.target.value)}
+                      placeholder="tpch1"
+                    />
+                  )}
               </label>
               <label>
                 Table
-                <input
-                  value={runScopeTable}
-                  onChange={ev => setRunScopeTable(ev.target.value)}
-                  placeholder="lineitem"
-                />
+                {runSchemas.length > 0 && (!runScopeSchema || runTables.length > 0)
+                  ? (
+                    <select
+                      value={runScopeTable}
+                      onChange={ev => setRunScopeTable(ev.target.value)}
+                      disabled={!runScopeSchema}
+                    >
+                      <option value="">{runScopeSchema ? 'pick a table' : 'pick a schema first'}</option>
+                      {runTables.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  )
+                  : (
+                    // Free text when there are no schemas at all OR the picked
+                    // schema's table list failed to load / is empty.
+                    <input
+                      value={runScopeTable}
+                      onChange={ev => setRunScopeTable(ev.target.value)}
+                      placeholder="lineitem"
+                    />
+                  )}
               </label>
             </>
           )}

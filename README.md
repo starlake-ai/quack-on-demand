@@ -92,7 +92,7 @@ ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load te
 
 Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
 
-**Other paths:** `./scripts/run-jar.sh` for a bare-JVM run (downloads the released uber-jar, `BUILD=1` builds from this checkout). The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
+**Other paths:** `./scripts/run-jar.sh` for a bare-JVM run (downloads the released uber-jar, `QOD_VERSION=BUILD` builds from this checkout). The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
 
 ---
 

@@ -668,6 +668,65 @@ export interface SchemaDiffResponse {
   nullabilityChanged: SchemaDiffNullability[];
 }
 
+// ----- Catalog data diff (Spec 02) -----
+
+export interface DataDiffSummary {
+  inserted: number;
+  deleted: number;
+  updated: number;
+}
+
+export interface DataDiffEntry {
+  changeType: string;            // insert | delete | update | raw update_* passthrough
+  snapshotId: number;
+  row?: unknown[] | null;        // insert/delete/bare entries
+  before?: unknown[] | null;     // paired updates
+  after?: unknown[] | null;
+}
+
+export interface DataDiffResponse {
+  schema: string;
+  table: string;
+  from: number;
+  to: number;
+  summary: DataDiffSummary;
+  columns: PreviewColumn[];
+  rows: DataDiffEntry[];
+  nextCursor?: string | null;
+  truncated: boolean;
+}
+
+// ----- Undrop (Spec 03) -----
+
+export interface RecoverableTableEntry {
+  schema: string;
+  table: string;
+  droppedAtSnapshot: number;
+  lastLiveSnapshot: number;
+  droppedAt?: string | null;   // ISO-8601; absent once the drop snapshot itself expired
+  recoverable: boolean;
+}
+
+export interface RecoverableListResponse {
+  tables: RecoverableTableEntry[];
+}
+
+export interface UndropRequest {
+  tenant: string;
+  tenantDb: string;
+  schema: string;
+  table: string;
+  asName?: string;
+  fromSnapshot?: number;
+}
+
+export interface UndropResponse {
+  schema: string;
+  table: string;
+  restoredAs: string;
+  fromSnapshot: number;
+}
+
 // ----- Managed maintenance (EPIC Spec 09) -----
 // Mirrors the Scala DTOs in ondemand/api/Dtos.scala; field names must match
 // the circe codecs exactly. Absent optionals serialize as null on responses.

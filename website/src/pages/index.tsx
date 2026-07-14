@@ -51,9 +51,10 @@ function Hero() {
             <span className={styles.titleAccent}>on demand.</span>
           </h1>
           <p className={styles.subtitle}>
-            Runs fleets of DuckDB Quack nodes on your own Kubernetes. Per-tenant
-            isolation,  fine-grained ACLs, federated queries. Query it from any
-            ODBC/JDBC/ADBC client. Works with any ETL.
+            From a single Docker container on one node to fleets of DuckDB Quack
+            nodes on your own Kubernetes. Per-tenant isolation, fine-grained ACLs,
+            federated queries. Query it from any ODBC/JDBC/ADBC client. Works with
+            any ETL.
           </p>
           <div className={styles.ctaRow}>
             <Link className={styles.ctaPrimary} to="/getting-started/quickstart">

@@ -28,8 +28,7 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 
 | Env var | Default | Effect |
 |---|---|---|
-| `BUILD` | `0` | `1` runs `sbt assembly` first instead of using the existing jar. |
-| `QOD_VERSION` | latest | Release to resolve from Maven Central (`0.3.2`, `latest-snapshot`, ...). |
+| `QOD_VERSION` | latest | Where the jar comes from: a release to resolve from Maven Central (`0.3.2`, `latest-snapshot`, ...), `BUILD` (run `sbt assembly` first), or `LOCAL` (newest `distrib/` jar, no rebuild, no Central lookup). |
 | `LOAD_TPCH` | unset | Positive integer scale factor: seeds TPC-H sf=N into `acme/acme_tpch`. |
 | `LOAD_TPCDS` | unset | Positive integer scale factor: seeds TPC-DS sf=N into `globex/globex_tpcds`. |
 | `LOAD_SSB` | unset | Positive integer scale factor: derives the SSB star schema (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) from TPC-H dbgen at sf=N into `acme/acme_tpch` schema `ssb1`. |
@@ -41,7 +40,8 @@ Boots the manager from the uber-jar with TLS cert auto-generation and a Postgres
 
 ```bash
 ./scripts/run-jar.sh
-BUILD=1 ./scripts/run-jar.sh
+QOD_VERSION=BUILD ./scripts/run-jar.sh
+QOD_VERSION=LOCAL ./scripts/run-jar.sh
 NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh                       # fresh boot + TPC-H only
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-jar.sh         # both, independent SFs
 NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh          # single-DuckDB profile: acme, 1 dual node
@@ -50,7 +50,7 @@ NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh          # single-DuckDB pr
 
 ### `run-docker-compose.sh`
 
-Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `BUILD` / `QOD_VERSION` / `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` / `LOAD_TPC` / `DEMO` / `NUKE` flags as above, plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
+Brings up the full stack (manager + Postgres, plus optional profiles) via Docker Compose. Same `QOD_VERSION` / `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` / `LOAD_TPC` / `DEMO` / `NUKE` flags as above (here `QOD_VERSION` picks the image tag, and `BUILD=1` builds the image from the repo Dockerfile instead), plus `PROFILES` (comma-separated, e.g. `observability,seaweedfs`). See [Docker deployment](/operating/deploy-docker).
 
 ```bash
 ./scripts/run-docker-compose.sh

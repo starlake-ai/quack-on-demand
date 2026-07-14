@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type {
   CatalogSnapshotEntry,
   CatalogTableDetailResponse,
   CatalogTagEntry,
+  DataDiffResponse,
   PreviewResponse,
   SchemaDiffResponse,
 } from '../api/types';
@@ -82,8 +83,19 @@ export default function CatalogTableDetail() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
 
-  // Which tab is showing. Tabs owns its own active state; this mirror only
-  // exists so the selector-change effect knows whether to refetch the preview.
+  // ----- Compare tab "Data" mode (Spec 02 row-level diff) -----
+  const [compareMode, setCompareMode] = useState<'schema' | 'data'>('schema');
+  const [dataDiff, setDataDiff] = useState<DataDiffResponse | null>(null);
+  const [dataDiffLoading, setDataDiffLoading] = useState(false);
+  const [dataDiffError, setDataDiffError] = useState<string | null>(null);
+  const [dataDiffFilter, setDataDiffFilter] = useState('');
+  // Monotonic request sequence: only the newest in-flight data-diff request may
+  // commit its result, so out-of-order responses cannot clobber newer ones.
+  const dataDiffSeq = useRef(0);
+
+  // Which tab is showing. Tabs runs controlled off this state so the
+  // selector-change effect knows whether to refetch the preview AND the
+  // history panel's Compare action can switch tabs programmatically.
   const initialTab = diffFromParam && diffToParam ? 'compare' : 'columns';
   const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -127,6 +139,8 @@ export default function CatalogTableDetail() {
   useEffect(() => {
     setDiff(null);
     setDiffError(null);
+    setDataDiff(null);
+    setDataDiffError(null);
     if (tenant && tenantDb && schema && table && diffFromParam && diffToParam) {
       loadDiff(diffFromParam, diffToParam);
     }
@@ -173,21 +187,57 @@ export default function CatalogTableDetail() {
       .finally(() => setDiffLoading(false));
   }
 
+  // A bounds change invalidates any loaded data diff: clearing it removes the
+  // Load more / filter controls, so a stale cursor can never append rows from
+  // a different (from, to) range; bumping the sequence drops in-flight replies.
+  useEffect(() => {
+    setDataDiff(null);
+    setDataDiffError(null);
+    dataDiffSeq.current++;
+  }, [diffFrom, diffTo]);
+
+  function loadDataDiff(opts?: { cursor?: string; changeType?: string }) {
+    if (!tenant || !tenantDb || !schema || !table) return;
+    const from = selectorToBound(diffFrom);
+    const to = selectorToBound(diffTo);
+    if (!from || !to) {
+      setDataDiffError('pick a "from" and a "to" snapshot or tag (a live timestamp cannot be diffed directly)');
+      return;
+    }
+    const rawFilter = opts?.changeType !== undefined ? opts.changeType : dataDiffFilter;
+    const seq = ++dataDiffSeq.current;
+    setDataDiffLoading(true);
+    setDataDiffError(null);
+    api.catalogDataDiff(tenant, tenantDb, schema, table, from, to, {
+      cursor: opts?.cursor,
+      changeType: rawFilter || undefined,
+    })
+      .then(r => {
+        if (seq !== dataDiffSeq.current) return;
+        setDataDiff(prev => (opts?.cursor && prev ? { ...r, rows: [...prev.rows, ...r.rows] } : r));
+      })
+      .catch(e => {
+        if (seq === dataDiffSeq.current) setDataDiffError(e instanceof ApiError ? e.message : String(e));
+      })
+      .finally(() => {
+        if (seq === dataDiffSeq.current) setDataDiffLoading(false);
+      });
+  }
+
   function viewAsOfSnapshot(snapshotId: number) {
     const next = new URLSearchParams(searchParams);
     writeSelectorToSearchParams(next, `id:${snapshotId}`);
     setSearchParams(next);
   }
 
-  // compareFromHistory loads the diff and stamps ?diffFrom/&diffTo; the result is visible when
-  // the user opens the Compare tab (the Tabs component owns tab state and remounts bodies, so
-  // the page cannot switch tabs programmatically without changing the shared component - out
-  // of scope here). viewAsOfSnapshot sets the page-wide AS OF selector, so the banner appears
-  // immediately and every tab reflects the chosen snapshot.
+  // compareFromHistory loads the diff, stamps ?diffFrom/&diffTo, and switches to the Compare
+  // tab (Tabs runs controlled off activeTab). viewAsOfSnapshot sets the page-wide AS OF
+  // selector, so the banner appears immediately and every tab reflects the chosen snapshot.
   function compareFromHistory(from: number, to: number) {
     setDiffFrom(`id:${from}`);
     setDiffTo(`id:${to}`);
     loadDiff(String(from), String(to));
+    setActiveTab('compare');
   }
 
   const tEnc  = encodeURIComponent(tenant!);
@@ -294,6 +344,7 @@ export default function CatalogTableDetail() {
               remount-on-switch behavior does not drop loaded results. */}
           <Tabs
             initialId={initialTab}
+            activeId={activeTab}
             onSelect={id => {
               setActiveTab(id);
               if (id === 'preview') loadPreview();
@@ -414,6 +465,22 @@ export default function CatalogTableDetail() {
                 label: 'Compare',
                 body: (
                   <>
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                      <button
+                        type="button"
+                        disabled={compareMode === 'schema'}
+                        onClick={() => setCompareMode('schema')}
+                      >
+                        Schema
+                      </button>
+                      <button
+                        type="button"
+                        disabled={compareMode === 'data'}
+                        onClick={() => setCompareMode('data')}
+                      >
+                        Data
+                      </button>
+                    </div>
                     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
                       <SnapshotPicker
                         tenant={tenant!}
@@ -433,12 +500,20 @@ export default function CatalogTableDetail() {
                         tags={tags}
                         label="To"
                       />
-                      <button type="button" onClick={() => loadDiff()} disabled={diffLoading}>
-                        {diffLoading ? 'Comparing...' : 'Compare'}
+                      <button
+                        type="button"
+                        onClick={() => (compareMode === 'schema' ? loadDiff() : loadDataDiff())}
+                        disabled={compareMode === 'schema' ? diffLoading : dataDiffLoading}
+                      >
+                        {(compareMode === 'schema' ? diffLoading : dataDiffLoading)
+                          ? 'Comparing...'
+                          : 'Compare'}
                       </button>
                     </div>
-                    {diffError && <p style={{ color: 'red' }}>Error: {diffError}</p>}
-                    {diff && (
+                    {compareMode === 'schema' && diffError && (
+                      <p style={{ color: 'red' }}>Error: {diffError}</p>
+                    )}
+                    {compareMode === 'schema' && diff && (
                       <div>
                         <p className="subtle">
                           Diffing snapshot {diff.from} against snapshot {diff.to}.
@@ -488,6 +563,112 @@ export default function CatalogTableDetail() {
                             </table>
                           )}
                       </div>
+                    )}
+                    {compareMode === 'data' && (
+                      <>
+                        {dataDiffError && <p style={{ color: 'red' }}>Error: {dataDiffError}</p>}
+                        {dataDiffLoading && !dataDiff && <p className="subtle">Loading...</p>}
+                        {dataDiff && (
+                          <div>
+                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+                              <span style={{ background: 'rgba(34, 197, 94, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                                +{dataDiff.summary.inserted.toLocaleString()} inserted
+                              </span>
+                              <span style={{ background: 'rgba(239, 68, 68, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                                -{dataDiff.summary.deleted.toLocaleString()} deleted
+                              </span>
+                              <span style={{ background: 'rgba(251, 191, 36, 0.15)', borderRadius: 4, padding: '2px 10px', fontSize: '0.9rem' }}>
+                                ~{dataDiff.summary.updated.toLocaleString()} updated
+                              </span>
+                              <label style={{ fontSize: '0.85rem' }}>Change type{' '}
+                                <select
+                                  value={dataDiffFilter}
+                                  onChange={e => {
+                                    setDataDiffFilter(e.target.value);
+                                    loadDataDiff({ changeType: e.target.value });
+                                  }}
+                                >
+                                  <option value="">all</option>
+                                  <option value="insert">insert</option>
+                                  <option value="delete">delete</option>
+                                  <option value="update">update</option>
+                                </select>
+                              </label>
+                              <span className="subtle">
+                                snapshots {dataDiff.from} {'->'} {dataDiff.to}
+                              </span>
+                            </div>
+                            {dataDiff.rows.length === 0
+                              ? <em style={{ color: '#888' }}>no row changes</em>
+                              : (
+                                <div style={{ overflowX: 'auto' }}>
+                                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                    <thead>
+                                      <tr>
+                                        <th align="left">Change</th>
+                                        <th align="right">Snapshot</th>
+                                        {dataDiff.columns.map(c => (
+                                          <th key={c.name} align="left">
+                                            {c.name}<br />
+                                            <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {dataDiff.rows.map((e, i) => {
+                                        const cell = (v: unknown, j: number, style?: CSSProperties) => (
+                                          <td key={j} style={style}>
+                                            {v === null || v === undefined
+                                              ? <em style={{ color: '#888' }}>null</em>
+                                              : String(v)}
+                                          </td>
+                                        );
+                                        if (e.changeType === 'update') {
+                                          return (
+                                            <Fragment key={i}>
+                                              <tr style={{ borderTop: '1px solid #eee', background: 'rgba(251, 191, 36, 0.1)' }}>
+                                                <td rowSpan={2}>update</td>
+                                                <td rowSpan={2} align="right">{e.snapshotId}</td>
+                                                {(e.before ?? []).map((v, j) =>
+                                                  cell(v, j, { opacity: 0.6, textDecoration: 'line-through' }))}
+                                              </tr>
+                                              <tr style={{ background: 'rgba(251, 191, 36, 0.1)' }}>
+                                                {(e.after ?? []).map((v, j) => cell(v, j))}
+                                              </tr>
+                                            </Fragment>
+                                          );
+                                        }
+                                        const bg = e.changeType === 'insert'
+                                          ? 'rgba(34, 197, 94, 0.1)'
+                                          : e.changeType === 'delete'
+                                            ? 'rgba(239, 68, 68, 0.1)'
+                                            : 'rgba(148, 163, 184, 0.1)';
+                                        return (
+                                          <tr key={i} style={{ borderTop: '1px solid #eee', background: bg }}>
+                                            <td>{e.changeType}</td>
+                                            <td align="right">{e.snapshotId}</td>
+                                            {(e.row ?? []).map((v, j) => cell(v, j))}
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            {dataDiff.nextCursor && !dataDiffLoading && (
+                              <button
+                                type="button"
+                                style={{ marginTop: 12 }}
+                                onClick={() => loadDataDiff({ cursor: dataDiff.nextCursor! })}
+                              >
+                                Load more
+                              </button>
+                            )}
+                            {dataDiffLoading && <p className="subtle">Loading...</p>}
+                          </div>
+                        )}
+                      </>
                     )}
                   </>
                 ),

@@ -38,6 +38,7 @@ final class ManagerServer(
     maintenance: Option[MaintenanceHandlers],
     preview: Option[CatalogPreviewHandlers],
     catalogHistory: Option[CatalogHistoryHandlers],
+    undrop: Option[CatalogUndropHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -179,22 +180,9 @@ final class ManagerServer(
         },
         CatalogEndpoints.getTableEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, token) =>
-            val asOfTs: Option[java.time.Instant] = asOfTsRaw.flatMap { raw =>
-              try Some(java.time.Instant.parse(raw))
-              catch case _ => None
-            }
-            val parseError =
-              if asOfTsRaw.isDefined && asOfTs.isEmpty then
-                Some(
-                  (
-                    sttp.model.StatusCode.BadRequest,
-                    ErrorResponse("invalid_selector", "asOfTs must be ISO-8601")
-                  )
-                )
-              else None
-            parseError match
-              case Some(e) => IO.pure(Left(e))
-              case None    =>
+            QueryParams.instantAs(asOfTsRaw, "asOfTs", "invalid_selector") match
+              case Left(e)       => IO.pure(Left(e))
+              case Right(asOfTs) =>
                 IO.blocking(
                   h.getTable(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, token)(
                     sessions.scopeOf
@@ -260,22 +248,9 @@ final class ManagerServer(
       List[ServerEndpoint[Any, IO]](
         TimeTravelEndpoints.previewEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, limit, token) =>
-            val asOfTs: Option[java.time.Instant] = asOfTsRaw.flatMap { raw =>
-              try Some(java.time.Instant.parse(raw))
-              catch case _ => None
-            }
-            val parseError =
-              if asOfTsRaw.isDefined && asOfTs.isEmpty then
-                Some(
-                  (
-                    sttp.model.StatusCode.BadRequest,
-                    ErrorResponse("invalid_selector", "asOfTs must be ISO-8601")
-                  )
-                )
-              else None
-            parseError match
-              case Some(e) => IO.pure(Left(e))
-              case None    =>
+            QueryParams.instantAs(asOfTsRaw, "asOfTs", "invalid_selector") match
+              case Left(e)       => IO.pure(Left(e))
+              case Right(asOfTs) =>
                 h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, token)(
                   sessions.scopeOf
                 )
@@ -283,6 +258,24 @@ final class ManagerServer(
         TimeTravelEndpoints.schemaDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, token) =>
             h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(sessions.scopeOf)
+        },
+        TimeTravelEndpoints.dataDiffEndpoint.serverLogic {
+          case (tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token) =>
+            h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token)(
+              sessions.scopeOf
+            )
+        }
+      )
+    }
+
+    // Undrop (Spec 03). Session-gated per request via TenantScopeCheck inside the handler.
+    val undropEndpoints: List[ServerEndpoint[Any, IO]] = undrop.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        UndropEndpoints.recoverableEndpoint.serverLogic { case (tenant, tenantDb, limit, token) =>
+          h.recoverable(tenant, tenantDb, limit, token)(sessions.scopeOf)
+        },
+        UndropEndpoints.undropEndpoint.serverLogic { case (req, token) =>
+          h.undrop(req, token)(sessions.scopeOf)
         }
       )
     }
@@ -304,26 +297,10 @@ final class ManagerServer(
               author,
               token
             ) =>
-          def parseTs(
-              raw: Option[String],
-              name: String
-          ): Either[(sttp.model.StatusCode, ErrorResponse), Option[java.time.Instant]] =
-            raw match
-              case None    => Right(None)
-              case Some(r) =>
-                try Right(Some(java.time.Instant.parse(r)))
-                catch
-                  case _: Exception =>
-                    Left(
-                      (
-                        sttp.model.StatusCode.BadRequest,
-                        ErrorResponse("invalid_filter", s"$name must be ISO-8601")
-                      )
-                    )
           val bounds =
             for
-              from <- parseTs(fromRaw, "from")
-              to   <- parseTs(toRaw, "to")
+              from <- QueryParams.instantAs(fromRaw, "from", "invalid_filter")
+              to   <- QueryParams.instantAs(toRaw, "to", "invalid_filter")
             yield (from, to)
           bounds match
             case Left(e)           => IO.pure(Left(e))
@@ -629,7 +606,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

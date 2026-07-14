@@ -68,10 +68,14 @@ object AuditActions:
   val TagHoldCreate = "tag.hold.create"
   val TagHoldRemove = "tag.hold.remove"
   // catalog browser reads (Spec 00; emitted only when catalog.auditCatalogReads is on)
-  val CatalogRead           = "catalog.read"
-  val CatalogPreviewRead    = "catalog.preview.read"
-  val CatalogSchemaDiffRead = "catalog.schemadiff.read"
-  val CatalogHistoryRead    = "catalog.history.read"
+  val CatalogRead            = "catalog.read"
+  val CatalogPreviewRead     = "catalog.preview.read"
+  val CatalogSchemaDiffRead  = "catalog.schemadiff.read"
+  val CatalogHistoryRead     = "catalog.history.read"
+  val CatalogDataDiffRead    = "catalog.datadiff.read"
+  val CatalogRecoverableRead = "catalog.recoverable.read"
+  // undrop is a mutation (routed CTAS), not a read; audited unconditionally
+  val CatalogUndrop = "catalog.undrop"
   // managed maintenance (Spec 09)
   val MaintenanceRun          = "maintenance.run"
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
@@ -144,6 +148,9 @@ object AuditActions:
     CatalogPreviewRead,
     CatalogSchemaDiffRead,
     CatalogHistoryRead,
+    CatalogDataDiffRead,
+    CatalogRecoverableRead,
+    CatalogUndrop,
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,

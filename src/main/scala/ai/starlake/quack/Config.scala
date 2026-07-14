@@ -294,7 +294,15 @@ final case class CatalogConfig(
       envVar = "QOD_CATALOG_PREVIEW_TIMEOUT_SEC",
       description = "Seconds before a catalog data-preview query is cancelled."
     )
-    previewTimeoutSec: Int = 30
+    previewTimeoutSec: Int = 30,
+    @field @ConfigField(
+      envVar = "QOD_CATALOG_UNDROP_TIMEOUT_SEC",
+      description =
+        "Seconds before an undrop recovery CTAS is abandoned. Larger than the preview timeout " +
+          "because it is a mutation over potentially large tables; on timeout the handler " +
+          "probes whether the table was created anyway and reports accordingly."
+    )
+    undropTimeoutSec: Int = 300
 )
 
 final case class TelemetryConfig(

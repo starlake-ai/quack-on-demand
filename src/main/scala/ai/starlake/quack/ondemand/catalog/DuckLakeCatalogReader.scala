@@ -45,6 +45,20 @@ final case class TableHistoryPage(
     hasMore: Boolean
 )
 
+/** One dropped-but-maybe-recoverable table (Spec 03 undrop). `lastLiveSnapshot` is the snapshot the
+  * table can be read AT to reconstruct its final state (`droppedAtSnapshot - 1`); `recoverable` is
+  * false once that snapshot has been expired. `droppedAt` is the drop snapshot's ISO-8601 commit
+  * time when that snapshot itself still exists.
+  */
+final case class DroppedTableEntry(
+    schema: String,
+    table: String,
+    droppedAtSnapshot: Long,
+    lastLiveSnapshot: Long,
+    droppedAt: Option[String],
+    recoverable: Boolean
+)
+
 /** Reads schemas / tables / columns / data files out of the DuckLake metadata tables. The metadata
   * schema is fixed by DuckLake itself (`ducklake_schema`, `ducklake_table`, `ducklake_column`,
   * `ducklake_data_file`) and lives in the same Postgres DB the catalog is attached to.
@@ -140,6 +154,56 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
 
   def snapshotExists(id: Long): Boolean =
     query("SELECT 1 FROM ducklake_snapshot WHERE snapshot_id = ?", id)(_ => 1).nonEmpty
+
+  /** Dropped tables, newest drop first (Spec 03 undrop). A renamed/altered table keeps a live
+    * `ducklake_table` row for its table_id, so the NOT EXISTS arm restricts to true drops. The drop
+    * transaction end-dates the row at the drop snapshot D, so last-live = D - 1 (verified live
+    * 2026-07-14, see the undrop design doc); `recoverable` checks that snapshot still exists (not
+    * expired). The schema row is deliberately joined without an end_snapshot filter so tables of a
+    * dropped schema still list.
+    */
+  private val droppedTablesSelect =
+    """SELECT s.schema_name,
+      |       t.table_name,
+      |       t.end_snapshot AS dropped_at_snapshot,
+      |       sn.snapshot_time AS dropped_at,
+      |       EXISTS(SELECT 1 FROM ducklake_snapshot e
+      |               WHERE e.snapshot_id = t.end_snapshot - 1) AS recoverable
+      |  FROM ducklake_table t
+      |  JOIN ducklake_schema s ON s.schema_id = t.schema_id
+      |  LEFT JOIN ducklake_snapshot sn ON sn.snapshot_id = t.end_snapshot
+      | WHERE t.end_snapshot IS NOT NULL
+      |   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
+      |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)""".stripMargin
+
+  private def droppedEntry(rs: ResultSet): DroppedTableEntry =
+    val d = rs.getLong("dropped_at_snapshot")
+    DroppedTableEntry(
+      schema = rs.getString("schema_name"),
+      table = rs.getString("table_name"),
+      droppedAtSnapshot = d,
+      lastLiveSnapshot = d - 1,
+      droppedAt = Option(rs.getTimestamp("dropped_at")).map(_.toInstant.toString),
+      recoverable = rs.getBoolean("recoverable")
+    )
+
+  def listDroppedTables(limit: Int = 50): List[DroppedTableEntry] =
+    query(
+      droppedTablesSelect + "\n ORDER BY t.end_snapshot DESC, t.table_name\n LIMIT ?",
+      limit
+    )(droppedEntry)
+
+  /** Targeted lookup for the undrop path: unlike paging through [[listDroppedTables]], this finds a
+    * dropped table regardless of how many drops happened after it (the discovery list caps at 200).
+    * Newest drop of that name wins when the name was dropped more than once.
+    */
+  def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
+    query(
+      droppedTablesSelect +
+        "\n   AND s.schema_name = ? AND t.table_name = ?\n ORDER BY t.end_snapshot DESC\n LIMIT 1",
+      schema,
+      table
+    )(droppedEntry).headOption
 
   /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
   def maxSnapshotId(): Option[Long] =
@@ -592,19 +656,23 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
     * (already used unscoped by `filesScheduledForDeletion`), which carries no `table_id` or
     * `snapshot_id` column. `schedule_start` matches the triggering snapshot's `snapshot_time`
     * exactly (same transaction), so `sched` joins on that equality and scopes to this table via a
-    * `path LIKE 'schema/table/%'` prefix. `sched` deliberately does NOT participate in the
-    * membership WHERE below - `schedule_start = snapshot_time` is a timestamp-equality join with no
-    * snapshot_id/table_id on the DuckLake side, so on a timestamp collision between two snapshots
-    * it could admit a foreign snapshot into this table's timeline; compaction snapshots are already
-    * members via `tf` (the merged output file's `ducklake_data_file` row has `begin_snapshot` = the
-    * compaction snapshot). `tr.files_removed + sched.n` is a plain sum, not `greatest(...)`:
-    * verified against a live catalog that the two never populate for the same `snapshot_id` -
-    * DuckLake rejects a transaction that both writes data and compacts ("Transactions can either
-    * make changes OR perform compaction - not both"), and separate DML vs. compaction transactions
-    * land on different snapshot_ids, so `tr` (keyed by a DML snapshot's end_snapshot) and `sched`
-    * (keyed by a compaction snapshot's own snapshot_id) are structurally disjoint keys; re-verify
-    * this invariant on a DuckLake pin bump. Row/file deltas are computed from this live metadata,
-    * so they decay once maintenance has run: `filesRemoved` reads
+    * `path LIKE 'schema/table/%'` prefix. That prefix scoping UNDERCOUNTS in two known cases: a
+    * renamed table (rows scheduled under the old name no longer match the current `schema/table/%`
+    * prefix) and files stored with `path_is_relative = false` (absolute paths never match the
+    * relative prefix); both make `filesRemoved` read low, never high. `sched` deliberately does NOT
+    * participate in the membership WHERE below - `schedule_start = snapshot_time` is a
+    * timestamp-equality join with no snapshot_id/table_id on the DuckLake side, so on a timestamp
+    * collision between two snapshots it could admit a foreign snapshot into this table's timeline;
+    * compaction snapshots are already members via `tf` (the merged output file's
+    * `ducklake_data_file` row has `begin_snapshot` = the compaction snapshot).
+    * `tr.files_removed + sched.n` is a plain sum, not `greatest(...)`: verified against a live
+    * catalog that the two never populate for the same `snapshot_id` - DuckLake rejects a
+    * transaction that both writes data and compacts ("Transactions can either make changes OR
+    * perform compaction - not both"), and separate DML vs. compaction transactions land on
+    * different snapshot_ids, so `tr` (keyed by a DML snapshot's end_snapshot) and `sched` (keyed by
+    * a compaction snapshot's own snapshot_id) are structurally disjoint keys; re-verify this
+    * invariant on a DuckLake pin bump. Row/file deltas are computed from this live metadata, so
+    * they decay once maintenance has run: `filesRemoved` reads
     * `ducklake_files_scheduled_for_deletion`, whose rows are consumed by
     * `ducklake_cleanup_old_files` (part of the shipped Spec 09 maintenance chain), so a commit's
     * `filesRemoved` reverts to 0 after cleanup runs; and `merge_adjacent` hard-deletes the

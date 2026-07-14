@@ -10,7 +10,7 @@ object HandlerResolvers:
 
   /** Resolve a `tenant` request field (display name OR surrogate id) to the canonical
     * `qodstate_tenant.id`, the same way `Role`/`Group`/`PoolPermission` handlers do. Distinct from
-    * `MaintenanceHandlers`/`TagHandlers`'s `resolveTenantId`, which resolves through
+    * [[TenantDbGate.resolveTenantId]], which resolves through
     * `sup.getTenantById(...).orElse(sup.getTenant(...))` and has different fallback semantics; left
     * alone here.
     */

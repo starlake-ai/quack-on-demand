@@ -23,7 +23,7 @@ import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.memory.RootAllocator
-import org.apache.arrow.vector.{IntVector, VectorSchemaRoot}
+import org.apache.arrow.vector.{BigIntVector, IntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, Schema}
 import org.scalatest.flatspec.AnyFlatSpec
@@ -51,6 +51,62 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     root.allocateNew()
     root.getVector("id").asInstanceOf[IntVector].setSafe(0, 1)
     root.setRowCount(1)
+    writer.writeBatch()
+    writer.end()
+    writer.close()
+    root.close()
+    new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
+
+  /** `ducklake_table_changes`-shaped Arrow stream: (snapshot_id, rowid, change_type, id) rows. */
+  private def changesReader(
+      rows: List[(Long, Long, String, Int)]
+  ): org.apache.arrow.vector.ipc.ArrowReader =
+    val allocator = new RootAllocator()
+    val schema    = new Schema(
+      java.util.List.of(
+        Field.nullable("snapshot_id", new ArrowType.Int(64, true)),
+        Field.nullable("rowid", new ArrowType.Int(64, true)),
+        Field.nullable("change_type", new ArrowType.Utf8()),
+        Field.nullable("id", new ArrowType.Int(32, true))
+      )
+    )
+    val root   = VectorSchemaRoot.create(schema, allocator)
+    val out    = new ByteArrayOutputStream()
+    val writer = new ArrowStreamWriter(root, null, out)
+    writer.start()
+    root.allocateNew()
+    rows.zipWithIndex.foreach { case ((snap, rid, ct, id), i) =>
+      root.getVector("snapshot_id").asInstanceOf[BigIntVector].setSafe(i, snap)
+      root.getVector("rowid").asInstanceOf[BigIntVector].setSafe(i, rid)
+      root.getVector("change_type").asInstanceOf[VarCharVector].setSafe(i, ct.getBytes("UTF-8"))
+      root.getVector("id").asInstanceOf[IntVector].setSafe(i, id)
+    }
+    root.setRowCount(rows.length)
+    writer.writeBatch()
+    writer.end()
+    writer.close()
+    root.close()
+    new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
+
+  /** Aggregate-summary-shaped Arrow stream: (change_type, n) rows. */
+  private def summaryReader(counts: List[(String, Long)]): org.apache.arrow.vector.ipc.ArrowReader =
+    val allocator = new RootAllocator()
+    val schema    = new Schema(
+      java.util.List.of(
+        Field.nullable("change_type", new ArrowType.Utf8()),
+        Field.nullable("n", new ArrowType.Int(64, true))
+      )
+    )
+    val root   = VectorSchemaRoot.create(schema, allocator)
+    val out    = new ByteArrayOutputStream()
+    val writer = new ArrowStreamWriter(root, null, out)
+    writer.start()
+    root.allocateNew()
+    counts.zipWithIndex.foreach { case ((ct, n), i) =>
+      root.getVector("change_type").asInstanceOf[VarCharVector].setSafe(i, ct.getBytes("UTF-8"))
+      root.getVector("n").asInstanceOf[BigIntVector].setSafe(i, n)
+    }
+    root.setRowCount(counts.length)
     writer.writeBatch()
     writer.end()
     writer.close()
@@ -150,19 +206,36 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         seenPoolKey = Some(poolKey)
         executorResult
 
+    // dataDiff issues two statements (summary, then page); this queue hands them out in order
+    // while still recording every SQL text.
+    var seenSqls: List[String]                                        = Nil
+    var executorResults: List[IO[Either[RouterFailure, QueryResult]]] = Nil
+    val queuedExecutor: CatalogPreviewHandlers.PreviewExecutor        =
+      (connectionId, user, poolKey, sql) =>
+        seenSqls = seenSqls :+ sql
+        seenUser = Some(user)
+        seenPoolKey = Some(poolKey)
+        executorResults match
+          case head :: tail =>
+            executorResults = tail
+            head
+          case Nil => executorResult
+
     def handlers(
         cfgOverride: CatalogConfig = cfg,
         sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
-        readerOverride: DuckLakeCatalogReader = stubReader()
+        readerOverride: DuckLakeCatalogReader = stubReader(),
+        executorOverride: CatalogPreviewHandlers.PreviewExecutor = executor
     ): CatalogPreviewHandlers =
       new CatalogPreviewHandlers(
         sup,
         store,
         sessionsOverride,
-        executor,
+        executorOverride,
         (_, _) => readerOverride,
         cfgOverride,
-        audit
+        catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+        audit = audit
       )
 
     def preview(
@@ -191,6 +264,32 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         apiKey: Option[String] = NoKey
     ) =
       h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(NoScope).unsafeRunSync()
+
+    def dataDiff(
+        h: CatalogPreviewHandlers,
+        tenant: String = "acme",
+        tenantDb: String = "acme_tpch1",
+        schema: String = "tpch1",
+        table: String = "region",
+        from: String = "12",
+        to: String = "42",
+        limit: Option[Int] = None,
+        cursor: Option[String] = None,
+        changeType: Option[String] = None,
+        apiKey: Option[String] = NoKey
+    ) =
+      h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, apiKey)(
+        NoScope
+      ).unsafeRunSync()
+
+    def queueDiffResults(
+        summary: List[(String, Long)],
+        page: List[(Long, Long, String, Int)]
+    ): Unit =
+      executorResults = List(
+        IO.pure(Right(QueryResult(summaryReader(summary), () => (), "node-1", 5L))),
+        IO.pure(Right(QueryResult(changesReader(page), () => (), "node-1", 5L)))
+      )
 
   "preview" should "404 an unknown tenant" in new Stubs:
     val h   = handlers()
@@ -226,7 +325,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       executor,
       (_, _) => stubReader(),
       cfg,
-      audit
+      audit = audit
     )
     val out = preview(h, tenantDb = "acme_mem1")
     out.left.toOption.get._1 shouldBe StatusCode.BadRequest
@@ -284,7 +383,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       executor,
       (_, _) => stubReader(),
       cfg,
-      audit
+      audit = audit
     )
     val out = preview(h)
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
@@ -450,3 +549,175 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     // Post-resolution denial: the resolved snapshot bounds are carried in the detail map.
     e.detail.get("from") shouldBe Some("12")
     e.detail.get("to") shouldBe Some("42")
+
+  // ---------- data diff (Spec 02) ----------
+
+  "dataDiff" should "pair update pre/post rows, strip metadata columns, and pass the summary through" in new Stubs:
+    queueDiffResults(
+      summary = List(("insert", 1L), ("update_preimage", 1L), ("update_postimage", 1L)),
+      page = List(
+        (13L, 7L, "update_preimage", 1),
+        (13L, 7L, "update_postimage", 2),
+        (13L, 9L, "insert", 3)
+      )
+    )
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    val r   = out.toOption.get
+    r.summary shouldBe DataDiffSummary(1, 0, 1)
+    r.columns.map(_.name) shouldBe List("id")
+    r.rows should have size 2
+    r.rows.head.changeType shouldBe "update"
+    r.rows.head.snapshotId shouldBe 13L
+    r.rows.head.before.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(1)
+    r.rows.head.after.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(2)
+    r.rows(1).changeType shouldBe "insert"
+    r.rows(1).row.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(3)
+    r.nextCursor shouldBe None
+    r.truncated shouldBe false
+    r.from shouldBe 12L
+    r.to shouldBe 42L
+
+  it should "interpolate the catalog alias and from+1 bound into the SQL and order the page deterministically" in new Stubs:
+    queueDiffResults(summary = Nil, page = Nil)
+    val h = handlers(executorOverride = queuedExecutor)
+    dataDiff(h)
+    seenSqls should have size 2
+    seenSqls.head shouldBe
+      "SELECT change_type, count(*) AS n FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42) GROUP BY change_type"
+    seenSqls(1) should include(
+      "FROM ducklake_table_changes('acme_tpch1', 'tpch1', 'region', 13, 42)"
+    )
+    seenSqls(1) should include("ORDER BY snapshot_id, rowid, change_type")
+
+  it should "apply the changeType filter and cursor predicate in the page SQL" in new Stubs:
+    queueDiffResults(summary = Nil, page = Nil)
+    val h = handlers(executorOverride = queuedExecutor)
+    dataDiff(h, cursor = Some("13:7"), changeType = Some("update"))
+    seenSqls(1) should include(" AND (snapshot_id, rowid) > (13, 7)")
+    seenSqls(1) should include(" AND change_type IN ('update_postimage', 'update_preimage')")
+
+  it should "400 invalid_bounds when from resolves after to, without calling the executor" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, from = "42", to = "12")
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_bounds"
+    seenSqls shouldBe Nil
+
+  it should "400 invalid_filter on an unknown changeType" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, changeType = Some("upsert"))
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_filter"
+    seenSqls shouldBe Nil
+
+  it should "400 invalid_cursor on a malformed cursor" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, cursor = Some("abc"))
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_cursor"
+    seenSqls shouldBe Nil
+
+  it should "410 snapshot_expired on an expired bound" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, from = "11")
+    out.left.toOption.get._1 shouldBe StatusCode.Gone
+    out.left.toOption.get._2.error shouldBe "snapshot_expired"
+
+  it should "stop at the entry cap and hand back a keyset cursor for the next page" in new Stubs:
+    queueDiffResults(
+      summary = List(("insert", 2L)),
+      page = List((13L, 7L, "insert", 1), (13L, 8L, "update_preimage", 2))
+    )
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, limit = Some(1))
+    val r   = out.toOption.get
+    r.rows.map(_.changeType) shouldBe List("insert")
+    r.nextCursor shouldBe Some("13:7")
+    r.truncated shouldBe true
+
+  it should "pass a genuinely orphaned update half-row through with its raw change type" in new Stubs:
+    queueDiffResults(
+      summary = List(("update_preimage", 1L)),
+      page = List((13L, 8L, "update_preimage", 2))
+    )
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    val r   = out.toOption.get
+    r.rows.map(_.changeType) shouldBe List("update_preimage")
+    r.rows.head.row.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(2)
+    r.truncated shouldBe false
+    r.nextCursor shouldBe None
+
+  it should "audit ok with from/to/rowsReturned detail and never row contents" in new Stubs:
+    queueDiffResults(summary = List(("insert", 1L)), page = List((13L, 9L, "insert", 3)))
+    val h = handlers(executorOverride = queuedExecutor)
+    dataDiff(h)
+    val e = telemetryStore.events.last
+    e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogDataDiffRead
+    e.outcome shouldBe "ok"
+    e.detail.get("from") shouldBe Some("12")
+    e.detail.get("to") shouldBe Some("42")
+    e.detail.get("rowsReturned") shouldBe Some("1")
+    e.detail.values.exists(_.contains("3")) shouldBe false
+
+  it should "audit denied on a gate rejection" in new Stubs:
+    val h = handlers(executorOverride = queuedExecutor)
+    dataDiff(h, tenant = "nope")
+    val e = telemetryStore.events.last
+    e.action shouldBe ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogDataDiffRead
+    e.outcome shouldBe "denied"
+
+  it should "502 diff_failed when the executor fails" in new Stubs:
+    executorResults = List(IO.pure(Left(RouterFailure.Internal("node crashed"))))
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.error shouldBe "diff_failed"
+
+  it should "403 acl_denied when the executor reports AccessDenied" in new Stubs:
+    executorResults = List(IO.pure(Left(RouterFailure.AccessDenied("no select"))))
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    out.left.toOption.get._1 shouldBe StatusCode.Forbidden
+    out.left.toOption.get._2.error shouldBe "acl_denied"
+
+  it should "short-circuit from == to into an empty diff without calling the executor" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, from = "42", to = "42")
+    val r   = out.toOption.get
+    r.summary shouldBe DataDiffSummary(0, 0, 0)
+    r.rows shouldBe Nil
+    r.truncated shouldBe false
+    seenSqls shouldBe Nil
+
+  it should "pair correctly when postimage precedes preimage (the engine's actual sort order)" in new Stubs:
+    // ORDER BY snapshot_id, rowid, change_type sorts 'update_postimage' BEFORE
+    // 'update_preimage' ('post' < 'pre'), so production always sees this order.
+    queueDiffResults(
+      summary = List(("update_preimage", 1L), ("update_postimage", 1L)),
+      page = List((13L, 7L, "update_postimage", 2), (13L, 7L, "update_preimage", 1))
+    )
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h)
+    val r   = out.toOption.get
+    r.rows should have size 1
+    r.rows.head.changeType shouldBe "update"
+    r.rows.head.before.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(1)
+    r.rows.head.after.get.flatMap(_.asNumber.flatMap(_.toInt)) shouldBe List(2)
+
+  it should "400 invalid_cursor on an all-digit cursor beyond Long range" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, cursor = Some("99999999999999999999:1"))
+    out.left.toOption.get._1 shouldBe StatusCode.BadRequest
+    out.left.toOption.get._2.error shouldBe "invalid_cursor"
+    seenSqls shouldBe Nil
+
+  it should "404 not_found on from == to for an unknown table (agreeing with from < to)" in new Stubs:
+    val h = handlers(
+      executorOverride = queuedExecutor,
+      readerOverride = stubReader(knownTables = Set(("tpch1", "other")))
+    )
+    val out = dataDiff(h, from = "42", to = "42")
+    out.left.toOption.get._1 shouldBe StatusCode.NotFound
+    out.left.toOption.get._2.error shouldBe "not_found"
