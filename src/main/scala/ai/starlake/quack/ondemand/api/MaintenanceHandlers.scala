@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{MaintenancePolicy, Names, TenantDbKind}
+import ai.starlake.quack.model.{MaintenancePolicy, Names}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.maintenance.{CronExpr, PolicyMath}
@@ -25,35 +25,22 @@ final class MaintenanceHandlers(
   private val ValidScopeKinds = Set("tenantdb", "schema", "table")
   private val ValidOperations = Set("flush", "expire", "merge", "rewrite", "cleanup", "orphans")
 
-  private def resolveTenantId(raw: String): Option[String] =
-    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
-
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
 
-  /** Resolve the tenant + tenant-db + scope gate shared by every operation. Left = ready-made
-    * rejection; Right = (tenantId, tenantDbName).
+  /** [[TenantDbGate]] shared by every operation. Left = ready-made rejection; Right = (tenantId,
+    * tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    resolveTenantId(rawTenant) match
-      case None =>
-        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
-      case Some(tid) =>
-        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(e) => Left(e)
-          case None    =>
-            sup.findTenantDb(tid, tenantDb) match
-              case None =>
-                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
-              case Some(td) if td.kind != TenantDbKind.DuckLake =>
-                err(
-                  StatusCode.BadRequest,
-                  "invalid_kind",
-                  "managed maintenance requires a ducklake tenant-db"
-                )
-              case Some(td) => Right((tid, td.name))
+    TenantDbGate(
+      sup,
+      rawTenant,
+      tenantDb,
+      apiKey,
+      requireDuckLake = Some("managed maintenance requires a ducklake tenant-db")
+    )(scopeOf)
 
   /** Characters that must never reach an interpolated SQL string on the node session: quote (breaks
     * out of a literal), semicolon/backslash (statement/escape injection), any whitespace or control

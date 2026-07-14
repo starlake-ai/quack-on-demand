@@ -29,9 +29,6 @@ final class CatalogHistoryHandlers(
 
   private type Res[T] = Either[(StatusCode, ErrorResponse), T]
 
-  private def resolveTenantId(raw: String): Option[String] =
-    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
-
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
 
@@ -41,17 +38,7 @@ final class CatalogHistoryHandlers(
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    resolveTenantId(rawTenant) match
-      case None =>
-        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
-      case Some(tid) =>
-        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(e) => Left(e)
-          case None    =>
-            sup.findTenantDb(tid, tenantDb) match
-              case None =>
-                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
-              case Some(td) => Right((tid, td.name))
+    TenantDbGate(sup, rawTenant, tenantDb, apiKey)(scopeOf)
 
   def history(
       tenant: String,
@@ -66,27 +53,29 @@ final class CatalogHistoryHandlers(
       author: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Res[CatalogHistoryResponse] =
-    if operation.exists(op => !HistoryOperation.isValid(op)) then
-      err(
-        StatusCode.BadRequest,
-        "invalid_filter",
-        s"operation must be one of ${HistoryOperation.Values.toList.sorted.mkString(", ")}"
-      )
-    else if from.zip(to).exists((f, t) => f.isAfter(t)) then
-      err(StatusCode.BadRequest, "invalid_filter", "from must not be after to")
-    else
-      gate(tenant, tenantDb, apiKey)(scopeOf) match
-        case Left(e) =>
-          if auditReads then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.CatalogHistoryRead,
-              "denied",
-              detail = Map("endpoint" -> "history", "table" -> s"$schema.$table")
-            )
-          Left(e)
-        case Right((tid, db)) =>
+    // Gate first so the tenant-scope 403/404 wins over filter-validation 400s,
+    // consistent with the sibling gated handlers.
+    gate(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e) =>
+        if auditReads then
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.CatalogHistoryRead,
+            "denied",
+            detail = Map("endpoint" -> "history", "table" -> s"$schema.$table")
+          )
+        Left(e)
+      case Right((tid, db)) =>
+        if operation.exists(op => !HistoryOperation.isValid(op)) then
+          err(
+            StatusCode.BadRequest,
+            "invalid_filter",
+            s"operation must be one of ${HistoryOperation.Values.toList.sorted.mkString(", ")}"
+          )
+        else if from.zip(to).exists((f, t) => f.isAfter(t)) then
+          err(StatusCode.BadRequest, "invalid_filter", "from must not be after to")
+        else
           val notFound =
             err(StatusCode.NotFound, "not_found", s"table $schema.$table not found")
           if !isDuckLake(tid, db) then notFound

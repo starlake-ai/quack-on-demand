@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
-import ai.starlake.quack.model.{PoolKey, Role, TenantDbKind}
+import ai.starlake.quack.model.{PoolKey, Role}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -82,38 +82,24 @@ final class CatalogPreviewHandlers(
 
   private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
 
-  private def resolveTenantId(raw: String): Option[String] =
-    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
-
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
 
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
 
-  /** Tenant resolve -> scope gate -> tenant-db lookup, mirroring [[TagHandlers.gate]]: previews
-    * require a DuckLake tenant-db (400 `invalid_kind` otherwise), unlike the catalog browser's
-    * kind-tolerant reads.
+  /** [[TenantDbGate]] with the kind check: previews require a DuckLake tenant-db (400
+    * `invalid_kind` otherwise), unlike the catalog browser's kind-tolerant reads.
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    resolveTenantId(rawTenant) match
-      case None =>
-        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
-      case Some(tid) =>
-        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(e) => Left(e)
-          case None    =>
-            sup.findTenantDb(tid, tenantDb) match
-              case None =>
-                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
-              case Some(td) if td.kind != TenantDbKind.DuckLake =>
-                err(
-                  StatusCode.BadRequest,
-                  "invalid_kind",
-                  "data preview requires a ducklake tenant-db"
-                )
-              case Some(td) => Right((tid, td.name))
+    TenantDbGate(
+      sup,
+      rawTenant,
+      tenantDb,
+      apiKey,
+      requireDuckLake = Some("data preview requires a ducklake tenant-db")
+    )(scopeOf)
 
   /** Pool pick for `(tenant, tenantDb)`, stable across calls (Task 4 review carry-forward:
     * `sup.list()` iterates a mutable map, so picking "the first" without a deterministic sort could

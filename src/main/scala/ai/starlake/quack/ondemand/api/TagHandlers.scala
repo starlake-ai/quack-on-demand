@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{Names, SnapshotTag, TenantDbKind}
+import ai.starlake.quack.model.{Names, SnapshotTag}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
@@ -24,9 +24,6 @@ final class TagHandlers(
   // Mirror the alias used by the sibling handler files.
   private type Out[T] = IO[Either[(StatusCode, ErrorResponse), T]]
 
-  private def resolveTenantId(raw: String): Option[String] =
-    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
-
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
 
@@ -40,29 +37,19 @@ final class TagHandlers(
   private def toEntry(t: SnapshotTag, exists: Boolean): CatalogTagEntry =
     CatalogTagEntry(t.name, t.snapshotId, t.isProtected, t.createdBy, t.createdAt, exists)
 
-  /** Resolve the tenant + tenant-db + scope gate shared by all four operations. Left = ready-made
-    * rejection; Right = (tenantId, tenantDbName).
+  /** [[TenantDbGate]] shared by all four operations. Left = ready-made rejection; Right =
+    * (tenantId, tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    resolveTenantId(rawTenant) match
-      case None =>
-        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
-      case Some(tid) =>
-        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(e) => Left(e)
-          case None    =>
-            sup.findTenantDb(tid, tenantDb) match
-              case None =>
-                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
-              case Some(td) if td.kind != TenantDbKind.DuckLake =>
-                err(
-                  StatusCode.BadRequest,
-                  "invalid_kind",
-                  "snapshot tags require a ducklake tenant-db"
-                )
-              case Some(td) => Right((tid, td.name))
+    TenantDbGate(
+      sup,
+      rawTenant,
+      tenantDb,
+      apiKey,
+      requireDuckLake = Some("snapshot tags require a ducklake tenant-db")
+    )(scopeOf)
 
   def create(req: TagCreateRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -191,7 +178,7 @@ final class TagHandlers(
       asOf: Option[Long],
       asOfTag: Option[String]
   ): Either[(StatusCode, String), Option[Long]] =
-    val tid        = resolveTenantId(rawTenant).getOrElse(rawTenant)
+    val tid        = TenantDbGate.resolveTenantId(sup, rawTenant).getOrElse(rawTenant)
     lazy val tdOpt = sup.findTenantDb(tid, tenantDb)
     SnapshotSelector.resolve(
       asOf,

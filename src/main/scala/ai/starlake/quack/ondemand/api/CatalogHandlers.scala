@@ -34,32 +34,19 @@ final class CatalogHandlers(
 
   private type Res[T] = Either[(StatusCode, ErrorResponse), T]
 
-  private def resolveTenantId(raw: String): Option[String] =
-    sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)
-
   private def err(code: StatusCode, error: String, msg: String) =
     Left((code, ErrorResponse(error, msg)))
 
   private def isDuckLake(tenant: String, tenantDb: String): Boolean =
     kindOf(tenant, tenantDb).contains(TenantDbKind.DuckLake)
 
-  /** Tenant resolve -> scope gate -> tenant-db lookup shared by the four reads. Left = ready-made
-    * rejection; Right = (tenantId, tenantDbName).
+  /** [[TenantDbGate]] shared by the four reads. Left = ready-made rejection; Right = (tenantId,
+    * tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
-    resolveTenantId(rawTenant) match
-      case None =>
-        err(StatusCode.NotFound, "not_found", s"tenant '$rawTenant' is not registered")
-      case Some(tid) =>
-        TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
-          case Some(e) => Left(e)
-          case None    =>
-            sup.findTenantDb(tid, tenantDb) match
-              case None =>
-                err(StatusCode.NotFound, "not_found", s"tenant-db '$tenantDb' not found")
-              case Some(td) => Right((tid, td.name))
+    TenantDbGate(sup, rawTenant, tenantDb, apiKey)(scopeOf)
 
   /** Gate + selective read audit around `read`. The audit outcome tracks the gate, not the read: a
     * table-level 404 after an admitted gate is still an "ok" (authorized) read attempt.

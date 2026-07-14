@@ -216,6 +216,46 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
       Some((StatusCode.BadRequest, "invalid_filter"))
   }
 
+  it should "run the tenant gate before filter validation (403/404 win over 400)" in {
+    val reader = new StubReader(Some(TableHistoryPage(42L, Nil, hasMore = false)))
+    val h      = handlers(reader)
+
+    // Unknown tenant + invalid operation filter: the gate's 404 must win.
+    val unknownTenant = h.history(
+      "nope",
+      "acme_default",
+      "tpch1",
+      "nation",
+      None,
+      None,
+      None,
+      None,
+      Some("merge"),
+      None,
+      NoKey
+    )(NoScope)
+    unknownTenant.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.NotFound, "not_found"))
+
+    // Cross-tenant session + invalid operation filter: the gate's 403 must win.
+    val otherTenantScope: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
+      _ => Some(ai.starlake.quack.ondemand.auth.SessionScope(false, Set("globex")))
+    val crossTenant = h.history(
+      "acme",
+      "acme_default",
+      "tpch1",
+      "nation",
+      None,
+      None,
+      None,
+      None,
+      Some("merge"),
+      None,
+      Some("session-key")
+    )(otherTenantScope)
+    crossTenant.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
+  }
+
   it should "404 not_found on unknown tenant, tenant-db, and table without leaking" in {
     val known = new StubReader(Some(TableHistoryPage(42L, Nil, hasMore = false)))
     val h     = handlers(known)
