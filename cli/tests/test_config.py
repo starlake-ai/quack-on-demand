@@ -6,15 +6,6 @@ import pytest
 from qod_cli.config import Settings, config_path, load_settings, save_profile
 
 
-@pytest.fixture(autouse=True)
-def isolated_config(tmp_path, monkeypatch):
-    for var in list(os.environ):
-        if var.startswith("QOD_"):
-            monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("QOD_CONFIG_FILE", str(tmp_path / "config.toml"))
-    return tmp_path
-
-
 def test_defaults_when_no_file_and_no_env():
     st = load_settings()
     assert st.manager_url == "http://localhost:20900"
