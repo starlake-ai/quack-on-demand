@@ -162,33 +162,48 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
     * expired). The schema row is deliberately joined without an end_snapshot filter so tables of a
     * dropped schema still list.
     */
+  private val droppedTablesSelect =
+    """SELECT s.schema_name,
+      |       t.table_name,
+      |       t.end_snapshot AS dropped_at_snapshot,
+      |       sn.snapshot_time AS dropped_at,
+      |       EXISTS(SELECT 1 FROM ducklake_snapshot e
+      |               WHERE e.snapshot_id = t.end_snapshot - 1) AS recoverable
+      |  FROM ducklake_table t
+      |  JOIN ducklake_schema s ON s.schema_id = t.schema_id
+      |  LEFT JOIN ducklake_snapshot sn ON sn.snapshot_id = t.end_snapshot
+      | WHERE t.end_snapshot IS NOT NULL
+      |   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
+      |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)""".stripMargin
+
+  private def droppedEntry(rs: ResultSet): DroppedTableEntry =
+    val d = rs.getLong("dropped_at_snapshot")
+    DroppedTableEntry(
+      schema = rs.getString("schema_name"),
+      table = rs.getString("table_name"),
+      droppedAtSnapshot = d,
+      lastLiveSnapshot = d - 1,
+      droppedAt = Option(rs.getTimestamp("dropped_at")).map(_.toInstant.toString),
+      recoverable = rs.getBoolean("recoverable")
+    )
+
   def listDroppedTables(limit: Int = 50): List[DroppedTableEntry] =
-    val sql =
-      """SELECT s.schema_name,
-        |       t.table_name,
-        |       t.end_snapshot AS dropped_at_snapshot,
-        |       sn.snapshot_time AS dropped_at,
-        |       EXISTS(SELECT 1 FROM ducklake_snapshot e
-        |               WHERE e.snapshot_id = t.end_snapshot - 1) AS recoverable
-        |  FROM ducklake_table t
-        |  JOIN ducklake_schema s ON s.schema_id = t.schema_id
-        |  LEFT JOIN ducklake_snapshot sn ON sn.snapshot_id = t.end_snapshot
-        | WHERE t.end_snapshot IS NOT NULL
-        |   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
-        |                    WHERE l.table_id = t.table_id AND l.end_snapshot IS NULL)
-        | ORDER BY t.end_snapshot DESC, t.table_name
-        | LIMIT ?""".stripMargin
-    query(sql, limit) { rs =>
-      val d = rs.getLong("dropped_at_snapshot")
-      DroppedTableEntry(
-        schema = rs.getString("schema_name"),
-        table = rs.getString("table_name"),
-        droppedAtSnapshot = d,
-        lastLiveSnapshot = d - 1,
-        droppedAt = Option(rs.getTimestamp("dropped_at")).map(_.toInstant.toString),
-        recoverable = rs.getBoolean("recoverable")
-      )
-    }
+    query(
+      droppedTablesSelect + "\n ORDER BY t.end_snapshot DESC, t.table_name\n LIMIT ?",
+      limit
+    )(droppedEntry)
+
+  /** Targeted lookup for the undrop path: unlike paging through [[listDroppedTables]], this finds a
+    * dropped table regardless of how many drops happened after it (the discovery list caps at 200).
+    * Newest drop of that name wins when the name was dropped more than once.
+    */
+  def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
+    query(
+      droppedTablesSelect +
+        "\n   AND s.schema_name = ? AND t.table_name = ?\n ORDER BY t.end_snapshot DESC\n LIMIT 1",
+      schema,
+      table
+    )(droppedEntry).headOption
 
   /** Newest committed snapshot id, or None on an empty (just-attached) catalog. */
   def maxSnapshotId(): Option[Long] =

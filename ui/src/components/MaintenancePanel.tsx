@@ -175,7 +175,11 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
   // run is active.
   useEffect(() => {
     if (!runs?.some(r => r.status === 'queued' || r.status === 'running')) return;
-    const t = setInterval(() => reloadRuns(genRef.current), 10_000);
+    // Capture the generation at install time: a tenant switch bumps genRef, so
+    // a tick that fires in the gap before this effect re-runs fails reloadRuns'
+    // generation check instead of fetching the old tenant under the new gen.
+    const gen = genRef.current;
+    const t = setInterval(() => reloadRuns(gen), 10_000);
     return () => clearInterval(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runs]);
@@ -539,7 +543,7 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
               </label>
               <label>
                 Table
-                {runSchemas.length > 0
+                {runSchemas.length > 0 && (!runScopeSchema || runTables.length > 0)
                   ? (
                     <select
                       value={runScopeTable}
@@ -551,6 +555,8 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
                     </select>
                   )
                   : (
+                    // Free text when there are no schemas at all OR the picked
+                    // schema's table list failed to load / is empty.
                     <input
                       value={runScopeTable}
                       onChange={ev => setRunScopeTable(ev.target.value)}

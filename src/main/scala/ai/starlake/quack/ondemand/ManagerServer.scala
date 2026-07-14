@@ -268,8 +268,6 @@ final class ManagerServer(
       )
     }
 
-    // Per-table history timeline (EPIC Spec 01). Session-gated per request via
-    // TenantScopeCheck inside the handler, same shape as the browser GETs above.
     // Undrop (Spec 03). Session-gated per request via TenantScopeCheck inside the handler.
     val undropEndpoints: List[ServerEndpoint[Any, IO]] = undrop.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
@@ -282,6 +280,8 @@ final class ManagerServer(
       )
     }
 
+    // Per-table history timeline (EPIC Spec 01). Session-gated per request via
+    // TenantScopeCheck inside the handler, same shape as the browser GETs above.
     val catalogHistoryEndpoints: List[ServerEndpoint[Any, IO]] = catalogHistory.toList.map { h =>
       CatalogEndpoints.tableHistoryEndpoint.serverLogic {
         case (

@@ -375,6 +375,10 @@ object ManagerServerHarness:
         override def listDroppedTables(
             limit: Int
         ): List[ai.starlake.quack.ondemand.catalog.DroppedTableEntry] = Nil
+        override def findDroppedTable(
+            schema: String,
+            table: String
+        ): Option[ai.starlake.quack.ondemand.catalog.DroppedTableEntry] = None
     val previewReader: (String, String) => DuckLakeCatalogReader =
       catalogReader.getOrElse((_, _) => noSnapshotReader)
     val previewHandlers = new CatalogPreviewHandlers(

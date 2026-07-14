@@ -41,7 +41,13 @@ export default function CatalogBrowser({
     const seq = ++droppedSeq.current;
     api.listRecoverable(tenant, tenantDb)
       .then(r => { if (seq === droppedSeq.current) setDropped(r.tables); })
-      .catch(() => { if (seq === droppedSeq.current) setDropped([]); });
+      .catch(e => {
+        if (seq !== droppedSeq.current) return;
+        // Only the expected rejection (400 invalid_kind on non-DuckLake
+        // tenant-dbs) empties the section; a transient failure keeps the
+        // last known list instead of silently hiding recoverable tables.
+        if (e instanceof ApiError && e.status === 400) setDropped([]);
+      });
   }
 
   useEffect(() => {

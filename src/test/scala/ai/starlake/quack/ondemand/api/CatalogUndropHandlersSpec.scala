@@ -104,34 +104,47 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
       dropped: List[DroppedTableEntry] = List(
         DroppedTableEntry("tpch1", "doomed", 40L, 39L, Some("2026-07-14T00:00:00Z"), true)
       ),
-      liveTables: Set[(String, String)] = Set.empty
+      liveTables: Set[(String, String)] = Set.empty,
+      limitSink: AtomicInteger = new AtomicInteger(-1),
+      tableExistsAtFn: Option[(String, String, Long) => Boolean] = None
   ): DuckLakeCatalogReader =
     new DuckLakeCatalogReader(null):
       override def snapshotExists(id: Long): Boolean = id == 12L || id == 39L || id == 42L
       override def maxSnapshotId(): Option[Long]     = Some(42L)
-      override def listDroppedTables(limit: Int): List[DroppedTableEntry] = dropped.take(limit)
+      override def listDroppedTables(limit: Int): List[DroppedTableEntry] =
+        limitSink.set(limit)
+        dropped.take(limit)
+      override def findDroppedTable(schema: String, table: String): Option[DroppedTableEntry] =
+        dropped.find(e => e.schema == schema && e.table == table)
       override def tableExistsAt(schema: String, table: String, snapshotId: Long): Boolean =
-        liveTables.contains((schema, table))
+        tableExistsAtFn match
+          case Some(f) => f(schema, table, snapshotId)
+          case None    => liveTables.contains((schema, table))
 
   trait Stubs:
-    val (sup, store)            = supervisor()
-    val telemetryStore          = new RecordingTelemetryStore
-    val audit                   = new AuditRecorder(telemetryStore, _ => None)
-    var seenSql: Option[String] = None
-    var closed                  = false
+    val (sup, store)                 = supervisor()
+    val telemetryStore               = new RecordingTelemetryStore
+    val audit                        = new AuditRecorder(telemetryStore, _ => None)
+    var seenSql: Option[String]      = None
+    var seenPoolKey: Option[PoolKey] = None
+    var closed                       = false
     var executorResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
     val executor: CatalogPreviewHandlers.PreviewExecutor =
       (connectionId, user, poolKey, sql) =>
         seenSql = Some(sql)
+        seenPoolKey = Some(poolKey)
         executorResult
 
-    def handlers(readerOverride: DuckLakeCatalogReader = stubReader()): CatalogUndropHandlers =
+    def handlers(
+        readerOverride: DuckLakeCatalogReader = stubReader(),
+        cfgOverride: CatalogConfig = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
+    ): CatalogUndropHandlers =
       new CatalogUndropHandlers(
         sup,
         executor,
         (_, _) => readerOverride,
-        CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30),
+        cfgOverride,
         _ => None,
         audit = audit
       )
@@ -242,3 +255,46 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     val denied = telemetryStore.events.last
     denied.action shouldBe AuditActions.CatalogUndrop
     denied.outcome shouldBe "denied"
+
+  it should "422 invalid_snapshot when fromSnapshot is beyond the last-live snapshot" in new Stubs:
+    val out = undrop(handlers(), fromSnapshot = Some(42L))
+    out.left.toOption.get._1 shouldBe StatusCode.UnprocessableEntity
+    out.left.toOption.get._2.error shouldBe "invalid_snapshot"
+    seenSql shouldBe None
+
+  it should "report success when the CTAS commits despite the timeout (post-timeout probe)" in new Stubs:
+    executorResult = IO.never
+    // tableExistsAt: false for the pre-flight collision check, true for the
+    // post-timeout probe (the CTAS committed while the handler was waiting).
+    val calls = new AtomicInteger(0)
+    val h     = handlers(
+      readerOverride = stubReader(tableExistsAtFn = Some((_, _, _) => calls.getAndIncrement() > 0)),
+      cfgOverride =
+        CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, undropTimeoutSec = 1)
+    )
+    val out = undrop(h)
+    out.toOption.get shouldBe UndropResponse("tpch1", "doomed", "doomed", 39L)
+    telemetryStore.events.last.outcome shouldBe "ok"
+
+  it should "502 with a timeout message when the CTAS neither returns nor commits" in new Stubs:
+    executorResult = IO.never
+    val h = handlers(
+      cfgOverride =
+        CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30, undropTimeoutSec = 1)
+    )
+    val out = undrop(h)
+    out.left.toOption.get._1 shouldBe StatusCode.BadGateway
+    out.left.toOption.get._2.message should include("timed out after 1s")
+
+  it should "prefer a pool with a write-eligible node over an earlier-sorted read-only pool" in new Stubs:
+    sup.createPool(PoolKey("acme", "acme_tpch1", "aro"), RoleDistribution(0, 1, 0)).unsafeRunSync()
+    undrop(handlers())
+    seenPoolKey shouldBe Some(PoolKey("acme", "acme_tpch1", "bi"))
+
+  "recoverable limit" should "clamp into [1, 200]" in new Stubs:
+    val sink = new AtomicInteger(-1)
+    val h    = handlers(readerOverride = stubReader(limitSink = sink))
+    h.recoverable("acme", "acme_tpch1", Some(500), NoKey)(NoScope).unsafeRunSync()
+    sink.get shouldBe 200
+    h.recoverable("acme", "acme_tpch1", Some(0), NoKey)(NoScope).unsafeRunSync()
+    sink.get shouldBe 1
