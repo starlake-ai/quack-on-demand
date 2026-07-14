@@ -38,6 +38,9 @@ import type {
   CatalogTagEntry,
   PreviewResponse,
   DataDiffResponse,
+  RecoverableListResponse,
+  UndropRequest,
+  UndropResponse,
   SchemaDiffResponse,
   // Managed maintenance
   MaintenancePolicyUpsertRequest,
@@ -422,6 +425,13 @@ export const api = {
         `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/preview${q}`
     );
   },
+  listRecoverable: (tenant: string, tenantDb: string, limit?: number) => {
+    const q = limit != null ? `?limit=${limit}` : '';
+    return get<RecoverableListResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/recoverable${q}`
+    );
+  },
+  undropTable: (req: UndropRequest) => post<UndropResponse>('/catalog/undrop', req),
   catalogDataDiff: (
     tenant: string, tenantDb: string, schema: string, table: string, from: string, to: string,
     opts?: { limit?: number; cursor?: string; changeType?: string }

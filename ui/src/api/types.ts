@@ -696,6 +696,37 @@ export interface DataDiffResponse {
   truncated: boolean;
 }
 
+// ----- Undrop (Spec 03) -----
+
+export interface RecoverableTableEntry {
+  schema: string;
+  table: string;
+  droppedAtSnapshot: number;
+  lastLiveSnapshot: number;
+  droppedAt?: string | null;   // ISO-8601; absent once the drop snapshot itself expired
+  recoverable: boolean;
+}
+
+export interface RecoverableListResponse {
+  tables: RecoverableTableEntry[];
+}
+
+export interface UndropRequest {
+  tenant: string;
+  tenantDb: string;
+  schema: string;
+  table: string;
+  asName?: string;
+  fromSnapshot?: number;
+}
+
+export interface UndropResponse {
+  schema: string;
+  table: string;
+  restoredAs: string;
+  fromSnapshot: number;
+}
+
 // ----- Managed maintenance (EPIC Spec 09) -----
 // Mirrors the Scala DTOs in ondemand/api/Dtos.scala; field names must match
 // the circe codecs exactly. Absent optionals serialize as null on responses.
