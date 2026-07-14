@@ -139,6 +139,12 @@ object Main extends IOApp with LazyLogging:
   private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
 
   def run(args: List[String]): IO[ExitCode] =
+    // Route java.util.logging through slf4j so logback.xml governs the JUL loggers too.
+    // grpc-netty logs via JUL directly; without the bridge its warnings (e.g.
+    // NettyServerHandler's benign "Stream closed before write could take place" on a
+    // client-cancelled Flight stream) print raw to stderr and cannot be filtered.
+    org.slf4j.bridge.SLF4JBridgeHandler.removeHandlersForRootLogger()
+    org.slf4j.bridge.SLF4JBridgeHandler.install()
     args match
       case "manifest" :: "export" :: Nil =>
         IO.blocking {

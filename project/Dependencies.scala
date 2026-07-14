@@ -37,6 +37,7 @@ object Dependencies {
 
   val scalaLogging          = "com.typesafe.scala-logging" %% "scala-logging" % Versions.scalaLogging
   val logbackClassic        = "ch.qos.logback" % "logback-classic" % Versions.logbackClassic
+  val julToSlf4j            = "org.slf4j" % "jul-to-slf4j" % Versions.slf4j
 
   val pureconfigCore        = "com.github.pureconfig" %% "pureconfig-core" % Versions.pureconfig
   val pureconfigGenericScala3 = "com.github.pureconfig" %% "pureconfig-generic-scala3" % Versions.pureconfig

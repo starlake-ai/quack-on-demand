@@ -8,4 +8,8 @@
     <appender-ref ref="STDOUT" />
   </root>
   <logger name="ai.starlake.quack" level="DEBUG" />
+  <!-- Reached via the JUL-to-slf4j bridge installed in Main. WARN here is almost always
+       the benign stream-cancel race (client RST_STREAM while DATA frames sit queued),
+       e.g. DBeaver abandoning a Flight result stream after its first fetch page. -->
+  <logger name="io.grpc.netty.NettyServerHandler" level="ERROR" />
 </configuration>

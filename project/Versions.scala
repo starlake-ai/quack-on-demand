@@ -7,6 +7,7 @@ object Versions {
   val grpc           = "1.76.3"
   val scalaLogging   = "3.9.5"
   val logbackClassic = "1.5.12"
+  val slf4j          = "2.0.16" // must match what logback-classic pulls transitively
   val pureconfig     = "0.17.8"
   val javaJwt        = "4.4.0"
   val nimbusJoseJwt  = "9.47"

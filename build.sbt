@@ -190,6 +190,7 @@ lazy val root = (project in file("."))
       Dependencies.grpcStub,
       Dependencies.scalaLogging,
       Dependencies.logbackClassic,
+      Dependencies.julToSlf4j,
       Dependencies.pureconfigCore,
       Dependencies.pureconfigGenericScala3,
       Dependencies.javaJwt,

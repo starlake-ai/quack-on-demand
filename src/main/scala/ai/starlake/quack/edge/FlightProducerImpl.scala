@@ -1521,8 +1521,15 @@ final class FlightProducerImpl(
   /** Read batches from `reader` and push them to the Flight `listener`. Reuses
     * `reader.getVectorSchemaRoot()` directly - the listener flushes the current state of the root
     * on each `putNext()`.
+    *
+    * The loop is gated on `!listener.isCancelled()`: clients legitimately abandon streams
+    * mid-flight (DBeaver closes the result set after its first fetch page, ADBC readers get closed
+    * early), and pumping the remaining batches into a cancelled gRPC stream both wastes node reads
+    * and guarantees netty's "Stream closed before write could take place" warning. A residual race
+    * stays possible (frames queued in the window before the RST_STREAM arrives); that noise is
+    * silenced at the logging layer instead.
     */
-  private def streamArrow(
+  private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
       listener: FlightProducer.ServerStreamListener
   ): Unit =
@@ -1534,7 +1541,7 @@ final class FlightProducerImpl(
       // schema even if there's no data.
       root.setRowCount(0)
       listener.putNext()
-    while hasMore do
+    while hasMore && !listener.isCancelled() do
       listener.putNext()
       hasMore = reader.loadNextBatch()
     listener.completed()
