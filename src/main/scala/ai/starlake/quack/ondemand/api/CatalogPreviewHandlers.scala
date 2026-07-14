@@ -76,6 +76,7 @@ final class CatalogPreviewHandlers(
     executor: CatalogPreviewHandlers.PreviewExecutor,
     resolveReader: (String, String) => DuckLakeCatalogReader,
     cfg: CatalogConfig,
+    catalogAlias: (String, String) => String = (_, td) => td,
     audit: AuditRecorder = AuditRecorder.noop
 ):
   import CatalogPreviewHandlers.SuperuserIdentity
@@ -86,6 +87,43 @@ final class CatalogPreviewHandlers(
     Left((code, ErrorResponse(error, msg)))
 
   private def quoteIdent(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
+
+  private def quoteLit(v: String): String = "'" + v.replace("'", "''") + "'"
+
+  // PROVISIONAL until the live verification on the pinned DuckDB 1.5.4 / DuckLake 0.3
+  // (docs/duckdb-pin-bump-checklist.md): the change_type vocabulary and the (from + 1, to)
+  // inclusive bound convention below are taken from the DuckLake docs; amend both here and in the
+  // checklist if the live dump disagrees.
+  private val InsertTypes    = Set("insert")
+  private val DeleteTypes    = Set("delete")
+  private val UpdateTypes    = Set("update_preimage", "update_postimage")
+  private val UpdatePostType = "update_postimage"
+
+  private def diffFn(
+      alias: String,
+      schema: String,
+      table: String,
+      fromId: Long,
+      toId: Long
+  ): String =
+    s"ducklake_table_changes(${quoteLit(alias)}, ${quoteLit(schema)}, ${quoteLit(table)}, " +
+      s"${fromId + 1}, $toId)"
+
+  private def parseCursor(raw: String): Option[(Long, Long)] =
+    raw.split(':') match
+      case Array(a, b) if a.nonEmpty && b.nonEmpty && a.forall(_.isDigit) && b.forall(_.isDigit) =>
+        Some((a.toLong, b.toLong))
+      case _ => None
+
+  /** Map the request's `changeType` filter onto the raw change_type values; Left = unknown value.
+    */
+  private def typesFor(changeType: Option[String]): Either[Unit, Option[Set[String]]] =
+    changeType match
+      case None           => Right(None)
+      case Some("insert") => Right(Some(InsertTypes))
+      case Some("delete") => Right(Some(DeleteTypes))
+      case Some("update") => Right(Some(UpdateTypes))
+      case Some(_)        => Left(())
 
   /** [[TenantDbGate]] with the kind check: previews require a DuckLake tenant-db (400
     * `invalid_kind` otherwise), unlike the catalog browser's kind-tolerant reads.
@@ -398,3 +436,285 @@ final class CatalogPreviewHandlers(
                         Right(PreviewResponse(columns, rows, snapshotId, truncated))
                       finally result.close()
                   }
+
+  /** Row-level data diff between two snapshots (Spec 02). Same execution shape as [[preview]] (gate
+    * -> selector resolution -> pool pick -> executor -> Arrow decode), but two statements: a
+    * whole-range aggregate so the summary counts stay exact under pagination, then a keyset page
+    * over `ducklake_table_changes`. Update pre/post rows sharing (snapshot_id, rowid) are paired
+    * into one `update` entry. The page fetches `2 * limit + 2` source rows: a pair renders one
+    * entry per two source rows and a single one per one, so a full fetch always renders at least
+    * `limit + 1` entries and the entry cap is reached before a truncated tail could strand half a
+    * pair; a genuinely orphaned half-row at end-of-data passes through with its raw change type.
+    * Audited unconditionally like [[preview]]; detail carries from/to/rowsReturned, never row
+    * contents.
+    */
+  def dataDiff(
+      tenant: String,
+      tenantDb: String,
+      schema: String,
+      table: String,
+      from: String,
+      to: String,
+      limit: Option[Int],
+      cursor: Option[String],
+      changeType: Option[String],
+      apiKey: Option[String]
+  )(scopeOf: String => Option[SessionScope]): Out[DataDiffResponse] =
+    gate(tenant, tenantDb, apiKey)(scopeOf) match
+      case Left(e) =>
+        audit.rest(apiKey, "control-plane", AuditActions.CatalogDataDiffRead, "denied")
+        IO.pure(Left(e))
+      case Right((tid, db)) =>
+        val target = Some(s"$db/$schema/$table")
+        def denied(
+            sc: StatusCode,
+            code: String,
+            msg: String
+        ): Either[(StatusCode, ErrorResponse), DataDiffResponse] =
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.CatalogDataDiffRead,
+            "denied",
+            tenant = Some(tid),
+            target = target
+          )
+          err(sc, code, msg)
+
+        typesFor(changeType) match
+          case Left(_) =>
+            IO.pure(
+              denied(
+                StatusCode.BadRequest,
+                "invalid_filter",
+                "changeType must be one of insert, delete, update"
+              )
+            )
+          case Right(types) =>
+            cursor.map(c => (c, parseCursor(c))) match
+              case Some((raw, None)) =>
+                IO.pure(
+                  denied(
+                    StatusCode.BadRequest,
+                    "invalid_cursor",
+                    s"cursor '$raw' is not <snapshotId>:<rowid>"
+                  )
+                )
+              case parsedCursor =>
+                val cur      = parsedCursor.flatMap(_._2)
+                val reader   = resolveReader(tid, db)
+                val resolved =
+                  for
+                    fromId <- resolveBound(from, reader, tid, db)
+                    toId   <- resolveBound(to, reader, tid, db)
+                  yield (fromId, toId)
+                resolved match
+                  case Left(se) =>
+                    val (sc, code, msg) = selectorError(se)
+                    IO.pure(denied(sc, code, msg))
+                  case Right((fromId, toId)) if fromId > toId =>
+                    IO.pure(
+                      denied(
+                        StatusCode.BadRequest,
+                        "invalid_bounds",
+                        s"from snapshot $fromId is after to snapshot $toId"
+                      )
+                    )
+                  case Right((fromId, toId)) =>
+                    if !(reader.tableExistsAt(schema, table, toId) ||
+                        reader.tableExistsAt(schema, table, fromId))
+                    then
+                      IO.pure(
+                        denied(
+                          StatusCode.NotFound,
+                          "not_found",
+                          s"table '$schema.$table' not found"
+                        )
+                      )
+                    else
+                      firstPoolKey(tid, db) match
+                        case None =>
+                          IO.pure(
+                            denied(
+                              StatusCode.NotFound,
+                              "no_pool",
+                              s"tenant-db '$db' has no running pool; data diff needs at least " +
+                                "one pool with a live ReadOnly/Dual node"
+                            )
+                          )
+                        case Some(poolKey) =>
+                          runDiff(
+                            tid,
+                            db,
+                            schema,
+                            table,
+                            fromId,
+                            toId,
+                            limit,
+                            cur,
+                            types,
+                            poolKey,
+                            apiKey,
+                            denied
+                          )
+
+  private def runDiff(
+      tid: String,
+      db: String,
+      schema: String,
+      table: String,
+      fromId: Long,
+      toId: Long,
+      limit: Option[Int],
+      cur: Option[(Long, Long)],
+      types: Option[Set[String]],
+      poolKey: PoolKey,
+      apiKey: Option[String],
+      denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), DataDiffResponse]
+  ): Out[DataDiffResponse] =
+    val alias          = catalogAlias(tid, db)
+    val fn             = diffFn(alias, schema, table, fromId, toId)
+    val effectiveLimit = limit.map(_.max(1)).getOrElse(cfg.previewMaxRows).min(cfg.previewMaxRows)
+    val fetch          = effectiveLimit * 2 + 2
+    val filterPred     = types
+      .map(ts => s" AND change_type IN (${ts.toList.sorted.map(quoteLit).mkString(", ")})")
+      .getOrElse("")
+    val cursorPred = cur.map((s, r) => s" AND (snapshot_id, rowid) > ($s, $r)").getOrElse("")
+    val summarySql = s"SELECT change_type, count(*) AS n FROM $fn GROUP BY change_type"
+    val pageSql    =
+      s"SELECT * FROM $fn WHERE 1=1$cursorPred$filterPred " +
+        s"ORDER BY snapshot_id, rowid, change_type LIMIT $fetch"
+    val user = identityOf(apiKey)
+
+    def run(sql: String): IO[Either[Throwable, Either[RouterFailure, QueryResult]]] =
+      executor(s"diff-$tid-$db", user, poolKey, sql)
+        .timeout(cfg.previewTimeoutSec.seconds)
+        .attempt
+
+    def failureArm(
+        outcome: Either[Throwable, Either[RouterFailure, QueryResult]]
+    ): Option[Either[(StatusCode, ErrorResponse), DataDiffResponse]] =
+      outcome match
+        case Left(_) =>
+          Some(denied(StatusCode.BadGateway, "diff_failed", "diff query timed out"))
+        case Right(Left(RouterFailure.AccessDenied(reason))) =>
+          Some(denied(StatusCode.Forbidden, "acl_denied", reason))
+        case Right(Left(failure)) =>
+          Some(denied(StatusCode.BadGateway, "diff_failed", failure.reason))
+        case Right(Right(_)) => None
+
+    run(summarySql).flatMap { summaryOutcome =>
+      failureArm(summaryOutcome) match
+        case Some(e) => IO.pure(e)
+        case None    =>
+          val summaryResult = summaryOutcome.toOption.get.toOption.get
+          val summary       =
+            try
+              val (_, rows, _) = ArrowRowsDecoder.decode(summaryResult.rows, 64)
+              val counts       = rows.flatMap { r =>
+                for
+                  ct <- r.headOption.flatMap(_.asString)
+                  n  <- r.lift(1).flatMap(_.asNumber).flatMap(_.toLong)
+                yield ct -> n
+              }.toMap
+              DataDiffSummary(
+                inserted = InsertTypes.toList.map(counts.getOrElse(_, 0L)).sum,
+                deleted = DeleteTypes.toList.map(counts.getOrElse(_, 0L)).sum,
+                updated = counts.getOrElse(UpdatePostType, 0L)
+              )
+            finally summaryResult.close()
+          run(pageSql).map { pageOutcome =>
+            failureArm(pageOutcome) match
+              case Some(e) => e
+              case None    =>
+                val pageResult = pageOutcome.toOption.get.toOption.get
+                try
+                  val (cols, rawRows, decoderTruncated) =
+                    ArrowRowsDecoder.decode(pageResult.rows, fetch)
+                  val snapIdx = cols.indexWhere(_.name.equalsIgnoreCase("snapshot_id"))
+                  val rowIdx  = cols.indexWhere(_.name.equalsIgnoreCase("rowid"))
+                  val ctIdx   = cols.indexWhere(_.name.equalsIgnoreCase("change_type"))
+                  if snapIdx < 0 || rowIdx < 0 || ctIdx < 0 then
+                    denied(
+                      StatusCode.BadGateway,
+                      "diff_failed",
+                      "unexpected ducklake_table_changes result shape"
+                    )
+                  else
+                    val metaIdx  = Set(snapIdx, rowIdx, ctIdx)
+                    val dataCols = cols.zipWithIndex.filterNot((_, i) => metaIdx(i)).map(_._1)
+                    val src      = rawRows.flatMap { r =>
+                      for
+                        snap <- r.lift(snapIdx).flatMap(_.asNumber).flatMap(_.toLong)
+                        rid  <- r.lift(rowIdx).flatMap(_.asNumber).flatMap(_.toLong)
+                        ct   <- r.lift(ctIdx).flatMap(_.asString)
+                      yield (
+                        snap,
+                        rid,
+                        ct,
+                        r.zipWithIndex.filterNot((_, i) => metaIdx(i)).map(_._1)
+                      )
+                    }
+                    val entries = scala.collection.mutable.ListBuffer.empty[DataDiffEntry]
+                    var lastKey: Option[(Long, Long)] = None
+                    var i                             = 0
+                    while i < src.length && entries.length < effectiveLimit do
+                      val (snap, rid, ct, data) = src(i)
+                      val paired                =
+                        if UpdateTypes(ct) && i + 1 < src.length then
+                          val (nSnap, nRid, nCt, nData) = src(i + 1)
+                          Option.when(
+                            UpdateTypes(nCt) && nCt != ct && nSnap == snap && nRid == rid
+                          )((nCt, nData))
+                        else None
+                      paired match
+                        case Some((nCt, nData)) =>
+                          val (before, after) =
+                            if ct == UpdatePostType then (nData, data) else (data, nData)
+                          entries += DataDiffEntry(
+                            "update",
+                            snap,
+                            before = Some(before),
+                            after = Some(after)
+                          )
+                          lastKey = Some((snap, rid))
+                          i += 2
+                        case None =>
+                          val rendered =
+                            if InsertTypes(ct) then "insert"
+                            else if DeleteTypes(ct) then "delete"
+                            else ct
+                          entries += DataDiffEntry(rendered, snap, row = Some(data))
+                          lastKey = Some((snap, rid))
+                          i += 1
+                    val hasMore    = decoderTruncated || i < src.length
+                    val nextCursor = if hasMore then lastKey.map((s, r) => s"$s:$r") else None
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.CatalogDataDiffRead,
+                      "ok",
+                      tenant = Some(tid),
+                      target = Some(s"$db/$schema/$table"),
+                      detail = Map(
+                        "from"         -> fromId.toString,
+                        "to"           -> toId.toString,
+                        "rowsReturned" -> entries.length.toString
+                      )
+                    )
+                    Right(
+                      DataDiffResponse(
+                        schema,
+                        table,
+                        fromId,
+                        toId,
+                        summary,
+                        dataCols,
+                        entries.toList,
+                        nextCursor,
+                        truncated = hasMore
+                      )
+                    )
+                finally pageResult.close()
+          }
+    }

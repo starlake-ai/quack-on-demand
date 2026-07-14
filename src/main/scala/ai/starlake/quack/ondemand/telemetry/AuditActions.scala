@@ -72,6 +72,7 @@ object AuditActions:
   val CatalogPreviewRead    = "catalog.preview.read"
   val CatalogSchemaDiffRead = "catalog.schemadiff.read"
   val CatalogHistoryRead    = "catalog.history.read"
+  val CatalogDataDiffRead   = "catalog.datadiff.read"
   // managed maintenance (Spec 09)
   val MaintenanceRun          = "maintenance.run"
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
@@ -144,6 +145,7 @@ object AuditActions:
     CatalogPreviewRead,
     CatalogSchemaDiffRead,
     CatalogHistoryRead,
+    CatalogDataDiffRead,
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,

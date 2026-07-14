@@ -888,6 +888,38 @@ final case class PreviewResponse(
     truncated: Boolean
 )
 
+// ----- Catalog data diff (Spec 02) -----
+final case class DataDiffSummary(inserted: Long, deleted: Long, updated: Long)
+
+/** One rendered diff entry. `changeType` is `insert | delete | update`, or a bare `update_preimage`
+  * / `update_postimage` passthrough when a pair could not be matched. `row` is set for
+  * insert/delete/bare entries; `before`/`after` for paired updates.
+  */
+final case class DataDiffEntry(
+    changeType: String,
+    snapshotId: Long,
+    row: Option[List[Json]] = None,
+    before: Option[List[Json]] = None,
+    after: Option[List[Json]] = None
+)
+
+/** Row-level data diff between two DuckLake snapshots of one table (Spec 02). `summary` is computed
+  * over the FULL range by a separate aggregate, so its counts stay exact when `rows` paginates;
+  * `nextCursor` is the opaque `<snapshotId>:<rowid>` keyset cursor of the last rendered entry,
+  * absent on the final page.
+  */
+final case class DataDiffResponse(
+    schema: String,
+    table: String,
+    from: Long,
+    to: Long,
+    summary: DataDiffSummary,
+    columns: List[PreviewColumn],
+    rows: List[DataDiffEntry],
+    nextCursor: Option[String],
+    truncated: Boolean
+)
+
 /** One column whose declared type differs between the `from` and `to` snapshots of a two-snapshot
   * schema diff (Spec 00 Task 6). Only columns present at BOTH ends are considered here; an added or
   * removed column shows up in `SchemaDiffResponse.added` / `.removed` instead.
@@ -1680,8 +1712,11 @@ object Dtos:
   given Codec[MaintenanceRunResponse] = deriveCodec
 
   // Catalog data preview
-  given Codec[PreviewColumn]   = deriveCodec
-  given Codec[PreviewResponse] = deriveCodec
+  given Codec[PreviewColumn]    = deriveCodec
+  given Codec[PreviewResponse]  = deriveCodec
+  given Codec[DataDiffSummary]  = deriveCodec
+  given Codec[DataDiffEntry]    = deriveCodec
+  given Codec[DataDiffResponse] = deriveCodec
 
   // Schema diff (Task 6)
   given Codec[SchemaDiffColumnType]  = deriveCodec
