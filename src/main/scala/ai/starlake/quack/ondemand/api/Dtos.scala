@@ -920,6 +920,34 @@ final case class DataDiffResponse(
     truncated: Boolean
 )
 
+// ----- Undrop (Spec 03) -----
+final case class RecoverableTableEntry(
+    schema: String,
+    table: String,
+    droppedAtSnapshot: Long,
+    lastLiveSnapshot: Long,
+    droppedAt: Option[String],
+    recoverable: Boolean
+)
+
+final case class RecoverableListResponse(tables: List[RecoverableTableEntry])
+
+final case class UndropRequest(
+    tenant: String,
+    tenantDb: String,
+    schema: String,
+    table: String,
+    asName: Option[String] = None,
+    fromSnapshot: Option[Long] = None
+)
+
+final case class UndropResponse(
+    schema: String,
+    table: String,
+    restoredAs: String,
+    fromSnapshot: Long
+)
+
 /** One column whose declared type differs between the `from` and `to` snapshots of a two-snapshot
   * schema diff (Spec 00 Task 6). Only columns present at BOTH ends are considered here; an added or
   * removed column shows up in `SchemaDiffResponse.added` / `.removed` instead.
@@ -1712,11 +1740,15 @@ object Dtos:
   given Codec[MaintenanceRunResponse] = deriveCodec
 
   // Catalog data preview
-  given Codec[PreviewColumn]    = deriveCodec
-  given Codec[PreviewResponse]  = deriveCodec
-  given Codec[DataDiffSummary]  = deriveCodec
-  given Codec[DataDiffEntry]    = deriveCodec
-  given Codec[DataDiffResponse] = deriveCodec
+  given Codec[PreviewColumn]           = deriveCodec
+  given Codec[PreviewResponse]         = deriveCodec
+  given Codec[DataDiffSummary]         = deriveCodec
+  given Codec[DataDiffEntry]           = deriveCodec
+  given Codec[DataDiffResponse]        = deriveCodec
+  given Codec[RecoverableTableEntry]   = deriveCodec
+  given Codec[RecoverableListResponse] = deriveCodec
+  given Codec[UndropRequest]           = deriveCodec
+  given Codec[UndropResponse]          = deriveCodec
 
   // Schema diff (Task 6)
   given Codec[SchemaDiffColumnType]  = deriveCodec
