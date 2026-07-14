@@ -168,6 +168,18 @@ export default function MaintenancePanel({ tenant, tenantDb }: {
       .catch(e => { if (genRef.current === gen) setRunsError(String(e)); });
   }
 
+  // Auto-refresh the run history every 10s while any run is still active
+  // (queued or running), so a triggered run's progress shows up without a
+  // manual reload; the interval stops once everything has settled. Refresh
+  // re-fetches the first page, so any loaded-more tail collapses while a
+  // run is active.
+  useEffect(() => {
+    if (!runs?.some(r => r.status === 'queued' || r.status === 'running')) return;
+    const t = setInterval(() => reloadRuns(genRef.current), 10_000);
+    return () => clearInterval(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs]);
+
   useEffect(() => {
     genRef.current += 1;
     const gen = genRef.current;
