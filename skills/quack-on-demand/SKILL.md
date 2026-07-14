@@ -349,6 +349,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 - **Edits take effect on the next spawn.** Editing or disabling a source affects every Quack node spawned after the commit: idle-timeout replacement, manual restart, scale-up additions, pool recreation. Already-running nodes keep their attached catalogs until they exit.
 - **Boot-time failure is fatal.** If a source's `setupSql` errors at node startup (extension missing, bad credentials, DNS), the spawn script exits 91 and the supervisor surfaces the last lines of stderr.
 - **Disabled sources** are filtered out at blob assembly. No live DETACH.
+- **Deleting a federated source** removes its alias from the ACL ambiguity guard immediately, but running nodes keep the catalog attached until the pool recycles. Recycle the pool right after deleting a source.
 
 ### Troubleshooting
 

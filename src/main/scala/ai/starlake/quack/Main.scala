@@ -913,14 +913,18 @@ object Main extends IOApp with LazyLogging:
       auditRecorder.onDropCounter(journalDropped)
 
       // Per-pool attached-catalogs lookup for ACL resolution (attached-catalog-aware ACL):
-      // the tenant-db's own dbName + its enabled federation aliases + the DuckDB
-      // built-in catalogs (memory/system/temp) that are always attached. Cached 60s
-      // per PoolKey -- federation-source edits only reach the engine on node respawn
-      // anyway (documented lifecycle), so a short TTL is not a staleness regression.
-      // Deliberately NO invalidation hook (unlike the EffectiveSet cache): a stale
-      // entry can only be narrower than what a running node has attached (fail-closed)
-      // or admit an alias no node has attached yet (the engine then rejects the
-      // unknown catalog), never a grant bypass.
+      // the tenant-db's own dbName + ALL of its federation aliases (enabled or disabled)
+      // + the DuckDB built-in catalogs (memory/system/temp) that are always attached.
+      // Cached 60s per PoolKey -- federation-source edits only reach the engine on node
+      // respawn anyway (documented lifecycle), so a short TTL is not a staleness
+      // regression. Disabled sources are included deliberately: a disabled source's
+      // alias remains ATTACHed on already-running nodes until the pool recycles, so
+      // excluding it would re-open the two-part-name bypass for broadly granted
+      // principals. Deliberately NO invalidation hook (unlike the EffectiveSet cache):
+      // the set reflects what MAY be attached on any node of the pool. The only
+      // residual exposure is (a) a newly created source whose alias enters the set
+      // within the 60s TTL, and (b) a deleted source, whose alias disappears from the
+      // store entirely while still attached on running nodes until the pool recycles.
       val attachedCatalogsCache =
         new java.util.concurrent.ConcurrentHashMap[
           ai.starlake.quack.model.PoolKey,
@@ -938,7 +942,7 @@ object Main extends IOApp with LazyLogging:
             .getOrElse("dbName", key.tenantDb)
           val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
             case (Some(td), Some(fedStore)) =>
-              fedStore.listSources(td.id).filterNot(_.disabled).map(_.alias).toSet
+              fedStore.listSources(td.id).map(_.alias).toSet
             case _ => Set.empty[String]
           val result = builtins + dbName ++ aliases
           attachedCatalogsCache.put(key, (now, result))
