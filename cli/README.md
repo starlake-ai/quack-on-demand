@@ -1,0 +1,297 @@
+# qod - the quack-on-demand CLI
+
+`qod` is a Python command-line client for quack-on-demand. It wraps the
+manager's admin REST surface (tenants, databases, pools, nodes, RBAC, catalog
+browsing, federation, audit, usage) and the FlightSQL query plane (`qod sql`,
+one-shot or interactive REPL) behind one noun-verb command tree.
+
+## Install
+
+From the repo root, against a local checkout:
+
+```bash
+pip install ./cli
+```
+
+For development (editable install, plus pytest/respx):
+
+```bash
+pip install -e 'cli[dev]'
+```
+
+Released versions are published to PyPI as `qod-cli`:
+
+```bash
+pip install qod-cli
+```
+
+Both routes install the `qod` console script.
+
+## Quick start
+
+```bash
+qod login --url http://localhost:20900 --username admin
+qod tenant list
+qod sql "SELECT 1" --tenant acme --pool bi
+```
+
+`qod login` prompts for the password (it is never a command-line flag, so it
+never lands in shell history), mints a session, and stores the session token
+plus the edge host/port/TLS settings in the active profile - one login
+configures both the REST plane and the SQL plane.
+
+## Configuration
+
+Settings resolve in this order for every field, highest priority first:
+
+1. Command-line flag (e.g. `--tenant`, `--url`)
+2. `QOD_*` environment variable
+3. Value saved in the active profile
+4. Built-in default
+
+Profiles are named sections in a TOML file at the platform config
+directory: `~/.config/qod/config.toml` on Linux, `~/Library/Application
+Support/qod/config.toml` on macOS, `%APPDATA%\qod\config.toml` on Windows.
+`QOD_CONFIG_FILE` overrides the full path. The file is written with mode
+0600 because it can hold a session token and an opt-in SQL password. Select
+a profile with `--profile NAME` or `QOD_PROFILE`; the default profile is
+named `default`.
+
+| Setting | Env var | Default | Notes |
+|---|---|---|---|
+| `manager_url` | `QOD_MANAGER_URL` | `http://localhost:20900` | REST plane base URL. |
+| `api_key` | `QOD_API_KEY` | `""` | Static API key; wins over `token` when both are set. |
+| `token` | `QOD_TOKEN` | `""` | Session JWT, normally written by `qod login`, not set by hand. |
+| `edge_host` | `QOD_HOST` | `localhost` | FlightSQL edge host. |
+| `edge_port` | `QOD_PORT` | `31338` | FlightSQL edge port. |
+| `edge_tls` | `QOD_TLS` | `true` | TLS to the edge. |
+| `edge_tls_verify` | `QOD_TLS_VERIFY` | `false` | Verify the edge TLS cert; off by default since the edge ships a self-signed cert. |
+| `tenant` | `QOD_TENANT` | `""` | Default tenant for `qod sql`. |
+| `pool` | `QOD_POOL` | `""` | Default pool for `qod sql`. |
+| `sql_user` | `QOD_USER` | `""` | FlightSQL username; set by `qod login`. |
+| `sql_password` | `QOD_PASSWORD` | `""` | FlightSQL password; opt-in storage, see "SQL plane" below. |
+| `superuser` | `QOD_SUPERUSER` | `false` | Send the superuser call header on `qod sql`. |
+
+## Command reference
+
+Output columns below are one-line purposes; run `qod <noun> <verb> --help`
+for the full flag list of any command.
+
+### Top level
+
+| Command | Purpose |
+|---|---|
+| `qod login` | Mint a session, store it and the edge settings in the active profile. |
+| `qod logout` | Revoke the current session token. |
+| `qod whoami` | Verify the current session. |
+| `qod health` | Liveness plus pool/node counts (open endpoint). |
+| `qod usage` | Usage accounting rollups. |
+| `qod sql` | Run SQL against the FlightSQL edge; one-shot or interactive REPL. |
+
+### auth - authentication mode discovery
+
+| Verb | Purpose |
+|---|---|
+| `mode` | Show the auth mode (db or oidc) the manager expects. |
+
+### config - server-published configuration
+
+| Verb | Purpose |
+|---|---|
+| `client` | Edge host/port/TLS for client bootstrapping (open endpoint). |
+| `server` | Effective manager configuration. |
+
+### tenant - tenant CRUD
+
+| Verb | Purpose |
+|---|---|
+| `list` | List tenants. |
+| `create` | Create a tenant. |
+| `delete` | Delete a tenant (must have no pools). |
+| `set-disabled` | Enable or disable a tenant. |
+| `set-auth` | Change a tenant's auth provider/config. |
+
+### database - tenant databases (DuckLake catalogs)
+
+| Verb | Purpose |
+|---|---|
+| `list` | List databases for a tenant. |
+| `create` | Create a tenant database. |
+| `update` | Update a tenant database's metastore/object-store/init settings. |
+| `delete` | Delete a tenant database. |
+
+### pool - pool lifecycle and pool-level access grants
+
+| Verb | Purpose |
+|---|---|
+| `list` | List pools. |
+| `create` | Create a pool. |
+| `scale` | Change a pool's target size and role distribution. |
+| `stop` | Stop a pool's nodes. |
+| `delete` | Delete a pool. |
+| `set-disabled` | Enable or disable a pool. |
+| `set-resources` | Set CPU/memory requests for a pool's nodes. |
+| `set-pod-template` | Set the Kubernetes pod template YAML for a pool. |
+| `permission list` | List pool access grants. |
+| `permission grant` | Grant pool access to a user or group. |
+| `permission revoke` | Revoke a pool access grant. |
+
+### node - node lifecycle and statement inspection
+
+| Verb | Purpose |
+|---|---|
+| `quarantine` | Take a node out of routing rotation. |
+| `unquarantine` | Return a node to routing rotation. |
+| `restart` | Restart a node. |
+| `set-max-concurrent` | Set a node's max concurrent statement limit. |
+| `statements` | Recent statement history, newest first. |
+| `active-statements` | Currently running statements. |
+
+### statement - statement control
+
+| Verb | Purpose |
+|---|---|
+| `kill` | Kill a running statement by id. |
+
+### user - user principals
+
+| Verb | Purpose |
+|---|---|
+| `list` | List users. |
+| `create` | Create a user (tenant-scoped, or `--superuser` for tenant-less). |
+| `update` | Update a user's tenant, password, or role. |
+| `delete` | Delete a user. |
+| `effective` | Closure of roles, groups, table permissions, and pool grants. |
+
+### role - roles, table permissions, and row/column policies
+
+| Verb | Purpose |
+|---|---|
+| `list` | List roles for a tenant. |
+| `create` | Create a role. |
+| `delete` | Delete a role. |
+| `permission list` | List table permissions attached to a role. |
+| `permission grant` | Grant a table permission to a role. |
+| `permission revoke` | Revoke a table permission from a role. |
+| `row-policy list` | List row-level security predicates on a role. |
+| `row-policy create` | Add a row-level security predicate. |
+| `row-policy update` | Update a row-level security predicate. |
+| `row-policy delete` | Delete a row-level security predicate. |
+| `column-policy list` | List column-level security policies on a role. |
+| `column-policy create` | Add a column-level security policy. |
+| `column-policy update` | Update a column-level security policy. |
+| `column-policy delete` | Delete a column-level security policy. |
+
+### group - groups
+
+| Verb | Purpose |
+|---|---|
+| `list` | List groups for a tenant. |
+| `create` | Create a group. |
+| `delete` | Delete a group. |
+
+### membership - RBAC membership edges
+
+| Verb | Purpose |
+|---|---|
+| `user-role add` | Add a user to a role. |
+| `user-role remove` | Remove a user from a role. |
+| `user-group add` | Add a user to a group. |
+| `user-group remove` | Remove a user from a group. |
+| `group-role add` | Add a role to a group. |
+| `group-role remove` | Remove a role from a group. |
+| `group-role list` | List roles held by a group. |
+
+### catalog - DuckLake catalog browsing, time travel, and recovery
+
+| Verb | Purpose |
+|---|---|
+| `schemas` | List schemas in a tenant database. |
+| `tables` | List tables in a schema. |
+| `describe` | Describe a table's columns, optionally as of a snapshot/tag/timestamp. |
+| `snapshots` | List snapshots for a tenant database, optionally filtered to a table. |
+| `history` | Snapshot history for a table (operation, author, time range filters). |
+| `preview` | Preview table rows, optionally as of a snapshot/tag/timestamp. |
+| `data-diff` | Row-level diff of a table between two snapshot selectors. |
+| `schema-diff` | Schema diff of a table between two snapshot selectors. |
+| `recoverable` | Dropped tables still recoverable via undrop. |
+| `undrop` | Recover a dropped table, optionally under a different name. |
+
+### tag - snapshot tags (create, delete, protect)
+
+| Verb | Purpose |
+|---|---|
+| `create` | Tag a snapshot, optionally marking it protected. |
+| `delete` | Delete a tag. |
+| `protect` | Change a tag's protected flag. |
+
+### maintenance - managed maintenance policies and runs
+
+| Verb | Purpose |
+|---|---|
+| `policy` | Show the maintenance policy for a scope. |
+| `policy-upsert` | Create or update a maintenance policy. |
+| `policy-delete` | Delete a maintenance policy. |
+| `run` | Trigger a maintenance run. |
+| `runs` | List past maintenance runs. |
+
+### manifest - topology manifest export/import (YAML)
+
+| Verb | Purpose |
+|---|---|
+| `export` | Export the whole control-plane topology as YAML. |
+| `import` | Import a topology manifest (YAML) into the control plane. |
+
+### federation - federated sources per (tenant, tenant-db)
+
+| Verb | Purpose |
+|---|---|
+| `list` | List federated sources. |
+| `get` | Show one federated source. |
+| `create` | Create a federated source. |
+| `delete` | Delete a federated source. |
+| `secret list` | List secrets referenced by a federated source's setup SQL. |
+| `secret set` | Set a secret (inline value or external reference). |
+| `secret delete` | Delete a secret. |
+
+### audit - audit log
+
+| Verb | Purpose |
+|---|---|
+| `list` | List audit log entries with filters. |
+| `actions` | Distinct audit action names, for filter values. |
+
+### history - statement history and trends
+
+| Verb | Purpose |
+|---|---|
+| `statements` | List past statements with filters. |
+| `trends` | Aggregate statement trends over time. |
+
+## Output
+
+Human-readable Rich tables are the default. Pass `--json` (a top-level flag,
+before the noun) for the raw JSON response body - the stable interface for
+scripting. `qod sql` additionally supports `--csv`.
+
+Exit codes: `0` success, `1` a server/API error (the server's error body is
+shown verbatim, e.g. `tenant_forbidden`), `2` a usage error (missing or
+invalid arguments, the Typer/Click default).
+
+## SQL plane
+
+`qod sql "SELECT ..."` runs one statement and prints the result; `qod sql`
+with no statement argument opens an interactive REPL (statements end with
+`;`, `\q` or Ctrl-D exits, errors from one statement do not exit the REPL).
+
+Credentials for the FlightSQL edge are resolved in this order:
+
+1. `QOD_PASSWORD` environment variable
+2. `sql_password` in the active profile (opt-in; not written by `qod login`)
+3. An interactive prompt, once per invocation
+
+`sql_user` comes from `qod login` (or `QOD_USER`/`--tenant` overrides).
+`--superuser` sends the superuser call header instead of a tenant/pool pair.
+TLS to the edge defaults to on with certificate verification off, since the
+edge ships a self-signed certificate; set `edge_tls_verify = true` or
+`QOD_TLS_VERIFY=true` to opt into verification against a real certificate.
