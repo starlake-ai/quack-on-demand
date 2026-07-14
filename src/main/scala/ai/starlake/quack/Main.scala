@@ -917,6 +917,10 @@ object Main extends IOApp with LazyLogging:
       // built-in catalogs (memory/system/temp) that are always attached. Cached 60s
       // per PoolKey -- federation-source edits only reach the engine on node respawn
       // anyway (documented lifecycle), so a short TTL is not a staleness regression.
+      // Deliberately NO invalidation hook (unlike the EffectiveSet cache): a stale
+      // entry can only be narrower than what a running node has attached (fail-closed)
+      // or admit an alias no node has attached yet (the engine then rejects the
+      // unknown catalog), never a grant bypass.
       val attachedCatalogsCache =
         new java.util.concurrent.ConcurrentHashMap[
           ai.starlake.quack.model.PoolKey,
