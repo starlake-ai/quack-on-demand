@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qod-cli"
+dynamic = ["version"]
+description = "Command-line client for quack-on-demand: admin REST plane and FlightSQL plane"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "httpx>=0.27",
+    "platformdirs>=4.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+    "adbc-driver-flightsql>=1.0",
+    "pyarrow>=16.0",
+    "pyreadline3>=3.4; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "respx>=0.21"]
+
+[project.scripts]
+qod = "qod_cli.main:main"
+
+[tool.hatch.version]
+path = "src/qod_cli/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qod_cli"]
