@@ -18,7 +18,7 @@ Use this skill when the user wants to:
 
 ## Repo layout (the bits operators touch)
 
-- `scripts/run-jar.sh` - boot from the uber-jar; `BUILD=1` runs `sbt assembly` first
+- `scripts/run-jar.sh` - boot from the uber-jar; `QOD_VERSION=BUILD` runs `sbt assembly` first, `QOD_VERSION=LOCAL` reuses the newest `distrib/` jar
 - `scripts/stop-jar.sh` - SIGTERM → wait → SIGKILL
 - `scripts/tpch-load-test/tpch-load-test.py` - Python FlightSQL load tester (ADBC driver)
 - `scripts/adbc.sh` - run one SQL query against the FlightSQL edge and print it as a table (ADBC driver, self-provisioning venv)
@@ -35,7 +35,10 @@ Use this skill when the user wants to:
 ./scripts/run-jar.sh
 
 # Build the uber-jar first
-BUILD=1 ./scripts/run-jar.sh
+QOD_VERSION=BUILD ./scripts/run-jar.sh
+
+# Newest distrib/ jar, no rebuild, no Central lookup
+QOD_VERSION=LOCAL ./scripts/run-jar.sh
 
 # Disable DB auth (UI then skips the login screen)
 QOD_AUTH_DB_ENABLED=false ./scripts/run-jar.sh

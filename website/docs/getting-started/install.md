@@ -134,7 +134,7 @@ $env:QOD_ADMIN_PASSWORD = 'change-me'
 .\scripts\run-jar.ps1
 ```
 
-`run-jar.ps1` is at feature parity with the bash `run-jar.sh`. By default it resolves the jar from Maven Central (`QOD_VERSION`; on Windows pin it to `0.3.7-SNAPSHOT` or later, since older releases do not carry the Windows launchers; `latest-snapshot` picks the newest snapshot), caches it under `%USERPROFILE%\.cache\quack-on-demand\` with a sha1 check, and falls back to the newest `distrib\quack-on-demand-assembly-*.jar` or `sbt assembly` (bootstrapping `sbt` into `.sbt-bootstrap\` if it isn't on `PATH`) when nothing is published. Set `$env:BUILD='1'` to force a local `sbt assembly`. Before starting the JVM it runs a Postgres reachability probe + PG16 gate, creates the control-plane database if missing, and does a port preflight (aborting if the REST/FlightSQL ports are held or a stale Quack node is squatting the node-port range). All the same `QOD_*` / `PROXY_*` environment variables apply. Stop with `.\scripts\stop-jar.ps1`.
+`run-jar.ps1` is at feature parity with the bash `run-jar.sh`. By default it resolves the jar from Maven Central (`QOD_VERSION`; on Windows pin it to `0.3.7-SNAPSHOT` or later, since older releases do not carry the Windows launchers; `latest-snapshot` picks the newest snapshot), caches it under `%USERPROFILE%\.cache\quack-on-demand\` with a sha1 check, and falls back to the newest `distrib\quack-on-demand-assembly-*.jar` or `sbt assembly` (bootstrapping `sbt` into `.sbt-bootstrap\` if it isn't on `PATH`) when nothing is published. Set `$env:QOD_VERSION='BUILD'` to force a local `sbt assembly`, or `$env:QOD_VERSION='LOCAL'` to reuse the newest `distrib\` jar without rebuilding. Before starting the JVM it runs a Postgres reachability probe + PG16 gate, creates the control-plane database if missing, and does a port preflight (aborting if the REST/FlightSQL ports are held or a stale Quack node is squatting the node-port range). All the same `QOD_*` / `PROXY_*` environment variables apply. Stop with `.\scripts\stop-jar.ps1`.
 
 **Seeding the demo datasets.** The same seed flags as the bash path work on Windows - `run-jar.ps1` runs the PowerShell demo loaders (`load-{tpch,tpcds,ssb}-dbgen.ps1`) in the background before the JVM starts:
 
@@ -166,10 +166,11 @@ sbt assembly            # bundles native/windows-x86_64/quackwire.dll
 
 ### Build from source
 
-`BUILD=1` tells `run-jar.sh` to call `sbt assembly` first instead of downloading:
+`QOD_VERSION=BUILD` tells `run-jar.sh` to call `sbt assembly` first instead of downloading; `QOD_VERSION=LOCAL` reuses the newest jar already in `distrib/` without rebuilding or consulting Maven Central:
 
 ```bash
-BUILD=1 ./scripts/run-jar.sh
+QOD_VERSION=BUILD ./scripts/run-jar.sh
+QOD_VERSION=LOCAL ./scripts/run-jar.sh
 ```
 
 To build the jar separately and run it manually:

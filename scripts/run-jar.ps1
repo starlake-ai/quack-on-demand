@@ -4,15 +4,20 @@
   PowerShell twin of scripts/run-jar.sh, at feature parity.
 
 .DESCRIPTION
-  Two modes, picked via $env:BUILD:
-    BUILD=0 (default) - resolve the jar from Maven Central
-                        (ai.starlake:quack-on-demand_3:<QOD_VERSION>), cache it
-                        under $JAR_CACHE_DIR (sha1-checked), run `java -jar`.
+  One knob, $env:QOD_VERSION, picks where the jar comes from:
+    unset / latest    - resolve the latest release from Maven Central
+                        (ai.starlake:quack-on-demand_3), cache it under
+                        $JAR_CACHE_DIR (sha1-checked), run `java -jar`.
                         Falls back to a local distrib\ jar / `sbt assembly` when
                         the artifact isn't published yet.
-    BUILD=1           - run `sbt assembly` from this checkout (bootstrapping sbt
+    <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
+    latest-snapshot   - download the newest Central snapshot.
+    BUILD             - run `sbt assembly` from this checkout (bootstrapping sbt
                         into .sbt-bootstrap\ if it isn't on PATH) and run the
                         freshly-built jar in distrib\.
+    LOCAL             - run the newest jar already in distrib\ without
+                        rebuilding or consulting Maven Central (falls back to
+                        a build when distrib\ is empty).
 
   Boot extras (parity with run-jar.sh):
     - DuckDB CLI + libduckdb self-install (windows-amd64) onto PATH
@@ -29,11 +34,11 @@
   QOD_* / PROXY_* env vars; the Add-Opens JVM flags ship in the jar manifest.
 
   Env knobs (superset shared with run-jar.sh):
-    BUILD=1                run `sbt assembly` first (requires sbt + npm; sbt is
-                           auto-bootstrapped if missing)
-    QOD_VERSION            artifact version to download (default = latest release;
-                           `latest-snapshot` = newest Central snapshot; ignored
-                           when BUILD=1)
+    QOD_VERSION            jar source (see modes above): a version to download,
+                           `latest` (default), `latest-snapshot`, `BUILD`
+                           (sbt assembly first; requires sbt + npm, sbt is
+                           auto-bootstrapped if missing), or `LOCAL` (newest
+                           distrib\ jar, no rebuild, no Central lookup)
     JAR_CACHE_DIR          download cache (default $HOME\.cache\quack-on-demand)
     NUKE=1                 wipe local state (control-plane DB, demo tenant-dbs,
                            ducklake\, state\, certs\) before booting. Irreversible.
@@ -53,6 +58,10 @@
   .\scripts\run-jar.ps1                                  # latest release
 .EXAMPLE
   $env:QOD_VERSION='latest-snapshot'; .\scripts\run-jar.ps1
+.EXAMPLE
+  $env:QOD_VERSION='BUILD'; .\scripts\run-jar.ps1        # sbt assembly first
+.EXAMPLE
+  $env:QOD_VERSION='LOCAL'; .\scripts\run-jar.ps1        # newest distrib\ jar as-is
 .EXAMPLE
   $env:NUKE='1'; $env:LOAD_TPCH='1'; .\scripts\run-jar.ps1
 .EXAMPLE
@@ -211,7 +220,7 @@ function Use-LocalJarOrBuild {
   $jar = Get-LocalJar
   if ($jar) {
     Write-Host "using existing local jar: $jar"
-    Write-Host "  (set BUILD=1 to force a fresh build)"
+    Write-Host "  (set QOD_VERSION=BUILD to force a fresh build)"
     return $jar
   }
   return (Invoke-Build)
@@ -245,15 +254,16 @@ function Test-JarCurrent([string]$Jar, [string]$Sha1Url) {
 }
 
 $Jar = $null
-if ($env:BUILD -eq '1') {
-  Write-Host "BUILD=1: local build"
+$QodVersion = Get-EnvOr 'QOD_VERSION' 'latest'
+if ($QodVersion -ceq 'BUILD') {
+  Write-Host "QOD_VERSION=BUILD: local source build"
   $Jar = Invoke-Build
-} elseif ($env:LOCAL -eq '1') {
-  Write-Host "LOCAL=1: newest distrib\ jar, no rebuild, no Central lookup"
+} elseif ($QodVersion -ceq 'LOCAL') {
+  Write-Host "QOD_VERSION=LOCAL: newest distrib\ jar, no rebuild, no Central lookup"
   $Jar = Use-LocalJarOrBuild
 } else {
   New-Item -ItemType Directory -Force -Path $JarCacheDir | Out-Null
-  $version = Get-EnvOr 'QOD_VERSION' 'latest'
+  $version = $QodVersion
   switch ($version) {
     'latest' {
       $version = Get-MavenMetaValue "https://repo1.maven.org/maven2/$GroupPath/$Artifact/maven-metadata.xml" 'release'

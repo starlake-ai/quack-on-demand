@@ -30,8 +30,9 @@ The build sets `Compile / run / fork := true` and `Test / fork := true` and adds
 Boot from the uber-jar with TLS cert auto-generation and a Postgres reachability probe:
 
 ```bash
-./scripts/run-jar.sh           # foreground
-BUILD=1 ./scripts/run-jar.sh   # sbt assembly first
+./scripts/run-jar.sh                     # foreground
+QOD_VERSION=BUILD ./scripts/run-jar.sh   # sbt assembly first
+QOD_VERSION=LOCAL ./scripts/run-jar.sh   # newest distrib/ jar, no rebuild
 ./scripts/stop-jar.sh
 ```
 

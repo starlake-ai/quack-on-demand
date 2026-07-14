@@ -63,7 +63,7 @@ The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they c
 | `DEMO=full\|minimal` | Bootstrap profile for the demo seed. `full` (the default) imports the two-tenant `acme` + `globex` manifest and exercises multi-tenancy, multiple pools, and federation; `minimal` imports `bootstrap-demo-minimal.yaml` instead - the shape for fronting a single DuckDB/DuckLake database: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, plus the analyst RLS/CLS demo. Only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile). |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
-| `BUILD=1` | Build from local source (Compose: from the repo Dockerfile; jar: `sbt assembly`) instead of pulling/downloading. |
+| Build from source | Compose: `BUILD=1` builds the image from the repo Dockerfile instead of pulling. Jar: `QOD_VERSION=BUILD` runs `sbt assembly` first, and `QOD_VERSION=LOCAL` reuses the newest jar already in `distrib/` without rebuilding. |
 
 For a clean, freshly seeded environment in one shot, combine them. This wipes any previous state and boots with both demo datasets at scale-factor 1:
 

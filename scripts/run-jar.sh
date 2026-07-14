@@ -2,15 +2,20 @@
 #
 # Run the quack-on-demand manager from the assembly uber-jar.
 #
-# Two modes, picked via BUILD:
-#   BUILD=0 (default) - download the jar from Maven Central
-#                       (ai.starlake:quack-on-demand_3:<QOD_VERSION>),
-#                       cache it under $JAR_CACHE_DIR, run `java -jar`.
-#   BUILD=1           - rebuild libquackwire for the host platform (cmake +
+# One knob, QOD_VERSION, picks where the jar comes from:
+#   unset / latest    - download the latest release from Maven Central
+#                       (ai.starlake:quack-on-demand_3), cache it under
+#                       $JAR_CACHE_DIR, run `java -jar`.
+#   <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
+#   latest-snapshot   - download the newest Central snapshot.
+#   BUILD             - rebuild libquackwire for the host platform (cmake +
 #                       sbt libquackwire/publishLocal), then run `sbt assembly`
 #                       from this checkout. Non-host platforms come from
 #                       Central snapshots so the assembly carries all four
 #                       libs. Uses the freshly-built jar in distrib/.
+#   LOCAL             - run the newest jar already in distrib/ without
+#                       rebuilding or consulting Maven Central (falls back
+#                       to a build when distrib/ is empty).
 #
 # Boot extras: Postgres reachability probe, idempotent CREATE DATABASE
 # of the catalog DB, optional TPC-H seed via load-tpch-dbgen.sh before
@@ -22,15 +27,10 @@
 #   - Postgres expected at $QOD_PG_HOST:5432 (default localhost)
 #
 # Env vars:
-#   BUILD=1                       run `sbt assembly` first instead of downloading
-#   LOCAL=1                       run the newest jar already in distrib/ without
-#                                 rebuilding or consulting Maven Central (falls
-#                                 back to a build when distrib/ is empty; ignored
-#                                 when BUILD=1)
-#   QOD_VERSION                 artifact version to download (default = latest
-#                                 release from Maven Central; `latest-snapshot`
-#                                 fetches from Central snapshots; ignored when
-#                                 BUILD=1)
+#   QOD_VERSION                   jar source (see modes above): a version to
+#                                 download, `latest` (default), `latest-snapshot`,
+#                                 `BUILD` (sbt assembly first), or `LOCAL`
+#                                 (newest distrib/ jar, no rebuild, no Central)
 #   JAR_CACHE_DIR                 download cache (default ~/.cache/quack-on-demand)
 #   JAVA_HOME                     uses `java` on PATH if unset
 #   JAVA_OPTS                     extra JVM flags (e.g. -Xmx2g)
@@ -83,7 +83,8 @@
 #   ./scripts/run-jar.sh                                   # latest release
 #   QOD_VERSION=0.1.0 ./scripts/run-jar.sh               # pinned release
 #   QOD_VERSION=latest-snapshot ./scripts/run-jar.sh     # latest snapshot
-#   BUILD=1 ./scripts/run-jar.sh                           # local source build
+#   QOD_VERSION=BUILD ./scripts/run-jar.sh                 # local source build
+#   QOD_VERSION=LOCAL ./scripts/run-jar.sh                 # newest distrib/ jar as-is
 #   LOAD_TPCH=1 ./scripts/run-jar.sh                       # + TPC-H demo seed SF=1
 #   LOAD_TPCDS=10 ./scripts/run-jar.sh                     # + TPC-DS demo seed SF=10
 #   LOAD_SSB=1 ./scripts/run-jar.sh                        # + SSB star schema SF=1
@@ -110,7 +111,6 @@ cd "$REPO_DIR"
 # Override by exporting QOD_DUCKLAKE_DATA_PATH before invoking this script.
 export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/data}"
 
-BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
 GROUP_PATH="ai/starlake"
 ARTIFACT="quack-on-demand_3"
@@ -271,10 +271,11 @@ if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
 fi
 
 # ---- Resolve jar ----
-# BUILD=1 always builds locally. BUILD=0 (default) tries Maven Central
-# first and falls back to `sbt assembly` if the artifact hasn't been
-# published yet (pre-release / dev), so a fresh clone of the source
-# tree works with the documented invocation regardless of release state.
+# QOD_VERSION=BUILD always builds locally; QOD_VERSION=LOCAL reuses the
+# newest distrib/ jar. Everything else tries Maven Central and falls back
+# to `sbt assembly` if the artifact hasn't been published yet (pre-release
+# / dev), so a fresh clone of the source tree works with the documented
+# invocation regardless of release state.
 
 # Ensure `sbt` is callable. If it isn't on PATH, fetch the official
 # distribution into `.sbt-bootstrap/` under the repo root so a fresh
@@ -413,24 +414,25 @@ build_locally() {
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
 }
 
-# Used in the Maven-Central-fallback path only. Reuses an existing assembly
-# jar if one is sitting in distrib/, saving ~30-45s of sbt assembly. `BUILD=1`
-# bypasses this and always rebuilds.
+# Used by QOD_VERSION=LOCAL and the Maven-Central-fallback path. Reuses an
+# existing assembly jar if one is sitting in distrib/, saving ~30-45s of
+# sbt assembly. `QOD_VERSION=BUILD` bypasses this and always rebuilds.
 use_local_jar_or_build() {
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
   if [[ -n "$JAR" ]]; then
     echo "using existing local jar: $JAR"
-    echo "  (BUILD=1 ./scripts/run-jar.sh to force a fresh build)"
+    echo "  (QOD_VERSION=BUILD ./scripts/run-jar.sh to force a fresh build)"
   else
     build_locally
   fi
 }
 
-if [[ "$BUILD" == "1" ]]; then
-  echo "BUILD=1: local build"
+QOD_VERSION="${QOD_VERSION:-latest}"
+if [[ "$QOD_VERSION" == "BUILD" ]]; then
+  echo "QOD_VERSION=BUILD: local source build"
   build_locally
-elif [[ "${LOCAL:-0}" == "1" ]]; then
-  echo "LOCAL=1: newest distrib/ jar, no rebuild, no Central lookup"
+elif [[ "$QOD_VERSION" == "LOCAL" ]]; then
+  echo "QOD_VERSION=LOCAL: newest distrib/ jar, no rebuild, no Central lookup"
   use_local_jar_or_build
 else
   mkdir -p "$JAR_CACHE_DIR"
@@ -463,7 +465,7 @@ else
   # Belt-and-suspenders: also wrap each substitution with `|| true`, so an
   # accidental non-zero from the function never aborts the script under
   # `set -e`. The empty-version fall-back branch below picks up the result.
-  version="${QOD_VERSION:-latest}"
+  version="$QOD_VERSION"
   case "$version" in
     latest)
       version="$(resolve_latest_release || true)"
