@@ -57,6 +57,12 @@ from .commands import database, tenant  # noqa: E402
 app.add_typer(tenant.app, name="tenant")
 app.add_typer(database.app, name="database")
 
+from .commands import node, pool  # noqa: E402
+
+app.add_typer(pool.app, name="pool")
+app.add_typer(node.app, name="node")
+app.add_typer(node.statement_app, name="statement")
+
 
 def main() -> None:
     app()

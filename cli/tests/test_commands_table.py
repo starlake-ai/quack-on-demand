@@ -74,6 +74,87 @@ CASES = [
         {},
         {"tenant": "acme", "name": "tpch1"},
     ),
+    (["pool", "list"], "GET", "/api/pool/list", {}, None),
+    (
+        ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--size", "2", "--writeonly", "1", "--readonly", "1", "--dual", "0"],
+        "POST",
+        "/api/pool/create",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
+            "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
+            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
+            "cpu": "", "memory": "", "podTemplateYaml": "",
+        },
+    ),
+    (
+        ["pool", "scale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--target-size", "3", "--writeonly", "1", "--readonly", "2", "--dual", "0", "--force"],
+        "POST",
+        "/api/pool/scale",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "targetSize": 3,
+            "roleDistribution": {"writeonly": 1, "readonly": 2, "dual": 0}, "force": True,
+        },
+    ),
+    (
+        ["pool", "stop", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/stop", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "force": False},
+    ),
+    (
+        ["pool", "delete", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--force"],
+        "POST", "/api/pool/delete", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "force": True},
+    ),
+    (
+        ["pool", "set-disabled", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--disabled"],
+        "POST", "/api/pool/setDisabled", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "disabled": True},
+    ),
+    (
+        ["pool", "set-resources", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--cpu", "2", "--memory", "4Gi"],
+        "POST", "/api/pool/setResources", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "cpu": "2", "memory": "4Gi"},
+    ),
+    (
+        ["pool", "permission", "list", "--tenant", "acme"],
+        "GET", "/api/pool/permission/list", {"tenant": "acme"}, None,
+    ),
+    (
+        ["pool", "permission", "grant", "--tenant", "acme", "--user-id", "u1", "--pool-id", "p1"],
+        "POST", "/api/pool/permission/grant", {},
+        {"tenant": "acme", "poolId": "p1", "userId": "u1"},
+    ),
+    (
+        ["pool", "permission", "grant", "--tenant", "acme", "--group-id", "g1"],
+        "POST", "/api/pool/permission/grant", {},
+        {"tenant": "acme", "groupId": "g1"},
+    ),
+    (["pool", "permission", "revoke", "pp1"], "POST", "/api/pool/permission/revoke", {}, {"id": "pp1"}),
+    (
+        ["node", "quarantine", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--node-id", "n1"],
+        "POST", "/api/node/quarantine", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "nodeId": "n1"},
+    ),
+    (
+        ["node", "unquarantine", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--node-id", "n1"],
+        "POST", "/api/node/unquarantine", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "nodeId": "n1"},
+    ),
+    (
+        ["node", "restart", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--node-id", "n1"],
+        "POST", "/api/node/restart", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "nodeId": "n1"},
+    ),
+    (
+        ["node", "set-max-concurrent", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--node-id", "n1", "--max", "8"],
+        "POST", "/api/node/setMaxConcurrent", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "nodeId": "n1", "max": 8},
+    ),
+    (["node", "statements", "--limit", "20"], "GET", "/api/node/statements", {"limit": "20"}, None),
+    (["node", "active-statements"], "GET", "/api/node/active-statements", {}, None),
+    (["statement", "kill", "s1"], "POST", "/api/statement/kill", {}, {"id": "s1"}),
 ]
 
 

@@ -1,0 +1,137 @@
+import typer
+
+from ._run import call
+
+app = typer.Typer(help="Pool lifecycle and pool-level access grants.")
+permission_app = typer.Typer(help="Pool access grants for users and groups.")
+app.add_typer(permission_app, name="permission")
+
+TENANT = typer.Option(..., "--tenant")
+DB = typer.Option(..., "--db", help="Tenant database name.")
+POOL = typer.Option(..., "--pool")
+
+
+def _key(tenant: str, db: str, pool: str) -> dict:
+    return {"tenant": tenant, "tenantDb": db, "pool": pool}
+
+
+@app.command("list")
+def list_(ctx: typer.Context):
+    call(ctx, "GET", "/api/pool/list")
+
+
+@app.command()
+def create(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    size: int = typer.Option(..., "--size"),
+    writeonly: int = typer.Option(0, "--writeonly"),
+    readonly: int = typer.Option(0, "--readonly"),
+    dual: int = typer.Option(0, "--dual"),
+    idle_timeout_sec: int = typer.Option(-1, "--idle-timeout-sec"),
+    max_concurrent_per_node: int = typer.Option(0, "--max-concurrent-per-node"),
+    disabled: bool = typer.Option(False, "--disabled"),
+    init_sql: str = typer.Option(None, "--init-sql"),
+    cpu: str = typer.Option("", "--cpu"),
+    memory: str = typer.Option("", "--memory"),
+    pod_template_file: typer.FileText = typer.Option(None, "--pod-template-file"),
+):
+    body = {
+        **_key(tenant, db, pool),
+        "size": size,
+        "roleDistribution": {"writeonly": writeonly, "readonly": readonly, "dual": dual},
+        "idleTimeoutSec": idle_timeout_sec,
+        "maxConcurrentPerNode": max_concurrent_per_node,
+        "disabled": disabled,
+        "cpu": cpu,
+        "memory": memory,
+        "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
+    }
+    if init_sql is not None:
+        body["initSql"] = init_sql
+    call(ctx, "POST", "/api/pool/create", body=body)
+
+
+@app.command()
+def scale(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    target_size: int = typer.Option(..., "--target-size"),
+    writeonly: int = typer.Option(0, "--writeonly"),
+    readonly: int = typer.Option(0, "--readonly"),
+    dual: int = typer.Option(0, "--dual"),
+    force: bool = typer.Option(False, "--force"),
+):
+    call(
+        ctx,
+        "POST",
+        "/api/pool/scale",
+        body={
+            **_key(tenant, db, pool),
+            "targetSize": target_size,
+            "roleDistribution": {"writeonly": writeonly, "readonly": readonly, "dual": dual},
+            "force": force,
+        },
+    )
+
+
+@app.command()
+def stop(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
+    call(ctx, "POST", "/api/pool/stop", body={**_key(tenant, db, pool), "force": force})
+
+
+@app.command()
+def delete(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
+    call(ctx, "POST", "/api/pool/delete", body={**_key(tenant, db, pool), "force": force})
+
+
+@app.command("set-disabled")
+def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, disabled: bool = typer.Option(..., "--disabled/--enabled")):
+    call(ctx, "POST", "/api/pool/setDisabled", body={**_key(tenant, db, pool), "disabled": disabled})
+
+
+@app.command("set-resources")
+def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, cpu: str = typer.Option(..., "--cpu"), memory: str = typer.Option(..., "--memory")):
+    call(ctx, "POST", "/api/pool/setResources", body={**_key(tenant, db, pool), "cpu": cpu, "memory": memory})
+
+
+@app.command("set-pod-template")
+def set_pod_template(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, file: typer.FileText = typer.Option(..., "--file")):
+    call(ctx, "POST", "/api/pool/setPodTemplate", body={**_key(tenant, db, pool), "podTemplateYaml": file.read()})
+
+
+@permission_app.command("list")
+def permission_list(
+    ctx: typer.Context,
+    tenant: str = typer.Option(None, "--tenant"),
+    user_id: str = typer.Option(None, "--user-id"),
+    group_id: str = typer.Option(None, "--group-id"),
+):
+    call(ctx, "GET", "/api/pool/permission/list", params={"tenant": tenant, "userId": user_id, "groupId": group_id})
+
+
+@permission_app.command("grant")
+def permission_grant(
+    ctx: typer.Context,
+    tenant: str = typer.Option(..., "--tenant"),
+    pool_id: str = typer.Option(None, "--pool-id", help="Omit = every pool in the tenant."),
+    user_id: str = typer.Option(None, "--user-id"),
+    group_id: str = typer.Option(None, "--group-id", help="Exactly one of --user-id / --group-id."),
+):
+    body: dict = {"tenant": tenant}
+    if pool_id is not None:
+        body["poolId"] = pool_id
+    if user_id is not None:
+        body["userId"] = user_id
+    if group_id is not None:
+        body["groupId"] = group_id
+    call(ctx, "POST", "/api/pool/permission/grant", body=body)
+
+
+@permission_app.command("revoke")
+def permission_revoke(ctx: typer.Context, grant_id: str = typer.Argument(..., metavar="ID")):
+    call(ctx, "POST", "/api/pool/permission/revoke", body={"id": grant_id})
