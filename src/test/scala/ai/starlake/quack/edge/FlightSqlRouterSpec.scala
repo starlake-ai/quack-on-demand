@@ -489,6 +489,116 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturer.lastCtx.defaultDatabase shouldBe Some("delta_lake")
         capturer.lastCtx.defaultSchema shouldBe Some("myschema")
 
+  // KNOWN GAP (ignored below): validator-vs-engine default-schema skew.
+  //
+  // FlightSqlRouter.execute builds ValidationContext.defaultSchema from
+  // maybeState.defaultDatabase/defaultSchema (the tenant-db's own override
+  // fields, see PoolSupervisor.scala lines ~240-241), but
+  // wrapWithDefaultSchema (FlightSqlRouter.scala lines ~483-499) prepends
+  // `USE <metastore("dbName")>.<metastore("schemaName")>` unconditionally
+  // from the pool metastore map, NEVER consulting state.defaultSchema.
+  //
+  // The demo manifests set defaultSchema=tpch1 on the tenant-db while the
+  // metastore carries schemaName=main (the DuckLake default schema DuckLake
+  // itself created). When those two diverge, the ACL/statement validator
+  // qualifies unqualified table refs against tpch1 while the engine actually
+  // executes the statement `USE <db>.main`, i.e. the two components of the
+  // router disagree about which schema is "current" for the same statement.
+  //
+  // This test builds exactly that shape (defaultSchema=tpch1,
+  // metastore.schemaName=main), captures the ValidationContext the validator
+  // saw and the actual SQL sent to the node, and asserts the USE statement's
+  // schema equals ctx.defaultSchema. As of this writing it fails with
+  // "main" != "tpch1" (see .superpowers/sdd/pin-tests-report.md for the
+  // captured run output). Un-ignore when fixing.
+  ignore should "keep the USE-statement schema in sync with ValidationContext.defaultSchema (KNOWN GAP)" in:
+    val sup   = freshSupervisorAndBackend()
+    val key   = PoolKey("epsilon", "epsilon_lake", "p4")
+    val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
+      def createDatabase(name: String): Either[String, Unit] = Right(())
+      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    // freshSupervisorAndBackend() doesn't thread a DbAdmin, so rebuild a
+    // supervisor sharing the same shape but with dbAdmin wired (mirrors
+    // stampedSetup() above) - DuckLake pre-init against pgPort 0 fails fast
+    // and is swallowed with a warning by design, so no live Postgres needed.
+    val backend2 = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          25000 + n.size,
+          "tok",
+          Some(5L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+    val sup2 = new PoolSupervisor(
+      backend2,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      dbAdmin = admin
+    )
+    sup2.createTenant(Tenant("epsilon")).unsafeRunSync()
+    sup2
+      .createTenantDb(
+        tenantName = "epsilon",
+        suffix = "lake",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map(
+          "pgHost"     -> "127.0.0.1",
+          "pgPort"     -> "0",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "schemaName" -> "main"
+        ),
+        dataPath = "/tmp/qod-schema-skew-test",
+        defaultSchema = Some("tpch1")
+      )
+      .unsafeRunSync()
+    sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    val capturer    = new CapturingValidator
+    var capturedSql = ""
+    val client      = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        capturedSql = sql
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
+    val router  = new FlightSqlRouter(
+      sup2,
+      new SessionRegistry,
+      new NodeLoadTracker,
+      adapter,
+      validator = capturer
+    )
+    router.execute("skew-1", "alice", key, "SELECT 1 FROM t").unsafeRunSync()
+
+    // The validator saw defaultSchema=tpch1 (tenant-db override wins).
+    capturer.lastCtx.defaultSchema shouldBe Some("tpch1")
+    // The engine actually runs under whatever schema wrapWithDefaultSchema
+    // put in the USE statement. Extract it and compare against what the
+    // validator used - they MUST be the same schema for the ACL check to
+    // mean anything.
+    val useSchema = """USE\s+\S+?\.(\S+?);""".r
+      .findFirstMatchIn(capturedSql)
+      .map(_.group(1))
+      .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
+    useSchema shouldBe capturer.lastCtx.defaultSchema.get
+
   // ---- ColumnPolicyRewriter integration tests ----
 
   private val tenantUser = ai.starlake.quack.ondemand.state.RbacUser(

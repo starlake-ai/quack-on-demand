@@ -785,6 +785,59 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup2.get(key).get.defaultSchema shouldBe Some("tpch1")
   }
 
+  // KNOWN GAP (ignored below): restore() drops kindWire and extraSetupSql.
+  //
+  // PoolSupervisor.restore() (PoolSupervisor.scala, the `pools.put(key,
+  // PoolState(...))` block around line 234) rebuilds PoolState explicitly
+  // field-by-field but never passes `kindWire` or `extraSetupSql`, so both
+  // silently fall back to the PoolState case-class defaults ("ducklake" and
+  // "" respectively - see PoolState.scala lines 14-15). createPool, by
+  // contrast, sets `kindWire = td.kind.wireValue` (e.g. "memory" for an
+  // InMemory tenant-db) and `extraSetupSql = fedBlob` (the resolved
+  // federation blob, injected via the `federationBlobOf` constructor hook).
+  //
+  // Practical impact: any respawn driven by restore() - manager restart, an
+  // HA replica rehydrating off a qod_topology NOTIFY - loses the federation
+  // ATTACH blob and mis-tags a memory-kind pool's nodes as "ducklake" wire
+  // kind, which changes what spawn-quack-node.sh does at boot.
+  //
+  // This test creates a pool on an InMemory tenant-db (kindWire should be
+  // "memory") with a non-empty federation blob (via federationBlobOf),
+  // snapshots the pre-restore PoolState, then calls restore() on the SAME
+  // supervisor (mirroring the two tests above) and asserts kindWire and
+  // extraSetupSql survive unchanged. It currently fails with
+  // kindWire "ducklake" != "memory" (see .superpowers/sdd/pin-tests-report.md
+  // for the captured run output). Un-ignore when fixing.
+  ignore should "preserve kindWire and extraSetupSql across restore() (KNOWN GAP)" in {
+    val store2 = new InMemoryControlPlaneStore()
+    val sup2   = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      store2,
+      federationBlobOf = _ => IO.pure(Some("ATTACH 'fed.db' AS fedx;"))
+    )
+    sup2.createTenant(Tenant("acme")).unsafeRunSync()
+    sup2.createTenantDb(
+      tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
+      metastore = Map.empty, dataPath = ""
+    ).unsafeRunSync()
+    sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    val before = sup2.get(key).get
+    before.kindWire shouldBe "memory"
+    before.extraSetupSql should include("ATTACH 'fed.db' AS fedx;")
+
+    sup2.restore()
+    val after = sup2.get(key).get
+
+    after.kindWire shouldBe before.kindWire
+    after.extraSetupSql shouldBe before.extraSetupSql
+    // The already-fixed defaultDatabase/defaultSchema carry-through (see the
+    // test above) should also hold here.
+    after.defaultDatabase shouldBe before.defaultDatabase
+    after.defaultSchema shouldBe before.defaultSchema
+  }
+
   // ---------- updateTenantDb ----------
 
   /** Fresh supervisor + tenant acme + DuckDbFile tenant-db with pgPassword in metastore
