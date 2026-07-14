@@ -94,9 +94,14 @@ LOAD_TPC=1 ./scripts/run-docker-compose.sh
 
 # Both flags combine.
 NUKE=1 LOAD_TPC=1 ./scripts/run-docker-compose.sh
+
+# Single-DuckDB profile: one tenant, one pool, one dual node.
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-docker-compose.sh
 ```
 
 `LOAD_TPC=1` seeds two demo tenants inside the container: `acme` loaded with TPC-H (8 tables in schema `tpch1`, database `acme_tpch`) plus the SSB star schema derived from it (5 tables in schema `ssb1`, same database), and `globex` loaded with TPC-DS (24 tables in schema `tpcds1`, database `globex_tpcds`). Use `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` to seed each independently. The bundled manifest `bootstrap-demo.yaml` declares the tenants, pools, roles, groups, and users; `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` is injected into `.env` automatically so the JVM imports it on startup.
+
+`DEMO=minimal` injects `bootstrap-demo-minimal.yaml` instead - the shape for fronting a single DuckDB/DuckLake database: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, and the analyst RLS/CLS demo. `DEMO=full` is the default and covers the multi-tenant, multi-pool, and federation demos. The profile is only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset; bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile).
 
 You can also seed a running stack directly:
 

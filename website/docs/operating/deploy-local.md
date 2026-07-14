@@ -72,4 +72,12 @@ NUKE=1 ./scripts/run-jar.sh
 
 This stops any running manager, drops the Postgres control-plane database and the bootstrap tenant database, and removes the `ducklake/`, `state/`, and `certs/` directories. This action is irreversible.
 
+To boot freshly seeded instead of empty, combine `NUKE=1` with the demo seed flags. `DEMO=minimal` selects the single-DuckDB profile - one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes - the shape for fronting a single DuckDB/DuckLake database:
+
+```bash
+NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+```
+
+See [Demo bootstrap](/getting-started/demo) for the full flag reference and what each profile creates.
+
 **Respawn and recovery behavior.** When the manager restarts after a crash or SIGTERM, it reads the persisted node registry and calls `adopt()` on each node that was alive at shutdown. Adopted nodes have their port re-claimed in the allocator and are tracked via `ProcessHandle` so a subsequent `stop()` still delivers SIGTERM. Nodes that died while the manager was down are detected by the health-check loop and replaced automatically. For full details on how the manager handles node failures, drains, and replacements, refer to the Resilience guide.

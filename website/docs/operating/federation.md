@@ -106,7 +106,8 @@ Two specifics for federation:
 
 - **Edits take effect on the next node spawn.** Creating, editing, or disabling a source changes the catalog blob that every node spawned *after* the change receives: idle-timeout replacements, manual restarts, scale-up additions, and pool recreation. Nodes already running keep their attached catalogs until they exit, so recycle the pool to apply a change immediately.
 - **Boot-time failures are fatal.** If a source's `setupSql` errors at node startup (extension missing, bad credentials, DNS failure), the spawn aborts and the supervisor surfaces the last lines of stderr.
-- **Disabled sources** are filtered out when the catalog blob is assembled; there is no live `DETACH` of running nodes.
+- **Disabled sources** are filtered out when the catalog blob is assembled; there is no live `DETACH` of running nodes. A disabled source's alias stays in the ACL ambiguity guard (see [Table name resolution](/administration/access-control#table-name-resolution)) because already-running nodes keep it attached until the pool recycles.
+- **Recycle the pool right after deleting a source.** Deleting a source removes its alias from the ACL ambiguity guard (the guard's attached-catalog set is rebuilt from the control plane, cached for about 60 seconds), but running nodes keep the catalog attached until they exit. In that window the ambiguity guard no longer covers the alias while the engine still binds it catalog-first, so recycle the pool to close the gap.
 
 ## Backup and restore
 

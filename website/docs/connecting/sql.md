@@ -13,6 +13,8 @@ Statements are executed by DuckDB on the chosen node, so DuckDB syntax, function
 
 A connection is scoped to a pool, and the pool is bound to one database with a default catalog and schema. The gateway prepends `USE <catalog>.<schema>;` to each statement, so an unqualified `SELECT * FROM customer` resolves against the pool's database, and `tpch1.customer` (schema-qualified) works too. The prefix is skipped when your statement itself starts with `USE`, `SET`, `BEGIN`, `COMMIT`, `ROLLBACK`, `ATTACH`, or `DETACH`, so you can drive the session explicitly when needed. The mechanics are in [Routing and statement classification](/concepts/routing).
 
+Under ACL, a two-part name is only accepted when its first part is a schema in the pool's default catalog, as in `tpch1.customer`. When the first part instead names a possibly-attached catalog (the tenant-db itself, e.g. `acme_tpch`, any federation alias, or the DuckDB built-ins `memory` / `system` / `temp`), the statement is denied as ambiguous and you must write the full three-part form, e.g. `acme_tpch.tpch1.customer`. See [Table name resolution](/administration/access-control#table-name-resolution).
+
 ## Transactions
 
 `BEGIN` / `COMMIT` / `ROLLBACK` are supported. A transaction pins to the node its `BEGIN` ran on, and every statement until `COMMIT` / `ROLLBACK` routes to that node. If that node is lost mid-transaction, the transaction fails explicitly and must be restarted, there is no silent re-execution on another node. See [Sessions and transactions](/concepts/sessions-transactions) for the full model.
@@ -32,4 +34,4 @@ When per-statement ACL is enabled, every statement is checked against the connec
 
 ## Querying federated catalogs
 
-If the database has federated sources attached, their catalogs appear under their aliases, and you query them like any other table with a three-part `alias.schema.table` reference (for example `SELECT * FROM fedpg.public.orders`). Access is governed by the same ACL: you need a `SELECT` grant on the federated alias. Federated writes are denied by default. Setting up federated sources is covered in [Federation](/operating/federation).
+If the database has federated sources attached, their catalogs appear under their aliases, and you query them like any other table with a three-part `alias.schema.table` reference (for example `SELECT * FROM fedpg.public.orders`). Under ACL, the three-part form is also the only accepted one: a two-part reference whose first part is a federation alias is denied as ambiguous (see [Table name resolution](/administration/access-control#table-name-resolution)). Access is governed by the same ACL: you need a `SELECT` grant on the federated alias. Federated writes are denied by default. Setting up federated sources is covered in [Federation](/operating/federation).

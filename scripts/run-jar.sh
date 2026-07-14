@@ -84,7 +84,7 @@
 #   LOAD_TPCDS=10 ./scripts/run-jar.sh                     # + TPC-DS demo seed SF=10
 #   LOAD_SSB=1 ./scripts/run-jar.sh                        # + SSB star schema SF=1
 #   LOAD_TPC=1 ./scripts/run-jar.sh                        # + all three demos SF=1 (legacy shortcut)
-#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh  # smallest demo: acme, 1 dual node
+#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh  # single-instance: acme, 1 dual node
 #   NUKE=1 LOAD_TPC=1 ./scripts/run-jar.sh                 # wipe + fresh boot + all SF=1
 
 set -euo pipefail

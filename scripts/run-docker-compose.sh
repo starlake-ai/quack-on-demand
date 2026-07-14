@@ -59,7 +59,7 @@
 #   LOAD_TPC=1 ./scripts/run-docker-compose.sh                 # + all three SF=1 (legacy)
 #   LOAD_TPCH=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh  # + both, independent SFs
 #   NUKE=1 ./scripts/run-docker-compose.sh                     # wipe + fresh boot
-#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-docker-compose.sh  # smallest demo
+#   NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-docker-compose.sh  # single-instance profile
 #   PROFILES=observability ./scripts/run-docker-compose.sh     # + Prometheus + Grafana
 
 set -euo pipefail

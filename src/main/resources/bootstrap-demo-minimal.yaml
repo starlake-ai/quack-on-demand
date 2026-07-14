@@ -3,8 +3,9 @@
 # `DEMO=minimal LOAD_TPCH=N` (run-jar.sh / run-jar.ps1 /
 # run-docker-compose.sh).
 #
-# Shows off the smallest useful topology: one tenant (acme), one
-# database (acme_tpch), one pool (bi) with a single dual node, and the
+# The single-instance profile: quack-on-demand in front of one DuckDB
+# instance. One tenant (acme), one database (acme_tpch), one pool (bi)
+# with a single dual node serving both reads and writes, and the
 # RLS/CLS demo on the analyst role. For multi-tenancy, federation, and
 # the full verb matrix use the default profile (bootstrap-demo.yaml).
 #

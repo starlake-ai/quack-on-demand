@@ -41,8 +41,44 @@
   `tag.hold.remove` so removing a retention hold is distinctly visible), and tag names can never be
   all digits, so they stay unambiguous next to snapshot ids.
 
+### Security
+
+- **ACL two-part table names are now resolved engine-consistently (attached-catalog aware).**
+  Under `QOD_ACL_ENABLED=true`, `schema.table` (e.g. `tpch1.customer`) now resolves against the
+  session's default catalog and just works with a matching grant; previously the static validator
+  guessed catalog-first and denied it. When the first part names a catalog that may actually be
+  attached on the pool's nodes (the tenant-db itself, any federation alias including disabled
+  ones, or the DuckDB built-ins `memory`/`system`/`temp`), the statement is denied as ambiguous
+  with an actionable message to qualify fully as `catalog.schema.table` - the engine binds such
+  names catalog-first, so guessing either way would let a broad in-tenant grant reach a federated
+  source without its per-alias grant. Qualification errors in general now fail closed instead of
+  silently dropping the offending table from the access set. Operational note: after DELETING a
+  federated source, recycle the pool - running nodes keep the catalog attached while the
+  ambiguity guard no longer covers it.
+- **Manager restarts no longer degrade the session schema context.** `PoolSupervisor` restore now
+  preserves each tenant-db's default database/schema when rehydrating pool state, so ACL
+  qualification and the RLS/CLS rewriters keep resolving unqualified names correctly after a
+  redeploy instead of falling back to `main`.
+
 ### Operations
 
+- **"Run maintenance now" works.** Manual and scheduled maintenance runs previously failed
+  instantly with `flush: Permanent(java.net.ConnectException)`: the runner sent the chain's first
+  statement to the ephemeral maintenance node milliseconds after fork, seconds before its DuckDB
+  was listening. The spawn path now gates on TCP readiness with a bounded wait
+  (`maintenance.nodeReadyTimeoutSec`, env `QOD_MAINT_NODE_READY_TIMEOUT_SEC`, default 180 to cover
+  cold extension installs). The Maintenance panel also gained structured controls: a Refresh
+  button on Run history, a scope select (whole database / single table with schema+table inputs),
+  and per-operation checkboxes replacing the free-text CSV.
+- **Single-instance profile: `DEMO=minimal`.** All three launchers (`run-jar.sh`, `run-jar.ps1`,
+  `run-docker-compose.sh`) accept `DEMO=full|minimal` (default `full`). `minimal` bootstraps the
+  shape for fronting a single DuckDB instance: one tenant (acme), one pool, one dual node serving
+  both reads and writes, from the new bundled `bootstrap-demo-minimal.yaml` (analyst RLS/CLS demo
+  included): `NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh`. Use `full` for the
+  multi-tenant, multi-pool, federation demo. The profile is only consulted when a `LOAD_*` flag is
+  set and `QOD_BOOTSTRAP_YAML` is unset; bootstrap only imports into a fresh control plane, so
+  switch profiles with `NUKE=1`. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the loader (no
+  globex tenant in this profile).
 - **Managed DuckLake maintenance: auto-compaction, snapshot expiry, cleanup (EPIC Spec 09).**
   A policy-driven background service keeps every DuckLake tenant-db healthy and storage bounded:
   a leader-gated scheduler triggers runs on small-file thresholds and a per-lake cadence
