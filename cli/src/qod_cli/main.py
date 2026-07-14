@@ -45,6 +45,13 @@ from .commands import config_cmd  # noqa: E402
 
 app.add_typer(config_cmd.app, name="config")
 
+from .commands import auth  # noqa: E402
+
+app.command()(auth.login)
+app.command()(auth.logout)
+app.command()(auth.whoami)
+app.add_typer(auth.app, name="auth")
+
 
 def main() -> None:
     app()
