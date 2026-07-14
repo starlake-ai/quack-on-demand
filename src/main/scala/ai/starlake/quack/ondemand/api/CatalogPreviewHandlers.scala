@@ -90,10 +90,13 @@ final class CatalogPreviewHandlers(
 
   private def quoteLit(v: String): String = "'" + v.replace("'", "''") + "'"
 
-  // PROVISIONAL until the live verification on the pinned DuckDB 1.5.4 / DuckLake 0.3
-  // (docs/duckdb-pin-bump-checklist.md): the change_type vocabulary and the (from + 1, to)
-  // inclusive bound convention below are taken from the DuckLake docs; amend both here and in the
-  // checklist if the live dump disagrees.
+  // Verified live on the pinned DuckDB 1.5.4 / DuckLake 0.3 (2026-07-14, see
+  // docs/duckdb-pin-bump-checklist.md section 5): ducklake_table_changes emits exactly
+  // insert / delete / update_preimage / update_postimage (inline and flushed writes both
+  // attribute to the logical DML snapshot; no inlined_* variants unlike changes_made); both
+  // bounds are INCLUSIVE, hence the (from + 1, to) call convention for an exclusive-of-from
+  // diff; and a bound naming a nonexistent snapshot is an engine ERROR ("No snapshot found at
+  // version N"), not an empty result, which is why dataDiff short-circuits from == to.
   private val InsertTypes    = Set("insert")
   private val DeleteTypes    = Set("delete")
   private val UpdateTypes    = Set("update_preimage", "update_postimage")
@@ -518,6 +521,38 @@ final class CatalogPreviewHandlers(
                         StatusCode.BadRequest,
                         "invalid_bounds",
                         s"from snapshot $fromId is after to snapshot $toId"
+                      )
+                    )
+                  case Right((fromId, toId)) if fromId == toId =>
+                    // Empty diff by definition; also load-bearing: the (from + 1, to) call would
+                    // name snapshot to + 1, which the engine rejects as an error when it does not
+                    // exist (verified live), not as an empty result.
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.CatalogDataDiffRead,
+                      "ok",
+                      tenant = Some(tid),
+                      target = target,
+                      detail = Map(
+                        "from"         -> fromId.toString,
+                        "to"           -> toId.toString,
+                        "rowsReturned" -> "0"
+                      )
+                    )
+                    IO.pure(
+                      Right(
+                        DataDiffResponse(
+                          schema,
+                          table,
+                          fromId,
+                          toId,
+                          DataDiffSummary(0, 0, 0),
+                          Nil,
+                          Nil,
+                          None,
+                          truncated = false
+                        )
                       )
                     )
                   case Right((fromId, toId)) =>

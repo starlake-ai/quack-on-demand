@@ -681,3 +681,12 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val out = dataDiff(h)
     out.left.toOption.get._1 shouldBe StatusCode.Forbidden
     out.left.toOption.get._2.error shouldBe "acl_denied"
+
+  it should "short-circuit from == to into an empty diff without calling the executor" in new Stubs:
+    val h   = handlers(executorOverride = queuedExecutor)
+    val out = dataDiff(h, from = "42", to = "42")
+    val r   = out.toOption.get
+    r.summary shouldBe DataDiffSummary(0, 0, 0)
+    r.rows shouldBe Nil
+    r.truncated shouldBe false
+    seenSqls shouldBe Nil
