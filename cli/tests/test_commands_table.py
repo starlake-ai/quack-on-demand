@@ -185,9 +185,9 @@ CASES = [
         "GET", "/api/role/permission/list", {"roleId": "r1"}, None,
     ),
     (
-        ["role", "permission", "grant", "--role-id", "r1", "--verb", "SELECT", "--schema", "main", "--table", "orders"],
+        ["role", "permission", "grant", "--role-id", "r1", "--verb", "RO", "--schema", "main", "--table", "orders"],
         "POST", "/api/role/permission/grant", {},
-        {"roleId": "r1", "catalog": "*", "schema": "main", "table": "orders", "verb": "SELECT"},
+        {"roleId": "r1", "catalog": "*", "schema": "main", "table": "orders", "verb": "RO"},
     ),
     (["role", "permission", "revoke", "rp1"], "POST", "/api/role/permission/revoke", {}, {"id": "rp1"}),
     (

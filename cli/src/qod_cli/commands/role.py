@@ -43,7 +43,7 @@ def permission_list(ctx: typer.Context, role_id: str = typer.Option(..., "--role
 def permission_grant(
     ctx: typer.Context,
     role_id: str = typer.Option(..., "--role-id"),
-    verb: str = typer.Option(..., "--verb", help="SELECT|INSERT|UPDATE|DELETE|ALL"),
+    verb: str = typer.Option(..., "--verb", help="RO|RW|DDL|ALL"),
     catalog: str = typer.Option("*", "--catalog"),
     schema: str = typer.Option("*", "--schema"),
     table: str = typer.Option("*", "--table"),

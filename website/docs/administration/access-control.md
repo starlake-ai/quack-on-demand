@@ -14,7 +14,7 @@ Access control is **off by default** (`acl.enabled=false`). Set `QOD_ACL_ENABLED
 **Steps (UI):**
 
 1. Open the **Users** section (top nav) and select the target tenant from the tenant selector.
-2. Go to the **Roles** tab and click **+ New role**. Give the role a name (for example `bi-readers`). Add a table permission with verb `SELECT` and the target catalog, schema, and table (use `*` to wildcard any field). Save.
+2. Go to the **Roles** tab and click **+ New role**. Give the role a name (for example `bi-readers`). Add a table permission with verb `RO` (read) and the target catalog, schema, and table (use `*` to wildcard any field). Save.
 
    ![Roles tab](/img/ui/rbac-roles.png)
 
@@ -35,7 +35,7 @@ roles:
   - tenant: acme
     name: analyst
     permissions:
-      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: SELECT }
+      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: RO }
 groups:
   - tenant: acme
     name: analysts
@@ -56,8 +56,8 @@ The examples below assume `qod login` has stored a session (see [the CLI section
 # 1. Create a role
 ROLE_ID=$(qod --json role create --tenant acme --name analyst --description "Read-only analyst" | jq -r .id)
 
-# 2. Grant SELECT on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
-qod role permission grant --role-id "$ROLE_ID" --catalog acme_tpch --schema tpch1 --table customer --verb SELECT
+# 2. Grant RO (read) on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
+qod role permission grant --role-id "$ROLE_ID" --catalog acme_tpch --schema tpch1 --table customer --verb RO
 
 # 3. Create a group
 GROUP_ID=$(qod --json group create --tenant acme --name analysts | jq -r .id)
@@ -94,9 +94,8 @@ The permission graph is: user -> roles (direct), user -> groups -> roles (via gr
 
 1. Open **Users** > **Roles** tab and click the edit icon on the target role.
 2. Add one or more table permissions with the appropriate verb:
-   - `INSERT` for inserts
-   - `UPDATE` / `DELETE` for row mutations
-   - `CREATE` / `DROP` / `ALTER` for DDL
+   - `RW` for DML (INSERT, UPDATE, DELETE, MERGE, TRUNCATE) - it also covers reads on the same table
+   - `DDL` for schema changes (CREATE, DROP, ALTER)
    - `ALL` to cover every verb at once
 3. Save. The verbs are collapsed to `Read`, `Write`, or `Ddl` at enforcement time; see [Access control model](/operating/rbac-model) for the exact mapping.
 
@@ -107,20 +106,20 @@ roles:
   - tenant: acme
     name: loader
     permissions:
-      - { catalog: acme_tpch, schema: tpch1, table: orders, verb: INSERT }
+      - { catalog: acme_tpch, schema: tpch1, table: orders, verb: RW }
 ```
 
 **CLI equivalent:**
 
 ```bash
-# Grant INSERT on acme_tpch.tpch1.orders to an existing role
-qod role permission grant --role-id <roleId> --catalog acme_tpch --schema tpch1 --table orders --verb INSERT
+# Grant RW (DML) on acme_tpch.tpch1.orders to an existing role
+qod role permission grant --role-id <roleId> --catalog acme_tpch --schema tpch1 --table orders --verb RW
 
 # Grant ALL verbs on every table in the catalog (wildcard schema and table)
 qod role permission grant --role-id <roleId> --catalog acme_tpch --schema "*" --table "*" --verb ALL
 ```
 
-Replace `verb` with `UPDATE`, `DELETE`, `CREATE`, `DROP`, or `ALTER` as needed. Omitting `catalog`/`schema`/`table` (or setting them to `"*"`) wildcards that field.
+Replace `verb` with `DDL` for schema changes as needed. Omitting `catalog`/`schema`/`table` (or setting them to `"*"`) wildcards that field.
 
 **Verify:** See [Verify access](#verify-access) below.
 

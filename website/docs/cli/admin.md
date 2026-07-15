@@ -58,10 +58,10 @@ USER_ID=$(qod --json user create --tenant initech --username peter --role user |
 
 ```bash
 ROLE_ID=$(qod --json role create --tenant initech --name analyst --description "Read-only" | jq -r .id)
-qod role permission grant --role-id "$ROLE_ID" --verb SELECT --schema main
+qod role permission grant --role-id "$ROLE_ID" --verb RO --schema main
 ```
 
-The first line creates the `analyst` role and captures its id in one shot with `--json` + `jq -r .id` - the pattern to reach for any time a later step needs an id a `create` command just minted. The second grants `SELECT` on every table in schema `main` (the omitted `--catalog` / `--table` default to `*`).
+The first line creates the `analyst` role and captures its id in one shot with `--json` + `jq -r .id` - the pattern to reach for any time a later step needs an id a `create` command just minted. The second grants `RO` (read) on every table in schema `main` (the omitted `--catalog` / `--table` default to `*`). Grant verbs are `RO` (read), `RW` (read + write DML), `DDL` (schema changes), or `ALL` (everything).
 
 ## Wire the role to the user
 

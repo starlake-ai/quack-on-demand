@@ -22,7 +22,7 @@ roles:
   - tenant: acme
     name: analyst
     permissions:
-      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: SELECT }
+      - { catalog: acme_tpch, schema: tpch1, table: customer, verb: RO }
 groups:
   - { tenant: acme, name: analysts, roles: [analyst] }
 users:

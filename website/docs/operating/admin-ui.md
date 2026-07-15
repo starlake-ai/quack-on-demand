@@ -129,7 +129,7 @@ The **Groups** tab shows each group with its user, role, and pool-grant counts.
 
 ![The Groups tab](/img/ui/rbac-groups.png)
 
-The **Roles** tab lists each role with a per-verb count (SELECT / INSERT / UPDATE / DELETE / ALL) of its table permissions, and **+ New role** plus per-role edit and delete actions.
+The **Roles** tab lists each role with a per-verb count (RO / RW / DDL / ALL) of its table permissions, and **+ New role** plus per-role edit and delete actions.
 
 ![The Roles tab](/img/ui/rbac-roles.png)
 
