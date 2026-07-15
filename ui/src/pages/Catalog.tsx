@@ -15,6 +15,9 @@ export default function Catalog() {
   const [tenantDbs, setTenantDbs]   = useState<TenantDbResponse[]>([]);
   const [tenantDb, setTenantDbState] = useState<string>('');
   const [error, setError]           = useState<string | null>(null);
+  // Bumped when the browser panel commits a catalog write (undrop), so the
+  // snapshots panel below refetches and shows the new recovery snapshot.
+  const [catalogGen, setCatalogGen] = useState(0);
 
   function pickTenant(t: string) {
     setTenantState(t);
@@ -80,8 +83,12 @@ export default function Catalog() {
       <div style={{ marginTop: '12px' }}>
         {tenant && tenantDb && (
           <>
-            <CatalogBrowser tenant={tenant} tenantDb={tenantDb} />
-            <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} />
+            <CatalogBrowser
+              tenant={tenant}
+              tenantDb={tenantDb}
+              onCatalogMutated={() => setCatalogGen(g => g + 1)}
+            />
+            <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} refreshToken={catalogGen} />
           </>
         )}
       </div>

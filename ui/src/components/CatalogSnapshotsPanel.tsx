@@ -10,8 +10,11 @@ const chipBtn: React.CSSProperties = {
   font: 'inherit', fontSize: '0.9em', color: 'inherit', textDecoration: 'underline',
 };
 
-export default function CatalogSnapshotsPanel({ tenant, tenantDb }: {
+export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken = 0 }: {
   tenant: string; tenantDb: string;
+  /** Bump to force a refetch after a sibling panel commits a catalog write
+    * (e.g. an undrop recovery snapshot). */
+  refreshToken?: number;
 }) {
   const [snaps, setSnaps] = useState<CatalogSnapshotEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +66,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb }: {
       .then(r => { if (!cancelled) setTags(r); })
       .catch(() => { if (!cancelled) setTags([]); });
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, tableFilter]);
+  }, [tenant, tenantDb, tableFilter, refreshToken]);
 
   const tagsBySnapshot = useMemo(() => {
     const m = new Map<number, CatalogTagEntry[]>();

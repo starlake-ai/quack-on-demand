@@ -25,6 +25,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   // null = show the list; otherwise the name of the database whose
   // federation sources are being managed inline via <FederationSection>.
   const [federating, setFederating] = useState<string | null>(null);
+  // Bumped when the inline browser commits a catalog write (undrop), so the
+  // snapshots panel below it refetches and shows the new recovery snapshot.
+  const [catalogGen, setCatalogGen] = useState(0);
 
   // Form state. The Name input always starts with the tenant prefix
   // and the locked-prefix logic in `onNameChange` keeps it there.
@@ -215,8 +218,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           </div>
           <button type="button" className="link-button" onClick={() => setBrowsing(null)}>&larr; Back to databases</button>
         </div>
-        <CatalogBrowser tenant={tenant} tenantDb={browsing} />
-        <CatalogSnapshotsPanel tenant={tenant} tenantDb={browsing} />
+        <CatalogBrowser
+          tenant={tenant}
+          tenantDb={browsing}
+          onCatalogMutated={() => setCatalogGen(g => g + 1)}
+        />
+        <CatalogSnapshotsPanel tenant={tenant} tenantDb={browsing} refreshToken={catalogGen} />
       </div>
     );
   }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type {
   CatalogSchemaEntry,
@@ -14,9 +14,16 @@ import TableSchemaCard from './TableSchemaCard';
 export default function CatalogBrowser({
   tenant,
   tenantDb,
+  onCatalogMutated,
 }: {
   tenant:   string;
   tenantDb: string;
+  /** Fired after this panel commits a catalog write (undrop recovery), so
+    * sibling panels showing derived state (the snapshots list: the recovery
+    * CTAS mints a new snapshot) can refetch. Both hosts (the standalone
+    * /catalog page and the inline Databases view) wire it to their
+    * CatalogSnapshotsPanel's refreshToken. */
+  onCatalogMutated?: () => void;
 }) {
   const [schemas, setSchemas] = useState<CatalogSchemaEntry[]>([]);
   const [schema, setSchema]   = useState<string>('');
@@ -35,7 +42,23 @@ export default function CatalogBrowser({
   const [undropAs, setUndropAs] = useState('');
   const [undropError, setUndropError] = useState<string | null>(null);
   const [undropping, setUndropping] = useState(false);
+  // Per "schema.table" group: the last-live snapshot the user picked in the
+  // version select. Absent = newest recoverable drop of that name.
+  const [undropFrom, setUndropFrom] = useState<Record<string, number>>({});
   const droppedSeq = useRef(0);
+
+  // A name dropped N times yields N reader rows (newest first). One line per
+  // table; the versions feed the last-live snapshot select.
+  const droppedGroups = useMemo(() => {
+    const byName = new Map<string, RecoverableTableEntry[]>();
+    for (const d of dropped) {
+      const key = `${d.schema}.${d.table}`;
+      const list = byName.get(key) ?? [];
+      list.push(d);
+      byName.set(key, list);
+    }
+    return [...byName.entries()].map(([key, versions]) => ({ key, versions }));
+  }, [dropped]);
 
   function reloadDropped() {
     const seq = ++droppedSeq.current;
@@ -54,6 +77,7 @@ export default function CatalogBrowser({
     if (!tenant || !tenantDb) { setSchemas([]); setDropped([]); return; }
     setError(null);
     setUndropTarget(null);
+    setUndropFrom({});
     api.listCatalogSchemas(tenant, tenantDb)
       .then(setSchemas)
       .catch(e => setError(String(e)));
@@ -71,6 +95,9 @@ export default function CatalogBrowser({
       schema: entry.schema,
       table: entry.table,
       asName: asName && asName !== entry.table ? asName : undefined,
+      // Pin the picked version: the handler CTAS-reads AT (VERSION => fromSnapshot),
+      // so an older drop of a multiply-dropped name recovers that state.
+      fromSnapshot: entry.lastLiveSnapshot,
     })
       .then(() => {
         setUndropTarget(null);
@@ -80,6 +107,7 @@ export default function CatalogBrowser({
         if (schema === entry.schema) {
           api.listCatalogTables(tenant, tenantDb, schema).then(setTables).catch(() => {});
         }
+        onCatalogMutated?.();
       })
       .catch(e => setUndropError(e instanceof ApiError ? e.message : String(e)))
       .finally(() => setUndropping(false));
@@ -219,14 +247,15 @@ export default function CatalogBrowser({
         </main>
       </div>
 
-      {dropped.length > 0 && (
+      {droppedGroups.length > 0 && (
         <details style={{ marginTop: '1.5rem' }} open>
           <summary style={{ cursor: 'pointer', color: 'var(--text-mute)' }}>
-            Recently dropped ({dropped.length})
+            Recently dropped ({droppedGroups.length})
           </summary>
           <p className="subtle" style={{ marginBottom: 4 }}>
             Dropped tables stay recoverable until snapshot expiry reaps their last-live
-            snapshot; retention is the undo horizon.
+            snapshot; retention is the undo horizon. A table dropped more than once keeps
+            one line; pick the version to restore in the last-live snapshot select.
           </p>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
@@ -238,16 +267,48 @@ export default function CatalogBrowser({
               </tr>
             </thead>
             <tbody>
-              {dropped.map(d => {
-                const key = `${d.schema}.${d.table}`;
-                const open = undropTarget === key;
+              {droppedGroups.map(g => {
+                const open = undropTarget === g.key;
+                // Selected version: the user's pick when it still exists after a
+                // refetch, else the newest recoverable drop. undefined = every
+                // version's last-live snapshot has been expired.
+                const selected =
+                  g.versions.find(v => v.recoverable && v.lastLiveSnapshot === undropFrom[g.key])
+                  ?? g.versions.find(v => v.recoverable);
+                const shown = selected ?? g.versions[0];
                 return (
-                  <tr key={key} style={{ borderTop: '1px solid #eee' }}>
-                    <td><code>{key}</code></td>
-                    <td>{d.droppedAt ? new Date(d.droppedAt).toLocaleString() : '--'}</td>
-                    <td align="right">{d.lastLiveSnapshot}</td>
+                  <tr key={g.key} style={{ borderTop: '1px solid #eee' }}>
+                    <td><code>{g.key}</code></td>
+                    <td>{shown.droppedAt ? new Date(shown.droppedAt).toLocaleString() : '--'}</td>
+                    <td align="right">
+                      {g.versions.length === 1
+                        ? shown.lastLiveSnapshot
+                        : (
+                          <select
+                            value={selected?.lastLiveSnapshot ?? g.versions[0].lastLiveSnapshot}
+                            onChange={e =>
+                              setUndropFrom(m => ({ ...m, [g.key]: Number(e.target.value) }))
+                            }
+                            title="version to restore"
+                          >
+                            {g.versions.map(v => (
+                              <option
+                                key={v.droppedAtSnapshot}
+                                value={v.lastLiveSnapshot}
+                                disabled={!v.recoverable}
+                              >
+                                {v.lastLiveSnapshot}
+                                {v.droppedAt
+                                  ? ` - dropped ${new Date(v.droppedAt).toLocaleString()}`
+                                  : ''}
+                                {v.recoverable ? '' : ' (expired)'}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                    </td>
                     <td>
-                      {!d.recoverable
+                      {!selected
                         ? <em style={{ color: '#888' }}>no longer recoverable</em>
                         : open
                           ? (
@@ -258,7 +319,11 @@ export default function CatalogBrowser({
                                 style={{ width: 180 }}
                                 title="restore under this name"
                               />
-                              <button type="button" disabled={undropping} onClick={() => undrop(d)}>
+                              <button
+                                type="button"
+                                disabled={undropping}
+                                onClick={() => undrop(selected)}
+                              >
                                 {undropping ? 'Undropping...' : 'Confirm'}
                               </button>
                               <button type="button" onClick={() => setUndropTarget(null)}>
@@ -270,8 +335,8 @@ export default function CatalogBrowser({
                             <button
                               type="button"
                               onClick={() => {
-                                setUndropTarget(key);
-                                setUndropAs(d.table);
+                                setUndropTarget(g.key);
+                                setUndropAs(selected.table);
                                 setUndropError(null);
                               }}
                             >
