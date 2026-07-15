@@ -565,7 +565,7 @@ final case class RolePermissionGrantRequest(
     catalog: String = "*",
     schema: String = "*",
     table: String = "*",
-    verb: String // SELECT | INSERT | UPDATE | DELETE | ALL
+    verb: String // RO | RW | DDL | ALL
 )
 final case class RolePermissionRevokeRequest(id: String)
 final case class RolePermissionResponse(
