@@ -86,35 +86,28 @@ Set `QOD_TELEMETRY_STORE=none` to disable the history subsystem entirely:
 
 The `postgres` and `none` values are the only accepted values for `QOD_TELEMETRY_STORE`. Any other value is refused at startup.
 
-## Querying statements via curl
+## Querying statements with the CLI
+
+The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts.
 
 ```bash
 # Most recent 50 statements for tenant acme (default limit)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&limit=50' | python3 -m json.tool
+qod history statements --tenant acme --limit 50
 
 # Page through with the keyset cursor (use nextBefore from the previous response)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?before=<nextBefore-from-previous-page>'
+qod history statements --before <nextBefore-from-previous-page>
 
 # Find yesterday's slow statements: fetch the full day, then inspect durationMs locally
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&pool=bi&from=2026-07-05T00:00:00Z&to=2026-07-06T00:00:00Z&limit=500' \
-  | python3 -c "
-import sys, json
-rows = json.load(sys.stdin).get('statements', [])
-slow = [r for r in rows if r.get('durationMs', 0) > 5000]
-for r in sorted(slow, key=lambda x: -x.get('durationMs', 0)):
-    print(r.get('durationMs'), r.get('username'), r.get('sql', '')[:80])
-"
+qod --json history statements --tenant acme --pool bi \
+  --from 2026-07-05T00:00:00Z --to 2026-07-06T00:00:00Z --limit 500 \
+  | jq -r '.statements | sort_by(-.durationMs) | .[] | select(.durationMs > 5000) |
+           "\(.durationMs) \(.username) \(.sql[0:80])"'
 
 # Denied statements only
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&status=denied&limit=100'
+qod history statements --tenant acme --status denied --limit 100
 
 # Free-text search for a table name
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&q=lineorder'
+qod history statements --tenant acme --q lineorder
 ```
 
 ### Statement filter parameters
@@ -133,18 +126,16 @@ curl -sS -H "X-API-Key: $TOKEN" \
 
 Results are returned newest-first. The response includes a `nextBefore` cursor whenever the page is non-empty. There is no duration filter parameter on the endpoint; fetch a time window and filter `durationMs` client-side.
 
-## Querying trends via curl
+## Querying trends with the CLI
 
 ```bash
 # Hourly trend for the last 7 days, tenant acme, pool bi
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/trends?granularity=hour&tenant=acme&pool=bi&from=2026-06-29T00:00:00Z&to=2026-07-06T00:00:00Z' \
-  | python3 -m json.tool
+qod history trends --granularity hour --tenant acme --pool bi \
+  --from 2026-06-29T00:00:00Z --to 2026-07-06T00:00:00Z
 
 # Daily trend for the last 30 days (all pools for a tenant)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/trends?granularity=day&tenant=acme&from=2026-06-06T00:00:00Z&to=2026-07-06T00:00:00Z' \
-  | python3 -m json.tool
+qod history trends --granularity day --tenant acme \
+  --from 2026-06-06T00:00:00Z --to 2026-07-06T00:00:00Z
 ```
 
 ### Trend filter parameters

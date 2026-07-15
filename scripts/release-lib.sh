@@ -122,3 +122,25 @@ sbt_signed() {
     "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
     "$@"
 }
+
+# ---- qod-cli (PyPI) --------------------------------------------------------
+CLI_VERSION_FILE="$REPO_DIR/cli/src/qod_cli/__init__.py"
+
+cli_version() {
+  sed -nE 's|^__version__ = "([^"]+)"$|\1|p' "$CLI_VERSION_FILE"
+}
+
+set_cli_version() {
+  sed -i.bak -E "s|^__version__ = \".*\"$|__version__ = \"$1\"|" "$CLI_VERSION_FILE"
+  rm "${CLI_VERSION_FILE}.bak"
+}
+
+cli_on_pypi() {
+  curl -fsS -o /dev/null "https://pypi.org/pypi/qod-cli/$1/json"
+}
+
+require_pypi_creds() {
+  [[ -n "${PIPY_TOKEN:-}" ]] || die "PIPY_TOKEN not set (PyPI API token for qod-cli)."
+  python3 -c "import build, twine" >/dev/null 2>&1 \
+    || die "python packages 'build' and 'twine' missing: pip install build twine"
+}

@@ -5,7 +5,7 @@ title: Pools and cohorts
 
 A pool is a set of DuckDB Quack nodes bound to one database (tenant-db). It is the object clients connect to, and the unit the gateway routes statements across. This page covers creating, sizing, scaling, and stopping pools, the node role distribution that drives routing, and cohort-based node placement on Kubernetes.
 
-Provision the tenant and database first (see "Tenants and databases"). For how pool access governs database access, see the [Access control model](/operating/rbac-model). REST calls authenticate with `X-API-Key` (a static `QOD_API_KEY` or an admin session token, as on the tenants page).
+Provision the tenant and database first (see "Tenants and databases"). For how pool access governs database access, see the [Access control model](/operating/rbac-model). The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts.
 
 ## Node roles and the role distribution
 
@@ -24,10 +24,8 @@ Within the acceptable roles for a statement, the router picks the least-loaded n
 ## Create a pool
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1}}'
+qod pool create --tenant acme --db acme_sales --pool bi --size 3 \
+  --writeonly 1 --readonly 1 --dual 1
 ```
 
 | Field | Default | Meaning |
@@ -48,39 +46,30 @@ The pool inherits its metastore (Postgres connection and data path) from the ten
 
 ```bash
 # List all pools with their live node tables
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
+qod pool list
 
 # Status of one pool (live per-node metrics: in-flight, served, latency)
-curl -sS -H "X-API-Key: $TOKEN" \
-  http://localhost:20900/api/pool/acme/sales/bi/status
+qod --json pool list | jq '.pools[] | select(.tenant=="acme" and .pool=="bi")'
 
-# Scale to a new size and role split (force skips graceful drain when shrinking)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","targetSize":6,
-       "roleDistribution":{"writeonly":1,"readonly":3,"dual":2}}'
+# Scale to a new size and role split (--force skips graceful drain when shrinking)
+qod pool scale --tenant acme --db acme_sales --pool bi --target-size 6 \
+  --writeonly 1 --readonly 3 --dual 2
 
 # Disable a pool without removing it (edge rejects fresh handshakes)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setDisabled \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","disabled":true}'
+qod pool set-disabled --tenant acme --db acme_sales --pool bi --disabled
 
-# Stop and remove the pool (force=true skips the graceful drain)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","force":false}'
+# Stop the pool's nodes, keeping the registration (--force skips the graceful drain; omitted here)
+qod pool stop --tenant acme --db acme_sales --pool bi
 ```
 
-A graceful stop (`force=false`) drains in-flight statements before terminating nodes. `force=true` terminates immediately. The same `force` flag applies when `scale` shrinks a pool.
+A graceful stop (no `--force`) drains in-flight statements before terminating nodes. `--force` terminates immediately. The same `--force` flag applies when `scale` shrinks a pool.
 
 ## Node pod sizing (Kubernetes)
 
 On the Kubernetes backend a pool carries optional `cpu` and `memory` quantities. Each is applied as both the request and the limit on the `quack` container of every node pod, so setting both yields Guaranteed QoS. The local backend ignores them.
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setResources \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","cpu":"2","memory":"8Gi"}'
+qod pool set-resources --tenant acme --db acme_sales --pool bi --cpu 2 --memory 8Gi
 ```
 
 - Values take effect on the next node spawn (idle-timeout replacement, scale-up, manual restart). Restart the pool's nodes to apply immediately. An empty string clears a value.
@@ -88,27 +77,30 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setResou
 - Size the DuckDB engine below the pod: set `SET memory_limit = '...'` (about 80% of pod memory) in the database or pool `initSql` so the engine spills to disk before the kernel OOM-kills the pod.
 - The Helm chart's `resources` value sizes the manager container, not node pods; node pods are sized per pool with this endpoint.
 
-When requests-and-limits are not enough (sidecars, volumes, affinity), a pool can carry a full Pod-manifest template via `POST /api/pool/setPodTemplate` (API-only, superuser-only, gated behind `QOD_POD_TEMPLATE_ENABLED`, default off). The template must contain a container named `quack`; the manager overlays the pod name, its identity labels, and the quack container's env contract and resources.
+When requests-and-limits are not enough (sidecars, volumes, affinity), a pool can carry a full Pod-manifest template via `qod pool set-pod-template` (`POST /api/pool/setPodTemplate`; CLI/API-only, superuser-only, gated behind `QOD_POD_TEMPLATE_ENABLED`, default off). The template must contain a container named `quack`; the manager overlays the pod name, its identity labels, and the quack container's env contract and resources.
 
 ## Cohorts and Kubernetes placement
 
 By default the supervisor schedules every node in a pool with no placement constraint. On the Kubernetes backend you can instead split a pool into cohorts, each pinned to a class of nodes with a `nodeSelector` and tolerations. This is how you keep, for example, the write nodes on memory-optimized hardware and the read nodes on cheaper general-purpose nodes.
 
-A cohort carries a `placement` (Kubernetes `nodeSelector` plus `tolerations`) and its own `distribution`. Supply the cohorts in `pool/create`:
+A cohort carries a `placement` (Kubernetes `nodeSelector` plus `tolerations`) and its own `distribution`. `qod pool create` does not yet expose a `--cohorts` flag, so set cohorts through the manifest: `qod manifest export --out manifest.yaml`, add or edit the `cohorts` list under the target pool, then `qod manifest import manifest.yaml`. Because nested collections (a tenant's `pools`, in this case) are replaced wholesale on import, always edit a full export - re-importing a hand-written fragment with only one pool would delete the tenant's other pools. See [Manage by manifest](/administration/manage-by-manifest).
 
-```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"sales","pool":"bi","size":4,
-       "roleDistribution":{"writeonly":1,"readonly":2,"dual":1},
-       "cohorts":[
-         {"placement":{"nodeSelector":{"workload":"write"},
-                       "tolerations":[{"key":"dedicated","operator":"Equal",
-                                       "value":"write","effect":"NoSchedule"}]},
-          "distribution":{"writeonly":1,"readonly":0,"dual":1}},
-         {"placement":{"nodeSelector":{"workload":"read"}},
-          "distribution":{"writeonly":0,"readonly":2,"dual":0}}
-       ]}'
+```yaml
+tenants:
+  - name: acme
+    pools:
+      - name: bi
+        tenantDb: sales
+        roleDistribution: { writeonly: 1, readonly: 2, dual: 1 }
+        cohorts:
+          - placement:
+              nodeSelector: { workload: write }
+              tolerations:
+                - { key: dedicated, operator: Equal, value: write, effect: NoSchedule }
+            distribution: { writeonly: 1, readonly: 0, dual: 1 }
+          - placement:
+              nodeSelector: { workload: read }
+            distribution: { writeonly: 0, readonly: 2, dual: 0 }
 ```
 
 Two validation rules apply when `cohorts` is non-empty:

@@ -3,7 +3,7 @@ id: onboarding
 title: Onboard a tenant
 ---
 
-This page walks an administrator through the complete golden path: from signing in to the admin console through handing a BI user a ready-to-paste connection string. Each playbook covers the console steps, the equivalent REST call, and how to confirm success.
+This page walks an administrator through the complete golden path: from signing in to the admin console through handing a BI user a ready-to-paste connection string. Each playbook covers the console steps, the equivalent [qod CLI](/cli/) command, and how to confirm success.
 
 ## Sign in {#sign-in}
 
@@ -23,18 +23,13 @@ This page walks an administrator through the complete golden path: from signing 
 
 ![Login screen](/img/ui/login.png)
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
-# Get a session token (admin role required)
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
-
-# Use it on every /api/* call
-curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
+qod login --url http://localhost:20900 --username admin
 ```
+
+`qod login` prompts for the password (never a command-line flag), mints a session, and stores it in the active profile - every subsequent `qod` command reuses it. CI scripts can set `QOD_API_KEY` instead of logging in.
 
 **Verify:** The top-right pill shows the signed-in user and their role. In no-auth dev mode the pill reads `anonymous / no-auth`.
 
@@ -72,14 +67,13 @@ tenants:
     displayName: Acme Corporation
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
-# Create a tenant with metastore overrides
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme","metastore":{"dbName":"tpch","schemaName":"tpch1"}}'
+qod tenant create acme
 ```
+
+Metastore settings (database name, schema) are configured per tenant-db, not on the tenant itself - see [Add a database](#add-a-database) below.
 
 **Verify:** The new tenant appears in the Tenants list immediately after creation.
 
@@ -126,22 +120,13 @@ tenants:
         defaultSchema: public
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
-The example below creates an in-memory database. Replace `"kind": "memory"` with `"kind": "ducklake"` (the default) and supply `dataPath` for a production tenant-db.
+The example below creates an in-memory database. Replace `--kind memory` with `--kind ducklake` (the default) and supply `--data-path` for a production tenant-db.
 
 ```bash
-curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  "http://localhost:20900/api/database/create" \
-  -d '{
-    "tenant": "acme",
-    "name": "fed",
-    "kind": "memory",
-    "metastore": {},
-    "dataPath": "",
-    "defaultDatabase": "fedpg",
-    "defaultSchema": "public"
-  }'
+qod database create --tenant acme --name fed --kind memory \
+  --default-database fedpg --default-schema public
 ```
 
 **Verify:** The database appears in the Databases tab with its kind and default schema displayed.
@@ -187,14 +172,12 @@ tenants:
         roleDistribution: { writeonly: 1, readonly: 1, dual: 1 }
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1}}'
+qod pool create --tenant acme --db acme_tpch --pool bi --size 3 \
+  --writeonly 1 --readonly 1 --dual 1
 ```
 
 **Verify:** The pool row appears in the Pools tab and the node count starts incrementing as nodes come up. You can watch the progress on the Nodes tab.
@@ -222,15 +205,12 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
 
 ![Nodes overview](/img/ui/nodes.png)
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Live node table (used by the UI)
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); \
-    [print(f'{n[\"nodeId\"]:28s} role={n[\"role\"]:9s} healthy={n[\"healthy\"]} \
-served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p99={n[\"p99Ms\"]:4.0f}') \
-     for p in d['pools'] for n in p['nodes']]"
+qod --json pool list | jq -r '.pools[].nodes[] |
+  "\(.nodeId) role=\(.role) healthy=\(.healthy) served=\(.totalServed) p50=\(.p50Ms) p95=\(.p95Ms) p99=\(.p99Ms)"'
 ```
 
 **Verify:** The number of healthy rows for the pool matches the role distribution you configured (write-only + read-only + dual = total size).
@@ -260,7 +240,7 @@ served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p
 
 ![Pool Connections tab](/img/ui/pool-connections.png)
 
-**REST equivalent:** There is no REST equivalent for this step. The Connections tab is a UI convenience that assembles the string from the pool's host, port, tenant, and pool name. The underlying parameters are available from the pool detail returned by `GET /api/pool/list`.
+**CLI equivalent:** There is no CLI equivalent for this step. The Connections tab is a UI convenience that assembles the string from the pool's host, port, tenant, and pool name. The underlying parameters are available from `qod --json pool list`.
 
 **Verify:** The BI user connects successfully. For client-specific setup steps, see the client guides listed below.
 

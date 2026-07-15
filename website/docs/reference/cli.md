@@ -1,6 +1,6 @@
 ---
 id: cli
-title: CLI
+title: Manager jar
 ---
 
 The manager is one uber-jar. Run with no arguments it boots the manager; it also has two `manifest` subcommands for scripting. A set of wrapper scripts under `scripts/` cover the common boot and teardown flows.

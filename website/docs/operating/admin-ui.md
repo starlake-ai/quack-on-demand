@@ -107,7 +107,7 @@ When you create a pool, the **New pool** form has a **Node placement** section. 
 The tenant page's **Maintenance** tab manages [managed DuckLake maintenance](/operating/maintenance) per database. Pick one of the tenant's DuckLake databases to get its panel:
 
 - **Policy form**, bound to the database-level scope: the enable toggle, retention days (annotated as the bound on time-travel, undrop, and history horizons), compaction knobs (target file size, small-file threshold, rewrite threshold), cleanup grace and orphan age, and the cadence cron. Unset fields show the effective defaults as placeholders; the first save creates the policy row.
-- **Overrides table** listing schema- and table-scope policy rows with their overriding fields; rows can be deleted here (creating overrides is REST-only for now).
+- **Overrides table** listing schema- and table-scope policy rows with their overriding fields; rows can be deleted here (creating overrides needs the [qod CLI](/cli/) for now: `qod maintenance policy-upsert --scope-kind schema` or `--scope-kind table`).
 - **Run history**, newest first with load-more and a **Refresh** button that re-fetches the list: trigger (cadence, threshold, or manual), scope, status (`succeeded` / `failed` / `partial`), per-step counters, bytes reclaimed, and duration.
 - **Run maintenance now** under an advanced disclosure, the manual escape hatch. Scope is a select: **whole database (full chain)** or **single table (table-safe steps)**, the latter revealing schema and table inputs. Operations are checkboxes over the chain vocabulary (`flush`, `expire`, `merge`, `rewrite`, `cleanup`, `orphans`); leaving all checked runs the full chain, unchecking restricts the run to the checked subset. It is refused with a conflict while a run is already queued or running for the database.
 
@@ -129,7 +129,7 @@ The **Groups** tab shows each group with its user, role, and pool-grant counts.
 
 ![The Groups tab](/img/ui/rbac-groups.png)
 
-The **Roles** tab lists each role with a per-verb count (SELECT / INSERT / UPDATE / DELETE / ALL) of its table permissions, and **+ New role** plus per-role edit and delete actions.
+The **Roles** tab lists each role with a per-verb count (RO / RW / DDL / ALL) of its table permissions, and **+ New role** plus per-role edit and delete actions.
 
 ![The Roles tab](/img/ui/rbac-roles.png)
 
@@ -205,7 +205,7 @@ Below the charts, a searchable statement table shows the raw rows for the select
 
 ![The Statements page with trend charts](/img/ui/statements.png)
 
-The storage model, watermark semantics, retention knobs, and the curl API for both endpoints are covered on the [Statement history and trends](/operating/history-trends) page.
+The storage model, watermark semantics, retention knobs, and the CLI recipes for both endpoints are covered on the [Statement history and trends](/operating/history-trends) page.
 
 ## Usage
 

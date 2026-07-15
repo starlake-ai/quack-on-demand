@@ -17,36 +17,23 @@ tenant  ──owns──▶  tenant-db (a database)  ──hosts──▶  pool 
 
 Provision them in that order: tenant first, then a database under it, then a pool under the database.
 
-## Authenticating REST calls
+## Authenticating with the CLI
 
-Every `/api/*` call needs a credential. Either set a static `QOD_API_KEY` and send it as `X-API-Key`, or mint an admin session token:
-
-```bash
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
-```
-
-The examples below send `-H "X-API-Key: $TOKEN"`. These endpoints are mounted only in `postgres` state-storage mode (the default).
+Every `/api/*` call needs a credential. The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts. These endpoints are mounted only in `postgres` state-storage mode (the default).
 
 ## Tenants
 
 ### Create a tenant
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme"}'
+qod tenant create acme
 ```
 
-`authProvider` defaults to `db` (database-backed bcrypt users). To point a tenant's users at an OIDC provider instead, set `authProvider` to one of `keycloak` / `google` / `azure` / `aws` and supply the provider config:
+`--auth-provider` defaults to `db` (database-backed bcrypt users). To point a tenant's users at an OIDC provider instead, set `--auth-provider` to one of `keycloak` / `google` / `azure` / `aws` and supply the provider config with repeatable `--auth-config KEY=VALUE`:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme","authProvider":"keycloak",
-       "authConfig":{"issuer":"https://kc.example.com/realms/acme","realm":"acme"}}'
+qod tenant create acme --auth-provider keycloak \
+  --auth-config issuer=https://kc.example.com/realms/acme --auth-config realm=acme
 ```
 
 `authConfig` is empty for `db`. For OIDC providers it expects `issuer` (full URL) plus one of `realm` (Keycloak), `hd` (Google Workspace domain), `tenantId` (Azure), or `userPoolId` (Cognito).
@@ -62,20 +49,16 @@ Both must be set together; leaving either blank falls back to the global client.
 
 ```bash
 # List every tenant (with its pools and auth provider)
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/tenant/list
+qod tenant list
 
 # Disable a tenant: the edge rejects fresh handshakes for all its pools
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/setDisabled \
-  -H 'Content-Type: application/json' -d '{"name":"acme","disabled":true}'
+qod tenant set-disabled acme --disabled
 
 # Switch the auth provider after creation
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/setAuth \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme","authProvider":"db","authConfig":{}}'
+qod tenant set-auth acme --auth-provider db
 
 # Delete a tenant (remove its pools first, else 409 has_pools)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \
-  -H 'Content-Type: application/json' -d '{"name":"acme"}'
+qod tenant delete acme
 ```
 
 ## Databases (tenant-dbs)
@@ -85,11 +68,8 @@ A database is created under an existing tenant. The `name` you pass is a suffix;
 ### Create a database
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/database/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"sales","kind":"ducklake",
-       "dataPath":"/app/ducklake/acme_sales",
-       "defaultSchema":"mart"}'
+qod database create --tenant acme --name sales --kind ducklake \
+  --data-path /app/ducklake/acme_sales --default-schema mart
 ```
 
 | Field | Meaning |
@@ -108,12 +88,10 @@ For object storage on S3-compatible backends and the `QOD_S3_*` keys, see the Do
 
 ```bash
 # List the databases under a tenant
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/database/list?tenant=acme'
+qod database list --tenant acme
 
 # Delete a database (remove its pools first, else 409 has_pools)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/database/delete \
-  -H 'Content-Type: application/json' -d '{"tenant":"acme","name":"sales"}'
+qod database delete --tenant acme --name sales
 ```
 
 Deleting a database removes the `qodstate_tenant_db` row. The underlying Postgres database and any object-store Parquet are not erased by the API; reclaim them separately if you no longer need the data.

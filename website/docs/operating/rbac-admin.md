@@ -3,7 +3,7 @@ id: rbac-admin
 title: Administering access
 ---
 
-This page contains task-oriented recipes for managing users, roles, groups, memberships, and pool grants through the REST API. They require a valid admin credential on every request.
+This page contains task-oriented recipes for managing users, roles, groups, memberships, and pool grants with the [qod CLI](/cli/). They require a valid admin credential on every request.
 
 For a description of the underlying data model, the EffectiveSet, pool-access gates, and privilege-escalation rules, see the "Access control model" page.
 
@@ -27,14 +27,7 @@ Every RBAC handler checks the caller's session scope before mutating. A tenant-A
 
 with HTTP `403`. Superuser and static-key sessions bypass the gate. Unknown ids return `404` (not `403`) so a probe cannot distinguish "exists in another tenant" from "doesn't exist at all". The pattern covers id-only endpoints (`/role/delete`, `/user/delete`, `/group/delete`, `/role/permission/revoke`, `/pool/permission/revoke`, all 6 membership ops, the per-user `/effective`) - those resolve the owning tenant from the resource before applying the check.
 
-```bash
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' \
-  | jq -r .token)
-```
-
-The examples below use `$TOKEN` as shorthand for whichever value you choose.
+The examples below assume `qod login` has stored a session (see [the CLI section](/cli/)); CI scripts can use `QOD_API_KEY` instead.
 
 ---
 
@@ -45,10 +38,7 @@ A role bundles one or more table permissions. First create the role, then attach
 **Create a role**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/role/create \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"analyst","description":"Read-only analyst role"}'
+qod role create --tenant acme --name analyst --description "Read-only analyst role"
 ```
 
 Response includes the generated `id` field. Copy it for the next step.
@@ -62,25 +52,13 @@ Response includes the generated `id` field. Copy it for the next step.
 Request body fields: `roleId` (required), `catalog` (default `*`), `schema` (default `*`), `table` (default `*`), `verb` (required; one of `RO`, `RW`, `DDL`, `ALL`). `RO` grants read-only, `RW` grants read + any DML (INSERT/UPDATE/DELETE/MERGE/TRUNCATE), `DDL` grants CREATE/DROP/ALTER, `ALL` grants everything.
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/role/permission/grant \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "roleId": "<role-id>",
-    "catalog": "tpch",
-    "schema": "tpch1",
-    "table": "customer",
-    "verb": "RO"
-  }'
+qod role permission grant --role-id <role-id> --catalog tpch --schema tpch1 --table customer --verb RO
 ```
 
-To grant access to every table in a tenant (wildcard), omit `catalog`, `schema`, and `table` (they default to `*`):
+To grant access to every table in a tenant (wildcard), omit `--catalog`, `--schema`, and `--table` (they default to `*`):
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/role/permission/grant \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"roleId":"<role-id>","verb":"RO"}'
+qod role permission grant --role-id <role-id> --verb RO
 ```
 
 In the admin UI: open the tenant detail page, navigate to the Roles tab, create a role, then use the permission editor to add grants.
@@ -94,30 +72,21 @@ Groups collect multiple users under a shared set of role assignments.
 **Create a group**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/group/create \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"data-team","description":"Data analysts group"}'
+qod group create --tenant acme --name data-team --description "Data analysts group"
 ```
 
 **Attach a role to the group**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/membership/group-role/add \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"groupId":"<group-id>","roleId":"<role-id>"}'
+qod membership group-role add --group-id <group-id> --role-id <role-id>
 ```
 
-This endpoint is idempotent: calling it multiple times with the same pair produces no error and no duplicate row.
+This command is idempotent: calling it multiple times with the same pair produces no error and no duplicate row.
 
 To remove the assignment:
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/membership/group-role/remove \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"groupId":"<group-id>","roleId":"<role-id>"}'
+qod membership group-role remove --group-id <group-id> --role-id <role-id>
 ```
 
 In the admin UI: open the tenant detail page, navigate to the Groups tab, create a group, then use the role assignment controls to link roles.
@@ -131,15 +100,7 @@ In the admin UI: open the tenant detail page, navigate to the Groups tab, create
 A tenant-scoped user can only connect to pools belonging to their tenant. The `role` field controls the admin UI role (`user` or `admin`); it is not an RBAC role in the access-control sense.
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/user/create \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant": "acme",
-    "username": "alice",
-    "password": "s3cr3t",
-    "role": "user"
-  }'
+qod user create --tenant acme --username alice --password s3cr3t --role user
 ```
 
 **Superuser (tenant null)**
@@ -147,17 +108,10 @@ curl -sS -X POST http://localhost:20900/api/user/create \
 A superuser has `tenant: null`. Superusers bypass the pool-access gate and the per-statement ACL gate entirely. Only an existing superuser may create another superuser; a tenant-scoped admin attempting this call receives a 403.
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/user/create \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "username": "ops-admin",
-    "password": "str0ng!",
-    "role": "admin"
-  }'
+qod user create --username ops-admin --password 'str0ng!' --superuser --role admin
 ```
 
-Omitting `tenant` is equivalent to passing `"tenant": null`.
+Passing `--superuser` (and omitting `--tenant`) is equivalent to passing `"tenant": null` on the REST body.
 
 In the admin UI: open the Users page, click "Create user", fill in the form. The superuser option appears only when the logged-in user is themselves a superuser.
 
@@ -165,27 +119,21 @@ In the admin UI: open the Users page, click "Create user", fill in the form. The
 
 ## 4. Add a user to a role and to a group
 
-These endpoints are idempotent: adding an already-existing membership returns 204 with no error.
+These commands are idempotent: adding an already-existing membership returns 204 with no error.
 
 **User to role**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/membership/user-role/add \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"userId":"<user-id>","roleId":"<role-id>"}'
+qod membership user-role add --user-id <user-id> --role-id <role-id>
 ```
 
 **User to group**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/membership/user-group/add \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"userId":"<user-id>","groupId":"<group-id>"}'
+qod membership user-group add --user-id <user-id> --group-id <group-id>
 ```
 
-To remove either membership, call the corresponding `.../remove` path with the same body.
+To remove either membership, run the corresponding `qod membership ... remove` command with the same flags.
 
 In the admin UI: on the user detail row, use the role and group assignment controls.
 
@@ -198,48 +146,31 @@ A pool permission allows a user or a group to open FlightSQL connections to a sp
 **Grant a specific pool to a user**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/pool/permission/grant \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant": "acme",
-    "poolId": "<pool-uuid>",
-    "userId": "<user-id>"
-  }'
+qod pool permission grant --tenant acme --pool-id <pool-uuid> --user-id <user-id>
 ```
 
 **Grant all pools in a tenant to a group**
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/pool/permission/grant \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant": "acme",
-    "groupId": "<group-id>"
-  }'
+qod pool permission grant --tenant acme --group-id <group-id>
 ```
 
-Omitting `poolId` (or passing `null`) grants access to every current and future pool in the tenant.
+Omitting `--pool-id` grants access to every current and future pool in the tenant.
 
 **Revoke a pool grant**
 
 Use the `id` from the grant response:
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/pool/permission/revoke \
-  -H "X-API-Key: $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"<grant-id>"}'
+qod pool permission revoke <grant-id>
 ```
 
 **List pool grants**
 
-All three query parameters are optional; any combination filters the results:
+All the filters below are optional; any combination narrows the results:
 
 ```bash
-curl -sS "http://localhost:20900/api/pool/permission/list?tenant=acme&userId=<user-id>" \
-  -H "X-API-Key: $TOKEN"
+qod pool permission list --tenant acme --user-id <user-id>
 ```
 
 In the admin UI: on the pool detail page, use the "Access" tab to add or remove user and group grants.
@@ -251,8 +182,7 @@ In the admin UI: on the pool detail page, use the "Access" tab to add or remove 
 The effective-permissions endpoint returns the full closure of roles, groups, pool grants, and table permissions for a given user without requiring you to trace the graph manually.
 
 ```bash
-curl -sS "http://localhost:20900/api/user/<user-id>/effective" \
-  -H "X-API-Key: $TOKEN"
+qod user effective <user-id>
 ```
 
 Example response shape:
@@ -275,13 +205,13 @@ In the admin UI: click a user in the Users page to open the effective-permission
 
 ---
 
-## Reference: list endpoints
+## Reference: list commands
 
-| Resource | Path |
+| Resource | Command |
 |---|---|
-| Users | `GET /api/user/list?tenant=<name>` (omit `tenant` to list all users including superusers) |
-| Roles | `GET /api/role/list?tenant=<name>` |
-| Role permissions | `GET /api/role/permission/list?roleId=<id>` |
-| Groups | `GET /api/group/list?tenant=<name>` |
-| Group role memberships | `GET /api/membership/group-role/list?groupId=<id>` |
-| Pool permissions | `GET /api/pool/permission/list?tenant=<name>&userId=<id>&groupId=<id>` |
+| Users | `qod user list --tenant <name>` (omit `--tenant` to list all users including superusers) |
+| Roles | `qod role list --tenant <name>` |
+| Role permissions | `qod role permission list --role-id <id>` |
+| Groups | `qod group list --tenant <name>` |
+| Group role memberships | `qod membership group-role list --group-id <id>` |
+| Pool permissions | `qod pool permission list --tenant <name> --user-id <id> --group-id <id>` |

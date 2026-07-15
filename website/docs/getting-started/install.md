@@ -184,6 +184,18 @@ The assembly output lands in `distrib/quack-on-demand-assembly-<version>.jar`. T
 
 Note: `sbt compile` and `sbt assembly` also run `npm ci` and `npm run build` inside the `ui/` directory as a resource generator, so the React admin UI is bundled automatically. There is no separate UI build step.
 
+## Install the CLI (optional)
+
+The `qod` command-line client drives the whole REST surface and runs SQL
+against the FlightSQL edge:
+
+```bash
+pip install qod-cli
+qod login --url http://localhost:20900 --username admin
+```
+
+See the [CLI section](/cli/) for a tour.
+
 ## Configuration model
 
 Every scalar in `application.conf` accepts a matching `QOD_*` environment variable override (FlightSQL edge keys use the `PROXY_*` prefix). The bundled `application.conf` is baked into the jar at build time, so you should use environment variables rather than editing it directly.

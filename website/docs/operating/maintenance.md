@@ -5,7 +5,7 @@ title: Managed DuckLake maintenance
 
 The manager runs a background maintenance service that keeps every DuckLake database healthy and its storage bounded. Without maintenance, DuckLake only ever adds: deletes and compactions write new files while old snapshots keep the previous files referenced, so disk usage grows monotonically. The service runs the full DuckLake maintenance chain per database, on compute isolated from query serving, with retention holds enforced and every run recorded.
 
-Maintenance is **double-opt-in**. The service fibers are on by default (`QOD_MAINT_ENABLED=true`), but every database's policy starts disabled, so nothing destructive happens until you enable a database explicitly, from the tenant page's Maintenance tab or via the REST API.
+Maintenance is **double-opt-in**. The service fibers are on by default (`QOD_MAINT_ENABLED=true`), but every database's policy starts disabled, so nothing destructive happens until you enable a database explicitly, from the tenant page's Maintenance tab or with the [qod CLI](/cli/).
 
 :::warning First enable expires history
 The retention window (default 7 days) is the time-travel horizon. The first time you enable maintenance on a database, the next scheduler tick expires every unpinned snapshot older than the window. Tag the snapshots you want to keep as `protected` first (see [retention holds](#retention-holds)).
@@ -28,7 +28,7 @@ Compaction alone reclaims nothing; only the full chain reduces on-disk bytes. Th
 
 - **Threshold**: the scheduler watches per-table small-file counts in each database's Postgres catalog (metadata reads, no node involved). A table with at least `smallFileMinCount` files under the target size gets a table-scoped run (flush + merge + rewrite only; nothing lake-wide is expired from a threshold trigger).
 - **Cadence**: a per-database cron (default `0 3 * * *` UTC, staggered per database) runs the full chain, including expiry and cleanup.
-- **Manual**: `POST /api/maintenance/run` as an escape hatch for backfills and incident response. Returns 409 `run_active` when a run is already queued or running for the database. The Maintenance tab's "Run maintenance now" form drives the same endpoint: scope is a select (whole database runs the full chain; single table takes schema and table inputs and runs only the table-safe steps), and operations are checkboxes (`flush`, `expire`, `merge`, `rewrite`, `cleanup`, `orphans`) - all checked runs the full chain, unchecking restricts the run to the checked subset. See the [admin UI guide](/operating/admin-ui#maintenance).
+- **Manual**: `qod maintenance run` (`POST /api/maintenance/run`) as an escape hatch for backfills and incident response. Returns 409 `run_active` when a run is already queued or running for the database. The Maintenance tab's "Run maintenance now" form drives the same endpoint: scope is a select (whole database runs the full chain; single table takes schema and table inputs and runs only the table-safe steps), and operations are checkboxes (`flush`, `expire`, `merge`, `rewrite`, `cleanup`, `orphans`) - all checked runs the full chain, unchecking restricts the run to the checked subset. See the [admin UI guide](/operating/admin-ui#maintenance).
 
 Runs are queued in the control plane and drained with bounded concurrency (`maxConcurrent`, default 2), serialized per database. Under HA only the leader schedules and drains.
 
@@ -48,26 +48,21 @@ Policies are hierarchical: a `table` scope overrides a `schema` scope overrides 
 | `orphanMinAgeDays` | 1 | Never delete orphan files younger than this. |
 | `cron` | `0 3 * * *` | Cadence fallback (5-field subset: `*`, integers, `*/n`; UTC). |
 
-Manage policies from the Maintenance tab (see the [admin UI guide](/operating/admin-ui)) or via REST:
+Manage policies from the Maintenance tab (see the [admin UI guide](/operating/admin-ui)) or with the CLI (`qod login` must have stored a session, or set `QOD_API_KEY`):
 
 ```bash
 # Enable maintenance on a database with a 14-day horizon
-curl -sS -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  localhost:20900/api/maintenance/policy/upsert \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","scopeKind":"tenantdb","enabled":true,"retentionDays":14}'
+qod maintenance policy-upsert --tenant acme --db acme_tpch --scope-kind tenantdb \
+  --enabled --retention-days 14
 
 # Inspect rows + the resolved effective policy
-curl -sS -H "X-API-Key: $KEY" \
-  'localhost:20900/api/maintenance/policy?tenant=acme&tenantDb=acme_tpch'
+qod maintenance policy --tenant acme --db acme_tpch
 
-# Run history (newest first, keyset pagination via before=<id>)
-curl -sS -H "X-API-Key: $KEY" \
-  'localhost:20900/api/maintenance/runs?tenant=acme&tenantDb=acme_tpch&limit=50'
+# Run history (newest first, keyset pagination via --before <id>)
+qod maintenance runs --tenant acme --db acme_tpch --limit 50
 
 # Manual run (escape hatch); scope is optional: "tenantdb" or "table:<schema>.<table>"
-curl -sS -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  localhost:20900/api/maintenance/run \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","operations":"flush,merge"}'
+qod maintenance run --tenant acme --db acme_tpch --operations flush,merge
 ```
 
 All endpoints are tenant-scoped: a tenant admin manages only their own tenant's policies and runs. Policy changes and manual runs are audited (`maintenance.policy.upsert`, `maintenance.policy.delete`, `maintenance.run.manual`), and every finished run writes a `maintenance.run` audit entry with its counters.

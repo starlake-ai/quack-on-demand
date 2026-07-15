@@ -173,26 +173,25 @@ Set `QOD_TELEMETRY_STORE=none` to disable the audit subsystem entirely:
 
 The `postgres` and `none` values are the only accepted values for `QOD_TELEMETRY_STORE`. Any other value is refused at startup.
 
-## Querying the audit log via curl
+## Querying the audit log with the CLI
+
+The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts.
 
 ```bash
 # List the 50 most recent control-plane events (default limit)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?family=control-plane&limit=50' | python3 -m json.tool
+qod audit list --family control-plane --limit 50
 
 # Page through with the keyset cursor
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?before=<nextBefore-from-previous-page>'
+qod audit list --before <nextBefore-from-previous-page>
 
 # Failed logins in a window
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?action=auth.login.failure&from=2026-07-01T00:00:00Z'
+qod audit list --action auth.login.failure --from 2026-07-01T00:00:00Z
 ```
 
 The exhaustive action vocabulary (for building filter UIs) is served by a static registry:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/audit/actions | python3 -m json.tool
+qod audit actions
 ```
 
 ### Filter parameters
