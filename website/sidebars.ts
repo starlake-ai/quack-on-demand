@@ -90,6 +90,11 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'CLI',
+      items: ['cli/index', 'cli/admin', 'cli/sql', 'cli/reference'],
+    },
+    {
+      type: 'category',
       label: 'Reference',
       items: [
         'reference/configuration',
