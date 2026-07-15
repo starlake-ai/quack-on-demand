@@ -5,12 +5,12 @@ title: Manifest backup and restore
 
 The config manifest is the entire control-plane configuration serialized as one YAML document: every tenant, database, pool, federated source, role, group, user, and grant. Export it to back up or version-control your configuration, then import it to restore, clone an environment, or apply a reviewed change. The manifest holds configuration only; it does not contain table data or the DuckLake catalogs.
 
-Manifest export and import are cross-tenant operations and are **restricted to superusers**. A tenant-scoped session is rejected with `403 superuser_required`; a static `QOD_API_KEY` caller is admitted. The examples assume an admin token in `$TOKEN` and the manager base URL in `$MGR`.
+Manifest export and import are cross-tenant operations and are **restricted to superusers**. A tenant-scoped session is rejected with `403 superuser_required`; a static `QOD_API_KEY` caller is admitted. The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a superuser session, or `QOD_API_KEY` is set for CI scripts.
 
 ## Export
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" "$MGR/api/manifest/export" > manifest.yaml
+qod manifest export --out manifest.yaml
 ```
 
 `GET /api/manifest/export` returns the manifest as `application/yaml`. The top of the document records provenance:
@@ -51,8 +51,7 @@ A plain export-then-import round-trip preserves credentials without rotation: ex
 ## Import
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST "$MGR/api/manifest/import" \
-  -H 'Content-Type: text/plain' --data-binary @manifest.yaml
+qod manifest import manifest.yaml
 ```
 
 `POST /api/manifest/import` takes the YAML body and returns a summary of how many top-level resources were in the manifest:

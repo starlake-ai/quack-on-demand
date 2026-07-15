@@ -48,44 +48,30 @@ users:
       - { pool: bi }
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
-The six steps below mirror the UI flow exactly. Surrogate ids (`<roleId>`, `<groupId>`, etc.) are returned by each create call; capture them from the JSON response.
+The examples below assume `qod login` has stored a session (see [the CLI section](/cli/)); CI scripts can use `QOD_API_KEY` instead. The six steps below mirror the UI flow exactly. Surrogate ids (`<roleId>`, `<groupId>`, etc.) are returned by each create call; capture them with the `--json` flag.
 
 ```bash
 # 1. Create a role
-ROLE_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"analyst","description":"Read-only analyst"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+ROLE_ID=$(qod --json role create --tenant acme --name analyst --description "Read-only analyst" | jq -r .id)
 
 # 2. Grant SELECT on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"tpch1\",\"table\":\"customer\",\"verb\":\"SELECT\"}"
+qod role permission grant --role-id "$ROLE_ID" --catalog acme_tpch --schema tpch1 --table customer --verb SELECT
 
 # 3. Create a group
-GROUP_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/group/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"analysts"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+GROUP_ID=$(qod --json group create --tenant acme --name analysts | jq -r .id)
 
 # 4. Attach the role to the group
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/add \
-  -H 'Content-Type: application/json' \
-  -d "{\"groupId\":\"$GROUP_ID\",\"roleId\":\"$ROLE_ID\"}"
+qod membership group-role add --group-id "$GROUP_ID" --role-id "$ROLE_ID"
 
-# 5. Add a user to the group (or use membership/user-role/add to attach the role directly to a user)
-#    Retrieve <userId> from GET /api/user/list?tenant=acme
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/add \
-  -H 'Content-Type: application/json' \
-  -d "{\"userId\":\"<userId>\",\"groupId\":\"$GROUP_ID\"}"
+# 5. Add a user to the group (or use `qod membership user-role add` to attach the role directly to a user)
+#    Retrieve <userId> from `qod user list --tenant acme`
+qod membership user-group add --user-id <userId> --group-id "$GROUP_ID"
 
 # 6. Grant the group access to the pool (REQUIRED - without this the group cannot reach the pool)
-#    Retrieve <poolId> from GET /api/pool/list
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d "{\"tenant\":\"acme\",\"poolId\":\"<poolId>\",\"groupId\":\"$GROUP_ID\"}"
+#    Retrieve <poolId> from `qod pool list`
+qod pool permission grant --tenant acme --pool-id <poolId> --group-id "$GROUP_ID"
 ```
 
 The permission graph is: user -> roles (direct), user -> groups -> roles (via group membership), plus a required pool permission that gates which pools the principal can reach.
@@ -124,18 +110,14 @@ roles:
       - { catalog: acme_tpch, schema: tpch1, table: orders, verb: INSERT }
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Grant INSERT on acme_tpch.tpch1.orders to an existing role
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d '{"roleId":"<roleId>","catalog":"acme_tpch","schema":"tpch1","table":"orders","verb":"INSERT"}'
+qod role permission grant --role-id <roleId> --catalog acme_tpch --schema tpch1 --table orders --verb INSERT
 
 # Grant ALL verbs on every table in the catalog (wildcard schema and table)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d '{"roleId":"<roleId>","catalog":"acme_tpch","schema":"*","table":"*","verb":"ALL"}'
+qod role permission grant --role-id <roleId> --catalog acme_tpch --schema "*" --table "*" --verb ALL
 ```
 
 Replace `verb` with `UPDATE`, `DELETE`, `CREATE`, `DROP`, or `ALTER` as needed. Omitting `catalog`/`schema`/`table` (or setting them to `"*"`) wildcards that field.
@@ -180,33 +162,29 @@ After **deleting** a federated source, recycle the pool: running nodes keep the 
 
 **Manifest (YAML):** Declaratively, remove the entry from its parent's nested list (a `permissions` entry on the role, or a role/group/grant on the user) and re-import; nested collections are replaced to match the file, so the omitted entry is deleted. Top-level roles, groups, and users are upsert-only, so this prunes grants, not whole roles. See [Manage by manifest](/administration/manage-by-manifest).
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
-# Remove a table permission from a role (get <permissionId> from role/permission/list)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/revoke \
-  -H 'Content-Type: application/json' -d '{"id":"<permissionId>"}'
+# Remove a table permission from a role (get <permissionId> from `qod role permission list`)
+qod role permission revoke <permissionId>
 
 # Detach a role from a group
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/remove \
-  -H 'Content-Type: application/json' -d '{"groupId":"<groupId>","roleId":"<roleId>"}'
+qod membership group-role remove --group-id <groupId> --role-id <roleId>
 
 # Remove a user from a group
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/remove \
-  -H 'Content-Type: application/json' -d '{"userId":"<userId>","groupId":"<groupId>"}'
+qod membership user-group remove --user-id <userId> --group-id <groupId>
 
-# Remove pool access from a group (get <id> from pool/permission/list?tenant=acme)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/revoke \
-  -H 'Content-Type: application/json' -d '{"id":"<id>"}'
+# Remove pool access from a group (get <id> from `qod pool permission list --tenant acme`)
+qod pool permission revoke <id>
 ```
 
-**Verify:** Re-run the relevant list endpoint and confirm the entry no longer appears:
+**Verify:** Re-run the relevant list command and confirm the entry no longer appears:
 
 ```bash
 # List role permissions
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/role/permission/list?roleId=<roleId>'
+qod role permission list --role-id <roleId>
 # List pool permissions
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/pool/permission/list?tenant=acme'
+qod pool permission list --tenant acme
 ```
 
 **Related:**

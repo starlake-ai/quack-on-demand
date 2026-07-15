@@ -20,21 +20,17 @@ A few caveats apply before using these numbers for billing:
 
 ## API
 
-`GET /api/usage` returns aggregated daily rollup data over a requested period. The endpoint requires authentication (either the `X-API-Key` header or a `qod_session` cookie from the admin UI).
+`GET /api/usage` returns aggregated daily rollup data over a requested period. The endpoint requires authentication (either the `X-API-Key` header or a `qod_session` cookie from the admin UI). The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts.
 
 ```bash
-# Month-to-date usage per tenant (defaults: current calendar month UTC, groupBy=tenant)
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/usage' | python3 -m json.tool
+# Month-to-date usage per tenant (defaults: current calendar month UTC, group-by=tenant)
+qod usage
 
 # June 2026, per pool, one tenant
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&groupBy=pool&tenant=acme' \
-  | python3 -m json.tool
+qod usage --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z --group-by pool --tenant acme
 
 # Per-user accounting for a billing export
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&groupBy=user' \
-  | python3 -m json.tool
+qod usage --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z --group-by user
 ```
 
 ### Query parameters
@@ -126,8 +122,7 @@ The JSON API is the integration surface for external billing systems. A typical 
 
 ```bash
 # Extract a closed billing month (half-open interval, UTC)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&groupBy=user' \
+qod --json usage --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z --group-by user \
   | jq -r '["tenant","user","statements","errors","denied","engine_ms"],
            (.groups[] | [.tenant, (.username // ""), .statements, .errors, .denied, .engineMs])
            | @csv'

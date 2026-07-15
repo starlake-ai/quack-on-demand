@@ -3,7 +3,7 @@ id: lifecycle-config
 title: Lifecycle and config
 ---
 
-Attach external catalogs, rotate secrets, back up and restore configuration, and decommission cleanly. Each playbook below follows the same structure: goal, prerequisites, step-by-step UI flow with screenshots, the equivalent REST call, and how to verify success.
+Attach external catalogs, rotate secrets, back up and restore configuration, and decommission cleanly. Each playbook below follows the same structure: goal, prerequisites, step-by-step UI flow with screenshots, the equivalent [qod CLI](/cli/) command, and how to verify success.
 
 ## Attach an external catalog
 
@@ -13,7 +13,7 @@ Attach external catalogs, rotate secrets, back up and restore configuration, and
 
 - The tenant and database already exist. See [Tenants and databases](/operating/tenants-databases).
 - The target external system is reachable from the Quack nodes at startup time.
-- An admin session token or API key in `$TOKEN`. The manager runs at `http://localhost:20900` (the default dev address; adjust the host and port for other environments).
+- `qod login` has stored a session (CI scripts can use `QOD_API_KEY` instead). The manager runs at `http://localhost:20900` (the default dev address; adjust the host and port for other environments).
 
 **Steps (UI)**:
 
@@ -45,22 +45,15 @@ tenants:
               - { name: PG_PWD, value: hunter2 }
 ```
 
-**REST equivalent**:
+**CLI equivalent**:
 
 ```bash
 # Register the federated source
-curl -X POST -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
-  -d '{
-    "alias": "fedpg",
-    "description": "Prod warehouse Postgres",
-    "setupSql": "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST '\''pg.prod'\'', PORT 5432, DATABASE '\''warehouse'\'', USER '\''svc_qod'\'', PASSWORD '\''{{secret.PG_PWD}}'\''); ATTACH '\'''\'' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
-  }'
+qod federation create acme acme_fed --alias fedpg --description "Prod warehouse Postgres" \
+  --setup-sql "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}'); ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
 
 # Add the secret referenced by {{secret.PG_PWD}}
-curl -X PUT -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -d '{"name": "PG_PWD", "value": "hunter2"}'
+qod federation secret set acme acme_fed fedpg --name PG_PWD --value hunter2
 ```
 
 Placeholders in `setupSql`:
@@ -111,13 +104,11 @@ tenants:
               - { name: PG_PWD, value: <new-value> }
 ```
 
-**REST equivalent**:
+**CLI equivalent**:
 
 ```bash
-# Re-PUT the secret with the new value (same endpoint as the initial add)
-curl -X PUT -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -d '{"name": "PG_PWD", "value": "hunter2"}'
+# Re-set the secret with the new value (same command as the initial add; it upserts)
+qod federation secret set acme acme_fed fedpg --name PG_PWD --value hunter2
 ```
 
 After updating the secret, recycle the pool so new nodes pick up the change. See [Federation - lifecycle](/operating/federation#lifecycle) for the exact spawn-time substitution rules.
@@ -148,18 +139,17 @@ Note: the Config/Manifest tab and the manifest endpoints are restricted to super
 
 ![Config page](/img/ui/config.png)
 
-**REST equivalent**:
+**CLI equivalent**:
 
 ```bash
-# Export - returns application/yaml; superuser only
-curl -sS -H "X-API-Key: $TOKEN" "http://localhost:20900/api/manifest/export" > manifest.yaml
+# Export - superuser only
+qod manifest export --out manifest.yaml
 
 # Import after editing
-curl -sS -H "X-API-Key: $TOKEN" -X POST "http://localhost:20900/api/manifest/import" \
-  -H 'Content-Type: text/plain' --data-binary @manifest.yaml
+qod manifest import manifest.yaml
 ```
 
-The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}`. The import validates the whole document before writing anything; on failure it returns `400` and changes nothing.
+The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}` (pass `--json` to see it verbatim). The import validates the whole document before writing anything; on failure it returns `400` and changes nothing.
 
 **Verify**: After import, check **Tenants** and **Users** in the UI to confirm the expected tenants, pools, and users are present. If you cloned to a new environment, run a sample query through the FlightSQL edge to confirm the pools came up correctly.
 
@@ -182,19 +172,16 @@ The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}`
 2. **Delete a tenant**: Once all pools are removed, go to **Tenants**, select the tenant, and click **Delete**.
 3. **Remove a user, role, or group**: Go to **Users**, select the tenant scope at the top, find the object on the appropriate tab, and click **Delete**.
 
-**Manifest (YAML):** Declaratively, drop a pool from a tenant that is still in the manifest and re-import; nested collections are replaced, so the omitted pool is pruned. Top-level tenants are upsert-only, so deleting a whole tenant uses the REST delete above, not omission. See [Manage by manifest](/administration/manage-by-manifest).
+**Manifest (YAML):** Declaratively, drop a pool from a tenant that is still in the manifest and re-import; nested collections are replaced, so the omitted pool is pruned. Top-level tenants are upsert-only, so deleting a whole tenant uses the CLI delete below, not omission. See [Manage by manifest](/administration/manage-by-manifest).
 
-**REST equivalent**:
+**CLI equivalent**:
 
 ```bash
 # Delete a pool: stops nodes AND removes the pool from the registry
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
+qod pool delete --tenant acme --db acme_tpch --pool bi --force
 
 # Delete a tenant (must have no pools first)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \
-  -H 'Content-Type: application/json' -d '{"name":"acme"}'
+qod tenant delete acme
 ```
 
 **Verify**: The pool or tenant no longer appears in the **Tenants** or **Nodes** lists. A user removed from the RBAC graph can no longer authenticate against the tenant or run queries.

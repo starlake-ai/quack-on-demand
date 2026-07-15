@@ -3,7 +3,7 @@ id: day-2-operations
 title: Run the platform
 ---
 
-The Nodes board is the at-a-glance operational view for a running deployment. From it you can spot trouble, scale compute up or down, drain a pool before maintenance, and drill into recent statements. This page walks through each of those tasks as step-by-step playbooks with the equivalent REST call for scripting and automation.
+The Nodes board is the at-a-glance operational view for a running deployment. From it you can spot trouble, scale compute up or down, drain a pool before maintenance, and drill into recent statements. This page walks through each of those tasks as step-by-step playbooks with the equivalent [qod CLI](/cli/) command for scripting and automation.
 
 ## Watch the Nodes board
 
@@ -26,18 +26,15 @@ The Nodes board is the at-a-glance operational view for a running deployment. Fr
 
 ![Nodes overview](/img/ui/nodes.png)
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Live node table (used by the UI)
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); \
-    [print(f'{n[\"nodeId\"]:28s} role={n[\"role\"]:9s} healthy={n[\"healthy\"]} \
-served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p99={n[\"p99Ms\"]:4.0f}') \
-     for p in d['pools'] for n in p['nodes']]"
+qod --json pool list | jq -r '.pools[].nodes[] |
+  "\(.nodeId) role=\(.role) healthy=\(.healthy) served=\(.totalServed) p50=\(.p50Ms) p95=\(.p95Ms) p99=\(.p99Ms)"'
 ```
 
-Per-node fields surfaced via `/api/pool/list`:
+Per-node fields surfaced via `qod --json pool list`:
 - `inFlight` - currently executing statements
 - `totalServed` - lifetime counter since manager start
 - `avgDurationMs` - EWMA latency
@@ -79,14 +76,12 @@ tenants:
         roleDistribution: { writeonly: 1, readonly: 2, dual: 3 }
 ```
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Scale up
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","targetSize":6,
-       "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
+qod pool scale --tenant acme --db acme_tpch --pool bi --target-size 6 \
+  --writeonly 1 --readonly 2 --dual 3
 ```
 
 **Verify:** Return to the Nodes board. The new node count appears as rows grouped under the pool. Newly spawned nodes may show `healthy: false` for up to 5 seconds while the health probe runs its first check.
@@ -110,16 +105,14 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
 3. After either action the pool row stays in the registry with zero nodes and a zero distribution. It is not deleted. Reconcile will not respawn nodes because the persisted distribution is zero.
 4. To bring the pool back: use **Scale** and set a non-zero target size.
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
-# Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
+# Stop a pool: scales it down to 0 nodes but KEEPS the pool (--force skips graceful drain)
+qod pool stop --tenant acme --db acme_tpch --pool bi --force
 ```
 
-Pass `"force":false` to drain instead of force-stopping.
+Omit `--force` to drain instead of force-stopping.
 
 **Verify:** On the Nodes board, the pool's rows disappear. The pool itself still appears in the Tenants -> Pools tab with zero nodes, confirming it is registered but stopped.
 
@@ -139,12 +132,11 @@ Pass `"force":false` to drain instead of force-stopping.
 2. The page shows a **Recent statements** panel below the pool list. Statements appear newest-first with the SQL text, the node that handled it, the duration, and the status.
 3. The same panel appears on the pool detail page, scoped to statements routed to that pool.
 
-**REST equivalent:**
+**CLI equivalent:**
 
 ```bash
 # Recent statement history (newest first)
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/node/statements?limit=20' \
-  | python3 -m json.tool
+qod node statements --limit 20
 ```
 
 **Verify:** Run a known query through the FlightSQL edge. Refresh the Recent statements panel. The query appears at the top of the list.
@@ -157,11 +149,11 @@ curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/node/statements?limi
 
 | Symptom | Likely cause | Where to look |
 |---|---|---|
-| `/api/*` returns 401 | `QOD_API_KEY` is set but the request header is missing or wrong | Pass `X-API-Key: <key>` or log in via `/api/auth/login`; check env var on manager startup |
-| `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Run `pgrep -fl spawn-quack-node`; if 0 processes, call `pool/stop` then `pool/scale` to respawn |
-| `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching role-permission grant | Add the grant via the role-permission API or the Users screen; or set `QOD_ACL_ENABLED=false` for dev |
-| `session expired; please reconnect` | Bearer token is not recognized (manager restarted, clearing the in-process denylist and session store) | Re-login or pass Basic credentials; the static `QOD_API_KEY` continues to work after a restart |
-| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child process died after the manager restarted (local mode does not adopt survivors) | Wait for the next reconcile tick (default 30 s) to respawn; or call `pool/stop` then `pool/scale` immediately |
+| `/api/*` returns 401 | `QOD_API_KEY` is set but the request header is missing or wrong | Pass `X-API-Key: <key>` (or `QOD_API_KEY`) or run `qod login`; check env var on manager startup |
+| `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Run `pgrep -fl spawn-quack-node`; if 0 processes, run `qod pool stop` then `qod pool scale` to respawn |
+| `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching role-permission grant | Add the grant via `qod role permission grant` or the Users screen; or set `QOD_ACL_ENABLED=false` for dev |
+| `session expired; please reconnect` | Bearer token is not recognized (manager restarted, clearing the in-process denylist and session store) | Run `qod login` again or pass Basic credentials; the static `QOD_API_KEY` continues to work after a restart |
+| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child process died after the manager restarted (local mode does not adopt survivors) | Wait for the next reconcile tick (default 30 s) to respawn; or run `qod pool stop` then `qod pool scale` immediately |
 | Manager hangs at startup after `BaseAllocator` log line, JVM pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy; DuckDB silently retries fetching the extension | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` to the manager process; see the README "Behind a corporate proxy" section |
 
 For the full failure and recovery matrix (Postgres outage, TLS expiry, disk full, multi-manager race) see [Resilience and recovery](/operating/resilience).

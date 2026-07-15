@@ -5,10 +5,10 @@ title: Federation
 
 Federation attaches external catalogs (Postgres, MySQL, S3/Iceberg, or anything a DuckDB extension can `ATTACH`) to a database under an alias, so clients query remote data through the same FlightSQL session and the same access-control model as native DuckLake tables. Sources are scoped to a tenant-db: each `qodstate_tenant_db` carries its own set of federated sources.
 
-Provision the tenant and database first (see "Tenants and databases"). REST calls authenticate with `X-API-Key` (a static `QOD_API_KEY` or an admin session token, as on the other operator pages); the examples below assume the token is in `$TOKEN` and the manager base URL in `$MGR` (e.g. `http://localhost:20900`).
+Provision the tenant and database first (see "Tenants and databases"). The examples below use the [qod CLI](/cli/); they assume `qod login` has stored a session, or `QOD_API_KEY` is set for CI scripts.
 
-:::note Path uses the full database name
-The federated-source endpoints are under `/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources`, where `{tenantDb}` is the **full** database name `${tenant}_${suffix}` (for example `acme_fed`), not the suffix you passed to `database/create` (`fed`).
+:::note DB argument uses the full database name
+The `qod federation` commands' `DB` argument (and the underlying `/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources` REST path) take the **full** database name `${tenant}_${suffix}` (for example `acme_fed`), not the suffix you passed to `qod database create` (`fed`).
 :::
 
 ## Choosing a database kind for federation
@@ -16,10 +16,8 @@ The federated-source endpoints are under `/api/tenants/{tenant}/tenant-dbs/{tena
 Any database kind can carry federated sources, but a common pattern is a `memory` database that serves *only* federated catalogs, with its default catalog pointed at a federated alias:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST "$MGR/api/database/create" \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"fed","kind":"memory",
-       "defaultDatabase":"fedpg","defaultSchema":"public"}'
+qod database create --tenant acme --name fed --kind memory \
+  --default-database fedpg --default-schema public
 ```
 
 This creates the database `acme_fed` with no persistent DuckLake catalog; sessions resolve unqualified names against the `fedpg` federated alias. See "Tenants and databases" for the full `kind` list.
@@ -29,14 +27,8 @@ This creates the database `acme_fed` with no persistent DuckLake catalog; sessio
 A source is an alias plus the `setupSql` that DuckDB runs at node startup to install the extension, create any secret, and `ATTACH` the catalog.
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "alias": "fedpg",
-    "description": "Prod warehouse Postgres",
-    "setupSql": "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST '\''pg.prod'\'', PORT 5432, DATABASE '\''warehouse'\'', USER '\''svc_qod'\'', PASSWORD '\''{{secret.PG_PWD}}'\''); ATTACH '\'''\'' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
-  }'
+qod federation create acme acme_fed --alias fedpg --description "Prod warehouse Postgres" \
+  --setup-sql "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}'); ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
 ```
 
 The request body fields are `alias`, `setupSql`, optional `description`, and `disabled` (default false). Two placeholders are substituted before the SQL runs on a node:
@@ -49,12 +41,9 @@ Include `READ_ONLY` in the `ATTACH` for read-only federation; read-only is enfor
 List, fetch, and delete sources:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources"
-curl -sS -H "X-API-Key: $TOKEN" \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg"
-curl -sS -H "X-API-Key: $TOKEN" -X DELETE \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg"
+qod federation list acme acme_fed
+qod federation get acme acme_fed fedpg
+qod federation delete acme acme_fed fedpg
 ```
 
 ## Secrets
@@ -63,19 +52,14 @@ A secret feeds a `{{secret.NAME}}` placeholder. Upsert one with either an inline
 
 ```bash
 # Value-backed (stored in the control plane)
-curl -sS -H "X-API-Key: $TOKEN" -X PUT \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"PG_PWD","value":"hunter2"}'
+qod federation secret set acme acme_fed fedpg --name PG_PWD --value hunter2
 
 # External-reference-backed (resolved from a secret store)
-curl -sS -H "X-API-Key: $TOKEN" -X PUT \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"PG_PWD","externalRef":"vault:secret/data/qod/fedpg#password"}'
+qod federation secret set acme acme_fed fedpg --name PG_PWD \
+  --external-ref vault:secret/data/qod/fedpg#password
 ```
 
-Secret values are always redacted on reads: a value-backed secret comes back as `***REDACTED***`, while `externalRef` is returned as-is. Delete a secret with `DELETE .../federated-sources/fedpg/secrets/PG_PWD`.
+Secret values are always redacted on reads: a value-backed secret comes back as `***REDACTED***`, while `externalRef` is returned as-is. Delete a secret with `qod federation secret delete acme acme_fed fedpg PG_PWD`.
 
 ### Secret resolvers
 
@@ -111,13 +95,13 @@ Two specifics for federation:
 
 ## Backup and restore
 
-Federated sources and their secrets are included in the whole-control-plane config manifest, exported and re-imported through `GET /api/manifest/export` and `POST /api/manifest/import` (not a federation-specific endpoint). Value-backed secrets are written as `***REDACTED***` in the export, while `externalRef` secrets are written verbatim. On import, federation follows replace-by-alias semantics within each database, and a secret left as `***REDACTED***` (with no `externalRef`) reuses the existing stored value, so a round-trip never requires re-typing passwords. See [Manifest backup and restore](/operating/manifest) for the manifest format and the export/import flow.
+Federated sources and their secrets are included in the whole-control-plane config manifest, exported and re-imported through `qod manifest export` and `qod manifest import` (not a federation-specific command). Value-backed secrets are written as `***REDACTED***` in the export, while `externalRef` secrets are written verbatim. On import, federation follows replace-by-alias semantics within each database, and a secret left as `***REDACTED***` (with no `externalRef`) reuses the existing stored value, so a round-trip never requires re-typing passwords. See [Manifest backup and restore](/operating/manifest) for the manifest format and the export/import flow.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `unresolved secret 'X' in source '<alias>'` in the supervisor log | `setupSql` references `{{secret.X}}` but no matching secret row exists | Add the secret with `PUT .../federated-sources/<alias>/secrets` |
-| `unsubstituted placeholder` at boot | A malformed placeholder such as `{{secret.X}` (missing brace) | Fix `setupSql` (POST upserts the source) and recycle the pool |
+| `unresolved secret 'X' in source '<alias>'` in the supervisor log | `setupSql` references `{{secret.X}}` but no matching secret row exists | Add the secret with `qod federation secret set <tenant> <db> <alias> --name X --value ...` |
+| `unsubstituted placeholder` at boot | A malformed placeholder such as `{{secret.X}` (missing brace) | Fix `setupSql` (`qod federation create` upserts the source) and recycle the pool |
 | Client sees `catalog 'fedpg' does not exist` | The pool was not recycled after the source changed | Recreate the pool, or wait for the idle-timeout replacement |
 | Client sees `missing SELECT grant on fedpg.public.X` | No ACL grant on the federated alias | Grant `SELECT` on the alias (see "Administering access") |
