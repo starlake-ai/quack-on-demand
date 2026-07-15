@@ -57,7 +57,7 @@ def config_path() -> Path:
     env = os.environ.get("QOD_CONFIG_FILE")
     if env:
         return Path(env)
-    return Path(platformdirs.user_config_dir("qod")) / "config.toml"
+    return Path(platformdirs.user_config_dir("qod", appauthor=False, roaming=True)) / "config.toml"
 
 
 def _read_file() -> dict:
