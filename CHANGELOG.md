@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.7 (unreleased)
+## 0.3.7
 
 ### Catalog
 
