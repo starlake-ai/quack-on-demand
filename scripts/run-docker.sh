@@ -2,18 +2,22 @@
 #
 # Run quack-on-demand from a Docker image, against an EXTERNAL Postgres.
 #
-# Two modes, picked via BUILD:
-#   BUILD=0 (default) - `docker pull` the published image
-#                       starlakeai/quack-on-demand:$QOD_VERSION
-#   BUILD=1           - `docker build` this repo's Dockerfile and tag the
-#                       result as starlakeai/quack-on-demand:$QOD_VERSION
-#                       (same name as the published image so the rest of
-#                       this script is identical for both flows)
+# One knob, QOD_VERSION, picks where the image comes from (same contract
+# as run-jar.sh):
+#   unset / <tag>     - `docker pull` starlakeai/quack-on-demand:<tag>
+#                       (default tag: latest, falling back to latest-snapshot
+#                       when no release has been cut yet)
+#   BUILD             - `docker build` this repo's Dockerfile and tag the
+#                       result starlakeai/quack-on-demand:local (same image
+#                       name as the published one so the rest of this script
+#                       is identical for both flows)
+#   LOCAL             - reuse starlakeai/quack-on-demand:local from a prior
+#                       BUILD without pulling or rebuilding (falls back to a
+#                       build when that image is absent)
 #
 # Env vars (with defaults):
 #
-#   BUILD=1          build the image from local Dockerfile instead of pulling
-#   QOD_VERSION    image tag                              (default latest)
+#   QOD_VERSION    image source (see modes above)         (default latest)
 #   IMAGE            full image                             (default starlakeai/quack-on-demand)
 #
 #   PG_HOST          remote Postgres host                   (required)
@@ -64,6 +68,8 @@
 #   PG_HOST=db.internal PG_PASSWORD=*** ./scripts/run-docker.sh
 #   QOD_VERSION=0.1.0 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
 #   QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh
+#   QOD_VERSION=BUILD PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh   # local Dockerfile build
+#   QOD_VERSION=LOCAL PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh   # reuse the :local image
 #   NUKE=1 PG_HOST=... PG_PASSWORD=... ./scripts/run-docker.sh   # wipe local mounts first
 
 set -euo pipefail
@@ -76,11 +82,31 @@ set -euo pipefail
 IMAGE="${IMAGE:-starlakeai/quack-on-demand}"
 QOD_VERSION="${QOD_VERSION:-latest}"
 
-# If the user didn't pin a version and is on the pull path (not BUILD=1),
-# probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
-# fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
-# smooth before 0.1.0 ships.
-if [[ "${BUILD:-0}" != "1" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
+# The old BUILD=0/1 knob folded into QOD_VERSION=BUILD (2026-07-15, matching
+# run-jar.sh). Fail loudly rather than silently pulling.
+if [[ -n "${BUILD:-}" ]]; then
+  echo "ERROR: BUILD is gone; use QOD_VERSION=BUILD (build the local Dockerfile)," >&2
+  echo "       QOD_VERSION=LOCAL (reuse the :local image), or QOD_VERSION=<tag> (pull)." >&2
+  exit 1
+fi
+
+# Resolve the BUILD / LOCAL sentinels: both run the :local tag, so the rest
+# of the script (and a later plain re-run) never confuses a local build with
+# a published tag.
+IMAGE_SOURCE="pull"
+if [[ "$QOD_VERSION" == "BUILD" ]]; then
+  IMAGE_SOURCE="build"
+  QOD_VERSION="local"
+elif [[ "$QOD_VERSION" == "LOCAL" ]]; then
+  IMAGE_SOURCE="local"
+  QOD_VERSION="local"
+fi
+
+# If the user didn't pin a version and is on the pull path, probe Docker
+# Hub: when `:latest` doesn't exist yet (no release cut), fall back to
+# `:latest-snapshot` from the CI. Keeps the first-run UX smooth before
+# 0.1.0 ships.
+if [[ "$IMAGE_SOURCE" == "pull" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
   if ! docker manifest inspect "$IMAGE:latest" >/dev/null 2>&1; then
     echo "$IMAGE:latest not on Docker Hub yet; falling back to :latest-snapshot"
     QOD_VERSION="latest-snapshot"
@@ -121,13 +147,24 @@ DATA_PATH="$(cd "$DATA_PATH" && pwd)"
 CERTS_DIR="$(cd "$CERTS_DIR" && pwd)"
 
 # ---- Acquire image ----
-if [[ "${BUILD:-0}" == "1" ]]; then
-  echo "BUILD=1: building $IMAGE:$QOD_VERSION from $REPO_DIR/Dockerfile ..."
-  docker build -t "$IMAGE:$QOD_VERSION" "$REPO_DIR"
-else
-  echo "pulling $IMAGE:$QOD_VERSION ..."
-  docker pull "$IMAGE:$QOD_VERSION"
-fi
+case "$IMAGE_SOURCE" in
+  build)
+    echo "QOD_VERSION=BUILD: building $IMAGE:$QOD_VERSION from $REPO_DIR/Dockerfile ..."
+    docker build -t "$IMAGE:$QOD_VERSION" "$REPO_DIR"
+    ;;
+  local)
+    if docker image inspect "$IMAGE:$QOD_VERSION" >/dev/null 2>&1; then
+      echo "QOD_VERSION=LOCAL: reusing $IMAGE:$QOD_VERSION (no pull, no build)"
+    else
+      echo "QOD_VERSION=LOCAL: $IMAGE:$QOD_VERSION not found; building it first..."
+      docker build -t "$IMAGE:$QOD_VERSION" "$REPO_DIR"
+    fi
+    ;;
+  *)
+    echo "pulling $IMAGE:$QOD_VERSION ..."
+    docker pull "$IMAGE:$QOD_VERSION"
+    ;;
+esac
 
 # ---- Stop any prior instance with the same name ----
 if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then

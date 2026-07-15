@@ -2,19 +2,21 @@
 #
 # Run the quack-on-demand stack via docker compose.
 #
-# Two modes, picked via BUILD:
-#   BUILD=0 (default) - `docker compose pull` the published image
-#                       starlakeai/quack-on-demand:$QOD_VERSION, then up.
-#                       No git checkout, sbt, or node toolchain required.
-#   BUILD=1           - `docker compose up -d --build` against this repo's
-#                       Dockerfile. The build tags the image as
-#                       starlakeai/quack-on-demand:$QOD_VERSION (same name
-#                       as the published one), so this script's wait/seed/
+# One knob, QOD_VERSION, picks where the image comes from (same contract
+# as run-jar.sh):
+#   unset / <tag>     - `docker compose pull` the published image
+#                       starlakeai/quack-on-demand:<tag>, then up. No git
+#                       checkout, sbt, or node toolchain required.
+#   BUILD             - `docker compose up -d --build` against this repo's
+#                       Dockerfile, tagging the result
+#                       starlakeai/quack-on-demand:local (same image name as
+#                       the published one), so this script's wait/seed/
 #                       teardown paths are identical for both flows.
+#   LOCAL             - up with the :local image from a prior BUILD, no pull,
+#                       no rebuild (falls back to a build when it is absent).
 #
 # Env vars:
-#   BUILD=1             build from local Dockerfile (default 0 = pull from Hub)
-#   QOD_VERSION       image tag                 (default latest)
+#   QOD_VERSION       image source (see modes above)      (default latest)
 #   ENV_FILE            .env path                 (default ./.env)
 #   ENV_SEED            template if .env missing  (default .env.example)
 #   LOAD_TPCH           Demo seed: unset/0/false = skip; positive integer =
@@ -52,7 +54,8 @@
 # Usage:
 #   ./scripts/run-docker-compose.sh                            # latest
 #   QOD_VERSION=0.1.0 ./scripts/run-docker-compose.sh          # pinned
-#   BUILD=1 ./scripts/run-docker-compose.sh                    # local build
+#   QOD_VERSION=BUILD ./scripts/run-docker-compose.sh          # local build
+#   QOD_VERSION=LOCAL ./scripts/run-docker-compose.sh          # reuse :local image
 #   LOAD_TPCH=1 ./scripts/run-docker-compose.sh                # + TPC-H only SF=1
 #   LOAD_TPCDS=10 ./scripts/run-docker-compose.sh              # + TPC-DS only SF=10
 #   LOAD_SSB=1 ./scripts/run-docker-compose.sh                 # + SSB star schema SF=1
@@ -69,6 +72,26 @@ cd "$REPO_DIR"
 
 QOD_VERSION="${QOD_VERSION:-latest}"
 NUKE="${NUKE:-0}"
+
+# The old BUILD=0/1 knob folded into QOD_VERSION=BUILD (2026-07-15, matching
+# run-jar.sh). Fail loudly rather than silently pulling.
+if [[ -n "${BUILD:-}" ]]; then
+  echo "ERROR: BUILD is gone; use QOD_VERSION=BUILD (build the local Dockerfile)," >&2
+  echo "       QOD_VERSION=LOCAL (reuse the :local image), or QOD_VERSION=<tag> (pull)." >&2
+  exit 1
+fi
+
+# Resolve the BUILD / LOCAL sentinels: both run the :local tag (compose
+# interpolates ${QOD_VERSION} as the image tag), so a local build never
+# masquerades as a published tag.
+IMAGE_SOURCE="pull"
+if [[ "$QOD_VERSION" == "BUILD" ]]; then
+  IMAGE_SOURCE="build"
+  QOD_VERSION="local"
+elif [[ "$QOD_VERSION" == "LOCAL" ]]; then
+  IMAGE_SOURCE="local"
+  QOD_VERSION="local"
+fi
 
 # ---- Validate DEMO early (before any destructive NUKE operations) ----
 _demo_explicit="${DEMO:+1}"
@@ -113,11 +136,11 @@ if [[ "$NUKE" == "1" ]]; then
   echo "booting from a clean slate."
 fi
 
-# If the user didn't pin a version and is on the pull path (not BUILD=1),
-# probe Docker Hub: when `:latest` doesn't exist yet (no release cut),
-# fall back to `:latest-snapshot` from the CI. Keeps the first-run UX
-# smooth before 0.1.0 ships.
-if [[ "${BUILD:-0}" != "1" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
+# If the user didn't pin a version and is on the pull path, probe Docker
+# Hub: when `:latest` doesn't exist yet (no release cut), fall back to
+# `:latest-snapshot` from the CI. Keeps the first-run UX smooth before
+# 0.1.0 ships.
+if [[ "$IMAGE_SOURCE" == "pull" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
   registry_image="starlakeai/quack-on-demand"
   if ! docker manifest inspect "$registry_image:latest" >/dev/null 2>&1; then
     echo "starlakeai/quack-on-demand:latest not on Docker Hub yet; falling back to :latest-snapshot"
@@ -338,15 +361,27 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
 fi
 
 # ---- Acquire image + up ----
-if [[ "${BUILD:-0}" == "1" ]]; then
-  echo "BUILD=1: starting stack with 'docker compose up -d --build'..."
-  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
-else
-  echo "pulling starlakeai/quack-on-demand:$QOD_VERSION + postgres:16-alpine..."
-  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} pull
-  echo "starting stack..."
-  docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
-fi
+case "$IMAGE_SOURCE" in
+  build)
+    echo "QOD_VERSION=BUILD: starting stack with 'docker compose up -d --build'..."
+    docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
+    ;;
+  local)
+    if docker image inspect "starlakeai/quack-on-demand:$QOD_VERSION" >/dev/null 2>&1; then
+      echo "QOD_VERSION=LOCAL: reusing starlakeai/quack-on-demand:$QOD_VERSION; starting stack..."
+      docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
+    else
+      echo "QOD_VERSION=LOCAL: starlakeai/quack-on-demand:$QOD_VERSION not found; building via 'up -d --build'..."
+      docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
+    fi
+    ;;
+  *)
+    echo "pulling starlakeai/quack-on-demand:$QOD_VERSION + postgres:16-alpine..."
+    docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} pull
+    echo "starting stack..."
+    docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
+    ;;
+esac
 
 # ---- Wait for manager ----
 echo -n "waiting for manager REST on :20900 "

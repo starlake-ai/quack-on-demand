@@ -36,7 +36,7 @@ The `scripts/run-docker-compose.sh` wrapper handles port preflight, profile auto
 QOD_VERSION=0.3.2 ./scripts/run-docker-compose.sh
 
 # Build the image from this repo's Dockerfile instead of pulling.
-BUILD=1 ./scripts/run-docker-compose.sh
+QOD_VERSION=BUILD ./scripts/run-docker-compose.sh
 ```
 
 Settings come from a `.env` file (copied from `.env.example` on first run). Edit it before booting, or pass the same keys as environment variables. The admin UI is at `http://localhost:20900/ui/`; log in with `ADMIN_USERNAME` / `ADMIN_PASSWORD` (defaults `admin` / `admin`).

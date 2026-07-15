@@ -73,7 +73,8 @@ services:
     # Single image name for both flows: `docker compose up --build` writes
     # this tag locally; `docker compose pull` fetches it from Docker Hub.
     # Pin to a specific snapshot/release via QOD_VERSION (e.g.
-    # QOD_VERSION=0.1.0 docker compose pull).
+    # QOD_VERSION=0.1.0 docker compose pull). Through the wrapper script,
+    # QOD_VERSION=BUILD builds and runs the :local tag instead.
     image: starlakeai/quack-on-demand:${QOD_VERSION:-latest}
     container_name: quack-on-demand
     restart: unless-stopped
