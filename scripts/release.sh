@@ -10,7 +10,7 @@
 # failed phase directly - you don't have to restart from the top. See each
 # script's header for details.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PIPY_TOKEN.
+# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PYPI_TOKEN.
 # Optional env: NO_DOCKER=1, RELEASE_VERSION, NEXT_VERSION, REGISTRY_IMAGE,
 #               DOCKERHUB_USERNAME, DOCKER_PASSWORD.
 #

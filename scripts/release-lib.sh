@@ -140,7 +140,7 @@ cli_on_pypi() {
 }
 
 require_pypi_creds() {
-  [[ -n "${PIPY_TOKEN:-}" ]] || die "PIPY_TOKEN not set (PyPI API token for qod-cli)."
+  [[ -n "${PYPI_TOKEN:-}" ]] || die "PYPI_TOKEN not set (PyPI API token for qod-cli)."
   python3 -c "import build, twine" >/dev/null 2>&1 \
     || die "python packages 'build' and 'twine' missing: pip install build twine"
 }

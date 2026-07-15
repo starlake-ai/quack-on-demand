@@ -20,7 +20,7 @@
 # non-SNAPSHOT coord that is on Maven Central) - run release-libquackwire.sh
 # first. This mirrors sbt-release's checkSnapshotDependencies gate.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PIPY_TOKEN.
+# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PYPI_TOKEN.
 # Optional env: RELEASE_VERSION (pin the release; default = strip -SNAPSHOT),
 #               NEXT_VERSION    (pin the next snapshot; default = bump patch),
 #               QOD_DISCORD_WEBHOOK_URL (announce on Discord #news; also read
@@ -118,7 +118,7 @@ else
   ( cd "$REPO_DIR/cli"
     rm -rf dist
     python3 -m build
-    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PIPY_TOKEN" python3 -m twine upload dist/*
+    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" python3 -m twine upload dist/*
   )
 fi
 
