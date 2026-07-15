@@ -139,8 +139,31 @@ cli_on_pypi() {
   curl -fsS -o /dev/null "https://pypi.org/pypi/qod-cli/$1/json"
 }
 
+# build + twine live in a repo-local venv so the release never depends on
+# whatever python3 happens to be first on PATH (a stray project venv, a
+# bare system python). Provisioned on demand, reused across runs.
+PYPI_VENV="$REPO_DIR/.venv-release"
+
+pypi_python() {
+  if [[ -x "$PYPI_VENV/bin/python" ]]; then
+    echo "$PYPI_VENV/bin/python"
+  else
+    echo "$PYPI_VENV/Scripts/python.exe"   # Windows venv layout
+  fi
+}
+
+ensure_pypi_tooling() {
+  if "$(pypi_python)" -c "import build, twine" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "provisioning $PYPI_VENV with build + twine (one-time)..."
+  python3 -m venv "$PYPI_VENV" \
+    || die "python3 -m venv failed; install a python3 with venv support."
+  "$(pypi_python)" -m pip install --quiet --upgrade pip build twine \
+    || die "pip install build twine failed in $PYPI_VENV."
+}
+
 require_pypi_creds() {
   [[ -n "${PYPI_TOKEN:-}" ]] || die "PYPI_TOKEN not set (PyPI API token for qod-cli)."
-  python3 -c "import build, twine" >/dev/null 2>&1 \
-    || die "python packages 'build' and 'twine' missing: pip install build twine"
+  ensure_pypi_tooling
 }

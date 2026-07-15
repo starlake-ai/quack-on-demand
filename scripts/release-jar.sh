@@ -117,8 +117,8 @@ else
   echo "building + publishing qod-cli ${release_version} to PyPI..."
   ( cd "$REPO_DIR/cli"
     rm -rf dist
-    python3 -m build
-    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" python3 -m twine upload dist/*
+    "$(pypi_python)" -m build
+    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" "$(pypi_python)" -m twine upload dist/*
   )
 fi
 
