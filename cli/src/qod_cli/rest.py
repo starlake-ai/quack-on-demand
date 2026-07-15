@@ -50,7 +50,10 @@ class RestClient:
             headers["Content-Type"] = "text/plain"
         elif body is not None:
             kwargs["json"] = body
-        response = httpx.request(method, settings.manager_url + path, **kwargs)
+        try:
+            response = httpx.request(method, settings.manager_url + path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise ApiError(0, "connection_error", f"{settings.manager_url}: {exc}")
         if response.is_success:
             if text:
                 return response.text
@@ -59,7 +62,10 @@ class RestClient:
             return response.json()
         try:
             payload = response.json()
-            error, message = payload.get("error", "error"), payload.get("message", response.text)
+            if isinstance(payload, dict):
+                error, message = payload.get("error", "error"), payload.get("message", response.text)
+            else:
+                error, message = "error", response.text
         except ValueError:
             error, message = "error", response.text or response.reason_phrase
         if response.status_code == 401 and not settings.api_key:

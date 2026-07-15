@@ -24,7 +24,7 @@ Within the acceptable roles for a statement, the router picks the least-loaded n
 ## Create a pool
 
 ```bash
-qod pool create --tenant acme --db sales --pool bi --size 3 \
+qod pool create --tenant acme --db acme_sales --pool bi --size 3 \
   --writeonly 1 --readonly 1 --dual 1
 ```
 
@@ -52,14 +52,14 @@ qod pool list
 qod --json pool list | jq '.pools[] | select(.tenant=="acme" and .pool=="bi")'
 
 # Scale to a new size and role split (--force skips graceful drain when shrinking)
-qod pool scale --tenant acme --db sales --pool bi --target-size 6 \
+qod pool scale --tenant acme --db acme_sales --pool bi --target-size 6 \
   --writeonly 1 --readonly 3 --dual 2
 
 # Disable a pool without removing it (edge rejects fresh handshakes)
-qod pool set-disabled --tenant acme --db sales --pool bi --disabled
+qod pool set-disabled --tenant acme --db acme_sales --pool bi --disabled
 
 # Stop the pool's nodes, keeping the registration (--force skips the graceful drain; omitted here)
-qod pool stop --tenant acme --db sales --pool bi
+qod pool stop --tenant acme --db acme_sales --pool bi
 ```
 
 A graceful stop (no `--force`) drains in-flight statements before terminating nodes. `--force` terminates immediately. The same `--force` flag applies when `scale` shrinks a pool.
@@ -69,7 +69,7 @@ A graceful stop (no `--force`) drains in-flight statements before terminating no
 On the Kubernetes backend a pool carries optional `cpu` and `memory` quantities. Each is applied as both the request and the limit on the `quack` container of every node pod, so setting both yields Guaranteed QoS. The local backend ignores them.
 
 ```bash
-qod pool set-resources --tenant acme --db sales --pool bi --cpu 2 --memory 8Gi
+qod pool set-resources --tenant acme --db acme_sales --pool bi --cpu 2 --memory 8Gi
 ```
 
 - Values take effect on the next node spawn (idle-timeout replacement, scale-up, manual restart). Restart the pool's nodes to apply immediately. An empty string clears a value.

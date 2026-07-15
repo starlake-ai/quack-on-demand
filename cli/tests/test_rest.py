@@ -88,3 +88,19 @@ def test_401_with_token_hints_login():
     with pytest.raises(ApiError) as exc:
         client(token="old").request("GET", "/api/auth/whoami")
     assert "run qod login" in exc.value.message
+
+
+@respx.mock
+def test_connection_error_maps_to_api_error():
+    respx.get(f"{BASE}/health").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(ApiError) as exc:
+        client().request("GET", "/health")
+    assert exc.value.error == "connection_error"
+
+
+@respx.mock
+def test_non_dict_error_body_maps_cleanly():
+    respx.get(f"{BASE}/health").mock(return_value=httpx.Response(500, json=["boom"]))
+    with pytest.raises(ApiError) as exc:
+        client().request("GET", "/health")
+    assert exc.value.status == 500

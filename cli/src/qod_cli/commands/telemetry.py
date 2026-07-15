@@ -39,7 +39,6 @@ def actions(ctx: typer.Context):
 
 def usage(
     ctx: typer.Context,
-    granularity: str = typer.Option(None, "--granularity"),
     from_: str = typer.Option(None, "--from"),
     to: str = typer.Option(None, "--to"),
     group_by: str = typer.Option(None, "--group-by"),
@@ -51,7 +50,7 @@ def usage(
         ctx,
         "GET",
         "/api/usage",
-        params={"granularity": granularity, "from": from_, "to": to, "groupBy": group_by, "tenant": tenant, "pool": pool},
+        params={"from": from_, "to": to, "groupBy": group_by, "tenant": tenant, "pool": pool},
     )
 
 

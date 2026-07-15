@@ -10,7 +10,7 @@
 # failed phase directly - you don't have to restart from the top. See each
 # script's header for details.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE.
+# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PIPY_TOKEN.
 # Optional env: NO_DOCKER=1, RELEASE_VERSION, NEXT_VERSION, REGISTRY_IMAGE,
 #               DOCKERHUB_USERNAME, DOCKER_PASSWORD.
 #
@@ -22,6 +22,8 @@
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPTS/release-lib.sh"
+
+require_pypi_creds
 
 NO_DOCKER="${NO_DOCKER:-0}"
 current="$(manager_version)"
