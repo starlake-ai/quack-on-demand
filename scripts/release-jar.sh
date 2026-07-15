@@ -12,6 +12,7 @@
 #   - version.sbt already at the release version -> skip the set + commit
 #   - tag v<version> already exists              -> skip tag
 #   - manager already on Maven Central           -> skip publish
+#   - qod-cli already on PyPI                    -> skip PyPI publish
 #   - GitHub release already exists              -> skip gh release
 #   - version.sbt already bumped to -SNAPSHOT    -> skip the finalize bumps
 #
@@ -19,7 +20,7 @@
 # non-SNAPSHOT coord that is on Maven Central) - run release-libquackwire.sh
 # first. This mirrors sbt-release's checkSnapshotDependencies gate.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE.
+# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PIPY_TOKEN.
 # Optional env: RELEASE_VERSION (pin the release; default = strip -SNAPSHOT),
 #               NEXT_VERSION    (pin the next snapshot; default = bump patch),
 #               QOD_DISCORD_WEBHOOK_URL (announce on Discord #news; also read
@@ -36,6 +37,8 @@ require_clean_tree
 warn_if_not_main
 require_sonatype_creds
 require_pgp
+require_cmd python3
+require_pypi_creds
 require_cmd gh
 gh auth status >/dev/null 2>&1 || die "'gh auth login' first (needed to create the GitHub release)."
 
@@ -76,6 +79,15 @@ else
   echo "version.sbt already at ${release_version}; skipping set/commit."
 fi
 
+# qod-cli __version__ tracks the manager release version in lockstep; stamp it
+# even on a resumed run so it lands regardless of where a prior run stopped.
+if [[ "$(cli_version)" != "$release_version" ]]; then
+  echo "setting cli __version__ -> $release_version"
+  set_cli_version "$release_version"
+  git add cli/src/qod_cli/__init__.py
+  git diff --cached --quiet || git commit -m "Setting qod-cli version to ${release_version}" -q
+fi
+
 # ---- 2. Tag (idempotent) -------------------------------------------------
 if git rev-parse -q --verify "refs/tags/v${release_version}" >/dev/null; then
   echo "tag v${release_version} already exists; skipping."
@@ -98,6 +110,18 @@ else
   sbt_signed "publishSigned" "sonatypeBundleRelease"
 fi
 
+# ---- 3b. PyPI: qod-cli (idempotent) ---------------------------------------
+if cli_on_pypi "$release_version"; then
+  echo "qod-cli ${release_version} already on PyPI; skipping."
+else
+  echo "building + publishing qod-cli ${release_version} to PyPI..."
+  ( cd "$REPO_DIR/cli"
+    rm -rf dist
+    python3 -m build
+    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PIPY_TOKEN" python3 -m twine upload dist/*
+  )
+fi
+
 # ---- 4. Finalize: bump to next dev snapshots + push commits + tag --------
 # Push must happen BEFORE the GitHub release: `gh release create` requires the
 # tag to already exist on the remote. Bumps are idempotent (skip once the
@@ -109,6 +133,14 @@ if [[ "$(manager_version)" != *-SNAPSHOT ]]; then
   rm version.sbt.bak
   git add version.sbt
   git commit -m "Setting version to ${next_version}" -q
+fi
+
+cli_next="${next_version%-SNAPSHOT}.dev0"
+if [[ "$(cli_version)" != "$cli_next" ]]; then
+  echo "bumping cli __version__ -> $cli_next"
+  set_cli_version "$cli_next"
+  git add cli/src/qod_cli/__init__.py
+  git commit -m "next dev version: qod-cli ${cli_next}" -q
 fi
 
 # libquackwire back to its next -SNAPSHOT for the next dev cycle. Done here,
