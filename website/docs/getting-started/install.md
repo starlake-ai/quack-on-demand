@@ -3,42 +3,7 @@ id: install
 title: Installation
 ---
 
-Quack on Demand ships as a Docker image and as a single uber-jar driven by the `qod` CLI (`pip install qod`, or no install at all with `uvx`). The fastest way to evaluate it is [Demo mode](#demo-mode-self-contained-no-postgres) via `uvx qod demo`. For a durable deployment, two paths are supported: Docker, and the native jar via [`qod start`](#native-jar-qod-start). Both run on **Linux, macOS, and Windows** (Windows support is experimental; see [Run on Windows](#run-on-windows) below). GitHub Releases hosts the raw jar artifacts, but you should rarely need to download one by hand - every path below fetches what it needs.
-
-## Demo mode (self-contained, no Postgres)
-
-The fastest way to try Quack on Demand end to end. `demo` boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**.
-
-With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Temurin 21 JRE if no Java 21+ is on your machine (it asks first, ~50 MB, cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
-
-```bash
-uvx qod demo
-```
-
-`pip install qod && qod demo` is equivalent. Two more routes to the same demo:
-
-```bash
-# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
-# drop-in replacement like Podman, Colima, or OrbStack)
-docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
-
-# from a source checkout or a downloaded assembly jar
-# (needs a JDK 21 and the duckdb CLI on PATH):
-java -Darrow.allocation.manager.type=Unsafe \
-  -jar distrib/quack-on-demand-assembly-*.jar demo
-```
-
-It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS off), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
-
-The seeded principals demonstrate row + column security:
-
-- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
-- `acme-admin` / `demo-acme-admin` - full, unmasked data
-- a table `alice` has no grant on - denied
-
-:::warning
-Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the Binaries or Docker paths below with your own Postgres.
-:::
+Quack on Demand ships as a Docker image and as a single uber-jar driven by the `qod` CLI (`pip install qod`, or no install at all with `uvx`). The fastest way to evaluate it is [Demo mode](/getting-started/quickstart#demo-mode-self-contained-no-postgres) via `uvx qod demo`. For a durable deployment, two paths are supported: Docker, and the native jar via [`qod start`](#native-jar-qod-start). Both run on **Linux, macOS, and Windows** (Windows support is experimental; see [Run on Windows](#run-on-windows) below). GitHub Releases hosts the raw jar artifacts, but you should rarely need to download one by hand - every path below fetches what it needs.
 
 ## Docker
 

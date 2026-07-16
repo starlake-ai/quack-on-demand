@@ -5,19 +5,67 @@ title: Quickstart
 
 Boot the gateway, connect a client, and run your first SQL query against a live TPC-H dataset.
 
+## Demo mode (self-contained, no Postgres)
+
+The fastest way to try Quack on Demand end to end. `demo` boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**.
+
+With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Java runtime if none is on your machine (it asks first, cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
+
+```bash
+uvx qod demo
+```
+
+`pip install qod && qod demo` is equivalent. Two more routes to the same demo:
+
+```bash
+# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
+# drop-in replacement like Podman, Colima, or OrbStack)
+docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
+
+# from a source checkout or a downloaded assembly jar
+# (needs a JDK and the duckdb CLI on PATH):
+java -Darrow.allocation.manager.type=Unsafe \
+  -jar distrib/quack-on-demand-assembly-*.jar demo
+```
+
+It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
+
+The seeded principals demonstrate row + column security:
+
+- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
+- `acme-admin` / `demo-acme-admin` - full, unmasked data
+- a table `alice` has no grant on - denied
+
+:::warning
+Demo mode is insecure by design (self-signed TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the paths below with your own Postgres.
+:::
+
 ## Prerequisites
 
-- **Docker Compose path (Option A):** just Docker. The stack ships its own Postgres, so you need nothing else installed.
-- **Jar path (Option B):** **JDK 21 or later** (Arrow Flight requires Java 21+) and a **Postgres 16 or later** reachable at `localhost:5432` (the default) for the control-plane schema and tenant catalogs.
+- **Native path (Option A):** a **Postgres 16 or later** reachable at `localhost:5432` (the default) for the control-plane schema and tenant catalogs. Everything else (Java, DuckDB) is auto-provisioned by `qod start`.
+- **Docker Compose path (Option B):** just Docker. The stack ships its own Postgres, so you need nothing else installed.
 - **Ports 20900 and 31338 free** on the host (admin REST/UI on 20900, FlightSQL edge on 31338), for either path.
 
 For alternative deployment paths (Kubernetes) and the full environment-variable model, see the [Installation guide](/getting-started/install).
 
 ## Boot the manager
 
-### Option A: Docker Compose (no prerequisites)
+### Option A: Native (`qod start`)
 
-The quickest start: only Docker is required. From the root of a cloned repository:
+If you have a reachable Postgres:
+
+```bash
+uv tool install qod    # or: pip install qod
+qod start
+```
+
+On first run `qod start` downloads the release jar from GitHub Releases (sha256-verified), self-installs the pinned DuckDB, creates the control-plane database (`qod`) when `psql` is available, then starts the JVM. Stop it with `qod stop` (SIGTERM, then SIGKILL after 10 seconds).
+
+On **Windows** (experimental), the same `pip install qod && qod start` works natively; see [Run on Windows](/getting-started/install#run-on-windows) for the current gaps (no `qod stop`, no `LOAD_*` seeding).
+
+### Option B: Docker Compose (no prerequisites)
+
+Only Docker is required - the stack ships its own Postgres. From the root of a cloned repository:
 
 ```bash
 ./scripts/run-docker-compose.sh
@@ -28,19 +76,6 @@ This pulls the published `starlakeai/quack-on-demand` image plus a bundled `post
 ```bash
 ./scripts/stop-docker-compose.sh
 ```
-
-### Option B: From the jar
-
-If you have a reachable Postgres (Java is auto-provisioned when missing):
-
-```bash
-uv tool install qod    # or: pip install qod
-qod start
-```
-
-On first run `qod start` downloads the release jar from GitHub Releases (sha256-verified), self-installs the pinned DuckDB, creates the control-plane database (`qod`) when `psql` is available, then starts the JVM. Stop it with `qod stop` (SIGTERM, then SIGKILL after 10 seconds).
-
-On **Windows** (experimental), the same `pip install qod && qod start` works natively; see [Run on Windows](/getting-started/install#run-on-windows) for the current gaps (no `qod stop`, no `LOAD_*` seeding).
 
 ### What comes up
 
@@ -53,18 +88,18 @@ Either path brings up the same surface:
 
 ### Boot flags
 
-The same flags work on both `run-docker-compose.sh` and `qod start`, and they combine:
+The same flags work on both `qod start` and `run-docker-compose.sh`, and they combine:
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `qod start` on first boot, see [Run from Linux/MacOS](/getting-started/install#run-from-linuxmacos)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Any seed flag being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The native path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `qod start` on first boot, see [Run from Linux/MacOS](/getting-started/install#run-from-linuxmacos)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Any seed flag being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
 | `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
 | `LOAD_SSB=N` | Seeds the SSB (Star Schema Benchmark) star schema at sf=N: 5 tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) derived from TPC-H dbgen into schema `ssb1` of `acme/acme_tpch`, next to the TPC-H tables and served by the same acme pools. |
 | `LOAD_TPC=N` | Legacy shortcut: equivalent to setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N`. Explicit per-bench vars override it. |
 | `DEMO=full\|minimal` | Bootstrap profile for the demo seed. `full` (the default) imports the two-tenant `acme` + `globex` manifest and exercises multi-tenancy, multiple pools, and federation; `minimal` imports `bootstrap-demo-minimal.yaml` instead - the shape for fronting a single DuckDB/DuckLake database: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, plus the analyst RLS/CLS demo. Only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile). |
 | `NUKE=1` | Tear down and wipe local state (Postgres data, parquet under `ducklake/`, `certs/`) before booting. **Irreversible.** |
 | `QOD_VERSION=latest-snapshot` | Use the latest snapshot image/jar instead of the latest release. |
-| Build from source | Compose: `BUILD=1` builds the image from the repo Dockerfile instead of pulling. Jar: `QOD_VERSION=BUILD` runs `sbt assembly` first, and `QOD_VERSION=LOCAL` reuses the newest jar already in `distrib/` without rebuilding. |
+| Build from source | Compose: `BUILD=1` builds the image from the repo Dockerfile instead of pulling. Native: `QOD_VERSION=BUILD` runs `sbt assembly` first, and `QOD_VERSION=LOCAL` reuses the newest jar already in `distrib/` without rebuilding. |
 
 For a clean, freshly seeded environment in one shot, combine them. This wipes any previous state and boots with both demo datasets at scale-factor 1:
 
@@ -87,7 +122,7 @@ NUKE=1 LOAD_TPCH=1 ./scripts/run-docker-compose.sh        # TPC-H only, ~10 s se
 NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh      # TPC-DS only, SF=10
 ```
 
-The jar path takes the same flags:
+The native path takes the same flags:
 
 ```bash
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 qod start
