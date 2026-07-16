@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type {
   GroupResponse, PoolPermissionResponse, PoolResponse, RoleResponse, UserResponse,
 } from '../api/types';
 import Tabs from './Tabs';
 import { DeleteIcon, EditIcon } from './Icons';
+import { Modal } from './Modal';
 
 /** Groups tab on the /users page. Single-pane list of groups (one row per
   * group, with member/role/pool-grant counts) plus a per-row Edit button
@@ -67,7 +68,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
         ));
         setRoleCounts(Object.fromEntries(entries));
       })
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   function reloadTenantContext() {
@@ -82,13 +83,13 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
   function reloadGroupPools(g: GroupResponse) {
     api.listPoolPermissions({ groupId: g.id })
       .then(r => setPoolPerms(r.permissions))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   function reloadGroupRoles(g: GroupResponse) {
     api.listGroupRoles(g.id)
       .then(r => setGroupRoles(r.roles))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => {
@@ -123,7 +124,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       reloadGroups();
       setSelected(created);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -135,7 +136,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       if (selected?.id === g.id) setSelected(null);
       reloadGroups();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -148,7 +149,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       setAddUserId('');
       reloadTenantContext();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -159,7 +160,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       await api.removeUserGroup({ userId, groupId: selected.id });
       reloadTenantContext();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -173,7 +174,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       reloadGroupRoles(selected);
       setRoleCounts(c => ({ ...c, [selected.id]: (c[selected.id] ?? 0) + 1 }));
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -185,7 +186,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       reloadGroupRoles(selected);
       setRoleCounts(c => ({ ...c, [selected.id]: Math.max(0, (c[selected.id] ?? 1) - 1) }));
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -203,7 +204,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       reloadGroupPools(selected);
       setPoolCounts(c => ({ ...c, [selected.id]: (c[selected.id] ?? 0) + 1 }));
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -216,7 +217,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       reloadGroupPools(selected);
       setPoolCounts(c => ({ ...c, [selected.id]: Math.max(0, (c[selected.id] ?? 1) - 1) }));
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -364,20 +365,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
       )}
 
       {adding && (
-        <div
-          className="modal-backdrop"
-          onClick={() => { setAdding(false); setError(null); }}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 560 }}
-          >
+        <Modal maxWidth={560} onClose={() => { setAdding(false); setError(null); }}>
             <div className="card-title">New group</div>
             <form onSubmit={handleCreate}>
               <label>
@@ -393,29 +381,11 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
                 <button type="submit" style={{ minWidth: '7rem' }}>Create</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {selected && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setSelected(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{
-              width: '90%', maxWidth: 720,
-              height: '80vh', maxHeight: 'calc(100vh - 4rem)',
-              display: 'flex', flexDirection: 'column',
-            }}
-          >
+        <Modal maxWidth={720} height="80vh" onClose={() => setSelected(null)}>
             <div className="card-title">Edit group <code>{selected.name}</code></div>
             <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
               <Tabs
@@ -429,8 +399,7 @@ export default function GroupSection({ tenant }: { tenant: string | null }) {
             <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
               <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => setSelected(null)}>Close</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type {
   FederatedSourceResponse,
   FederatedSecretResponse,
 } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
+import { Modal } from './Modal';
 
 /** Copy-pasteable Setup SQL templates surfaced as quick-insert buttons above
   * the textarea. Each picks a common DuckDB federation flow. Placeholders
@@ -390,7 +391,7 @@ function SecretEditor({
   const reload = () =>
     api.listFederatedSecrets(tenant, tenantDb, alias)
       .then(r => setSecrets(r.secrets))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
 
   useEffect(() => { void reload(); }, [tenant, tenantDb, alias]);
 
@@ -414,7 +415,7 @@ function SecretEditor({
       setModalOpen(false);
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -425,7 +426,7 @@ function SecretEditor({
       await api.deleteFederatedSecret(tenant, tenantDb, alias, name);
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -480,20 +481,7 @@ function SecretEditor({
       )}
 
       {modalOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={closeModal}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 640 }}
-          >
+        <Modal maxWidth={640} onClose={closeModal}>
             <div className="card-title">
               {editingName ? <>Edit secret <code>{editingName}</code></> : 'New secret'}
             </div>
@@ -607,8 +595,7 @@ function SecretEditor({
                 <button type="submit" style={{ minWidth: '7rem' }} disabled={!validation.ok}>Save</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
@@ -644,7 +631,7 @@ export default function FederationSection({
   const reload = () =>
     api.listFederatedSources(tenant, tenantDb)
       .then(r => setSources(r.sources))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
 
   useEffect(() => { void reload(); }, [tenant, tenantDb]);
 
@@ -688,7 +675,7 @@ export default function FederationSection({
       closeForm();
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -700,7 +687,7 @@ export default function FederationSection({
       if (expanded === a) setExpanded(null);
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -726,24 +713,7 @@ export default function FederationSection({
       {error && <div className="login-err">Error: {error}</div>}
 
       {adding && (
-        <div
-          className="modal-backdrop"
-          onClick={closeForm}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{
-              width: '90%', maxWidth: 800,
-              height: '85vh', maxHeight: 'calc(100vh - 4rem)',
-              display: 'flex', flexDirection: 'column',
-            }}
-          >
+        <Modal maxWidth={800} height="85vh" onClose={closeForm}>
             <div className="card-title">
               {editingAlias ? <>Edit federated source <code>{editingAlias}</code></> : 'New federated source'}
             </div>
@@ -813,8 +783,7 @@ export default function FederationSection({
                 <button type="submit" style={{ minWidth: '7rem' }}>{editingAlias ? 'Save' : 'Create'}</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {sources.length === 0 ? (

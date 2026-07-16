@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { CatalogTableDetailResponse } from '../api/types';
 
 /** Inline schema (column list) drilldown rendered as a card beneath a
@@ -23,7 +23,7 @@ export default function TableSchemaCard({
     setError(null);
     api.getCatalogTable(tenant, tenantDb, schema, table)
       .then(setDetail)
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }, [tenant, tenantDb, schema, table]);
 
   return (

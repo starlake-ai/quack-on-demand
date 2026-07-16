@@ -113,13 +113,6 @@ const BASE = '/api';
 // is the canonical "am I logged in?" check, and /api/auth/logout is the only
 // way to clear the cookie. The legacy localStorage token path is gone; CLI
 // clients still go through X-API-Key separately.
-export const session = {
-  /** Kept as a stub so any straggler callers compile; the real session is
-   * the HttpOnly cookie which JS cannot read. */
-  get: (): string | null => null,
-  set: (_: string) => { /* no-op; cookie is server-set */ },
-  clear: () => { /* no-op; cookie is server-cleared via /api/auth/logout */ },
-};
 
 /** fetch options shared by every authed call. `credentials: 'same-origin'`
  * is the default but spelling it out documents intent. */
@@ -129,6 +122,11 @@ const FETCH_OPTS: RequestInit = { credentials: 'same-origin' };
  * on 401 (login-page redirect) vs. other failures. */
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
+}
+
+/** Normalize any thrown value to a display string (ApiError keeps its server message). */
+export function errorMessage(e: unknown): string {
+  return e instanceof ApiError ? e.message : String(e);
 }
 
 async function handle<T>(r: Response): Promise<T> {

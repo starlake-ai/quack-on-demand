@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
 import { EditIcon } from './Icons';
+import { Modal } from './Modal';
 
 /** Auth-provider tab on the TenantDetail page. Shows the tenant's
   * current provider + config and lets the admin swap it. Users / roles /
@@ -29,7 +30,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
         if (!t) setError(`tenant '${tenantName}' not found`);
         else setTenant(t);
       })
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, [tenantName]);
@@ -61,7 +62,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
       setTenant(updated);
       setEditing(false);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -119,20 +120,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
       </table>
 
       {editing && (
-        <div
-          className="modal-backdrop"
-          onClick={() => { setEditing(false); setError(null); }}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 560 }}
-          >
+        <Modal maxWidth={560} onClose={() => { setEditing(false); setError(null); }}>
             <div className="card-title">Edit auth provider</div>
             <form onSubmit={save}>
               <label>
@@ -178,8 +166,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                 <button type="submit" style={{ minWidth: '7rem' }} disabled={!formReady}>Save</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

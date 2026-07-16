@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { RolePermissionResponse, RoleResponse } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
+import { Modal } from './Modal';
 import RoleColumnPoliciesSection from './RoleColumnPoliciesSection';
 import RoleRowPoliciesSection from './RoleRowPoliciesSection';
 import Tabs from './Tabs';
@@ -57,13 +58,13 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
         ));
         setVerbCounts(Object.fromEntries(entries));
       })
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   function reloadPerms(r: RoleResponse) {
     api.listRolePermissions(r.id)
       .then(x => setPerms(x.permissions))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => {
@@ -98,7 +99,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       reloadRoles();
       setSelected(created);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -110,7 +111,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       if (selected?.id === r.id) setSelected(null);
       reloadRoles();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -129,7 +130,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       reloadPerms(selected);
       bumpVerbCount(selected.id, grantVerb, +1);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -142,7 +143,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       reloadPerms(selected);
       bumpVerbCount(selected.id, p.verb, -1);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -198,24 +199,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
       )}
 
       {selected && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setSelected(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{
-              width: '90%', maxWidth: 720,
-              height: '80vh', maxHeight: 'calc(100vh - 4rem)',
-              display: 'flex', flexDirection: 'column',
-            }}
-          >
+        <Modal maxWidth={720} height="80vh" onClose={() => setSelected(null)}>
             <div className="card-title">Edit role <code>{selected.name}</code></div>
             <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
               <Tabs
@@ -275,25 +259,11 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
             <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
               <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => setSelected(null)}>Close</button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {adding && (
-        <div
-          className="modal-backdrop"
-          onClick={() => { setAdding(false); setError(null); }}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 560 }}
-          >
+        <Modal maxWidth={560} onClose={() => { setAdding(false); setError(null); }}>
             <div className="card-title">New role</div>
             <form onSubmit={handleCreate}>
               <label>
@@ -309,8 +279,7 @@ export default function RoleSection({ tenant }: { tenant: string | null }) {
                 <button type="submit" style={{ minWidth: '7rem' }}>Create</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

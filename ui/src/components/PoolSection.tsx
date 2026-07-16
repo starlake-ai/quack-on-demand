@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { PoolResponse, TenantDbResponse } from '../api/types';
 import PoolDetailBody from './PoolDetailBody';
 import { DeleteIcon } from './Icons';
+import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
+import { Modal } from './Modal';
 import CohortEditor, {
   CohortDraft,
   cohortDraftToWire,
@@ -69,7 +71,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   function reloadPools() {
     return api.listPools()
       .then(r => setPools(r.pools.filter(p => p.tenant === tenant)))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   function reloadTenantDbs() {
@@ -79,7 +81,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         // Default the form to the first DB so the select isn't blank.
         if (r.tenantDbs.length > 0 && !tenantDb) setTenantDb(r.tenantDbs[0].name);
       })
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => {
@@ -105,7 +107,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force });
       await reloadPools();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -120,7 +122,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       await api.deletePool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force: true });
       await reloadPools();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -196,7 +198,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       setPools(curr => curr.map(x =>
         x.tenantDb === p.tenantDb && x.pool === p.pool ? { ...x, disabled: !next } : x
       ));
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -227,7 +229,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       // Open the newly-created pool inline, same panel.
       setBrowsing(justCreated);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -240,7 +242,6 @@ export default function PoolSection({ tenant }: { tenant: string }) {
           tenant={tenant}
           tenantDb={browsing.tenantDb}
           pool={browsing.pool}
-          onStopped={() => { setBrowsing(null); void reloadPools(); }}
           onBack={() => setBrowsing(null)}
         />
       </div>
@@ -351,25 +352,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
       )}
 
       {adding && (
-        <div
-          className="modal-backdrop"
-          onClick={cancelForm}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-            // Outer is the scroll container: when the inner content (with
-            // many cohorts) exceeds the viewport the modal scrolls
-            // instead of running off the bottom of the screen.
-            overflowY: 'auto',
-            paddingBottom: '2rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 560 }}
-          >
+        <Modal maxWidth={560} scrollBackdrop onClose={cancelForm}>
             <div className="card-title">New pool</div>
             <p className="subtle" style={{ marginTop: 0 }}>
               The pool inherits the metastore, data path, and object-store
@@ -439,20 +422,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     />
                     CPU limit
                   </label>
-                  {cpuEnabled && (
-                    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                      <input
-                        type="range"
-                        min={0.5}
-                        max={128}
-                        step={0.5}
-                        value={cpuSlider}
-                        onChange={ev => setCpuSlider(Number(ev.target.value))}
-                        style={{ width: 140 }}
-                      />
-                      <span className="subtle">{cpuSlider} cores</span>
-                    </div>
-                  )}
+                  {cpuEnabled && <CpuLimitSlider value={cpuSlider} onChange={setCpuSlider} />}
                 </div>
                 <div>
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
@@ -463,20 +433,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     />
                     Memory limit
                   </label>
-                  {memEnabled && (
-                    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                      <input
-                        type="range"
-                        min={1}
-                        max={1024}
-                        step={1}
-                        value={memSlider}
-                        onChange={ev => setMemSlider(Number(ev.target.value))}
-                        style={{ width: 140 }}
-                      />
-                      <span className="subtle">{memSlider} Gi</span>
-                    </div>
-                  )}
+                  {memEnabled && <MemLimitSlider value={memSlider} onChange={setMemSlider} />}
                 </div>
               </div>
               <label style={{ display: 'block', marginTop: '.5rem' }}>
@@ -494,27 +451,11 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                 </button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {scaling && (
-        <div
-          className="modal-backdrop"
-          onClick={closeScale}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-            overflowY: 'auto',
-            paddingBottom: '2rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 480 }}
-          >
+        <Modal maxWidth={480} scrollBackdrop onClose={closeScale}>
             <div className="card-title">Scale {scaling.tenant}/{scaling.tenantDb}/{scaling.pool}</div>
             <p className="subtle" style={{ marginTop: 0 }}>
               Current size: {scaling.nodes.length}. Target: {scaleRo + scaleWo + scaleDual}.
@@ -564,8 +505,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                 <button type="submit" style={{ minWidth: '7rem' }} disabled={scaleRo + scaleWo + scaleDual === 0}>Apply</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

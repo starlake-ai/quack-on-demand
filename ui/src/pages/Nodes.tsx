@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry, ActiveStatementInfo } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import SqlHighlight from '../components/SqlHighlight';
@@ -138,7 +138,7 @@ export default function Nodes() {
       else await api.quarantineNode(req);
       await refresh();
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
+      setErr(errorMessage(e));
     }
   }
 
@@ -151,7 +151,7 @@ export default function Nodes() {
       await api.restartNode({ tenant: n.tenant, tenantDb: n.tenantDb, pool: n.pool, nodeId: n.nodeId });
       await refresh();
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
+      setErr(errorMessage(e));
     }
   }
 
@@ -168,7 +168,7 @@ export default function Nodes() {
       }
       await refresh();
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
+      setErr(errorMessage(e));
     }
   }
 

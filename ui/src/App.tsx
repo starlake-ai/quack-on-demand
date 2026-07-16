@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
@@ -57,7 +57,6 @@ function SsoError({ code, onRetry }: { code: string; onRetry: () => void }) {
     </div>
   );
 }
-import { api } from './api/client';
 import Audit from './pages/Audit';
 import History from './pages/History';
 import Usage from './pages/Usage';
@@ -72,7 +71,7 @@ import Config from './pages/Config';
 import NavDropdown from './components/NavDropdown';
 
 function Shell() {
-  const { username, role, tenant, logout, authEnabled } = useAuth();
+  const { username, role, tenant, logout, authEnabled, telemetryEnabled } = useAuth();
   // Config (resolved application.conf + manifest export/import) is a
   // cross-tenant view of the entire deployment, so it's superuser-only.
   // `tenant === null` flags the session as system-scoped; tenant-bound
@@ -81,12 +80,6 @@ function Shell() {
   // leak. `authEnabled === false` is the no-auth dev mode; treat the
   // synthetic anonymous user as a superuser there.
   const isSuperuser = !authEnabled || tenant === null;
-  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
-  useEffect(() => {
-    api.clientConfig()
-      .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
-      .catch(() => setTelemetryEnabled(false));
-  }, []);
   return (
     <>
       <nav className="app-nav">

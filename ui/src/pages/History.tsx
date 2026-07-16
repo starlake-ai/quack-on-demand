@@ -11,12 +11,8 @@ import {
   Legend,
 } from 'recharts';
 import { api } from '../api/client';
-import type {
-  TrendBucketEntry,
-  StatementHistoryRowEntry,
-  TenantResponse,
-  PoolResponse,
-} from '../api/types';
+import { tenantOptionLabel, useTenantPoolOptions } from '../hooks/useTenantPoolOptions';
+import type { TrendBucketEntry, StatementHistoryRowEntry } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import SqlHighlight from '../components/SqlHighlight';
 
@@ -208,9 +204,8 @@ function StmtStatusBadge({ status }: { status: string }) {
 }
 
 export default function History() {
-  const { superuser } = useAuth();
+  const { superuser, telemetryEnabled } = useAuth();
 
-  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [range, setRange]   = useState<Range>('24h');
   const [tenant, setTenant] = useState('');
   const [pool, setPool]     = useState('');
@@ -241,25 +236,8 @@ export default function History() {
   const filterRef = useRef({ range, tenant, pool, userFilter, statusFilter, sqlFilter });
   filterRef.current = { range, tenant, pool, userFilter, statusFilter, sqlFilter };
 
-  useEffect(() => {
-    api.clientConfig()
-      .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
-      .catch(() => setTelemetryEnabled(false));
-  }, []);
-
   // Filter select options (mirrors the Usage page).
-  const [tenantOptions, setTenantOptions] = useState<TenantResponse[]>([]);
-  const [poolOptions, setPoolOptions] = useState<PoolResponse[]>([]);
-
-  useEffect(() => {
-    api.listPools().then(r => setPoolOptions(r.pools)).catch(() => setPoolOptions([]));
-  }, []);
-
-  useEffect(() => {
-    if (superuser) {
-      api.listTenants().then(r => setTenantOptions(r.tenants)).catch(() => setTenantOptions([]));
-    }
-  }, [superuser]);
+  const { tenantOptions, poolNamesFor } = useTenantPoolOptions(superuser);
 
   const fetch = useCallback(() => {
     const { range: r, tenant: t, pool: p } = filterRef.current;
@@ -291,12 +269,27 @@ export default function History() {
   // to a newer rolling window at each click.
   const stmtFromRef = useRef('');
 
-  const fetchStmts = useCallback(() => {
+  /** Shared fetch skeleton for the statements table: assemble the filter params, bump
+   * the request generation, and run the query with the standard loading / error /
+   * in-flight bookkeeping. `append` decides both the pagination params (before + the
+   * stored window `from` vs a fresh rolling `from`) and how results and errors land:
+   * a fresh fetch replaces the rows (and clears them and the cursor on error, since
+   * the table no longer reflects any successfully fetched window) while an append
+   * keeps the already-loaded rows on error - only the append failed. */
+  const runStmtQuery = useCallback((append: boolean) => {
+    const before = nextBeforeRef.current;
+    if (append && (stmtInFlightRef.current || !before)) return;
     const gen = ++stmtGenRef.current;
     const { range: r, tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
-    const from = new Date(Date.now() - rangeMs(r)).toISOString();
-    stmtFromRef.current = from;
-    const params: Record<string, string> = { from };
+    const params: Record<string, string> = {};
+    if (append && before) {
+      params.before = before;
+      if (stmtFromRef.current) params.from = stmtFromRef.current;
+    } else {
+      const from = new Date(Date.now() - rangeMs(r)).toISOString();
+      stmtFromRef.current = from;
+      params.from = from;
+    }
     if (t)  params.tenant = t;
     if (p)  params.pool   = p;
     if (u)  params.user   = u;
@@ -308,17 +301,17 @@ export default function History() {
     api.historyStatements(params)
       .then(res => {
         if (stmtGenRef.current !== gen) return; // superseded by a newer request
-        setStmts(res.statements);
+        setStmts(prev => (append ? [...prev, ...res.statements] : res.statements));
         setNextBefore(res.nextBefore);
         nextBeforeRef.current = res.nextBefore;
       })
       .catch(e => {
         if (stmtGenRef.current !== gen) return;
-        // Clear stale rows and the cursor: the table no longer reflects any
-        // successfully fetched window.
-        setStmts([]);
-        setNextBefore(null);
-        nextBeforeRef.current = null;
+        if (!append) {
+          setStmts([]);
+          setNextBefore(null);
+          nextBeforeRef.current = null;
+        }
         setStmtErr(String(e));
       })
       .finally(() => {
@@ -329,38 +322,8 @@ export default function History() {
       });
   }, []);
 
-  const loadMore = useCallback(() => {
-    if (stmtInFlightRef.current || !nextBeforeRef.current) return;
-    const gen = ++stmtGenRef.current;
-    const { tenant: t, pool: p, userFilter: u, statusFilter: s, sqlFilter: sq } = filterRef.current;
-    const params: Record<string, string> = { before: nextBeforeRef.current };
-    if (stmtFromRef.current) params.from = stmtFromRef.current;
-    if (t)  params.tenant = t;
-    if (p)  params.pool   = p;
-    if (u)  params.user   = u;
-    if (s)  params.status = s;
-    if (sq) params.q      = sq;
-    setStmtLoading(true);
-    stmtInFlightRef.current = true;
-    setStmtErr('');
-    api.historyStatements(params)
-      .then(res => {
-        if (stmtGenRef.current !== gen) return; // a newer refetch owns the table
-        setStmts(prev => [...prev, ...res.statements]);
-        setNextBefore(res.nextBefore);
-        nextBeforeRef.current = res.nextBefore;
-      })
-      .catch(e => {
-        // Keep the already-loaded rows: only the append failed.
-        if (stmtGenRef.current === gen) setStmtErr(String(e));
-      })
-      .finally(() => {
-        if (stmtGenRef.current === gen) {
-          setStmtLoading(false);
-          stmtInFlightRef.current = false;
-        }
-      });
-  }, []);
+  const fetchStmts = useCallback(() => runStmtQuery(false), [runStmtQuery]);
+  const loadMore   = useCallback(() => runStmtQuery(true), [runStmtQuery]);
 
   // Refetch charts AND table on range button click, tenant/pool selection, or initial load.
   useEffect(() => {
@@ -383,9 +346,7 @@ export default function History() {
   const agg  = aggregate(buckets, gran);
   const { throughput, errorRate, latency } = toChartData(agg);
 
-  const poolNames = [...new Set(
-    poolOptions.filter(p => !tenant || p.tenant === tenant).map(p => p.pool),
-  )].sort();
+  const poolNames = poolNamesFor(tenant);
 
   return (
     <>
@@ -409,7 +370,7 @@ export default function History() {
             <option value="">all tenants</option>
             {tenantOptions.map(t => (
               <option key={t.id} value={t.id}>
-                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+                {tenantOptionLabel(t)}
               </option>
             ))}
           </select>

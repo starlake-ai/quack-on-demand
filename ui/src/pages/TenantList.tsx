@@ -1,9 +1,10 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
 import { DeleteIcon } from '../components/Icons';
+import { Modal } from '../components/Modal';
 
 export default function TenantList() {
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
@@ -34,7 +35,7 @@ export default function TenantList() {
   function reload() {
     return api.listTenants()
       .then(r => setTenants(r.tenants))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => { void reload(); }, []);
@@ -59,7 +60,7 @@ export default function TenantList() {
       setAdding(false);
       await reload();
     } catch (e) {
-      setCreateErr(e instanceof ApiError ? e.message : String(e));
+      setCreateErr(errorMessage(e));
     }
   }
 
@@ -73,7 +74,7 @@ export default function TenantList() {
     } catch (e) {
       // Roll back on failure.
       setTenants(curr => curr.map(x => x.name === t.name ? { ...x, disabled: !next } : x));
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -88,7 +89,7 @@ export default function TenantList() {
       await api.deleteTenant({ name: t.name });
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -99,20 +100,7 @@ export default function TenantList() {
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
 
   const createModal = adding && (
-    <div
-      className="modal-backdrop"
-      onClick={closeCreate}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-        zIndex: 100, paddingTop: '4rem',
-      }}
-    >
-      <div
-        className="modal card"
-        onClick={ev => ev.stopPropagation()}
-        style={{ width: '90%', maxWidth: 560 }}
-      >
+    <Modal maxWidth={560} onClose={closeCreate}>
         <div className="card-title">New tenant</div>
         <p className="subtle" style={{ marginTop: 0 }}>
           A tenant is a logical owner. Storage details (metastore, data path,
@@ -173,8 +161,7 @@ export default function TenantList() {
             <button type="submit" style={{ minWidth: '7rem' }} disabled={!createReady}>Create</button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 
   if (tenants.length === 0) return (

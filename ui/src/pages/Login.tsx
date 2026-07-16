@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { ApiError } from '../api/client';
+import { errorMessage } from '../api/client';
 
 export default function Login() {
   const { login } = useAuth();
@@ -17,7 +17,7 @@ export default function Login() {
     try {
       await login(username, password, tenant);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
+      const msg = errorMessage(e);
       setErr(msg);
     } finally {
       setBusy(false);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { ConfigEntryView, ManifestImportSummary } from '../api/types';
 
 /** Returns everything before the last `.` in a HOCON path - the natural
@@ -70,7 +70,7 @@ export default function Config() {
       setImportResult(summary);
       clearStaged();
     } catch (e) {
-      setImportError(e instanceof ApiError ? e.message : String(e));
+      setImportError(errorMessage(e));
     } finally {
       setApplying(false);
     }

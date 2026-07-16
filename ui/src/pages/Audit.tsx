@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { AuditEventEntry, TenantResponse } from '../api/types';
+import type { AuditEventEntry } from '../api/types';
+import { tenantOptionLabel, useTenantPoolOptions } from '../hooks/useTenantPoolOptions';
 import { useAuth } from '../auth/AuthContext';
 
 const FAMILIES = ['control-plane', 'auth', 'data-denial', 'data-write'];
@@ -12,8 +13,7 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
 }
 
 export default function Audit() {
-  const { superuser } = useAuth();
-  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const { superuser, telemetryEnabled } = useAuth();
   const [events, setEvents] = useState<AuditEventEntry[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [family, setFamily] = useState('');
@@ -25,24 +25,13 @@ export default function Audit() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [err, setErr] = useState('');
 
-  const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [actions, setActions] = useState<string[]>([]);
-
-  useEffect(() => {
-    api.clientConfig()
-      .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
-      .catch(() => setTelemetryEnabled(false));
-  }, []);
 
   useEffect(() => {
     api.auditActions().then(r => setActions(r.actions)).catch(() => setActions([]));
   }, []);
 
-  useEffect(() => {
-    if (superuser) {
-      api.listTenants().then(r => setTenants(r.tenants)).catch(() => setTenants([]));
-    }
-  }, [superuser]);
+  const { tenantOptions } = useTenantPoolOptions(superuser, false);
 
   const params = useCallback((before?: string) => {
     const p: Record<string, string> = { limit: '50' };
@@ -90,9 +79,9 @@ export default function Audit() {
           <select value={tenant} onChange={e => setTenant(e.target.value)}>
             <option value="">all tenants</option>
             <option value={NO_TENANT}>(no tenant)</option>
-            {tenants.map(t => (
+            {tenantOptions.map(t => (
               <option key={t.id} value={t.id}>
-                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+                {tenantOptionLabel(t)}
               </option>
             ))}
           </select>

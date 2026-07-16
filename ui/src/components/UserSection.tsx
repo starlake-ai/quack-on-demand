@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { PoolResponse, TenantResponse, UserResponse } from '../api/types';
 import EffectivePermsCard from './EffectivePermsCard';
 import { DeleteIcon, EditIcon } from './Icons';
+import { Modal } from './Modal';
 
 /** Users tab on the /users page. Renders the user table for the
   * selected tenant (or every user when `tenant === null`), with inline
@@ -130,7 +131,7 @@ export default function UserSection({
     setError(null);
     api.listUsers(tenant ?? undefined)
       .then(r => setRows(superusersOnly ? r.users.filter(u => u.tenant == null) : r.users))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => {
@@ -162,7 +163,7 @@ export default function UserSection({
       setNewUsername(''); setNewPassword(''); setNewRole('user');
       reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -177,7 +178,7 @@ export default function UserSection({
       setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditIsAdmin(false);
       reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -188,7 +189,7 @@ export default function UserSection({
       await api.deleteUser({ id: u.id });
       reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -312,20 +313,7 @@ export default function UserSection({
       )}
 
       {adding && (
-        <div
-          className="modal-backdrop"
-          onClick={() => { setAdding(false); setError(null); }}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 560 }}
-          >
+        <Modal maxWidth={560} onClose={() => { setAdding(false); setError(null); }}>
             <div className="card-title">{createLabel}</div>
             {!newTenantIsDb && (
               <p className="subtle" style={{ marginTop: 0 }}>
@@ -375,28 +363,14 @@ export default function UserSection({
                 <button type="submit" style={{ minWidth: '7rem' }}>{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {editingId && (() => {
         const u = rows.find(r => r.id === editingId);
         if (!u) return null;
         return (
-          <div
-            className="modal-backdrop"
-            onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}
-            style={{
-              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-              display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-              zIndex: 100, paddingTop: '4rem',
-            }}
-          >
-            <div
-              className="modal card"
-              onClick={ev => ev.stopPropagation()}
-              style={{ width: '90%', maxWidth: 480 }}
-            >
+          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}>
               <div className="card-title">
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
@@ -424,8 +398,7 @@ export default function UserSection({
                   <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
                 </div>
               </form>
-            </div>
-          </div>
+          </Modal>
         );
       })()}
 

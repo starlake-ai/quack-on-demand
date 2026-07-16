@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { TenantDbKind, TenantDbResponse, UpdateTenantDbRequest } from '../api/types';
 import CatalogBrowser from './CatalogBrowser';
 import CatalogSnapshotsPanel from './CatalogSnapshotsPanel';
@@ -58,7 +58,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const reload = () =>
     api.listTenantDbs(tenant)
       .then(r => setDbs(r.tenantDbs))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
 
   useEffect(() => {
     setEditingDb(null);
@@ -147,7 +147,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       setAdding(false);
       await reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -160,7 +160,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       await reload();
       return true;
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
       return false;
     }
   }
@@ -204,7 +204,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       setEditingDb(null);
       await reload();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
+      setError(errorMessage(err));
     }
   }
 

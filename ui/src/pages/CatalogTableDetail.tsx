@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, errorMessage } from '../api/client';
 import type {
   CatalogSnapshotEntry,
   CatalogTableDetailResponse,
@@ -183,7 +183,7 @@ export default function CatalogTableDetail() {
         next.set('diffTo', to);
         setSearchParams(next);
       })
-      .catch(e => setDiffError(e instanceof ApiError ? e.message : String(e)))
+      .catch(e => setDiffError(errorMessage(e)))
       .finally(() => setDiffLoading(false));
   }
 
@@ -217,7 +217,7 @@ export default function CatalogTableDetail() {
         setDataDiff(prev => (opts?.cursor && prev ? { ...r, rows: [...prev.rows, ...r.rows] } : r));
       })
       .catch(e => {
-        if (seq === dataDiffSeq.current) setDataDiffError(e instanceof ApiError ? e.message : String(e));
+        if (seq === dataDiffSeq.current) setDataDiffError(errorMessage(e));
       })
       .finally(() => {
         if (seq === dataDiffSeq.current) setDataDiffLoading(false);

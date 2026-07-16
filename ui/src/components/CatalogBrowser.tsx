@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, errorMessage } from '../api/client';
 import type {
   CatalogSchemaEntry,
   CatalogTableEntry,
@@ -109,7 +109,7 @@ export default function CatalogBrowser({
         }
         onCatalogMutated?.();
       })
-      .catch(e => setUndropError(e instanceof ApiError ? e.message : String(e)))
+      .catch(e => setUndropError(errorMessage(e)))
       .finally(() => setUndropping(false));
   }
 

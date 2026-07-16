@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type {
   EffectivePermissionsResponse,
   PoolPermissionResponse,
@@ -37,7 +37,7 @@ export default function EffectivePermsCard({
     setError(null);
     api.effectivePermissions(userId)
       .then(setData)
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }, [userId]);
 
   // Resolution helpers. The grant rows carry surrogate ids

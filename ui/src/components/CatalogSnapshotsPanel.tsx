@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CatalogSnapshotEntry, CatalogTagEntry } from '../api/types';
+import { Modal } from './Modal';
 
 const PAGE = 200;
 
@@ -286,20 +287,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
         )}
 
       {tagging && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setTagging(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            zIndex: 100, paddingTop: '4rem',
-          }}
-        >
-          <div
-            className="modal card"
-            onClick={ev => ev.stopPropagation()}
-            style={{ width: '90%', maxWidth: 420 }}
-          >
+        <Modal maxWidth={420} onClose={() => setTagging(null)}>
             <div className="card-title">Tag snapshot {tagging.snapshotId}</div>
             <p className="subtle" style={{ marginTop: 0 }}>
               Tag names are per-database handles for this snapshot; a protected
@@ -331,8 +319,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                 <button type="submit">Create</button>
               </div>
             </form>
-          </div>
-        </div>
+        </Modal>
       )}
     </section>
   );

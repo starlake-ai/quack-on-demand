@@ -9,7 +9,8 @@ import {
   Legend,
 } from 'recharts';
 import { api } from '../api/client';
-import type { UsageGroupEntry, TenantResponse, PoolResponse } from '../api/types';
+import type { UsageGroupEntry } from '../api/types';
+import { tenantOptionLabel, useTenantPoolOptions } from '../hooks/useTenantPoolOptions';
 import { useAuth } from '../auth/AuthContext';
 
 const CHART_HEIGHT = 260;
@@ -104,9 +105,7 @@ function chartRows(groups: UsageGroupEntry[], groupBy: string, metric: Metric): 
 }
 
 export default function Usage() {
-  const { superuser } = useAuth();
-
-  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const { superuser, telemetryEnabled } = useAuth();
 
   const [month, setMonth] = useState(currentMonth());
   const [custom, setCustom] = useState(false);
@@ -130,24 +129,7 @@ export default function Usage() {
   const filterRef = useRef({ month, custom, fromDate, toDate, groupBy, tenant, pool });
   filterRef.current = { month, custom, fromDate, toDate, groupBy, tenant, pool };
 
-  useEffect(() => {
-    api.clientConfig()
-      .then(cfg => setTelemetryEnabled(cfg.telemetryEnabled !== false))
-      .catch(() => setTelemetryEnabled(false));
-  }, []);
-
-  const [tenantOptions, setTenantOptions] = useState<TenantResponse[]>([]);
-  const [poolOptions, setPoolOptions] = useState<PoolResponse[]>([]);
-
-  useEffect(() => {
-    api.listPools().then(r => setPoolOptions(r.pools)).catch(() => setPoolOptions([]));
-  }, []);
-
-  useEffect(() => {
-    if (superuser) {
-      api.listTenants().then(r => setTenantOptions(r.tenants)).catch(() => setTenantOptions([]));
-    }
-  }, [superuser]);
+  const { tenantOptions, poolNamesFor } = useTenantPoolOptions(superuser);
 
   const fetchUsage = useCallback(() => {
     const f = filterRef.current;
@@ -210,9 +192,7 @@ export default function Usage() {
   const { rows, labels } = chartRows(groups, resGroupBy, metric);
   const truncated = dataStart && resFrom && dataStart > resFrom;
 
-  const poolNames = [...new Set(
-    poolOptions.filter(p => !tenant || p.tenant === tenant).map(p => p.pool),
-  )].sort();
+  const poolNames = poolNamesFor(tenant);
 
   return (
     <>
@@ -252,7 +232,7 @@ export default function Usage() {
             <option value="">all tenants</option>
             {tenantOptions.map(t => (
               <option key={t.id} value={t.id}>
-                {t.displayName === t.id ? t.id : `${t.displayName} (${t.id})`}
+                {tenantOptionLabel(t)}
               </option>
             ))}
           </select>

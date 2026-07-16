@@ -1,16 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import Tabs from './Tabs';
 
 
-/** Header (title + Back / Scale / Delete pool actions) + the four-tab
-  * body for one pool. No breadcrumb -- callers compose that themselves.
-  * The `onStopped` callback lets the standalone page navigate elsewhere
-  * after a successful delete, while the inline view inside the Pools
-  * tab just collapses back to its list. */
+/** Header (title + Back button) + the four-tab body for one pool. No
+  * breadcrumb -- callers compose that themselves. */
 export default function PoolDetailBody({
   tenant,
   tenantDb,
@@ -20,7 +18,6 @@ export default function PoolDetailBody({
   tenant:    string;
   tenantDb:  string;
   pool:      string;
-  onStopped?: () => void;
   /** Custom Back-button handler. When provided, the header renders a
     * "Back to pools" button that calls this (used by PoolSection to
     * collapse the inline view). When omitted, the header falls back to
@@ -126,7 +123,7 @@ export default function PoolDetailBody({
         : rawMemory;
       await api.setPoolResources({ tenant, tenantDb, pool, cpu, memory });
     } catch (e) {
-      setActionErr(e instanceof ApiError ? e.message : String(e));
+      setActionErr(errorMessage(e));
     } finally {
       setResSaving(false);
     }
@@ -164,7 +161,7 @@ export default function PoolDetailBody({
       else await api.quarantineNode(req);
       setActionErr(null);
     } catch (e) {
-      setActionErr(e instanceof ApiError ? e.message : String(e));
+      setActionErr(errorMessage(e));
     }
   }
 
@@ -177,7 +174,7 @@ export default function PoolDetailBody({
       await api.restartNode({ tenant, tenantDb, pool, nodeId: n.nodeId });
       setActionErr(null);
     } catch (e) {
-      setActionErr(e instanceof ApiError ? e.message : String(e));
+      setActionErr(errorMessage(e));
     }
   }
 
@@ -213,18 +210,10 @@ export default function PoolDetailBody({
                   CPU limit
                 </label>
                 {resCpuEnabled && (
-                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    <input
-                      type="range"
-                      min={0.5}
-                      max={128}
-                      step={0.5}
-                      value={resCpuSlider}
-                      onChange={e => { setResCpuSlider(Number(e.target.value)); setCpuTouched(true); }}
-                      style={{ width: 140 }}
-                    />
-                    <span className="subtle">{resCpuSlider} cores</span>
-                  </div>
+                  <CpuLimitSlider
+                    value={resCpuSlider}
+                    onChange={v => { setResCpuSlider(v); setCpuTouched(true); }}
+                  />
                 )}
               </>
             )}
@@ -256,18 +245,10 @@ export default function PoolDetailBody({
                   Memory limit
                 </label>
                 {resMemEnabled && (
-                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    <input
-                      type="range"
-                      min={1}
-                      max={1024}
-                      step={1}
-                      value={resMemSlider}
-                      onChange={e => { setResMemSlider(Number(e.target.value)); setMemTouched(true); }}
-                      style={{ width: 140 }}
-                    />
-                    <span className="subtle">{resMemSlider} Gi</span>
-                  </div>
+                  <MemLimitSlider
+                    value={resMemSlider}
+                    onChange={v => { setResMemSlider(v); setMemTouched(true); }}
+                  />
                 )}
               </>
             )}

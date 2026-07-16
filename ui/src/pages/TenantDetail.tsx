@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api/client';
-import type { PoolResponse, TenantDbResponse, TenantResponse } from '../api/types';
+import type { TenantDbResponse, TenantResponse } from '../api/types';
 import AuthProviderSection from '../components/AuthProviderSection';
 import DatabaseSection from '../components/DatabaseSection';
 import MaintenancePanel from '../components/MaintenancePanel';
@@ -66,7 +66,6 @@ function MaintenanceSection({ tenant }: { tenant: string }) {
 export default function TenantDetail() {
   const { tenant } = useParams<{ tenant: string }>();
   const [data, setData]   = useState<TenantResponse | null>(null);
-  const [, setPools]      = useState<PoolResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   function refresh() {
@@ -77,9 +76,6 @@ export default function TenantDetail() {
         if (!t) setError(`tenant '${tenant}' not found`);
         else setData(t);
       })
-      .catch(e => setError(String(e)));
-    api.listPools()
-      .then(r => setPools(r.pools.filter(p => p.tenant === tenant)))
       .catch(e => setError(String(e)));
   }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { ColumnPolicyDto } from '../api/types';
 import { DeleteIcon } from './Icons';
 
@@ -24,7 +24,7 @@ export default function RoleColumnPoliciesSection({ roleId }: { roleId: string }
     setError(null);
     api.listColumnPolicies(roleId)
       .then(r => setPolicies(r.policies))
-      .catch(e => setError(e instanceof ApiError ? e.message : String(e)));
+      .catch(e => setError(errorMessage(e)));
   }
 
   useEffect(() => {
@@ -67,7 +67,7 @@ export default function RoleColumnPoliciesSection({ roleId }: { roleId: string }
       resetForm();
       reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
@@ -78,7 +78,7 @@ export default function RoleColumnPoliciesSection({ roleId }: { roleId: string }
       await api.deleteColumnPolicy({ id: p.id });
       reload();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(errorMessage(e));
     }
   }
 
