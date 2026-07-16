@@ -26,21 +26,32 @@ object DemoRunner:
 
   def runDemo(args: List[String]): IO[ExitCode] =
     val explicitHome = args.headOption
-    IO.blocking(setup(explicitHome)).flatMap { case (home, pg, configs) =>
-      val cleanup = IO.blocking {
-        logger.info("demo: tearing down")
-        try pg.stop()
-        finally home.deleteRecursively()
-      }
-      bootWithBanner(home, configs).guarantee(cleanup)
+    // `home` is created up front (a cheap, side-effect-free mkdir) and `pgRef` records the embedded
+    // PG instance the moment it starts, BEFORE any later setup step (createDatabase, config load,
+    // DemoSeed) that can throw. `cleanup` is attached via `.guarantee` around the WHOLE setup+boot
+    // chain (not just the boot), so a mid-setup failure -- e.g. a bad config -- still stops PG and
+    // deletes the home instead of leaking both under ${TMPDIR}/qod-demo.
+    val home  = DemoHome.create(explicitHome)
+    val pgRef = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
+    val cleanup = IO.blocking {
+      logger.info("demo: tearing down")
+      try pgRef.get().foreach(_.stop())
+      finally home.deleteRecursively()
     }
+    IO.blocking(setup(home, pgRef))
+      .flatMap(configs => bootWithBanner(home, configs))
+      .guarantee(cleanup)
 
-  /** Blocking, ordered setup: home -> embedded PG -> databases -> config overlay -> seed manifest
-    * env -> data seed. Returns the pieces the boot needs.
+  /** Blocking, ordered setup: embedded PG -> databases -> config overlay -> seed manifest env ->
+    * data seed. `pgRef` is populated as soon as PG starts so `runDemo`'s cleanup can stop it even if
+    * a later step here fails.
     */
-  private def setup(explicitHome: Option[String]): (DemoHome, DemoPostgres, DemoConfigs) =
-    val home = DemoHome.create(explicitHome)
-    val pg   = DemoPostgres.start(home.pgDir)
+  private def setup(
+      home: DemoHome,
+      pgRef: java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]]
+  ): DemoConfigs =
+    val pg = DemoPostgres.start(home.pgDir)
+    pgRef.set(Some(pg))
     pg.createDatabase("qod")  // control plane
     pg.createDatabase(DbName) // tenant-db DuckLake catalog
 
@@ -58,7 +69,7 @@ object DemoRunner:
     DemoSeed.run(pg.coords, DbName, Schema, home, Sf) match
       case Left(err) => sys.error(err)
       case Right(()) => ()
-    (home, pg, configs)
+    configs
 
   private def loadBase(): (ManagerConfig, FlightConfig, AclConfig) =
     val src = ConfigSource.default
