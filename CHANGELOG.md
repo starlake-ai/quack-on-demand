@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.9
+
+### Security
+
+- **`qod demo` now serves FlightSQL over TLS.** The demo edge keeps TLS on with a
+  self-signed certificate auto-generated under the ephemeral demo home (wiped on
+  exit). The banner advertises `grpc+tls://` and the connect snippets carry the
+  skip-verify knob (`tls_skip_verify` for ADBC, `disableCertificateVerification`
+  for JDBC).
+
+### Logging
+
+- **Quiet by default.** Application logs now default to INFO instead of DEBUG.
+  Set `QOD_LOG_LEVEL=DEBUG` (env var or `-D` system property) to get debug logs
+  back when diagnosing.
+
+### Documentation
+
+- The self-contained demo moved to the top of the Quickstart, now with the admin
+  console logins and ready-to-paste JDBC / ADBC / ODBC connection strings for
+  every seeded user. The native `qod start` path is presented before Docker
+  Compose.
+
+---
+
 ## 0.3.8
 
 ### Distribution
