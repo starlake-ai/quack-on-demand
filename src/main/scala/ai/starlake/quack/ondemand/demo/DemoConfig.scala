@@ -8,10 +8,15 @@ final case class DemoConfigs(manager: ManagerConfig, flight: FlightConfig, acl: 
 
 /** Produces the demo posture by copying the base configs with demo overrides.
   *
-  * Guardrail 1: this overlay is the ONLY place the insecure demo settings (TLS off, REST open) are
-  * produced, and it is called ONLY from [[DemoRunner.runDemo]]. `normalManagerRun` never invokes
-  * it, so a normal boot cannot acquire the demo posture. Case-class `copy` returns new instances;
-  * the base configs are never mutated.
+  * Guardrail 1: this overlay is the ONLY place the insecure demo settings (REST open, demo
+  * credentials) are produced, and it is called ONLY from [[DemoRunner.runDemo]]. `normalManagerRun`
+  * never invokes it, so a normal boot cannot acquire the demo posture. Case-class `copy` returns
+  * new instances; the base configs are never mutated.
+  *
+  * The FlightSQL edge keeps TLS ON: the edge auto-generates a self-signed cert at boot
+  * (`FlightEdgeServer.ensureCertFiles`), pointed under the ephemeral demo home so `qod demo`
+  * neither litters the invoking directory nor reuses a stale cert across runs. Clients still skip
+  * verification (self-signed), so the banner snippets carry the skip-verify knob.
   */
 object DemoConfig:
 
@@ -44,6 +49,11 @@ object DemoConfig:
       // happens to be set to in the operator's shell.
       nativeClient = false
     )
-    val flight = baseFlight.copy(tlsEnabled = false, port = 31338)
-    val acl    = baseAcl.copy(enabled = true)
+    val flight = baseFlight.copy(
+      tlsEnabled = true,
+      port = 31338,
+      tlsCertChain = home.root.resolve("certs/server-cert.pem").toString,
+      tlsPrivateKey = home.root.resolve("certs/server-key.pem").toString
+    )
+    val acl = baseAcl.copy(enabled = true)
     DemoConfigs(manager, flight, acl)

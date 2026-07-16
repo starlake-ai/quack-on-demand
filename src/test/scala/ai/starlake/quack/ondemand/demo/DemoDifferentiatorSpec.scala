@@ -142,6 +142,17 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
   // CommandStatementQuery execute + doGet dance.
   // ---------------------------------------------------------------------
 
+  /** TLS client against the demo edge. The demo posture keeps TLS on with a self-signed
+    * auto-generated cert (DemoConfig.overlay), so the client must skip server verification --
+    * exactly what the banner's `tls_skip_verify` knob tells ADBC users to do.
+    */
+  private def buildFlightClient(allocator: RootAllocator, port: Int): FlightClient =
+    FlightClient
+      .builder(allocator, Location.forGrpcTls("127.0.0.1", port))
+      .useTls()
+      .verifyServer(false)
+      .build()
+
   private def basicCredentials(user: String, password: String): String =
     Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
 
@@ -161,8 +172,7 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
     var lastErr: Option[Throwable] = None
     while System.nanoTime() < deadline do
       val allocator = new RootAllocator()
-      val client    =
-        FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", port)).build()
+      val client    = buildFlightClient(allocator, port)
       try
         val cmd = FlightSql.CommandGetSqlInfo
           .newBuilder()
@@ -192,8 +202,7 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
       sql: String
   ): List[Map[String, String]] =
     val allocator = new RootAllocator()
-    val rawClient =
-      FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", port)).build()
+    val rawClient = buildFlightClient(allocator, port)
     try
       val fsql     = new FlightSqlClient(rawClient)
       val opt      = headersOpt(user, password)

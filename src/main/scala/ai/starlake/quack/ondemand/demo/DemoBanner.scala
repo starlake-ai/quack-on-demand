@@ -7,17 +7,18 @@ object DemoBanner:
 
   def render(restPort: Int, flightPort: Int, dataPath: String, rows: String): String =
     s"""|
-        |QoD - demo mode  (no TLS, open REST, ephemeral catalog, demo credentials)
+        |QoD - demo mode  (self-signed TLS, open REST, ephemeral catalog, demo credentials)
         |
         |  DuckLake:   $dataPath (tenant acme, $rows TPC-H rows)
-        |  Flight SQL: grpc://localhost:$flightPort   (TLS off)
+        |  Flight SQL: grpc+tls://localhost:$flightPort   (self-signed cert: clients skip verification)
         |  Admin UI:   http://localhost:$restPort
         |
         |  Connect as the analyst (row + column security applied):
         |
         |  from adbc_driver_flightsql import dbapi
-        |  conn = dbapi.connect("grpc://localhost:$flightPort",
+        |  conn = dbapi.connect("grpc+tls://localhost:$flightPort",
         |                       db_kwargs={"username": "alice", "password": "demo-alice",
+        |                                  "adbc.flight.sql.client_option.tls_skip_verify": "true",
         |                                  "adbc.flight.sql.rpc.call_header.tenant": "acme",
         |                                  "adbc.flight.sql.rpc.call_header.pool": "bi",
         |                                  "adbc.flight.sql.rpc.call_header.db": "acme_tpch"})

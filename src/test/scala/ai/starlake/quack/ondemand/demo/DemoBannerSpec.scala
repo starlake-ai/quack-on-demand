@@ -9,11 +9,13 @@ class DemoBannerSpec extends AnyFlatSpec with Matchers:
     val b =
       DemoBanner.render(restPort = 20900, flightPort = 31338, dataPath = "/demo", rows = "~150K")
     b should include("demo mode")
-    b should include("no TLS")    // caveat
-    b should include("ephemeral") // caveat
-    b should include("grpc://localhost:31338")
+    b should include("self-signed TLS") // caveat: encrypted, but clients must skip verification
+    b should include("ephemeral")       // caveat
+    b should include("grpc+tls://localhost:31338")
     b should include("http://localhost:20900")
     b should include("username") // runnable connect snippet uses a seeded demo user
+    // Self-signed cert: without skip-verify the ADBC snippet dies on cert validation.
+    b should include("adbc.flight.sql.client_option.tls_skip_verify")
     // The edge requires tenant scope headers on Basic auth; without these three
     // the snippet dies with UNAUTHENTICATED 'tenant header required'.
     b should include("adbc.flight.sql.rpc.call_header.tenant")

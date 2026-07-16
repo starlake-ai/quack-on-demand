@@ -34,7 +34,11 @@ class DemoConfigSpec extends AnyFlatSpec with Matchers:
     out.manager.runtimeType shouldBe "local"
     out.manager.apiKey shouldBe None        // REST open
     out.manager.nativeClient shouldBe false // portable HTTP client fallback, not the JNI native lib
-    out.flight.tlsEnabled shouldBe false    // TLS off
+    out.flight.tlsEnabled shouldBe true     // self-signed TLS, auto-generated at boot
+    // Cert material lives under the ephemeral demo home (wiped on exit), not the
+    // cwd-relative default `certs/` -- `qod demo` must not litter the invoking directory.
+    out.flight.tlsCertChain shouldBe home.root.resolve("certs/server-cert.pem").toString
+    out.flight.tlsPrivateKey shouldBe home.root.resolve("certs/server-key.pem").toString
     out.flight.port shouldBe 31338
     out.acl.enabled shouldBe true // ACL kept on
   }
