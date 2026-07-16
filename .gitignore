@@ -124,3 +124,4 @@ src/main/scala/ai/starlake/quack/edge/.metals-scala-cli
 screens
 .venv-release/
 cli/dist
+/.bloop
