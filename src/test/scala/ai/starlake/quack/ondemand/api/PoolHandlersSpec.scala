@@ -1,43 +1,20 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, RoleDistribution, RunningNode, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
-import java.time.Instant
-import scala.collection.concurrent.TrieMap
-
 class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    private val n          = TrieMap.empty[String, RunningNode]
-    def start(s: NodeSpec) = IO {
-      val r = RunningNode(
-        s.nodeId,
-        s.poolKey,
-        s.role,
-        "127.0.0.1",
-        21000 + n.size,
-        "tok",
-        Some(1L),
-        None,
-        Instant.EPOCH,
-        maxConcurrent = s.maxConcurrent
-      )
-      n.put(s.nodeId, r); r
-    }
-    def stop(id: String)    = IO { n.remove(id); () }
-    def isAlive(id: String) = n.contains(id)
-    def discoverExisting()  = IO.pure(n.values.toList)
-    def cleanup()           = IO(n.clear())
+  private def stubBackend: QuackBackend = new StubQuackBackend()
 
   /** Supervisor with tenant `acme` + tenant-db `acme_default` already in place, so handler tests
     * can call `createPool` directly.

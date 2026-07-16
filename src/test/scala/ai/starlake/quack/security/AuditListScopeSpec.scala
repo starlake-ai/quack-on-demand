@@ -1,15 +1,13 @@
 // src/test/scala/ai/starlake/quack/security/AuditListScopeSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.telemetry.AuditEvent
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantId
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Instant
 
 /** Tenant-scoped authZ on `GET /api/audit/list`.
@@ -29,12 +27,9 @@ import java.time.Instant
   *   - Invalid `?from=not-a-date` returns 400 `invalid_time`; `GET /api/audit/actions` serves the
   *     sorted vocabulary behind the API-key perimeter.
   */
-class AuditListScopeSpec extends AnyFlatSpec with Matchers:
+class AuditListScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private val GlobexTenantId = "t-globex01"
-  private val AcmeTenantId   = SecurityFixtures.TenantId // "acme"
+  private val AcmeTenantId = SecurityFixtures.TenantId // "acme"
 
   private val BaseTs = Instant.parse("2026-07-01T10:00:00Z")
 
@@ -76,23 +71,8 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
     detail = Map("source" -> "127.0.0.1")
   )
 
-  // Add globex as a second tenant in the control-plane store.
-  private def addGlobex(store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore): Unit =
-    store.upsertTenant(
-      Tenant(id = GlobexTenantId, displayName = "globex", authProvider = "db")
-    )
-
   private def seedEvents(ts: RecordingTelemetryStore): Unit =
     ts.appendAudit(List(E1, E2, E3))
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
 
   private def eventsOf(body: String): List[io.circe.Json] =
     parse(body).toOption
@@ -109,13 +89,10 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
     parse(body).toOption
       .flatMap(_.hcursor.get[Option[String]]("nextBefore").toOption.flatten)
 
-  private def errorCodeOf(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
-
   private def bootHarness(staticApiKey: Option[String] = None) =
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
-    addGlobex(fix.store)
+    SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
       staticApiKey = staticApiKey,
@@ -269,7 +246,7 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers:
       )
       withClue(s"invalid from body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_time")
+        errorCode(resp.body()) shouldBe Some("invalid_time")
       }
     finally h.shutdown()
   }

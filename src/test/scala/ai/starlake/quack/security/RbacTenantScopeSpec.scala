@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.StatementRecord
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{Pool, RoleDistribution}
 import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   PoolPermission,
@@ -10,14 +10,13 @@ import ai.starlake.quack.ondemand.state.{
   RbacRole,
   RolePermission
 }
+import ai.starlake.quack.security.SecurityFixtures.{GlobexTenantDbId, GlobexTenantId}
 import at.favre.lib.crypto.bcrypt.BCrypt
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.nio.charset.StandardCharsets
+import java.net.http.HttpResponse
 import java.time.Instant
 
 /** Cross-tenant authZ on the RBAC REST surface.
@@ -31,19 +30,15 @@ import java.time.Instant
   * carrying its own admin role + grant edge so the spec can address tenant-B resources by id
   * without per-test plumbing.
   */
-class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
+class RbacTenantScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  // Tenant-B fixture constants.
-  private val GlobexTenantId = "t-globex01"
+  // Tenant-B fixture constants (GlobexTenantId / GlobexTenantDbId come from SecurityFixtures).
   private val GlobexRoleId   = "r-globex01"
   private val GlobexPermId   = "rp-globex01"
   private val GlobexGroupId  = "g-globex01"
   private val GlobexPoolPerm = "pp-globex01" // group-scoped, no pool (covers all pools in tenant)
 
-  private val GlobexTenantDbId = "td-globex01"
-  private val GlobexPoolId     = "p-globex01"
+  private val GlobexPoolId = "p-globex01"
 
   private val CarolUser     = "carol"
   private val CarolPassword = "carolpw"
@@ -62,26 +57,11 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
     */
   private def addTenantB(fix: SecurityFixtures.Fixture): String =
     val s = fix.store
-    s.upsertTenant(
-      Tenant(
-        id = GlobexTenantId,
-        displayName = "globex",
-        authProvider = "db"
-      )
-    )
-    // Seed a TenantDb and Pool for globex so pool/list tests have a real globex
-    // pool in the supervisor snapshot. Without these, the pool/list cross-tenant
-    // scoping test would pass trivially (empty list never contains the globex id).
-    s.upsertTenantDb(
-      TenantDb(
-        id = GlobexTenantDbId,
-        tenantId = GlobexTenantId,
-        name = "globex_main",
-        kind = TenantDbKind.InMemory,
-        metastore = Map.empty,
-        dataPath = ""
-      )
-    )
+    // Seed the shared tenant + tenant-db pair, plus a Pool for globex so pool/list
+    // tests have a real globex pool in the supervisor snapshot. Without these, the
+    // pool/list cross-tenant scoping test would pass trivially (empty list never
+    // contains the globex id).
+    SecurityFixtures.addTenantB(fix)
     s.upsertPool(
       Pool(
         id = GlobexPoolId,
@@ -144,60 +124,6 @@ class RbacTenantScopeSpec extends AnyFlatSpec with Matchers:
     )
     s.addUserRole(daveId, GlobexRoleId)
     carolId
-
-  // ---------- HTTP helpers --------------------------------------------------
-
-  private def post(
-      client: HttpClient,
-      url: String,
-      body: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", "application/json")
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def postWithCookie(
-      client: HttpClient,
-      url: String,
-      body: String,
-      cookieToken: String
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", "application/json")
-      .header("Cookie", s"qod_session=$cookieToken")
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def getWithCookie(
-      client: HttpClient,
-      url: String,
-      cookieToken: String
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Cookie", s"qod_session=$cookieToken")
-      .GET()
-      .timeout(RequestTimeout)
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def errorCode(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
 
   private def expectForbidden(resp: HttpResponse[String], context: String): Unit =
     withClue(s"$context body: ${resp.body()}") {

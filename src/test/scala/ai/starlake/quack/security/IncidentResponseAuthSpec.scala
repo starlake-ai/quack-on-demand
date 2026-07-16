@@ -1,12 +1,10 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantId
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 /** Auth gate on the incident-response surface: quarantine / unquarantine must be superuser-only. A
@@ -20,61 +18,7 @@ import java.time.Instant
   *   - [[SecurityFixtures]] has no `RootPassword`; it uses `RootPassword = "rootpw"`.
   *   - The harness's `mintToken` takes `tenant = None` for the superuser login.
   */
-class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
-
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private def post(
-      client: HttpClient,
-      url: String,
-      body: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", "application/json")
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  // Cookie-transport variants: send qod_session cookie instead of X-API-Key header.
-  // These prove that the session cookie is wired into scope resolution for the five
-  // incident-response endpoints (not just the apiKeyGuard admission gate).
-  private def postWithCookie(
-      client: HttpClient,
-      url: String,
-      body: String,
-      cookieToken: String
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", "application/json")
-      .header("Cookie", s"qod_session=$cookieToken")
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def getWithCookie(
-      client: HttpClient,
-      url: String,
-      cookieToken: String
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Cookie", s"qod_session=$cookieToken")
-      .GET()
-      .timeout(RequestTimeout)
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
+class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private val TestNodeId = "n-test0001"
 
@@ -176,9 +120,6 @@ class IncidentResponseAuthSpec extends AnyFlatSpec with Matchers:
       }
     finally h.shutdown()
   }
-
-  // Tenant-B fixture constant, mirroring the value in RbacTenantScopeSpec.
-  private val GlobexTenantId = "t-globex01"
 
   "node/active-statements" should "show a tenant admin only their tenant's statements" in {
     val (h, _) = bootWithNode()

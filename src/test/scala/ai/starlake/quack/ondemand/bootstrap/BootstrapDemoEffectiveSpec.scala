@@ -2,18 +2,16 @@ package ai.starlake.quack.ondemand.bootstrap
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.sql.{Allowed, Denied, PostgresAclValidator, ValidationContext}
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestImporter}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import io.circe.yaml.v12.parser
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.time.Instant
 import scala.io.Source
 import scala.util.Using
 
@@ -29,25 +27,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
 
   // ---- one-time setup -----------------------------------------------
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] = IO.pure(
-      RunningNode(
-        s.nodeId,
-        s.poolKey,
-        s.role,
-        "127.0.0.1",
-        21000,
-        "tok",
-        Some(1L),
-        None,
-        Instant.EPOCH,
-        maxConcurrent = s.maxConcurrent
-      )
-    )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   private val (store, sup) =
     val s      = new InMemoryControlPlaneStore()

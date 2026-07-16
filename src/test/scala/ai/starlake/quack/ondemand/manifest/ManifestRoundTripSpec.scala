@@ -5,16 +5,15 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
-  NodeSpec,
   Pool,
   RoleDistribution,
-  RunningNode,
   Tenant,
   TenantDb,
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   InMemoryFederatedSourceStore,
@@ -23,7 +22,6 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission
 }
 import at.favre.lib.crypto.bcrypt.BCrypt
-import cats.effect.IO
 import io.circe.syntax.*
 import io.circe.yaml.v12.Printer
 import io.circe.yaml.v12.parser
@@ -44,26 +42,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     * authorizeHandshake login gate. restore() only rehydrates caches; no process is spawned.
     * Mirrors the stub in FlightHandshakeSecuritySpec.
     */
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   private def buildSupervisor(store: InMemoryControlPlaneStore): PoolSupervisor =
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)

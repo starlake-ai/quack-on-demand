@@ -1,15 +1,13 @@
 // src/test/scala/ai/starlake/quack/security/UsageScopeSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.telemetry.StatementEvent
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantId
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Instant
 
 /** Tenant-scoped authZ on `GET /api/usage`.
@@ -42,12 +40,9 @@ import java.time.Instant
   *      alice).
   *   10. Ordering: engineMs descending across all groups in test 1.
   */
-class UsageScopeSpec extends AnyFlatSpec with Matchers {
+class UsageScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers {
 
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private val GlobexTenantId = "t-globex01"
-  private val AcmeTenantId   = SecurityFixtures.TenantId // "acme"
+  private val AcmeTenantId = SecurityFixtures.TenantId // "acme"
 
   private val d01 = Instant.parse("2026-07-01T00:00:00Z")
   private val d02 = Instant.parse("2026-07-02T00:00:00Z")
@@ -105,26 +100,9 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers {
     error = None
   )
 
-  private def addGlobex(
-      store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-  ): Unit =
-    store.upsertTenant(
-      Tenant(id = GlobexTenantId, displayName = "globex", authProvider = "db")
-    )
-
   private def seedAll(ts: RecordingTelemetryStore): Unit = {
     ts.appendStatements(List(E1, E2, E3, E4))
     ts.recomputeRollups(None, d02.plusSeconds(7200))
-  }
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] = {
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
   }
 
   // --- Usage JSON helpers ---
@@ -145,9 +123,6 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers {
 
   private def dataStartOf(body: String): Option[String] =
     parse(body).toOption.flatMap(_.hcursor.get[Option[String]]("dataStart").toOption.flatten)
-
-  private def errorCodeOf(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
 
   private def tenantOf(g: io.circe.Json): Option[String] = g.hcursor.get[String]("tenant").toOption
 
@@ -175,7 +150,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers {
   private def bootHarness(staticApiKey: Option[String] = None) = {
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
-    addGlobex(fix.store)
+    SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
       staticApiKey = staticApiKey,
@@ -390,7 +365,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers {
       )
       withClue(s"invalid groupBy body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_group_by")
+        errorCode(resp.body()) shouldBe Some("invalid_group_by")
       }
     } finally h.shutdown()
   }
@@ -406,7 +381,7 @@ class UsageScopeSpec extends AnyFlatSpec with Matchers {
       )
       withClue(s"invalid from body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_time")
+        errorCode(resp.body()) shouldBe Some("invalid_time")
       }
     } finally h.shutdown()
   }

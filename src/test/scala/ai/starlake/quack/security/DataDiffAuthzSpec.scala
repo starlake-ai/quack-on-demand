@@ -1,13 +1,11 @@
 // src/test/scala/ai/starlake/quack/security/DataDiffAuthzSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
-import io.circe.parser._
+import ai.starlake.quack.model.{Pool, RoleDistribution, TenantDb, TenantDbKind}
+import ai.starlake.quack.security.SecurityFixtures.{addTenantB, GlobexTenantId}
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantDbName as GlobexTenantDb
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 
 /** AuthZ contract of the row-level data-diff REST surface (Spec 02).
   *
@@ -19,30 +17,14 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
   * tenant-db proves the handler was reached), the pre-bound-resolution 400 invalid_cursor, and the
   * empty-catalog 422 invalid_snapshot from bound resolution.
   */
-class DataDiffAuthzSpec extends AnyFlatSpec with Matchers:
-
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private val GlobexTenantId   = "t-globex01"
-  private val GlobexTenantDbId = "td-globex01"
-  private val GlobexTenantDb   = "globex_main"
+class DataDiffAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private val DuckLakeTenantDbId = "td-acmedl01"
   private val DuckLakeTenantDb   = "acme_dl"
 
   private def addFixtures(fix: SecurityFixtures.Fixture): Unit =
     val s = fix.store
-    s.upsertTenant(Tenant(id = GlobexTenantId, displayName = "globex", authProvider = "db"))
-    s.upsertTenantDb(
-      TenantDb(
-        id = GlobexTenantDbId,
-        tenantId = GlobexTenantId,
-        name = GlobexTenantDb,
-        kind = TenantDbKind.InMemory,
-        metastore = Map.empty,
-        dataPath = ""
-      )
-    )
+    addTenantB(fix)
     s.upsertTenantDb(
       TenantDb(
         id = DuckLakeTenantDbId,
@@ -70,18 +52,6 @@ class DataDiffAuthzSpec extends AnyFlatSpec with Matchers:
         distribution = RoleDistribution(writeonly = 0, readonly = 0, dual = 1)
       )
     )
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def errorCode(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
 
   private def boot(
       staticApiKey: Option[String] = None

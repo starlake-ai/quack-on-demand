@@ -4,10 +4,10 @@ package ai.starlake.quack.security
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.StatementValidator
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -15,7 +15,6 @@ import org.apache.arrow.flight.{FlightClient, Location}
 import org.apache.arrow.memory.RootAllocator
 
 import java.nio.file.Files
-import java.time.Instant
 
 /** Test harness: boots the real [[FlightEdgeServer]] on an ephemeral port, against the in-memory
   * store seeded by [[SecurityFixtures]]. Auto-close by calling [[Harness.shutdown]].
@@ -30,26 +29,7 @@ object FlightEdgeHarness:
   // Stub QuackBackend: no real child processes. Mirrors the pattern
   // used in ManagerServerHarness and FlightSqlRouterSpec.
   // ------------------------------------------------------------------
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   // ------------------------------------------------------------------
   // Stub QuackHttpAdapter: never called during handshake-only tests.

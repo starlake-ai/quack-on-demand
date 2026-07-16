@@ -12,9 +12,6 @@ import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-
 /** `asOfTag` resolution on the catalog table endpoint (EPIC P2 / Spec 06).
   *
   * GET /api/catalog/tenant/{t}/database/{db}/schemas/{s}/tables/{tbl} accepts `asOfTag=<name>`
@@ -23,7 +20,7 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
   * tag 404; both params 400; dangling tag (snapshot vacuumed) 404 through the table-not-found arm;
   * no params still reads latest.
   */
-class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
+class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private val Tenant   = SecurityFixtures.TenantId
   private val TenantDb = SecurityFixtures.TenantDbName
@@ -51,12 +48,6 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers:
       override def maxSnapshotId(): Option[Long]                           = Some(LiveSnapshot)
       override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(LiveSnapshot)
       override def snapshotExists(id: Long): Boolean                       = id == LiveSnapshot
-
-  private def get(client: HttpClient, url: String): HttpResponse[String] =
-    client.send(
-      HttpRequest.newBuilder(URI.create(url)).GET().build(),
-      HttpResponse.BodyHandlers.ofString()
-    )
 
   private def withHarness(test: (ManagerServerHarness.Harness, Stub) => Unit): Unit =
     val fix  = SecurityFixtures.freshStore()

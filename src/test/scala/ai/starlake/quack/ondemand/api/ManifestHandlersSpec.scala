@@ -1,28 +1,18 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.manifest.ConfigManifest
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.time.Instant
-
 class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(RunningNode(s.nodeId, s.poolKey, s.role, "127.0.0.1", 21000, "tok",
-                          Some(1L), None, Instant.EPOCH, maxConcurrent = s.maxConcurrent))
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   private def newHandlers(store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore()): ManifestHandlers =
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)

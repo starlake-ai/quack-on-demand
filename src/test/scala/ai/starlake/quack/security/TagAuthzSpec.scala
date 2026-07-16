@@ -1,14 +1,12 @@
 // src/test/scala/ai/starlake/quack/security/TagAuthzSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
-import io.circe.parser._
+import ai.starlake.quack.security.SecurityFixtures.{addTenantB, GlobexTenantId}
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantDbName as GlobexTenantDb
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.nio.charset.StandardCharsets
+import java.net.http.HttpResponse
 
 /** AuthZ contract of the snapshot-tag REST surface (EPIC P2 / Spec 06).
   *
@@ -17,69 +15,8 @@ import java.nio.charset.StandardCharsets
   * and behind the handler-level [[ai.starlake.quack.ondemand.api.TenantScopeCheck]] gate. This spec
   * pins the four behaviors: credential-less 401, cross-tenant 403 tenant_forbidden, superuser
   * pass-through to the handler, and 404 on an unknown tenant (no existence leak).
-  *
-  * Mirrors [[RbacTenantScopeSpec]]'s harness helpers (copied locally where private).
   */
-class TagAuthzSpec extends AnyFlatSpec with Matchers:
-
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  // Tenant-B fixture constants (same shape as RbacTenantScopeSpec's addTenantB).
-  private val GlobexTenantId   = "t-globex01"
-  private val GlobexTenantDbId = "td-globex01"
-  private val GlobexTenantDb   = "globex_main"
-
-  /** Augment a [[SecurityFixtures.Fixture]] with a second tenant `globex` and one InMemory
-    * tenant-db so cross-tenant tag calls have a real target. InMemory (not DuckLake) on purpose:
-    * the superuser test relies on the handler's `invalid_kind` arm firing AFTER the scope gate.
-    */
-  private def addTenantB(fix: SecurityFixtures.Fixture): Unit =
-    val s = fix.store
-    s.upsertTenant(
-      Tenant(
-        id = GlobexTenantId,
-        displayName = "globex",
-        authProvider = "db"
-      )
-    )
-    s.upsertTenantDb(
-      TenantDb(
-        id = GlobexTenantDbId,
-        tenantId = GlobexTenantId,
-        name = GlobexTenantDb,
-        kind = TenantDbKind.InMemory,
-        metastore = Map.empty,
-        dataPath = ""
-      )
-    )
-
-  // ---------- HTTP helpers (mirroring RbacTenantScopeSpec) ------------------
-
-  private def post(
-      client: HttpClient,
-      url: String,
-      body: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", "application/json")
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def errorCode(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
+class TagAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private def expectForbidden(resp: HttpResponse[String], context: String): Unit =
     withClue(s"$context body: ${resp.body()}") {

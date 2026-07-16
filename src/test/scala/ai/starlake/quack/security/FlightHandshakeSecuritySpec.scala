@@ -3,23 +3,13 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthScope
-import ai.starlake.quack.model.{
-  NodeSpec,
-  Pool,
-  RoleDistribution,
-  RunningNode,
-  Tenant,
-  TenantDb,
-  TenantDbKind
-}
+import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, PoolPermission}
-import cats.effect.IO
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-
-import java.time.Instant
 
 /** Stubbed FlightSQL handshake security suite.
   *
@@ -42,26 +32,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     * tests (through upsertPool in the fixture), and those nodes are never actually touched by the
     * handshake gate.
     */
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   /** Build a PoolSupervisor over the given store and replay the store's state into the supervisor's
     * in-memory caches.

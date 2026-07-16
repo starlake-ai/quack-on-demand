@@ -45,6 +45,12 @@ object SecurityFixtures:
   val BobUsername: String   = "bob"
   val BobPassword: String   = "bobpw"
 
+  // Second-tenant ("tenant B") fixture constants shared by the cross-tenant authz specs.
+  val GlobexTenantId: String     = "t-globex01"
+  val GlobexTenantName: String   = "globex"
+  val GlobexTenantDbId: String   = "td-globex01"
+  val GlobexTenantDbName: String = "globex_main"
+
   /** Seeded in-memory store plus the auto-generated user ids that downstream specs need to resolve
     * role/pool-permission edges without extra lookups.
     */
@@ -57,6 +63,38 @@ object SecurityFixtures:
 
   private def bcryptHash(plaintext: String): String =
     BCrypt.withDefaults().hashToString(10, plaintext.toCharArray)
+
+  /** Augment a [[Fixture]] with a second tenant `globex` and one InMemory tenant-db so cross-tenant
+    * calls have a real target. InMemory (not DuckLake) on purpose: several superuser tests rely on
+    * the handler's `invalid_kind` arm firing AFTER the scope gate.
+    */
+  def addTenantB(fix: Fixture): Unit =
+    val s = fix.store
+    s.upsertTenant(
+      Tenant(
+        id = GlobexTenantId,
+        displayName = GlobexTenantName,
+        authProvider = "db"
+      )
+    )
+    s.upsertTenantDb(
+      TenantDb(
+        id = GlobexTenantDbId,
+        tenantId = GlobexTenantId,
+        name = GlobexTenantDbName,
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+    )
+
+  /** Tenant-only variant: seeds just the `globex` tenant row (no tenant-db). Used by the telemetry
+    * scope specs whose supervisor snapshot must not contain a globex tenant-db.
+    */
+  def addGlobexTenant(store: InMemoryControlPlaneStore): Unit =
+    store.upsertTenant(
+      Tenant(id = GlobexTenantId, displayName = GlobexTenantName, authProvider = "db")
+    )
 
   /** Build a freshly seeded fixture.
     *

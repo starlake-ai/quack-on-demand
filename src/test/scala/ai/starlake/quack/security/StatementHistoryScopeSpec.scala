@@ -2,13 +2,12 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.StatementRecord
-import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantId
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantName as GlobexName
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Instant
 
 /** Cross-tenant authZ on `GET /api/node/statements`.
@@ -24,21 +23,7 @@ import java.time.Instant
   *     FlightSQL handshake convention; the router records the display name today but future changes
   *     might switch)
   */
-class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
-
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private val GlobexTenantId = "t-globex01"
-  private val GlobexName     = "globex"
-
-  private def addTenantB(store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore): Unit =
-    store.upsertTenant(
-      Tenant(
-        id = GlobexTenantId,
-        displayName = GlobexName,
-        authProvider = "db"
-      )
-    )
+class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private def seed(h: ManagerServerHarness.Harness): Unit =
     // Two records per tenant: one carrying the display-name form (today's
@@ -91,15 +76,6 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
       )
     ).foreach(h.stmtHistory.record)
 
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
   private def tenantsOf(body: String): List[String] =
     parse(body).toOption
       .flatMap(_.hcursor.downField("statements").as[List[io.circe.Json]].toOption)
@@ -108,7 +84,7 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers:
 
   private def bootTwoTenants(staticApiKey: Option[String] = None) =
     val fix = SecurityFixtures.freshStore()
-    addTenantB(fix.store)
+    SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey)
     seed(h)
     (h, fix)

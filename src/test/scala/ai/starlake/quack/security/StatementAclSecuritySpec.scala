@@ -3,12 +3,11 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.sql.{Allowed, Denied, PostgresAclValidator, ValidationContext}
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RolePermission}
-import cats.effect.IO
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -45,26 +44,7 @@ class StatementAclSecuritySpec extends AnyFlatSpec with Matchers:
   // ---- infrastructure helpers -----------------------------------------
 
   /** No-op backend -- none of these tests spawn actual nodes. */
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   /** Build a PoolSupervisor over the given store and replay all persisted state into the
     * supervisor's in-memory caches.

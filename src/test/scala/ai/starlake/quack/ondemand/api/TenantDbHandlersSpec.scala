@@ -1,38 +1,26 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, RoleDistribution, RunningNode, Tenant}
+import ai.starlake.quack.model.{RoleDistribution, Tenant}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
-import java.time.Instant
-import scala.collection.concurrent.TrieMap
-
 /** Unit-tests the REST surface added for `qodstate_tenant_db` against
   * an in-memory supervisor (no Postgres needed). */
 class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private final class StubBackend extends QuackBackend:
-    private val nodes = TrieMap.empty[String, RunningNode]
-    def start(spec: NodeSpec): IO[RunningNode] = IO {
-      val n = RunningNode(spec.nodeId, spec.poolKey, spec.role,
-        "127.0.0.1", 21000 + nodes.size, "tok", Some(1L), None, Instant.EPOCH)
-      nodes.put(spec.nodeId, n); n
-    }
-    def stop(id: String):    IO[Unit] = IO { nodes.remove(id); () }
-    def isAlive(id: String): Boolean  = nodes.contains(id)
-    def discoverExisting():  IO[List[RunningNode]] = IO.pure(nodes.values.toList)
-    def cleanup():           IO[Unit] = IO { nodes.clear() }
-
   private def freshHandlers(): TenantDbHandlers =
-    val sup = new PoolSupervisor(new StubBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore()
+    )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     new TenantDbHandlers(sup)
 

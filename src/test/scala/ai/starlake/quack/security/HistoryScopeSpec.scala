@@ -1,15 +1,13 @@
 // src/test/scala/ai/starlake/quack/security/HistoryScopeSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.telemetry.StatementEvent
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.security.SecurityFixtures.GlobexTenantId
 import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Instant
 
 /** Tenant-scoped authZ on `GET /api/history/trends` and `GET /api/history/statements`.
@@ -34,12 +32,9 @@ import java.time.Instant
   *      round-trip produces the next page.
   *   7. Statements: static-key caller sees all 4 rows.
   */
-class HistoryScopeSpec extends AnyFlatSpec with Matchers {
+class HistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers {
 
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private val GlobexTenantId = "t-globex01"
-  private val AcmeTenantId   = SecurityFixtures.TenantId // "acme"
+  private val AcmeTenantId = SecurityFixtures.TenantId // "acme"
 
   private val BaseTs = Instant.parse("2026-07-01T10:00:00Z")
 
@@ -98,26 +93,9 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
   // Rollup watermark: one hour after BaseTs ensures all events fall within the window.
   private val RollupTs = BaseTs.plusSeconds(3600)
 
-  private def addGlobex(
-      store: ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-  ): Unit =
-    store.upsertTenant(
-      Tenant(id = GlobexTenantId, displayName = "globex", authProvider = "db")
-    )
-
   private def seedAll(ts: RecordingTelemetryStore): Unit = {
     ts.appendStatements(List(S1, S2, S3, S4))
     ts.recomputeRollups(None, RollupTs)
-  }
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] = {
-    val b = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => b.header("X-API-Key", k))
-    client.send(b.build(), HttpResponse.BodyHandlers.ofString())
   }
 
   // --- Trends JSON helpers ---
@@ -153,13 +131,10 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
     parse(body).toOption
       .flatMap(_.hcursor.get[Option[String]]("nextBefore").toOption.flatten)
 
-  private def errorCodeOf(body: String): Option[String] =
-    parse(body).toOption.flatMap(_.hcursor.get[String]("error").toOption)
-
   private def bootHarness(staticApiKey: Option[String] = None) = {
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
-    addGlobex(fix.store)
+    SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
       staticApiKey = staticApiKey,
@@ -225,7 +200,7 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
       )
       withClue(s"missing granularity body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_granularity")
+        errorCode(resp.body()) shouldBe Some("invalid_granularity")
       }
     } finally h.shutdown()
   }
@@ -241,7 +216,7 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
       )
       withClue(s"invalid granularity body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_granularity")
+        errorCode(resp.body()) shouldBe Some("invalid_granularity")
       }
     } finally h.shutdown()
   }
@@ -257,7 +232,7 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers {
       )
       withClue(s"invalid from body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        errorCodeOf(resp.body()) shouldBe Some("invalid_time")
+        errorCode(resp.body()) shouldBe Some("invalid_time")
       }
     } finally h.shutdown()
   }

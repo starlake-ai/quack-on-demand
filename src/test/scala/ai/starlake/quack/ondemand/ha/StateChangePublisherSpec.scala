@@ -1,24 +1,13 @@
 package ai.starlake.quack.ondemand.ha
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{
-  NodeSpec,
-  PoolKey,
-  RoleDistribution,
-  RunningNode,
-  Tenant,
-  TenantDbKind
-}
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-
-import java.time.Instant
-import scala.collection.concurrent.TrieMap
 
 class StateChangePublisherSpec extends AnyFlatSpec with Matchers:
 
@@ -28,32 +17,10 @@ class StateChangePublisherSpec extends AnyFlatSpec with Matchers:
     def topologyChanged(): Unit = topology += 1
     def rbacChanged(): Unit     = rbac += 1
 
-  private final class StubBackend extends QuackBackend:
-    private val nodes                          = TrieMap.empty[String, RunningNode]
-    def start(spec: NodeSpec): IO[RunningNode] = IO {
-      val n = RunningNode(
-        spec.nodeId,
-        spec.poolKey,
-        spec.role,
-        "127.0.0.1",
-        21000 + nodes.size,
-        "tok-" + spec.nodeId,
-        Some(1L),
-        None,
-        Instant.EPOCH,
-        maxConcurrent = spec.maxConcurrent
-      )
-      nodes.put(spec.nodeId, n); n
-    }
-    def stop(id: String): IO[Unit]                = IO { nodes.remove(id); () }
-    def isAlive(id: String): Boolean              = nodes.contains(id)
-    def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
-    def cleanup(): IO[Unit]                       = IO(nodes.clear())
-
   private def fresh(): (PoolSupervisor, Recording) =
     val rec = new Recording
     val sup = new PoolSupervisor(
-      new StubBackend,
+      new StubQuackBackend(tokenFor = StubQuackBackend.PerNodeToken),
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
       publish = rec

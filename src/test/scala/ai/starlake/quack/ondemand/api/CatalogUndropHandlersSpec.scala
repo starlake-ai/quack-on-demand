@@ -3,18 +3,12 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{
-  NodeSpec,
-  PoolKey,
-  RoleDistribution,
-  RunningNode,
-  Tenant,
-  TenantDbKind
-}
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.{DroppedTableEntry, DuckLakeCatalogReader}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
@@ -29,7 +23,6 @@ import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
-import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
 class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
@@ -51,27 +44,8 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     root.close()
     new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    private val counter                     = new AtomicInteger(23000)
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          counter.getAndIncrement(),
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend =
+    StubQuackBackend.noop(portBase = 23000, countingPorts = true)
 
   private def supervisor(withPool: Boolean = true): (PoolSupervisor, InMemoryControlPlaneStore) =
     val store = new InMemoryControlPlaneStore()

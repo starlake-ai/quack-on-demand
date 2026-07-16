@@ -2,15 +2,15 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource, NodeSpec, RunningNode}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.*
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{FederatedSourceOps, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{AuditEvent, AuditRateLimiter, AuditRecorder}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -18,7 +18,6 @@ import org.scalatest.matchers.should.Matchers
 import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
 import java.sql.DriverManager
-import java.time.Instant
 
 /** Handler-level audit spec. Tests that [[RoleHandlers]] records control-plane audit events on the
   * two key outcomes:
@@ -33,26 +32,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
   // Stub QuackBackend: no real child processes (mirrors ManagerServerHarness).
   // ---------------------------------------------------------------------------
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   // ---------------------------------------------------------------------------
   // DuckDB-backed UserStore (mirrors ManagerServerHarness.makeDuckDbUserStore).

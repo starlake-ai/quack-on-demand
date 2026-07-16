@@ -4,19 +4,12 @@ import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
-import ai.starlake.quack.model.{
-  NodeSpec,
-  PoolKey,
-  RoleDistribution,
-  RunningNode,
-  SnapshotTag,
-  Tenant,
-  TenantDbKind
-}
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, SnapshotTag, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, SchemaDiffResult}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.AuditRecorder
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
@@ -32,7 +25,6 @@ import sttp.model.StatusCode
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicInteger
 
 class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
 
@@ -113,27 +105,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     root.close()
     new ArrowStreamReader(new ByteArrayInputStream(out.toByteArray), allocator)
 
-  private def stubBackend: QuackBackend = new QuackBackend:
-    private val counter                     = new AtomicInteger(21000)
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          counter.getAndIncrement(),
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop(countingPorts = true)
 
   /** Tenant `acme` with one DuckLake tenant-db `acme_tpch1` and one running pool `bi` (so
     * `sup.list()` has a `PoolState` to pick for previews). `withPool = false` skips pool creation

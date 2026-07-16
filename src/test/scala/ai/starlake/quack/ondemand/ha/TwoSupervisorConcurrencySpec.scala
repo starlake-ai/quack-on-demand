@@ -1,16 +1,9 @@
 package ai.starlake.quack.ondemand.ha
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{
-  NodeSpec,
-  PoolKey,
-  RoleDistribution,
-  RunningNode,
-  Tenant,
-  TenantDbKind
-}
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PostgresControlPlaneStore}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import cats.effect.IO
@@ -18,35 +11,11 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.time.Instant
-import scala.collection.concurrent.TrieMap
-
 class TwoSupervisorConcurrencySpec extends AnyFlatSpec with Matchers:
 
   import TestPostgres.{pgHost, pgPass, pgPort, pgUser}
 
-  // Mirror the CapturingBackend in PoolSupervisorSpec.
-  private final class StubBackend extends QuackBackend:
-    private val nodes                          = TrieMap.empty[String, RunningNode]
-    def start(spec: NodeSpec): IO[RunningNode] = IO {
-      val n = RunningNode(
-        spec.nodeId,
-        spec.poolKey,
-        spec.role,
-        "127.0.0.1",
-        21000 + nodes.size,
-        "tok-" + spec.nodeId,
-        Some(1L),
-        None,
-        Instant.EPOCH,
-        maxConcurrent = spec.maxConcurrent
-      )
-      nodes.put(spec.nodeId, n); n
-    }
-    def stop(id: String): IO[Unit]                = IO { nodes.remove(id); () }
-    def isAlive(id: String): Boolean              = nodes.contains(id)
-    def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
-    def cleanup(): IO[Unit]                       = IO(nodes.clear())
+  private def newStubBackend() = new StubQuackBackend(tokenFor = StubQuackBackend.PerNodeToken)
 
   "two supervisors" should "not duplicate nodes when scale races reconcile" in {
     if !TestPostgres.reachable then cancel("local Postgres not reachable; skipping")
@@ -61,7 +30,7 @@ class TwoSupervisorConcurrencySpec extends AnyFlatSpec with Matchers:
       val locker  = new PgPoolLocker(dbUrl, pgUser, pgPass)
       def mkSup() =
         new PoolSupervisor(
-          new StubBackend,
+          newStubBackend(),
           new NodeLoadTracker,
           new PostgresControlPlaneStore(dbUrl, pgUser, pgPass),
           locks = locker

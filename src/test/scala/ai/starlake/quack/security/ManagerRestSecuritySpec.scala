@@ -5,10 +5,6 @@ import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.nio.charset.StandardCharsets
-
 /** End-to-end security tests for the ManagerServer REST API.
   *
   * Each test boots a fresh ManagerServer on an ephemeral port backed by the in-memory fixture store
@@ -19,45 +15,7 @@ import java.nio.charset.StandardCharsets
   * guard C. Login admin gate (AuthHandlers.login) D. Superuser gate on /api/config/server and
   * /api/manifest/export|import
   */
-class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
-
-  // ------------------------------------------------------------------
-  // Helpers
-  // ------------------------------------------------------------------
-
-  private def extractCode(body: String): Option[String] =
-    parse(body).toOption
-      .flatMap(_.hcursor.get[String]("error").toOption)
-
-  /** Per-request timeout. Long enough that a slow cold-JVM first call still succeeds; short enough
-    * that a real hang (server stuck, port collision, lost goroutine) fails fast with a readable
-    * error instead of dangling the entire suite for minutes.
-    */
-  private val RequestTimeout: java.time.Duration = java.time.Duration.ofSeconds(10)
-
-  private def get(
-      client: HttpClient,
-      url: String,
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val builder = HttpRequest.newBuilder(URI.create(url)).GET().timeout(RequestTimeout)
-    apiKey.foreach(k => builder.header("X-API-Key", k))
-    client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
-
-  private def post(
-      client: HttpClient,
-      url: String,
-      body: String,
-      contentType: String = "application/json",
-      apiKey: Option[String] = None
-  ): HttpResponse[String] =
-    val builder = HttpRequest
-      .newBuilder(URI.create(url))
-      .header("Content-Type", contentType)
-      .timeout(RequestTimeout)
-      .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-    apiKey.foreach(k => builder.header("X-API-Key", k))
-    client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   // ------------------------------------------------------------------
   // A. apiKeyGuard modes
@@ -181,7 +139,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
       withClue(s"POST /api/auth/login body: ${resp.body()}") {
         resp.statusCode() shouldBe 403
-        extractCode(resp.body()) should contain("admin_required")
+        errorCode(resp.body()) should contain("admin_required")
       }
     finally h.shutdown()
   }
@@ -208,13 +166,13 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val respBad  = post(h.httpClient, s"${h.baseUrl}/api/auth/login", badPw)
       withClue(s"disabled-user login body: ${respGood.body()}") {
         respGood.statusCode() shouldBe 401
-        extractCode(respGood.body()) should contain("invalid_credentials")
+        errorCode(respGood.body()) should contain("invalid_credentials")
       }
       // Same failure shape as a bad password: identical status + code, so the
       // response does not reveal whether the account is disabled or the
       // password was wrong.
       respBad.statusCode() shouldBe respGood.statusCode()
-      extractCode(respBad.body()) shouldBe extractCode(respGood.body())
+      errorCode(respBad.body()) shouldBe errorCode(respGood.body())
     finally h.shutdown()
   }
 
@@ -226,7 +184,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
       withClue(s"POST /api/auth/login body: ${resp.body()}") {
         resp.statusCode() shouldBe 400
-        extractCode(resp.body()) should contain("invalid_credentials")
+        errorCode(resp.body()) should contain("invalid_credentials")
       }
     finally h.shutdown()
   }
@@ -240,7 +198,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
       withClue(s"POST /api/auth/login body: ${resp.body()}") {
         resp.statusCode() shouldBe 503
-        extractCode(resp.body()) should contain("auth_disabled")
+        errorCode(resp.body()) should contain("auth_disabled")
       }
     finally h.shutdown()
   }
@@ -284,7 +242,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val resp = get(h.httpClient, s"${h.baseUrl}/api/config/server", apiKey = Some(token))
       withClue(s"GET /api/config/server body: ${resp.body()}") {
         resp.statusCode() shouldBe 403
-        extractCode(resp.body()) should contain("superuser_required")
+        errorCode(resp.body()) should contain("superuser_required")
       }
     finally h.shutdown()
   }
@@ -324,7 +282,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       val resp = get(h.httpClient, s"${h.baseUrl}/api/manifest/export", apiKey = Some(token))
       withClue(s"GET /api/manifest/export body: ${resp.body()}") {
         resp.statusCode() shouldBe 403
-        extractCode(resp.body()) should contain("superuser_required")
+        errorCode(resp.body()) should contain("superuser_required")
       }
     finally h.shutdown()
   }
@@ -398,7 +356,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers:
       )
       withClue(s"POST /api/manifest/import body: ${resp.body()}") {
         resp.statusCode() shouldBe 403
-        extractCode(resp.body()) should contain("superuser_required")
+        errorCode(resp.body()) should contain("superuser_required")
       }
     finally h.shutdown()
   }

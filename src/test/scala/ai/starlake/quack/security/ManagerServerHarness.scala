@@ -5,12 +5,12 @@ import ai.starlake.quack._
 import ai.starlake.quack.edge.{ActiveStatementRegistry, RouterFailure, StatementHistoryStore}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticationService
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
 import ai.starlake.quack.observability.metrics.MetricsEndpoint
 import ai.starlake.quack.ondemand.{ManagerServer, PoolSupervisor}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditRateLimiter,
@@ -26,7 +26,6 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
 import java.sql.DriverManager
-import java.time.Instant
 
 /** Test harness: boots the real [[ManagerServer]] on an ephemeral port backed by an
   * [[InMemoryControlPlaneStore]].
@@ -110,28 +109,8 @@ object ManagerServerHarness:
 
   // ------------------------------------------------------------------
   // Stub QuackBackend: no real child processes.
-  // Identical pattern to ManifestHandlersSpec.
   // ------------------------------------------------------------------
-  private def stubBackend: QuackBackend = new QuackBackend:
-    def start(s: NodeSpec): IO[RunningNode] =
-      IO.pure(
-        RunningNode(
-          s.nodeId,
-          s.poolKey,
-          s.role,
-          "127.0.0.1",
-          21000,
-          "tok",
-          Some(1L),
-          None,
-          Instant.EPOCH,
-          maxConcurrent = s.maxConcurrent
-        )
-      )
-    def stop(id: String)    = IO.unit
-    def isAlive(id: String) = true
-    def discoverExisting()  = IO.pure(Nil)
-    def cleanup()           = IO.unit
+  private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
   // Private alias so the existing `new InMemoryAuthSvc(...)` call site
   // below compiles without renaming everything.
