@@ -8,8 +8,8 @@ import { DeleteIcon } from './Icons';
   * "+ Add row policy" form that calls createRowPolicy. The predicate is a
   * boolean SQL expression that may embed identity tokens
   * (${user}, ${tenant}, ${tenantId}, ${roles}, ${groups}) substituted at
-  * query time. Row-level security is experimental and gated by
-  * QOD_RLS_ENABLED on the manager. */
+  * query time. Row-level security is enabled by default; QOD_RLS_ENABLED=false
+  * on the manager disables it. */
 export default function RoleRowPoliciesSection({ roleId }: { roleId: string }) {
   const [policies, setPolicies] = useState<RowPolicyDto[]>([]);
   const [error,    setError]    = useState<string | null>(null);

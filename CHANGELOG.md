@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.8 (unreleased)
+
+### Security
+
+- **Row-level and column-level security are no longer experimental and are enabled by default.**
+  `quack-on-demand.cls.enabled` and `quack-on-demand.rls.enabled` now default to `true`;
+  `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` remain available as kill switches.
+  With no policies defined the rewriters still short-circuit per statement, so deployments
+  without column or row policies see no behavior change.
+
 ## 0.3.7
 
 ### Catalog

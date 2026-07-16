@@ -37,9 +37,9 @@ final case class SchemaContext(
   * joins, set operations, CTEs and subqueries, and - when stacked under the column-level rewriter -
   * means row filtering runs on the true values before any column masking is applied.
   *
-  * `enabled` is the kill switch. When false (the default) every call short-circuits to
-  * [[Outcome.Passthrough]]. Row-level security is EXPERIMENTAL: operators opt in via
-  * `quack-on-demand.rls.enabled = true` (`QOD_RLS_ENABLED=true`).
+  * `enabled` is the kill switch, on by default. When false every call short-circuits to
+  * [[Outcome.Passthrough]]. Operators opt out via `quack-on-demand.rls.enabled = false`
+  * (`QOD_RLS_ENABLED=false`).
   */
 object RowPolicyRewriter:
   sealed trait Outcome
@@ -86,7 +86,7 @@ object RowPolicyRewriter:
         java.util.regex.Matcher.quoteReplacement(values.getOrElse(name, "NULL"))
     )
 
-class RowPolicyRewriter(enabled: Boolean = false):
+class RowPolicyRewriter(enabled: Boolean = true):
   import RowPolicyRewriter._
 
   def rewrite(

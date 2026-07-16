@@ -48,18 +48,15 @@ object ColumnPolicyRewriter:
   * FROM-item tables) plus the early-exit conditions (feature disabled, superuser, non-SELECT, no
   * policies) and delegates the actual SQL walk to the inner rewriter.
   *
-  * `enabled` is the kill switch. When false (the default), every call short-circuits to
-  * [[Passthrough]] without touching the catalog or the inner rewriter. Column-level security is
-  * EXPERIMENTAL: operators must opt in via `quack-on-demand.cls.enabled = true` (or
-  * `QOD_CLS_ENABLED=true`). Defaulting off avoids surprising existing deployments and lets us
-  * harden the rewriter against federated-source / LateralSubSelect / TableFunction edges in
-  * follow-up releases.
+  * `enabled` is the kill switch, on by default. When false, every call short-circuits to
+  * [[Passthrough]] without touching the catalog or the inner rewriter. Operators opt out via
+  * `quack-on-demand.cls.enabled = false` (or `QOD_CLS_ENABLED=false`).
   */
 final class ColumnPolicyRewriter(
     catalog: ColumnCatalog,
     inner: SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
     unresolvedMode: UnresolvedMode = UnresolvedMode.Pass,
-    enabled: Boolean = false
+    enabled: Boolean = true
 ):
   import ColumnPolicyRewriter._
 

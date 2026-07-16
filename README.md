@@ -102,7 +102,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 - **Arrow Flight SQL edge** with auto-generated self-signed TLS (drop in a CA-signed cert for prod)
 - **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
 - **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://qod.starlake.ai/operating/rbac-model)
-- **Column-level security & dynamic data masking** - per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too, behind an experimental `QOD_RLS_ENABLED` flag
+- **Column-level security & dynamic data masking** - per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too. Both are enabled by default, with `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` as kill switches
 - **Admin REST API** with an `X-API-Key` static key OR a session token from `/api/auth/login`
 
 ### Data plane

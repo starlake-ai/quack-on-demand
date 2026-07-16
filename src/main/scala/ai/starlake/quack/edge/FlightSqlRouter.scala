@@ -311,7 +311,7 @@ final class FlightSqlRouter(
             // Fail closed: the rewriter only reaches a parse attempt once the principal has
             // column policies, so a parse failure means we cannot prove the masked columns are
             // absent. Forwarding the original SQL would leak them. Deny instead of passthrough.
-            // See security-audit-2026-07-02 #5a. (CLS is experimental / default-off.)
+            // See security-audit-2026-07-02 #5a.
             clsDenied(
               "parse_failed",
               "column policy rewrite could not parse statement; denied (fail-closed)"
@@ -348,7 +348,7 @@ final class FlightSqlRouter(
             // Fail closed: the rewriter only reaches a parse attempt once the principal has row
             // policies, so a parse failure means we cannot prove the filtered rows are excluded.
             // Forwarding the original SQL would return unfiltered rows. Deny instead of passthrough.
-            // See security-audit-2026-07-02 #5a. (RLS is experimental / default-off.)
+            // See security-audit-2026-07-02 #5a.
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
             val f = RouterFailure.AccessDenied(
               "access denied: row policy rewrite could not parse statement; denied (fail-closed)"

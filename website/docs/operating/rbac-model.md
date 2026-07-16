@@ -197,20 +197,18 @@ FROM x` is masked according to the base table's policy. For FROM-item subqueries
 outer-scope policy keyed on `(subAlias, exposedName)` so the outer projection is masked too,
 since jsqltranspiler's lineage stops at the FROM boundary.
 
-### Kill switch (feature flag - EXPERIMENTAL)
+### Kill switch (feature flag)
 
-Column-level security is **experimental** and ships **disabled by default**. Operators opt in
-by setting `quack-on-demand.cls.enabled = true` (or env `QOD_CLS_ENABLED=true`). When disabled,
+Column-level security ships **enabled by default**. Operators opt out
+by setting `quack-on-demand.cls.enabled = false` (or env `QOD_CLS_ENABLED=false`). When disabled,
 every statement bypasses the rewriter completely: no FROM-table catalog lookup, no
 jsqltranspiler call, no per-statement overhead. The behaviour matches a build with column
 policies absent. Treat the toggle as a kill switch you can flip off in an incident: change
 the env var and restart the manager.
 
-While the feature is experimental, expect rough edges around federated sources,
-`LateralSubSelect` / `TableFunction` FROM items, and the 5-second catalog cache TTL race
-documented below. Standard SELECT, JOIN, CTE, UNION, subquery, CASE, CAST, IN, BETWEEN,
-EXTRACT, window, and LIKE constructs are covered by tests and considered ready for staging
-trials.
+Known limitations: federated sources, `LateralSubSelect` / `TableFunction` FROM items, and
+the 5-second catalog cache TTL race documented below. Standard SELECT, JOIN, CTE, UNION,
+subquery, CASE, CAST, IN, BETWEEN, EXTRACT, window, and LIKE constructs are covered by tests.
 
 ### Unresolved-table behaviour
 
@@ -345,9 +343,9 @@ The rewriter only runs for SELECT-shaped statements; DML and DDL pass through un
 
 Every table occurrence reachable from the statement is considered: the top-level `FROM` item, each `JOIN` right-hand item, parenthesised subqueries, and CTE (`WITH`) bodies are recursed into. A table matches a policy when its `(catalog, schema, table)` - resolved against the session's default catalog/schema for bare names - equals the policy tuple component-wise, with `*` matching anything. When a table matches more than one of the principal's policies (e.g. a wildcard tenant-id policy plus a specific-table policy, or policies from two different roles), the predicates are combined (see "Combining policies").
 
-### Kill switch (feature flag - EXPERIMENTAL)
+### Kill switch (feature flag)
 
-Row-level security is **experimental** and ships **disabled by default**. Operators opt in by setting `quack-on-demand.rls.enabled = true` (or env `QOD_RLS_ENABLED=true`). When disabled, every statement bypasses the rewriter completely - no parse, no table walk, no per-statement overhead. Treat the toggle as a kill switch you can flip off in an incident: change the env var and restart the manager. It is independent of `QOD_CLS_ENABLED`; either feature can run without the other.
+Row-level security ships **enabled by default**. Operators opt out by setting `quack-on-demand.rls.enabled = false` (or env `QOD_RLS_ENABLED=false`). When disabled, every statement bypasses the rewriter completely - no parse, no table walk, no per-statement overhead. Treat the toggle as a kill switch you can flip off in an incident: change the env var and restart the manager. It is independent of `QOD_CLS_ENABLED`; either feature can run without the other.
 
 ### Predicate validation
 
@@ -411,7 +409,7 @@ The `outcome` tag emits:
 
 ### Authoring
 
-Row policies are administered the same way as column policies: via REST endpoints under `/api/role/row-policy/{create,update,delete,list}`, via the admin UI's "Row policies" tab on the role detail page, and via YAML manifest (`rowPolicies` list under each role, each entry a `{catalog, schema, table, predicateSql}` object). The bundled demo manifest (`bootstrap-demo.yaml`) ships an example policy on `acme/analyst/customer` filtering to `c_mktsegment = 'BUILDING'`, so a fresh `LOAD_TPCH=1` boot with `QOD_RLS_ENABLED=true` demonstrates the feature end-to-end: the analyst sees only the ~30k BUILDING customers, a superuser sees all 150k. `scripts/adbc.sh` is a quick way to diff the two.
+Row policies are administered the same way as column policies: via REST endpoints under `/api/role/row-policy/{create,update,delete,list}`, via the admin UI's "Row policies" tab on the role detail page, and via YAML manifest (`rowPolicies` list under each role, each entry a `{catalog, schema, table, predicateSql}` object). The bundled demo manifest (`bootstrap-demo.yaml`) ships an example policy on `acme/analyst/customer` filtering to `c_mktsegment = 'BUILDING'`, so a fresh `LOAD_TPCH=1` boot demonstrates the feature end-to-end: the analyst sees only the ~30k BUILDING customers, a superuser sees all 150k. `scripts/adbc.sh` is a quick way to diff the two.
 
 ## The two gates
 
