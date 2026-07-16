@@ -1,6 +1,24 @@
 # Changelog
 
-## 0.3.8 (unreleased)
+## 0.3.8
+
+### Distribution
+
+- **One-command evaluation: `uvx qod demo`.** The Python CLI is now the launcher: it downloads
+  the release jar from GitHub Releases (verified against the new `.sha256` release asset),
+  auto-provisions a cached Temurin 21 JRE when no Java 21+ is present, self-installs the
+  ABI-pinned DuckDB (CLI + libduckdb), bundles the node spawn scripts, and execs the jar with
+  the right flags. Works the same on macOS, Linux, and Windows.
+- **`qod demo` (jar subcommand).** A fully self-contained demo: embedded ephemeral Postgres,
+  seeded minimal TPC-H, row/column security showcase (analyst sees masked `c_phone` and
+  BUILDING-segment rows only), all state deleted on Ctrl-C.
+- **`qod start` / `qod stop`.** Run a real manager against your own Postgres with no checkout,
+  at env-var parity with `scripts/run-jar.sh`: `QOD_VERSION`, `JAVA_BIN`, `JAVA_OPTS`,
+  `JAR_CACHE_DIR`, `DUCKDB_VERSION`, `DUCKDB_CACHE_DIR`, the `LOAD_TPCH` / `LOAD_TPCDS` /
+  `LOAD_SSB` / `LOAD_TPC` background seeders, `DEMO=full|minimal`, and `NUKE=1`. `qod stop`
+  discovers by port and tears down manager + nodes (SIGTERM, then SIGKILL).
+- **PyPI package renamed to `qod`** (`pip install qod`); `qod-cli` remains as a compatibility
+  alias. `scripts/install.sh` offers a curl-to-shell bootstrap (installs uv, then qod).
 
 ### Security
 
