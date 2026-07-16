@@ -1,9 +1,9 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{NodePlacement, NodeToleration, PoolCohort, RoleDistribution}
-import io.circe.{Codec, Decoder, Encoder, HCursor, Json, JsonObject}
+import io.circe.{Codec, Decoder, Encoder, Json}
+import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.generic.semiauto.deriveCodec
-import io.circe.syntax._
 
 final case class NodeTolerationDto(
     key: String,
@@ -508,7 +508,7 @@ final case class AuditActionsResponse(actions: List[String])
 // ----- RBAC: users -------------------------------------------------------
 
 final case class UserCreateRequest(
-    tenant: Option[String], // None = superuser
+    tenant: Option[String] = None, // None = superuser
     username: String,
     password: String,
     role: String = "user"
@@ -615,9 +615,9 @@ final case class ColumnPolicyDto(
 )
 final case class CreateColumnPolicyRequest(
     roleId: String,
-    catalogName: String,
-    schemaName: String,
-    tableName: String,
+    catalogName: String = "*",
+    schemaName: String = "*",
+    tableName: String = "*",
     columnName: String,
     action: String,
     transformSql: Option[String] = None
@@ -642,9 +642,9 @@ final case class RowPolicyDto(
 )
 final case class CreateRowPolicyRequest(
     roleId: String,
-    catalogName: String,
-    schemaName: String,
-    tableName: String,
+    catalogName: String = "*",
+    schemaName: String = "*",
+    tableName: String = "*",
     predicateSql: String
 )
 final case class UpdateRowPolicyRequest(
@@ -973,335 +973,43 @@ final case class SchemaDiffResponse(
 )
 
 object Dtos:
-  given Codec[RoleDistribution] = deriveCodec
-  // Hand-rolled codecs so optional fields with case-class defaults survive
-  // a round-trip through the wire (circe 0.14 deriveCodec is strict).
-  given Codec[NodeTolerationDto] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        key      <- c.get[String]("key")
-        operator <- c.getOrElse[String]("operator")("Equal")
-        value    <- c.getOrElse[Option[String]]("value")(None)
-        effect   <- c.getOrElse[Option[String]]("effect")(None)
-      yield NodeTolerationDto(key, operator, value, effect)
-    },
-    Encoder.instance { t =>
-      Json.fromJsonObject(
-        JsonObject(
-          "key"      -> t.key.asJson,
-          "operator" -> t.operator.asJson,
-          "value"    -> t.value.asJson,
-          "effect"   -> t.effect.asJson
-        )
-      )
-    }
-  )
-  given Codec[NodePlacementDto] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        nodeSelector <- c.getOrElse[Map[String, String]]("nodeSelector")(Map.empty)
-        tolerations  <- c.getOrElse[List[NodeTolerationDto]]("tolerations")(Nil)
-      yield NodePlacementDto(nodeSelector, tolerations)
-    },
-    Encoder.instance { p =>
-      Json.fromJsonObject(
-        JsonObject(
-          "nodeSelector" -> p.nodeSelector.asJson,
-          "tolerations"  -> p.tolerations.asJson
-        )
-      )
-    }
-  )
-  given Codec[PoolCohortDto] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        placement    <- c.getOrElse[NodePlacementDto]("placement")(NodePlacementDto())
-        distribution <- c.get[RoleDistribution]("distribution")
-      yield PoolCohortDto(placement, distribution)
-    },
-    Encoder.instance { p =>
-      Json.fromJsonObject(
-        JsonObject(
-          "placement"    -> p.placement.asJson,
-          "distribution" -> p.distribution.asJson
-        )
-      )
-    }
-  )
-  // Custom codec for CreatePoolRequest so that optional fields with case-class
-  // defaults stay optional in the wire JSON (circe 0.14 deriveCodec ignores Scala 3 defaults).
-  given Codec[CreatePoolRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant               <- c.get[String]("tenant")
-        tenantDb             <- c.get[String]("tenantDb")
-        pool                 <- c.get[String]("pool")
-        size                 <- c.get[Int]("size")
-        roleDistribution     <- c.get[RoleDistribution]("roleDistribution")
-        idleTimeoutSec       <- c.getOrElse[Int]("idleTimeoutSec")(-1)
-        maxConcurrentPerNode <- c.getOrElse[Int]("maxConcurrentPerNode")(0)
-        cohorts              <- c.getOrElse[List[PoolCohortDto]]("cohorts")(Nil)
-        disabled             <- c.getOrElse[Boolean]("disabled")(false)
-        cpu                  <- c.getOrElse[String]("cpu")("")
-        memory               <- c.getOrElse[String]("memory")("")
-        podTemplateYaml      <- c.getOrElse[String]("podTemplateYaml")("")
-      yield CreatePoolRequest(
-        tenant,
-        tenantDb,
-        pool,
-        size,
-        roleDistribution,
-        idleTimeoutSec,
-        maxConcurrentPerNode,
-        cohorts,
-        disabled,
-        None,
-        cpu,
-        memory,
-        podTemplateYaml
-      )
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "tenant"               -> r.tenant.asJson,
-          "tenantDb"             -> r.tenantDb.asJson,
-          "pool"                 -> r.pool.asJson,
-          "size"                 -> r.size.asJson,
-          "roleDistribution"     -> r.roleDistribution.asJson,
-          "idleTimeoutSec"       -> r.idleTimeoutSec.asJson,
-          "maxConcurrentPerNode" -> r.maxConcurrentPerNode.asJson,
-          "cohorts"              -> r.cohorts.asJson,
-          "disabled"             -> r.disabled.asJson,
-          "cpu"                  -> r.cpu.asJson,
-          "memory"               -> r.memory.asJson,
-          "podTemplateYaml"      -> r.podTemplateYaml.asJson
-        )
-      )
-    }
-  )
-  given Codec[ScalePoolRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant           <- c.get[String]("tenant")
-        tenantDb         <- c.get[String]("tenantDb")
-        pool             <- c.get[String]("pool")
-        targetSize       <- c.get[Int]("targetSize")
-        roleDistribution <- c.get[RoleDistribution]("roleDistribution")
-        force            <- c.getOrElse[Boolean]("force")(false)
-      yield ScalePoolRequest(tenant, tenantDb, pool, targetSize, roleDistribution, force)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "tenant"           -> r.tenant.asJson,
-          "tenantDb"         -> r.tenantDb.asJson,
-          "pool"             -> r.pool.asJson,
-          "targetSize"       -> r.targetSize.asJson,
-          "roleDistribution" -> r.roleDistribution.asJson,
-          "force"            -> r.force.asJson
-        )
-      )
-    }
-  )
-  given Codec[StopPoolRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant   <- c.get[String]("tenant")
-        tenantDb <- c.get[String]("tenantDb")
-        pool     <- c.get[String]("pool")
-        force    <- c.getOrElse[Boolean]("force")(false)
-      yield StopPoolRequest(tenant, tenantDb, pool, force)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "tenant"   -> r.tenant.asJson,
-          "tenantDb" -> r.tenantDb.asJson,
-          "pool"     -> r.pool.asJson,
-          "force"    -> r.force.asJson
-        )
-      )
-    }
-  )
-  given Codec[DeletePoolRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant   <- c.get[String]("tenant")
-        tenantDb <- c.get[String]("tenantDb")
-        pool     <- c.get[String]("pool")
-        force    <- c.getOrElse[Boolean]("force")(false)
-      yield DeletePoolRequest(tenant, tenantDb, pool, force)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "tenant"   -> r.tenant.asJson,
-          "tenantDb" -> r.tenantDb.asJson,
-          "pool"     -> r.pool.asJson,
-          "force"    -> r.force.asJson
-        )
-      )
-    }
-  )
-  // Custom codec for NodeInfo so all metric fields default to zero / true
-  // when absent in JSON; lets clients and UI poll responses share one shape.
-  given Codec[NodeInfo] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        nodeId        <- c.get[String]("nodeId")
-        role          <- c.get[String]("role")
-        host          <- c.get[String]("host")
-        port          <- c.get[Int]("port")
-        maxConcurrent <- c.getOrElse[Int]("maxConcurrent")(0)
-        inFlight      <- c.getOrElse[Int]("inFlight")(0)
-        totalServed   <- c.getOrElse[Long]("totalServed")(0L)
-        avgDurationMs <- c.getOrElse[Double]("avgDurationMs")(0.0)
-        p50Ms         <- c.getOrElse[Double]("p50Ms")(0.0)
-        p95Ms         <- c.getOrElse[Double]("p95Ms")(0.0)
-        p99Ms         <- c.getOrElse[Double]("p99Ms")(0.0)
-        healthy       <- c.getOrElse[Boolean]("healthy")(true)
-        draining      <- c.getOrElse[Boolean]("draining")(false)
-        quarantined   <- c.getOrElse[Boolean]("quarantined")(false)
-        duckMem       <- c.getOrElse[Option[Long]]("duckdbMemoryBytes")(None)
-        duckTemp      <- c.getOrElse[Option[Long]]("duckdbTempStorageBytes")(None)
-        duckSpillN    <- c.getOrElse[Option[Long]]("duckdbSpillFiles")(None)
-        duckSpillB    <- c.getOrElse[Option[Long]]("duckdbSpillBytes")(None)
-      yield NodeInfo(
-        nodeId,
-        role,
-        host,
-        port,
-        maxConcurrent,
-        inFlight,
-        totalServed,
-        avgDurationMs,
-        p50Ms,
-        p95Ms,
-        p99Ms,
-        healthy,
-        draining,
-        quarantined,
-        duckMem,
-        duckTemp,
-        duckSpillN,
-        duckSpillB
-      )
-    },
-    Encoder.instance { n =>
-      Json.fromJsonObject(
-        JsonObject(
-          "nodeId"                 -> n.nodeId.asJson,
-          "role"                   -> n.role.asJson,
-          "host"                   -> n.host.asJson,
-          "port"                   -> n.port.asJson,
-          "maxConcurrent"          -> n.maxConcurrent.asJson,
-          "inFlight"               -> n.inFlight.asJson,
-          "totalServed"            -> n.totalServed.asJson,
-          "avgDurationMs"          -> n.avgDurationMs.asJson,
-          "p50Ms"                  -> n.p50Ms.asJson,
-          "p95Ms"                  -> n.p95Ms.asJson,
-          "p99Ms"                  -> n.p99Ms.asJson,
-          "healthy"                -> n.healthy.asJson,
-          "draining"               -> n.draining.asJson,
-          "quarantined"            -> n.quarantined.asJson,
-          "duckdbMemoryBytes"      -> n.duckdbMemoryBytes.asJson,
-          "duckdbTempStorageBytes" -> n.duckdbTempStorageBytes.asJson,
-          "duckdbSpillFiles"       -> n.duckdbSpillFiles.asJson,
-          "duckdbSpillBytes"       -> n.duckdbSpillBytes.asJson
-        )
-      )
-    }
-  )
-  given Codec[PoolResponse]            = deriveCodec
-  given Codec[SetPoolResourcesRequest] = deriveCodec
-  given Codec[SetPoolTemplateRequest]  = deriveCodec
-  given Codec[PoolListResponse]        = deriveCodec
-  given Codec[HealthResponse]          = deriveCodec
-  given Codec[SetMaxConcurrentRequest] = deriveCodec
-  given Codec[NodeOpRequest]           = deriveCodec
-  given Codec[ErrorResponse]           = deriveCodec
-  // TenantRequest: hand-rolled so the optional auth fields default
-  // correctly when absent from the wire JSON.
-  given Codec[TenantRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        id           <- c.get[String]("id")
-        displayName  <- c.getOrElse[String]("displayName")("")
-        authProvider <- c.getOrElse[String]("authProvider")("db")
-        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
-      yield TenantRequest(id, displayName, authProvider, authConfig)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "id"           -> r.id.asJson,
-          "displayName"  -> r.displayName.asJson,
-          "authProvider" -> r.authProvider.asJson,
-          "authConfig"   -> r.authConfig.asJson
-        )
-      )
-    }
-  )
+  // Absent optional wire fields fall back to the case-class defaults: plain
+  // deriveCodec is strict (it rejects a missing field even when the case class
+  // has a default), so every DTO with defaults derives via ConfiguredCodec
+  // under this Configuration instead of a hand-rolled codec that can silently
+  // drift from its case class. DtosWireContractSpec pins the wire contract.
+  private given Configuration = Configuration.default.withDefaults
+
+  given Codec[RoleDistribution]         = deriveCodec
+  given Codec[NodeTolerationDto]        = ConfiguredCodec.derived
+  given Codec[NodePlacementDto]         = ConfiguredCodec.derived
+  given Codec[PoolCohortDto]            = ConfiguredCodec.derived
+  given Codec[CreatePoolRequest]        = ConfiguredCodec.derived
+  given Codec[ScalePoolRequest]         = ConfiguredCodec.derived
+  given Codec[StopPoolRequest]          = ConfiguredCodec.derived
+  given Codec[DeletePoolRequest]        = ConfiguredCodec.derived
+  given Codec[NodeInfo]                 = ConfiguredCodec.derived
+  given Codec[PoolResponse]             = deriveCodec
+  given Codec[SetPoolResourcesRequest]  = deriveCodec
+  given Codec[SetPoolTemplateRequest]   = deriveCodec
+  given Codec[PoolListResponse]         = deriveCodec
+  given Codec[HealthResponse]           = deriveCodec
+  given Codec[SetMaxConcurrentRequest]  = deriveCodec
+  given Codec[NodeOpRequest]            = deriveCodec
+  given Codec[ErrorResponse]            = deriveCodec
+  given Codec[TenantRequest]            = ConfiguredCodec.derived
   given Codec[TenantResponse]           = deriveCodec
   given Codec[TenantListResponse]       = deriveCodec
   given Codec[TenantOpRequest]          = deriveCodec
   given Codec[SetTenantDisabledRequest] = deriveCodec
-  // Hand-rolled so authConfig defaults to empty when absent from the wire JSON.
-  given Codec[SetTenantAuthRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        name         <- c.get[String]("name")
-        authProvider <- c.get[String]("authProvider")
-        authConfig   <- c.getOrElse[Map[String, String]]("authConfig")(Map.empty)
-      yield SetTenantAuthRequest(name, authProvider, authConfig)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "name"         -> r.name.asJson,
-          "authProvider" -> r.authProvider.asJson,
-          "authConfig"   -> r.authConfig.asJson
-        )
-      )
-    }
-  )
-  given Codec[SetPoolDisabledRequest] = deriveCodec
-  given Codec[ClientConfigResponse]   = deriveCodec
-  given Codec[ConfigEntryView]        = deriveCodec
-  given Codec[ConfigListResponse]     = deriveCodec
-  given Codec[ManifestImportSummary]  = deriveCodec
+  given Codec[SetTenantAuthRequest]     = ConfiguredCodec.derived
+  given Codec[SetPoolDisabledRequest]   = deriveCodec
+  given Codec[ClientConfigResponse]     = deriveCodec
+  given Codec[ConfigEntryView]          = deriveCodec
+  given Codec[ConfigListResponse]       = deriveCodec
+  given Codec[ManifestImportSummary]    = deriveCodec
 
-  // Hand-rolled decoder so omitted optional fields fall back to the
-  // case-class defaults (deriveCodec ignores Scala defaults and treats
-  // every field as required). Without this, POST {"tenant":"x","name":"y","kind":"memory"}
-  // is rejected with "Missing required field at 'metastore'/'dataPath'/'objectStore'".
-  given Codec[TenantDbRequest] = io.circe.Codec.from(
-    io.circe.Decoder.instance { c =>
-      for
-        tenant          <- c.get[String]("tenant")
-        name            <- c.get[String]("name")
-        kind            <- c.getOrElse[String]("kind")("ducklake")
-        metastore       <- c.getOrElse[Map[String, String]]("metastore")(Map.empty)
-        dataPath        <- c.getOrElse[String]("dataPath")("")
-        objectStore     <- c.getOrElse[Map[String, String]]("objectStore")(Map.empty)
-        defaultDatabase <- c.getOrElse[Option[String]]("defaultDatabase")(None)
-        defaultSchema   <- c.getOrElse[Option[String]]("defaultSchema")(None)
-        initSql         <- c.getOrElse[String]("initSql")("")
-      yield TenantDbRequest(
-        tenant,
-        name,
-        kind,
-        metastore,
-        dataPath,
-        objectStore,
-        defaultDatabase,
-        defaultSchema,
-        initSql
-      )
-    },
-    io.circe.generic.semiauto.deriveEncoder[TenantDbRequest]
-  )
+  given Codec[TenantDbRequest]        = ConfiguredCodec.derived
   given Codec[TenantDbResponse]       = deriveCodec
   given Codec[TenantDbListResponse]   = deriveCodec
   given Codec[TenantDbOpRequest]      = deriveCodec
@@ -1309,69 +1017,10 @@ object Dtos:
   given Codec[FailedRestart]          = deriveCodec
   given Codec[UpdateTenantDbResponse] = deriveCodec
 
-  given Codec[LoginRequest] = deriveCodec
-  // Hand-rolled so new optional fields fall back to defaults when absent on the wire,
-  // and so old clients (no superuser/manageableTenants) keep parsing.
-  given Codec[LoginResponse] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        token             <- c.get[String]("token")
-        username          <- c.get[String]("username")
-        tenant            <- c.getOrElse[Option[String]]("tenant")(None)
-        superuser         <- c.getOrElse[Boolean]("superuser")(false)
-        manageableTenants <- c.getOrElse[List[String]]("manageableTenants")(Nil)
-      yield LoginResponse(token, username, tenant, superuser, manageableTenants)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "token"             -> r.token.asJson,
-          "username"          -> r.username.asJson,
-          "tenant"            -> r.tenant.asJson,
-          "superuser"         -> r.superuser.asJson,
-          "manageableTenants" -> r.manageableTenants.asJson
-        )
-      )
-    }
-  )
-  given Codec[WhoamiResponse] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        username          <- c.get[String]("username")
-        role              <- c.get[String]("role")
-        tenant            <- c.getOrElse[Option[String]]("tenant")(None)
-        superuser         <- c.getOrElse[Boolean]("superuser")(false)
-        manageableTenants <- c.getOrElse[List[String]]("manageableTenants")(Nil)
-      yield WhoamiResponse(username, role, tenant, superuser, manageableTenants)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "username"          -> r.username.asJson,
-          "role"              -> r.role.asJson,
-          "tenant"            -> r.tenant.asJson,
-          "superuser"         -> r.superuser.asJson,
-          "manageableTenants" -> r.manageableTenants.asJson
-        )
-      )
-    }
-  )
-  given Codec[AuthModeResponse] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        mode            <- c.get[String]("mode")
-        ssoProviderName <- c.getOrElse[String]("ssoProviderName")("")
-      yield AuthModeResponse(mode, ssoProviderName)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "mode"            -> r.mode.asJson,
-          "ssoProviderName" -> r.ssoProviderName.asJson
-        )
-      )
-    }
-  )
+  given Codec[LoginRequest]     = deriveCodec
+  given Codec[LoginResponse]    = ConfiguredCodec.derived
+  given Codec[WhoamiResponse]   = ConfiguredCodec.derived
+  given Codec[AuthModeResponse] = ConfiguredCodec.derived
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec
@@ -1393,60 +1042,18 @@ object Dtos:
   given Codec[AuditActionsResponse] = deriveCodec
 
   // RBAC: users
-  // Custom decoders so Option[String] fields keep their case-class defaults
-  // when absent from the wire JSON (circe deriveCodec doesn't honor those).
-  given Codec[UserCreateRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        tenant   <- c.getOrElse[Option[String]]("tenant")(None)
-        username <- c.get[String]("username")
-        password <- c.get[String]("password")
-        role     <- c.getOrElse[String]("role")("user")
-      yield UserCreateRequest(tenant, username, password, role)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "tenant"   -> r.tenant.asJson,
-          "username" -> r.username.asJson,
-          "password" -> r.password.asJson,
-          "role"     -> r.role.asJson
-        )
-      )
-    }
-  )
+  given Codec[UserCreateRequest] = ConfiguredCodec.derived
   given Codec[UserUpdateRequest] = deriveCodec
   given Codec[UserDeleteRequest] = deriveCodec
   given Codec[UserResponse]      = deriveCodec
   given Codec[UserListResponse]  = deriveCodec
 
   // RBAC: roles
-  given Codec[RoleCreateRequest]          = deriveCodec
-  given Codec[RoleDeleteRequest]          = deriveCodec
-  given Codec[RoleResponse]               = deriveCodec
-  given Codec[RoleListResponse]           = deriveCodec
-  given Codec[RolePermissionGrantRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        roleId  <- c.get[String]("roleId")
-        catalog <- c.getOrElse[String]("catalog")("*")
-        schema  <- c.getOrElse[String]("schema")("*")
-        table   <- c.getOrElse[String]("table")("*")
-        verb    <- c.get[String]("verb")
-      yield RolePermissionGrantRequest(roleId, catalog, schema, table, verb)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "roleId"  -> r.roleId.asJson,
-          "catalog" -> r.catalog.asJson,
-          "schema"  -> r.schema.asJson,
-          "table"   -> r.table.asJson,
-          "verb"    -> r.verb.asJson
-        )
-      )
-    }
-  )
+  given Codec[RoleCreateRequest]           = deriveCodec
+  given Codec[RoleDeleteRequest]           = deriveCodec
+  given Codec[RoleResponse]                = deriveCodec
+  given Codec[RoleListResponse]            = deriveCodec
+  given Codec[RolePermissionGrantRequest]  = ConfiguredCodec.derived
   given Codec[RolePermissionRevokeRequest] = deriveCodec
   given Codec[RolePermissionResponse]      = deriveCodec
   given Codec[RolePermissionListResponse]  = deriveCodec
@@ -1463,85 +1070,14 @@ object Dtos:
 
   // RBAC: column policies
   given Codec[ColumnPolicyDto]           = deriveCodec
-  given Codec[CreateColumnPolicyRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        roleId       <- c.get[String]("roleId")
-        catalogName  <- c.getOrElse[String]("catalogName")("*")
-        schemaName   <- c.getOrElse[String]("schemaName")("*")
-        tableName    <- c.getOrElse[String]("tableName")("*")
-        columnName   <- c.get[String]("columnName")
-        action       <- c.get[String]("action")
-        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
-      yield CreateColumnPolicyRequest(
-        roleId,
-        catalogName,
-        schemaName,
-        tableName,
-        columnName,
-        action,
-        transformSql
-      )
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "roleId"       -> r.roleId.asJson,
-          "catalogName"  -> r.catalogName.asJson,
-          "schemaName"   -> r.schemaName.asJson,
-          "tableName"    -> r.tableName.asJson,
-          "columnName"   -> r.columnName.asJson,
-          "action"       -> r.action.asJson,
-          "transformSql" -> r.transformSql.asJson
-        )
-      )
-    }
-  )
-  given Codec[UpdateColumnPolicyRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        id           <- c.get[String]("id")
-        action       <- c.get[String]("action")
-        transformSql <- c.getOrElse[Option[String]]("transformSql")(None)
-      yield UpdateColumnPolicyRequest(id, action, transformSql)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "id"           -> r.id.asJson,
-          "action"       -> r.action.asJson,
-          "transformSql" -> r.transformSql.asJson
-        )
-      )
-    }
-  )
+  given Codec[CreateColumnPolicyRequest] = ConfiguredCodec.derived
+  given Codec[UpdateColumnPolicyRequest] = ConfiguredCodec.derived
   given Codec[DeleteColumnPolicyRequest] = deriveCodec
   given Codec[ColumnPolicyListResponse]  = deriveCodec
 
   // RBAC: row policies
   given Codec[RowPolicyDto]           = deriveCodec
-  given Codec[CreateRowPolicyRequest] = Codec.from(
-    Decoder.instance { (c: HCursor) =>
-      for
-        roleId       <- c.get[String]("roleId")
-        catalogName  <- c.getOrElse[String]("catalogName")("*")
-        schemaName   <- c.getOrElse[String]("schemaName")("*")
-        tableName    <- c.getOrElse[String]("tableName")("*")
-        predicateSql <- c.get[String]("predicateSql")
-      yield CreateRowPolicyRequest(roleId, catalogName, schemaName, tableName, predicateSql)
-    },
-    Encoder.instance { r =>
-      Json.fromJsonObject(
-        JsonObject(
-          "roleId"       -> r.roleId.asJson,
-          "catalogName"  -> r.catalogName.asJson,
-          "schemaName"   -> r.schemaName.asJson,
-          "tableName"    -> r.tableName.asJson,
-          "predicateSql" -> r.predicateSql.asJson
-        )
-      )
-    }
-  )
+  given Codec[CreateRowPolicyRequest] = ConfiguredCodec.derived
   given Codec[UpdateRowPolicyRequest] = deriveCodec
   given Codec[DeleteRowPolicyRequest] = deriveCodec
   given Codec[RowPolicyListResponse]  = deriveCodec
@@ -1567,21 +1103,7 @@ object Dtos:
   given Codec[CatalogHistoryResponse]     = deriveCodec
 
   // Federation
-  // Hand-rolled decoder so omitted optional fields fall back to the
-  // case-class defaults (deriveCodec ignores Scala defaults and treats
-  // `disabled` as required). Without this, POST {"alias":"x","setupSql":"..."}
-  // gets rejected with "Missing required field at 'disabled'".
-  given Codec[FederatedSourceCreateRequest] = io.circe.Codec.from(
-    io.circe.Decoder.instance { c =>
-      for
-        alias       <- c.get[String]("alias")
-        setupSql    <- c.get[String]("setupSql")
-        description <- c.getOrElse[Option[String]]("description")(None)
-        disabled    <- c.getOrElse[Boolean]("disabled")(false)
-      yield FederatedSourceCreateRequest(alias, setupSql, description, disabled)
-    },
-    io.circe.generic.semiauto.deriveEncoder[FederatedSourceCreateRequest]
-  )
+  given Codec[FederatedSourceCreateRequest] = ConfiguredCodec.derived
   given Codec[FederatedSourceResponse]      = deriveCodec
   given Codec[FederatedSourceListResponse]  = deriveCodec
   given Codec[FederatedSecretUpsertRequest] = deriveCodec
@@ -1657,87 +1179,15 @@ object Dtos:
     }
   )
 
-  // Managed maintenance (EPIC Spec 09). Hand-rolled decoder for the upsert request so every
-  // optional field defaults to None when absent from the wire JSON (deriveCodec ignores Scala 3
-  // defaults and treats every field as required).
-  given Codec[MaintenancePolicyUpsertRequest] = Codec.from(
-    Decoder.instance { c =>
-      for
-        tenant                 <- c.get[String]("tenant")
-        tenantDb               <- c.get[String]("tenantDb")
-        scopeKind              <- c.get[String]("scopeKind")
-        scopeSchema            <- c.getOrElse[Option[String]]("scopeSchema")(None)
-        scopeTable             <- c.getOrElse[Option[String]]("scopeTable")(None)
-        enabled                <- c.getOrElse[Option[Boolean]]("enabled")(None)
-        retentionDays          <- c.getOrElse[Option[Int]]("retentionDays")(None)
-        compactionEnabled      <- c.getOrElse[Option[Boolean]]("compactionEnabled")(None)
-        targetFileSize         <- c.getOrElse[Option[String]]("targetFileSize")(None)
-        smallFileMinCount      <- c.getOrElse[Option[Int]]("smallFileMinCount")(None)
-        rewriteDeleteThreshold <- c.getOrElse[Option[Double]]("rewriteDeleteThreshold")(None)
-        cleanupGraceDays       <- c.getOrElse[Option[Int]]("cleanupGraceDays")(None)
-        orphanMinAgeDays       <- c.getOrElse[Option[Int]]("orphanMinAgeDays")(None)
-        cron                   <- c.getOrElse[Option[String]]("cron")(None)
-      yield MaintenancePolicyUpsertRequest(
-        tenant,
-        tenantDb,
-        scopeKind,
-        scopeSchema,
-        scopeTable,
-        enabled,
-        retentionDays,
-        compactionEnabled,
-        targetFileSize,
-        smallFileMinCount,
-        rewriteDeleteThreshold,
-        cleanupGraceDays,
-        orphanMinAgeDays,
-        cron
-      )
-    },
-    Encoder.instance { r =>
-      Json.obj(
-        "tenant"                 -> r.tenant.asJson,
-        "tenantDb"               -> r.tenantDb.asJson,
-        "scopeKind"              -> r.scopeKind.asJson,
-        "scopeSchema"            -> r.scopeSchema.asJson,
-        "scopeTable"             -> r.scopeTable.asJson,
-        "enabled"                -> r.enabled.asJson,
-        "retentionDays"          -> r.retentionDays.asJson,
-        "compactionEnabled"      -> r.compactionEnabled.asJson,
-        "targetFileSize"         -> r.targetFileSize.asJson,
-        "smallFileMinCount"      -> r.smallFileMinCount.asJson,
-        "rewriteDeleteThreshold" -> r.rewriteDeleteThreshold.asJson,
-        "cleanupGraceDays"       -> r.cleanupGraceDays.asJson,
-        "orphanMinAgeDays"       -> r.orphanMinAgeDays.asJson,
-        "cron"                   -> r.cron.asJson
-      )
-    }
-  )
+  // Managed maintenance (EPIC Spec 09).
+  given Codec[MaintenancePolicyUpsertRequest] = ConfiguredCodec.derived
   given Codec[MaintenancePolicyDeleteRequest] = deriveCodec
   given Codec[MaintenancePolicyEntry]         = deriveCodec
   given Codec[MaintenanceEffectiveEntry]      = deriveCodec
   given Codec[MaintenancePolicyListResponse]  = deriveCodec
   given Codec[MaintenanceRunEntry]            = deriveCodec
-  // Hand-rolled so scope/operations default to None when absent from the wire JSON.
-  given Codec[MaintenanceRunRequest] = Codec.from(
-    Decoder.instance { c =>
-      for
-        tenant     <- c.get[String]("tenant")
-        tenantDb   <- c.get[String]("tenantDb")
-        scope      <- c.getOrElse[Option[String]]("scope")(None)
-        operations <- c.getOrElse[Option[String]]("operations")(None)
-      yield MaintenanceRunRequest(tenant, tenantDb, scope, operations)
-    },
-    Encoder.instance { r =>
-      Json.obj(
-        "tenant"     -> r.tenant.asJson,
-        "tenantDb"   -> r.tenantDb.asJson,
-        "scope"      -> r.scope.asJson,
-        "operations" -> r.operations.asJson
-      )
-    }
-  )
-  given Codec[MaintenanceRunResponse] = deriveCodec
+  given Codec[MaintenanceRunRequest]          = ConfiguredCodec.derived
+  given Codec[MaintenanceRunResponse]         = deriveCodec
 
   // Catalog data preview
   given Codec[PreviewColumn]           = deriveCodec

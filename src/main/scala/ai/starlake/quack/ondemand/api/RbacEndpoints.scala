@@ -23,8 +23,6 @@ object RbacEndpoints:
     .in("api")
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
-  private val apiKey = header[Option[String]]("X-API-Key")
-
   // ----- RBAC: users -----
   val createUser: PublicEndpoint[
     (UserCreateRequest, Option[String]),
@@ -122,7 +120,7 @@ object RbacEndpoints:
     base.get
       .in("role" / "list")
       .in(query[String]("tenant"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[RoleListResponse])
 
   val grantRolePermission: PublicEndpoint[
@@ -289,7 +287,7 @@ object RbacEndpoints:
     base.get
       .in("group" / "list")
       .in(query[String]("tenant"))
-      .in(apiKey)
+      .in(Endpoints.authToken)
       .out(jsonBody[GroupListResponse])
 
   // ----- RBAC: memberships (204 on success) -----
