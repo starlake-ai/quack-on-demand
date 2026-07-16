@@ -73,10 +73,21 @@ Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`R
 
 ### Fastest taste: `demo` mode (no Postgres, no Docker)
 
-One self-contained command boots a fully seeded instance against an **embedded, throwaway Postgres** - the only prerequisites are a JDK 21 and the `duckdb` CLI on your `PATH`:
+One command boots a fully seeded instance against an **embedded, throwaway Postgres**. With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the launcher fetches the release jar (sha256-verified against the GitHub release), a Java 21 runtime if none is present, and the pinned `duckdb` CLI, all cached under your user cache dir. Works the same on macOS, Linux, and Windows:
 
 ```bash
-sbt assembly                                                    # builds distrib/quack-on-demand-assembly-<version>.jar
+uvx qod demo
+```
+
+`pip install qod && qod demo` is equivalent. Other routes to the same demo:
+
+```bash
+# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
+# drop-in like Podman/Colima/OrbStack)
+docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
+
+# from a source checkout (needs a JDK 21 and the duckdb CLI on PATH)
+sbt assembly
 java -Darrow.allocation.manager.type=Unsafe \
   -jar distrib/quack-on-demand-assembly-*.jar demo
 ```
@@ -113,7 +124,7 @@ ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load te
 
 Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
 
-**Other paths:** `./scripts/run-jar.sh` for a bare-JVM run (downloads the released uber-jar, `QOD_VERSION=BUILD` builds from this checkout). The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
+**Other paths:** `qod start` runs a bare-JVM manager against your own Postgres with no checkout at all - it downloads the release jar (sha256-verified), a Java 21 runtime if needed, and the pinned duckdb, and honors the same env vars (`QOD_PG_*`, `LOAD_TPCH=1`, `NUKE=1`, `QOD_VERSION`, ...); `qod stop` tears it down. The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
 
 ---
 

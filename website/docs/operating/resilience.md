@@ -13,7 +13,7 @@ Worker pools scale horizontally. A pool can contain any number of Quack nodes; t
 
 ## Cold start and reconciliation
 
-When the manager JVM exits and a supervisor restarts it (systemd, Kubernetes, or a manual rerun of `run-jar.sh`), the following sequence runs:
+When the manager JVM exits and a supervisor restarts it (systemd, Kubernetes, or a manual rerun of `qod start`), the following sequence runs:
 
 1. **State restored from Postgres.** `PoolSupervisor.restore()` reads the normalized `qodstate_tenant`, `qodstate_tenant_db`, `qodstate_pool`, and `qodstate_node` tables (managed by Liquibase) and re-hydrates the registry into in-memory `TrieMap`s. The RBAC graph (`qodstate_role`, `qodstate_role_permission`, `qodstate_group`, `qodstate_user_role`, `qodstate_user_group`, `qodstate_group_role`, `qodstate_pool_permission`) is rebuilt into the per-session `EffectiveSet` on each connection.
 

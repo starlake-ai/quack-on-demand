@@ -15,13 +15,13 @@ For multi-host or container-orchestrated deployments, see the Kubernetes backend
 
 ## How nodes are spawned
 
-`LocalQuackBackend` spawns each DuckDB Quack node by forking a child process via `scripts/spawn-quack-node.sh`. The manager controls the full lifecycle: it allocates a port from the configured range, generates a random authentication token, sets the metastore environment variables, and hands those to the script. When the manager stops (SIGTERM or `./scripts/stop-jar.sh`), it sends SIGTERM to every tracked child and waits up to 5 seconds per process before issuing SIGKILL.
+`LocalQuackBackend` spawns each DuckDB Quack node by forking a child process via `scripts/spawn-quack-node.sh`. The manager controls the full lifecycle: it allocates a port from the configured range, generates a random authentication token, sets the metastore environment variables, and hands those to the script. When the manager stops (SIGTERM or `qod stop`), it sends SIGTERM to every tracked child and waits up to 5 seconds per process before issuing SIGKILL.
 
 **Port allocation.** The manager maintains a `PortAllocator` bounded by `minPort` and `maxPort` (defaults: 21900 to 22500). Ports are leased on spawn and released on stop. At most `maxNodesTotal` (default: 50) child nodes may be alive at the same time across all pools.
 
 **Do not run `scripts/spawn-quack-node.sh` directly.** The supervisor owns port allocation, token generation, and the metastore environment contract. Manual invocations bypass all of that, leak ports into the allocator's range, and produce orphan processes that cause silent "Authentication failed" errors at query time.
 
-**Orphan detection.** `scripts/run-jar.sh` runs a port preflight check at startup. If any listener is found inside the node port range it aborts with an actionable error message. To clear orphans:
+**Orphan cleanup.** A stale listener squatting the node port range makes the next spawn on that port fail. `qod stop` sweeps spawn scripts and leftover duckdb children; to clear orphans by hand:
 
 ```bash
 pkill -f 'quack_serve|spawn-quack-node'
@@ -64,10 +64,10 @@ The `kind` variable is also required. It selects the catalog mode: `ducklake` (D
 | `QOD_PG_PASSWORD` | `azizam` | Postgres password. Rotate before any non-local exposure. |
 | `QOD_DUCKLAKE_DATA_PATH` | `./ducklake/tpch` | Default data path propagated to spawned nodes. |
 
-**Wiping local state.** To discard all state and start fresh, pass `NUKE=1` to `run-jar.sh`:
+**Wiping local state.** To discard all state and start fresh, pass `NUKE=1` to `qod start`:
 
 ```bash
-NUKE=1 ./scripts/run-jar.sh
+NUKE=1 qod start
 ```
 
 This stops any running manager, drops the Postgres control-plane database and the bootstrap tenant database, and removes the `ducklake/`, `state/`, and `certs/` directories. This action is irreversible.
@@ -75,7 +75,7 @@ This stops any running manager, drops the Postgres control-plane database and th
 To boot freshly seeded instead of empty, combine `NUKE=1` with the demo seed flags. `DEMO=minimal` selects the single-DuckDB profile - one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes - the shape for fronting a single DuckDB/DuckLake database:
 
 ```bash
-NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 ```
 
 See [Demo bootstrap](/getting-started/demo) for the full flag reference and what each profile creates.

@@ -7,13 +7,13 @@ title: Demo bootstrap (LOAD_TPCH / LOAD_TPCDS)
 
 ```bash
 # native, both TPC benchmarks at SF=1
-NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 qod start
 
 # native, TPC-H only (fast path, ~10 s)
-NUKE=1 LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 qod start
 
 # native, TPC-H + the SSB star schema derived from it
-NUKE=1 LOAD_TPCH=1 LOAD_SSB=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 LOAD_SSB=1 qod start
 
 # docker compose, TPC-DS only at SF=10
 QOD_VERSION=BUILD NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh
@@ -31,7 +31,7 @@ Each `N` is that benchmark's scale factor. SF=1 is the fast path (~10 s of TPC-H
 The profile is only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset. Bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`:
 
 ```bash
-NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 ```
 
 `DEMO=minimal` plus `LOAD_TPCDS` warns and skips the TPC-DS loader (this profile has no `globex` tenant).
@@ -196,7 +196,7 @@ Replace `tenant`, `pool`, `username`, `password` with the personas from the tabl
 `NUKE=1` (without any `LOAD_TPC*` var) tears down state and boots empty:
 
 ```bash
-NUKE=1 ./scripts/run-jar.sh
+NUKE=1 qod start
 ```
 
 It drops the control-plane database, the `acme_tpch` and `globex_tpcds` tenant-db databases, the certs, and the ducklake data directories. Run-as-you-like operator setups built via the REST API or UI on top of the demo will be wiped along with everything else.

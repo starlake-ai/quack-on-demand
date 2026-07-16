@@ -5,13 +5,15 @@ title: The qod CLI
 
 `qod` is a single command-line client for both planes of quack-on-demand: the manager's admin REST surface on `:20900` (tenants, databases, pools, nodes, RBAC, catalog, federation, audit, usage) and the FlightSQL query plane on `:31338` (`qod sql`, one-shot or interactive). Every REST path has a matching noun-verb command - `POST /api/tenant/create` is `qod tenant create`, `GET /api/pool/list` is `qod pool list`, and so on - so if you know the API you already know most of the CLI.
 
+It is also the launcher: `qod demo` runs the self-contained demo, and `qod start` / `qod stop` run a real manager against your own Postgres - see [Installation](/getting-started/install) and the [manager jar reference](/reference/cli).
+
 ## Install
 
 ```bash
-pip install qod-cli
+pip install qod
 ```
 
-`qod-cli` is released on PyPI on the same version number as the manager itself, so pin the CLI to the manager you are talking to. Requires Python 3.10 or later.
+The CLI is released on PyPI as `qod` (with `qod-cli` kept as a compatibility alias) on the same version number as the manager itself, so pin the CLI to the manager you are talking to. Requires Python 3.10 or later.
 
 To install from a source checkout instead (for example while developing the CLI itself):
 
@@ -21,7 +23,7 @@ pip install ./cli
 
 Both routes install the `qod` console script on `$PATH`.
 
-**Windows.** The same `pip install qod-cli` installs a `qod.exe` entry point; there is no separate Windows package. The profile file lives at `%APPDATA%\qod\config.toml` instead of the Linux/macOS XDG path, and the interactive `qod sql` REPL gets line editing and history from `pyreadline3` (installed automatically as a Windows-only dependency of `qod-cli`).
+**Windows.** The same `pip install qod` installs a `qod.exe` entry point; there is no separate Windows package. The profile file lives at `%APPDATA%\qod\config.toml` instead of the Linux/macOS XDG path, and the interactive `qod sql` REPL gets line editing and history from `pyreadline3` (installed automatically as a Windows-only dependency).
 
 ## Login and profiles
 

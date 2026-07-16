@@ -3,7 +3,42 @@ id: install
 title: Installation
 ---
 
-Quack on Demand ships as a Docker image and as a single uber-jar. Two installation paths are supported: Docker, and the binaries (jar downloaded from Maven Central, or built from source). The jar path runs on **Linux, macOS, and Windows** - Windows support is experimental, requires `0.3.7-SNAPSHOT` or later, and uses PowerShell launchers (`*.ps1`) in place of the bash scripts; see [Run on Windows](#run-on-windows) below.
+Quack on Demand ships as a Docker image and as a single uber-jar driven by the `qod` CLI (`pip install qod`, or no install at all with `uvx`). The fastest way to evaluate it is [Demo mode](#demo-mode-self-contained-no-postgres) via `uvx qod demo`. For a durable deployment, two paths are supported: Docker, and the native jar via [`qod start`](#native-jar-qod-start). Both run on **Linux, macOS, and Windows** (Windows support is experimental; see [Run on Windows](#run-on-windows) below). GitHub Releases hosts the raw jar artifacts, but you should rarely need to download one by hand - every path below fetches what it needs.
+
+## Demo mode (self-contained, no Postgres)
+
+The fastest way to try Quack on Demand end to end. `demo` boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**.
+
+With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Temurin 21 JRE if no Java 21+ is on your machine (it asks first, ~50 MB, cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
+
+```bash
+uvx qod demo
+```
+
+`pip install qod && qod demo` is equivalent. Two more routes to the same demo:
+
+```bash
+# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
+# drop-in replacement like Podman, Colima, or OrbStack)
+docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
+
+# from a source checkout or a downloaded assembly jar
+# (needs a JDK 21 and the duckdb CLI on PATH):
+java -Darrow.allocation.manager.type=Unsafe \
+  -jar distrib/quack-on-demand-assembly-*.jar demo
+```
+
+It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS off), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
+
+The seeded principals demonstrate row + column security:
+
+- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
+- `acme-admin` / `demo-acme-admin` - full, unmasked data
+- a table `alice` has no grant on - denied
+
+:::warning
+Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the Binaries or Docker paths below with your own Postgres.
+:::
 
 ## Docker
 
@@ -36,35 +71,13 @@ QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=*** ./scripts/run-docker.sh
 
 **Note:** do not mix Docker and native-jar runs against the same catalog DB. DuckLake records the absolute data path in Postgres metadata. Inside the container that path is `/app/ducklake/<db>`; natively it is `<host-cwd>/ducklake/<db>`. Use a different `PG_DBNAME` (or `QOD_PG_DBNAME`) per mode, or wipe the data directory between switches.
 
-## Demo mode (self-contained, no Postgres)
+## Native jar (`qod start`)
 
-The fastest way to try Quack on Demand end to end. `demo` is a subcommand of the assembly jar that boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**. The only prerequisites are a **JDK 21** and the **`duckdb` CLI** on your `PATH`.
-
-```bash
-# after `sbt assembly` (or any downloaded assembly jar):
-java -Darrow.allocation.manager.type=Unsafe \
-  -jar distrib/quack-on-demand-assembly-*.jar demo
-```
-
-It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS off), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
-
-The seeded principals demonstrate row + column security:
-
-- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
-- `acme-admin` / `demo-acme-admin` - full, unmasked data
-- a table `alice` has no grant on - denied
-
-:::warning
-Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the Binaries or Docker paths below with your own Postgres.
-:::
-
-## Binaries
+`qod start` runs a real manager on the host JVM against your own Postgres, with no repository checkout: it downloads the release jar from GitHub Releases (verified against the published sha256), self-installs the DuckDB CLI + `libduckdb` at the pinned ABI, and starts the JVM with the right flags.
 
 ### Prerequisites
 
-- **JDK 21 or later.** Download it from [Adoptium (Eclipse Temurin)](https://adoptium.net/temurin/releases/?version=21) or use your platform's package manager (`brew install temurin@21`, `apt install openjdk-21-jdk`, `winget install EclipseAdoptium.Temurin.21.JDK`). The assembly jar embeds an `Add-Opens` manifest attribute (JEP 261) so no extra `--add-opens` flags are required when running `java -jar`.
-- **`curl` + `unzip` on `$PATH`.** `run-jar.sh` uses them on first boot to self-install the DuckDB CLI + `libduckdb` shared library into `$REPO_DIR/.duckdb/<version>/` at the ABI libquackwire links against (overridable via `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR`). The install is mandatory by design - an operator's system duckdb at the wrong ABI crashes the first node spawn with a confusing dlopen error. Air-gapped operators can pre-populate the cache directory; the script skips the network fetch when the cached binaries match the pinned version. On **Windows**, `run-jar.ps1` does the same self-install with built-in `Invoke-WebRequest` / `Expand-Archive` (no `curl`/`unzip` needed) and prepends the cache `bin\` + `lib\` to `PATH`.
-- **Postgres 16 or later.** Installers for all platforms are at [postgresql.org/download](https://www.postgresql.org/download/) (Windows users can also grab the [EDB installer](https://www.enterprisedb.com/downloads/postgres-postgresql-downloads) directly). The control plane stores all state in a dedicated database (default name `qod`) on `localhost:5432`. The `run-jar.sh` startup script probes Postgres before the JVM boots and refuses to proceed against a server older than PG 16.
+- **Postgres 16 or later, reachable.** Installers for all platforms are at [postgresql.org/download](https://www.postgresql.org/download/) (Windows users can also grab the [EDB installer](https://www.enterprisedb.com/downloads/postgres-postgresql-downloads) directly). The control plane stores all state in a dedicated database (default name `qod`) on `localhost:5432`; point `QOD_PG_HOST` / `QOD_PG_PORT` / `QOD_PG_USER` / `QOD_PG_PASSWORD` at yours. When `psql` is on `PATH`, `qod start` creates the control-plane database up front (idempotent); without it the manager creates what it needs on first connection.
 
   If you do not have a local Postgres instance, the quickest path is:
 
@@ -75,97 +88,73 @@ Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral 
     postgres:16-alpine
   ```
 
+- **Java 21+ is found, not required.** `qod start` uses `JAVA_HOME` or `java` on `PATH` when a 21+ JVM is present; otherwise it offers to download a cached Temurin 21 JRE (about 50 MB, one time). `JAVA_BIN` forces a specific binary; `JAVA_OPTS` adds JVM flags (e.g. `-Xmx2g`).
+- **DuckDB is self-installed** (CLI + `libduckdb` at the ABI libquackwire links against) into the user cache dir - a system duckdb at the wrong ABI would crash the first node spawn, so it is never used. `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR` override the pin and location; air-gapped operators can pre-populate `$DUCKDB_CACHE_DIR/$VERSION/{bin,lib}` and no network fetch happens.
+
 ### Run from Linux/MacOS
 
-`scripts/run-jar.sh` handles everything: it resolves the latest release from Maven Central (`ai.starlake:quack-on-demand_3:<version>`), caches the jar under `~/.cache/quack-on-demand/`, probes Postgres, creates the control-plane database if it does not exist, and starts the JVM with the Arrow allocator pinned.
-
 ```bash
-# Latest release (default)
-./scripts/run-jar.sh
+uv tool install qod            # or: pip install qod
 
-# Pinned release
-QOD_VERSION=0.3.2 ./scripts/run-jar.sh
-
-# Latest snapshot from Central snapshots
-QOD_VERSION=latest-snapshot ./scripts/run-jar.sh
+qod start                      # this CLI's matching release
+QOD_VERSION=latest qod start   # newest release
+QOD_VERSION=0.3.8 qod start    # pinned release
+qod start --jar path/to/quack-on-demand-assembly-X.Y.Z.jar   # a jar you built
 ```
 
-On first run against a freshly-provisioned Postgres, the script creates the `qod` database and Liquibase applies the control-plane schema. The admin UI is at `http://localhost:20900/ui/`; log in as `admin` with password `admin` (change this before any exposure beyond localhost -- see [Configuration model](#configuration-model) below).
+On first run against a freshly-provisioned Postgres, Liquibase applies the control-plane schema. The admin UI is at `http://localhost:20900/ui/`; log in as `admin` with password `admin` (change this before any exposure beyond localhost -- see [Configuration model](#configuration-model) below).
 
-The FlightSQL edge listens on `localhost:31338` with TLS on by default (self-signed cert auto-generated under `certs/`).
+The FlightSQL edge listens on `localhost:31338` with TLS on by default. Durable state (the self-signed certs, and the default DuckLake data path unless `QOD_DUCKLAKE_DATA_PATH` is set) lives under the platform user data dir (`~/.local/share/qod` on Linux, `~/Library/Application Support/qod` on macOS).
 
-To stop the manager:
+To stop the manager and its quack nodes (SIGTERM, escalating to SIGKILL after `FORCE_AFTER` seconds):
 
 ```bash
-./scripts/stop-jar.sh
+qod stop
 ```
 
 #### Seeding the demo dataset for a quick smoke test
 
-Pass `LOAD_TPCH=1`, `LOAD_TPCDS=1`, and/or `LOAD_SSB=1` to seed each benchmark independently before the JVM starts. The `run-jar.sh` self-install above already provisions the DuckDB CLI the loaders need - no extra steps.
+Pass `LOAD_TPCH=1`, `LOAD_TPCDS=1`, and/or `LOAD_SSB=1` to seed each benchmark independently; the loaders run in the background using the self-installed DuckDB - no extra steps.
 
 ```bash
-LOAD_TPCH=1 ./scripts/run-jar.sh                          # TPC-H only (acme, ~10 s)
-LOAD_TPCDS=1 ./scripts/run-jar.sh                         # TPC-DS only (globex, ~30 s)
-LOAD_SSB=1 ./scripts/run-jar.sh                           # SSB star schema only (acme, ~15 s)
-LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh             # TPC-H + TPC-DS
-LOAD_TPC=1 ./scripts/run-jar.sh                           # legacy shortcut for all three
+LOAD_TPCH=1 qod start                          # TPC-H only (acme, ~10 s)
+LOAD_TPCDS=1 qod start                         # TPC-DS only (globex, ~30 s)
+LOAD_SSB=1 qod start                           # SSB star schema only (acme, ~15 s)
+LOAD_TPCH=1 LOAD_TPCDS=1 qod start             # TPC-H + TPC-DS
+LOAD_TPC=1 qod start                           # legacy shortcut for all three
 ```
 
-Each flag seeds the matching demo dataset: `acme` loaded with TPC-H (8 tables in schema `tpch1`), `globex` loaded with TPC-DS (24 tables in schema `tpcds1`), and/or the SSB star schema (5 tables in schema `ssb1`, derived from TPC-H dbgen and living next to `tpch1` in the `acme_tpch` tenant-db). The bundled manifest under `src/main/resources/bootstrap-demo.yaml` declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
+Each flag seeds the matching demo dataset: `acme` loaded with TPC-H (8 tables in schema `tpch1`), `globex` loaded with TPC-DS (24 tables in schema `tpcds1`), and/or the SSB star schema (5 tables in schema `ssb1`, derived from TPC-H dbgen and living next to `tpch1` in the `acme_tpch` tenant-db). The bundled manifest `bootstrap-demo.yaml` (imported from the jar's classpath) declares the tenants, roles, groups, and users; see the [Access control model](/operating/rbac-model) for the full ACL matrix.
 
-For a completely fresh start (drops the control-plane DB and wipes local state directories before booting):
+For a completely fresh start (drops the control-plane DB and wipes local state directories before booting; requires `psql` for the DB drops):
 
 ```bash
-NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 qod start
 ```
 
 To front a single DuckDB instance instead of the multi-tenant demo, `DEMO=minimal` imports `bootstrap-demo-minimal.yaml`: one tenant (`acme`), one pool (`bi`), one dual node serving both reads and writes, and the analyst RLS/CLS demo. `DEMO=full` is the default and covers the multi-tenant, multi-pool, and federation demos. The profile is only consulted when a `LOAD_*` flag is set and `QOD_BOOTSTRAP_YAML` is unset; bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`. `DEMO=minimal` with `LOAD_TPCDS` warns and skips the TPC-DS loader (no `globex` tenant in this profile).
 
 ```bash
-NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 ```
 
 ### Run on Windows
 
 :::warning Experimental
-Windows support is **experimental** and requires version **0.3.7-SNAPSHOT** or later - no stable release carries the Windows launchers yet. Set the version env var *before* running the jar:
-
-```powershell
-$env:QOD_VERSION = '0.3.7-SNAPSHOT'
-.\scripts\run-jar.ps1
-```
+Windows support is **experimental**. The `qod` launcher needs release **0.3.8 or later** (older releases predate the `demo`/`start` subcommand support and are refused).
 :::
 
-The manager runs natively on Windows - no WSL, no Docker. The bash launchers have PowerShell twins, and Quack nodes are spawned through a PowerShell mirror of the node-spawn script.
-
-**Prerequisites**
-
-- **JDK 21+** (`java` on `PATH`, or `JAVA_HOME` set).
-- **Windows PowerShell 5+** (ships with Windows) - used to spawn Quack nodes.
-- **PostgreSQL 16+** reachable from the host (native install, a container, or a network host). `psql` is *optional* - the manager provisions its own control-plane and tenant databases; when `psql` is present `run-jar.ps1` additionally runs a reachability probe, enforces the PG16+ version gate, creates the control-plane database up-front, and enables the `NUKE=1` / `LOAD_*` flows below.
-- **DuckDB is self-installed** by `run-jar.ps1` (CLI + `duckdb.dll`, v1.5.4, `windows-amd64`) into `.duckdb\<version>\` and prepended to `PATH`. A system `duckdb` on `PATH` is ignored - an ABI/feature mismatch (for example a `winget` 0.10.x build) would fail node spawn.
-
-**Run** (from a PowerShell prompt at the repo root):
+The manager runs natively on Windows - no WSL, no Docker. `pip install qod` installs the same `qod.exe` entry point, and `qod demo` / `qod start` work as on Linux/macOS: Java 21 is auto-provisioned when missing, DuckDB (CLI + `duckdb.dll`) is self-installed, and Quack nodes are spawned through the bundled PowerShell mirror of the node-spawn script.
 
 ```powershell
-$env:QOD_VERSION        = '0.3.7-SNAPSHOT'
+pip install qod
 $env:QOD_PG_HOST        = 'localhost'
 $env:QOD_PG_PASSWORD    = 'hunter2'
 $env:QOD_ADMIN_PASSWORD = 'change-me'
-.\scripts\run-jar.ps1
+qod start
 ```
 
-`run-jar.ps1` is at feature parity with the bash `run-jar.sh`. By default it resolves the jar from Maven Central (`QOD_VERSION`; on Windows pin it to `0.3.7-SNAPSHOT` or later, since older releases do not carry the Windows launchers; `latest-snapshot` picks the newest snapshot), caches it under `%USERPROFILE%\.cache\quack-on-demand\` with a sha1 check, and falls back to the newest `distrib\quack-on-demand-assembly-*.jar` or `sbt assembly` (bootstrapping `sbt` into `.sbt-bootstrap\` if it isn't on `PATH`) when nothing is published. Set `$env:QOD_VERSION='BUILD'` to force a local `sbt assembly`, or `$env:QOD_VERSION='LOCAL'` to reuse the newest `distrib\` jar without rebuilding. Before starting the JVM it runs a Postgres reachability probe + PG16 gate, creates the control-plane database if missing, and does a port preflight (aborting if the REST/FlightSQL ports are held or a stale Quack node is squatting the node-port range). All the same `QOD_*` / `PROXY_*` environment variables apply. Stop with `.\scripts\stop-jar.ps1`.
-
-**Seeding the demo datasets.** The same seed flags as the bash path work on Windows - `run-jar.ps1` runs the PowerShell demo loaders (`load-{tpch,tpcds,ssb}-dbgen.ps1`) in the background before the JVM starts:
-
-```powershell
-$env:LOAD_TPCH = '1'; .\scripts\run-jar.ps1                       # TPC-H SF=1 into acme/acme_tpch
-$env:NUKE = '1'; $env:LOAD_TPCH = '1'; .\scripts\run-jar.ps1      # wipe state, then fresh boot + seed
-```
-
-`LOAD_TPCDS=N` (globex/globex_tpcds) and `LOAD_SSB=N` (acme, schema `ssb1`) behave the same; `LOAD_TPC=N` is the legacy shortcut for all three. `NUKE=1` drops the control-plane and demo tenant-db databases and wipes `ducklake\`, `state\`, and `certs\` before booting (irreversible; requires `psql`). Each loader can also be run standalone (e.g. `$env:SF=10; .\scripts\load-tpch-dbgen.ps1`).
+**Current Windows gaps:** `qod stop` is not implemented (kill the java process with `taskkill /PID <pid> /T`), and the `LOAD_*` benchmark seeders are bash-only through `qod start` (it warns and skips them; run the PowerShell loaders `scripts\load-*-dbgen.ps1` from a checkout instead).
 
 **Client path.** Two ways the manager talks to the Quack nodes:
 
@@ -183,22 +172,19 @@ Copy-Item native\quackwire\build\Release\quackwire.dll libquackwire\binaries\win
 $env:QOD_WITH_WINDOWS_NATIVE = 'true'
 sbt libquackwire/publishLocal
 sbt assembly            # bundles native/windows-x86_64/quackwire.dll
-.\scripts\run-jar.ps1   # the default native client now works on Windows
+qod start --jar distrib\quack-on-demand-assembly-<version>.jar
 ```
 
 ### Build from source
 
-`QOD_VERSION=BUILD` tells `run-jar.sh` to call `sbt assembly` first instead of downloading; `QOD_VERSION=LOCAL` reuses the newest jar already in `distrib/` without rebuilding or consulting Maven Central:
-
-```bash
-QOD_VERSION=BUILD ./scripts/run-jar.sh
-QOD_VERSION=LOCAL ./scripts/run-jar.sh
-```
-
-To build the jar separately and run it manually:
-
 ```bash
 sbt assembly
+qod start --jar distrib/quack-on-demand-assembly-*.jar
+```
+
+To run the jar manually instead:
+
+```bash
 java -jar distrib/quack-on-demand-assembly-*.jar
 ```
 
@@ -206,14 +192,14 @@ The assembly output lands in `distrib/quack-on-demand-assembly-<version>.jar`. T
 
 Note: `sbt compile` and `sbt assembly` also run `npm ci` and `npm run build` inside the `ui/` directory as a resource generator, so the React admin UI is bundled automatically. There is no separate UI build step.
 
-## Install the CLI (optional)
+## The CLI beyond launching
 
-The `qod` command-line client drives the whole REST surface and runs SQL
-against the FlightSQL edge:
+The same `qod` command drives the whole REST surface and runs SQL against the
+FlightSQL edge:
 
 ```bash
-pip install qod-cli
 qod login --url http://localhost:20900 --username admin
+qod tenant list
 ```
 
 See the [CLI section](/cli/) for a tour.

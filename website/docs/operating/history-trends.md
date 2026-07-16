@@ -69,7 +69,7 @@ The manager runs an hourly background purge:
 To keep raw rows for a longer period:
 
 ```bash
-QOD_STMT_HISTORY_RETENTION_DAYS=30 ./scripts/run-jar.sh
+QOD_STMT_HISTORY_RETENTION_DAYS=30 qod start
 ```
 
 Set `QOD_STMT_HISTORY_RETENTION_DAYS=0` to keep raw rows forever (the purge runs but deletes nothing). Keeping raw rows longer than 90 days will not cause rollup gaps but will increase the `qodstate_stmt_history` table size; make sure your Postgres instance has room.

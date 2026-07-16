@@ -140,7 +140,7 @@ The manager runs an hourly background purge that deletes rows older than `QOD_AU
 To keep audit records for a longer period:
 
 ```bash
-QOD_AUDIT_RETENTION_DAYS=365 ./scripts/run-jar.sh
+QOD_AUDIT_RETENTION_DAYS=365 qod start
 ```
 
 To disable retention (keep forever), set `QOD_AUDIT_RETENTION_DAYS=0`. The purge runs but deletes nothing.

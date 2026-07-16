@@ -31,15 +31,16 @@ This pulls the published `starlakeai/quack-on-demand` image plus a bundled `post
 
 ### Option B: From the jar
 
-If you have JDK 21+ and a reachable Postgres:
+If you have a reachable Postgres (Java is auto-provisioned when missing):
 
 ```bash
-./scripts/run-jar.sh
+uv tool install qod    # or: pip install qod
+qod start
 ```
 
-On first run the script downloads the latest release jar from Maven Central, probes Postgres, creates the control-plane database (`qod`), then starts the JVM. When Postgres is unreachable the script warns and aborts; start Postgres first or use the Docker Compose path above. Stop it with `./scripts/stop-jar.sh` (SIGTERM, then SIGKILL after 10 seconds).
+On first run `qod start` downloads the release jar from GitHub Releases (sha256-verified), self-installs the pinned DuckDB, creates the control-plane database (`qod`) when `psql` is available, then starts the JVM. Stop it with `qod stop` (SIGTERM, then SIGKILL after 10 seconds).
 
-On **Windows** (experimental), run the PowerShell twins instead - `.\scripts\run-jar.ps1` and `.\scripts\stop-jar.ps1` - and pin the version to `0.3.7-SNAPSHOT` or later first (`$env:QOD_VERSION = '0.3.7-SNAPSHOT'`); no stable release carries the Windows launchers yet. See [Run on Windows](/getting-started/install#run-on-windows) for the native-Windows details.
+On **Windows** (experimental), the same `pip install qod && qod start` works natively; see [Run on Windows](/getting-started/install#run-on-windows) for the current gaps (no `qod stop`, no `LOAD_*` seeding).
 
 ### What comes up
 
@@ -52,11 +53,11 @@ Either path brings up the same surface:
 
 ### Boot flags
 
-The same flags work on both `run-docker-compose.sh` and `run-jar.sh`, and they combine:
+The same flags work on both `run-docker-compose.sh` and `qod start`, and they combine:
 
 | Flag | Effect |
 |---|---|
-| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `run-jar.sh` on first boot, see [Run from Linux/MacOS](/getting-started/install#run-from-linuxmacos)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Any seed flag being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
+| `LOAD_TPCH=N` | Seeds TPC-H sf=N into `acme/acme_tpch` (8 tables in schema `tpch1`). The jar path runs the loader on the host (DuckDB CLI + `libduckdb` are auto-installed by `qod start` on first boot, see [Run from Linux/MacOS](/getting-started/install#run-from-linuxmacos)); the Compose path seeds inside the container. `LOAD_TPCH=1` is ~6 M lineitem rows; SF=10 is ~60 M. Any seed flag being set also exports `QOD_BOOTSTRAP_YAML` so the JVM imports the bundled demo manifest. |
 | `LOAD_TPCDS=N` | Seeds TPC-DS sf=N into `globex/globex_tpcds` (24 tables in schema `tpcds1`). Slower than TPC-H at the same SF (SF=10 ≈ several minutes; SF=100+ spills to disk). |
 | `LOAD_SSB=N` | Seeds the SSB (Star Schema Benchmark) star schema at sf=N: 5 tables (`lineorder`, `customer`, `supplier`, `part`, `dwdate`) derived from TPC-H dbgen into schema `ssb1` of `acme/acme_tpch`, next to the TPC-H tables and served by the same acme pools. |
 | `LOAD_TPC=N` | Legacy shortcut: equivalent to setting `LOAD_TPCH=N`, `LOAD_TPCDS=N`, and `LOAD_SSB=N`. Explicit per-bench vars override it. |
@@ -76,7 +77,7 @@ Any seed flag (or the legacy `LOAD_TPC=1` shortcut, which enables all three) imp
 To run the gateway in front of a single DuckDB instance instead, `DEMO=minimal` swaps in `bootstrap-demo-minimal.yaml`: one tenant (`acme`), one pool (`bi`), and one dual node serving both reads and writes, plus the analyst RLS/CLS demo. Bootstrap only imports into a fresh control plane, so switch profiles with `NUKE=1`:
 
 ```bash
-NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 ```
 
 Pick one benchmark to keep boot snappy:
@@ -89,7 +90,7 @@ NUKE=1 LOAD_TPCDS=10 ./scripts/run-docker-compose.sh      # TPC-DS only, SF=10
 The jar path takes the same flags:
 
 ```bash
-NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 ./scripts/run-jar.sh
+NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=1 qod start
 ```
 
 ## Open the admin console

@@ -14,7 +14,7 @@ TLS is on at startup (`PROXY_TLS_ENABLED=true`). The server reads the certificat
 | Certificate chain | `certs/server-cert.pem` | `PROXY_TLS_CERT_CHAIN` |
 | Private key | `certs/server-key.pem` | `PROXY_TLS_PRIVATE_KEY` |
 
-Paths are resolved relative to the JVM working directory (the repo root when launched via `scripts/run-jar.sh`).
+Paths are resolved relative to the JVM working directory (the qod state dir, e.g. `~/.local/share/qod`, when launched via `qod start`).
 
 ### Automatic self-signed certificate generation
 
