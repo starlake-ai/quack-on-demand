@@ -395,22 +395,45 @@ final class PoolSupervisor(
         case None => state
     }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
 
-  private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =
+  /** The full NodeSpec for one slot of a pool, derived from its PoolState. Shared by every spawn
+    * path (createPool, scaleUnlocked, spawnFromDistribution, respawn) so the 13-field contract
+    * cannot drift between them.
+    */
+  private def specFromState(
+      key: PoolKey,
+      state: PoolState,
+      nodeId: String,
+      role: ai.starlake.quack.model.Role,
+      placement: NodePlacement,
+      maxConcurrent: Int
+  ): NodeSpec =
     NodeSpec(
       poolKey = key,
-      nodeId = n.nodeId,
-      role = n.role,
+      nodeId = nodeId,
+      role = role,
       metastore = state.metastore,
       s3 = state.s3,
-      maxConcurrent = n.maxConcurrent,
+      maxConcurrent = maxConcurrent,
       kindWire = state.kindWire,
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
-      placement = placementForNodeId(key, n.nodeId),
+      placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
       podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
     )
+
+  /** Start `specs` sequentially, clearing any stale NodeLoadTracker entry first (a reused node id
+    * must not inherit a lingering draining=true flag from a prior scale-down). Returns the started
+    * nodes in spawn order.
+    */
+  private def spawnAll(specs: List[NodeSpec]): IO[List[RunningNode]] =
+    specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
+      acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
+    }
+
+  private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =
+    specFromState(key, state, n.nodeId, n.role, placementForNodeId(key, n.nodeId), n.maxConcurrent)
 
   /** NodeSpec for an ephemeral Spec 09 maintenance node. Never registered in the Router or
     * NodeLoadTracker; the caller owns the full lifecycle (start -> chain -> stop). Borrows the
@@ -497,28 +520,17 @@ final class PoolSupervisor(
         p.effectiveCohorts.flatMap(c => c.distribution.asRoleList.map(r => (r, c.placement)))
       case None =>
         state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
-    val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
-    val specs     = plan.zipWithIndex.map { case ((role, placement), i) =>
-      NodeSpec(
+    val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+      specFromState(
         key,
+        state,
         PoolSupervisor.nodeId(key, i + 1),
         role,
-        state.metastore,
-        state.s3,
-        maxConcurrent = state.maxConcurrentPerNode,
-        kindWire = state.kindWire,
-        extraSetupSql = nodeExtra,
-        dbInitSql = state.dbInitSql,
-        placement = placement,
-        cpu = Option(state.cpu).filter(_.nonEmpty),
-        memory = Option(state.memory).filter(_.nonEmpty),
-        podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
+        placement,
+        state.maxConcurrentPerNode
       )
     }
-    specs
-      .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-        acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
-      }
+    spawnAll(specs)
       .flatMap { running =>
         val updated = state.copy(nodes = running)
         pools.put(key, updated)
@@ -1127,7 +1139,6 @@ final class PoolSupervisor(
           // restart that re-projects PoolState from persisted rows still has the
           // operator-authored initSql available separately (and respawn can
           // re-concatenate without double-prepending).
-          val nodeExtra  = PoolSupervisor.joinInitAndBlob(initSql, fedBlob)
           val poolEntity = Pool(
             id = newId("p"),
             tenantId = td.tenantId,
@@ -1154,50 +1165,40 @@ final class PoolSupervisor(
               poolEntity.effectiveCohorts.flatMap { c =>
                 c.distribution.asRoleList.map(role => (role, c.placement))
               }
+            // Pool state sans nodes: the spawn specs derive from it, and the
+            // spawned nodes are folded back in below before it is published.
+            val preState = PoolState(
+              key,
+              Nil,
+              dist,
+              merged,
+              td.objectStore,
+              maxConcurrentPerNode,
+              disabled = disabled,
+              kindWire = kindWire,
+              // Federation blob only; respawn concatenates with initSql fresh.
+              extraSetupSql = fedBlob,
+              dbInitSql = td.initSql,
+              initSql = initSql,
+              defaultDatabase = td.defaultDatabase,
+              defaultSchema = td.defaultSchema,
+              cpu = cpu,
+              memory = memory,
+              podTemplateYaml = podTemplateYaml
+            )
             val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
-              NodeSpec(
+              specFromState(
                 key,
+                preState,
                 PoolSupervisor.nodeId(key, i + 1),
                 role,
-                merged,
-                td.objectStore,
-                maxConcurrent = maxConcurrentPerNode,
-                kindWire = kindWire,
-                extraSetupSql = nodeExtra,
-                dbInitSql = td.initSql,
-                placement = placement,
-                cpu = Option(cpu).filter(_.nonEmpty),
-                memory = Option(memory).filter(_.nonEmpty),
-                podTemplateYaml = Option(podTemplateYaml).filter(_.nonEmpty)
+                placement,
+                maxConcurrentPerNode
               )
             }
-            specs
-              .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-                acc.flatMap(rs =>
-                  IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
-                )
-              }
+            spawnAll(specs)
               .flatMap { running =>
-                val state = PoolState(
-                  key,
-                  running,
-                  dist,
-                  merged,
-                  td.objectStore,
-                  maxConcurrentPerNode,
-                  disabled = disabled,
-                  kindWire = kindWire,
-                  // Federation blob only; respawn concatenates with initSql fresh.
-                  extraSetupSql = fedBlob,
-                  dbInitSql = td.initSql,
-                  initSql = initSql,
-                  defaultDatabase = td.defaultDatabase,
-                  defaultSchema = td.defaultSchema,
-                  cpu = cpu,
-                  memory = memory,
-                  podTemplateYaml = podTemplateYaml
-                )
-                pools.put(key, state)
+                pools.put(key, preState.copy(nodes = running))
                 running
                   .foldLeft(IO.unit)((acc, n) =>
                     acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
@@ -1342,24 +1343,19 @@ final class PoolSupervisor(
 
         if toRemove.isEmpty && rolesToAdd.isEmpty then IO.pure(state.nodes)
         else
-          val nodeExtra = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql)
           // Fresh ids start above the current high-water mark so they never
-          // collide with survivors during a mixed add/remove.
+          // collide with survivors during a mixed add/remove. Scaling clears
+          // authored cohorts (updatePoolEntityDist below), so new nodes spawn
+          // placement-less by design.
           val baseIndex = state.size
           val specs     = rolesToAdd.zipWithIndex.map { case (role, i) =>
-            NodeSpec(
+            specFromState(
               key,
+              state,
               PoolSupervisor.nodeId(key, baseIndex + i + 1),
               role,
-              state.metastore,
-              state.s3,
-              maxConcurrent = state.maxConcurrentPerNode,
-              kindWire = state.kindWire,
-              extraSetupSql = nodeExtra,
-              dbInitSql = state.dbInitSql,
-              cpu = Option(state.cpu).filter(_.nonEmpty),
-              memory = Option(state.memory).filter(_.nonEmpty),
-              podTemplateYaml = Option(state.podTemplateYaml).filter(_.nonEmpty)
+              NodePlacement.empty,
+              state.maxConcurrentPerNode
             )
           }
           val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))
@@ -1379,17 +1375,8 @@ final class PoolSupervisor(
             }
 
           stopRemoved *> deleteRemoved *>
-            specs
-              .foldLeft(IO.pure(survivors)) { (acc, spec) =>
-                // Reset any stale tracker entry before (re)starting: scaling down
-                // with force=false sets draining=true and deletes the node row but
-                // leaves the tracker entry behind, and scaling back up reuses the
-                // freed node id. Without this remove the fresh node inherits the old
-                // draining=true flag (mirrors createPool / reconcile spawn paths).
-                acc.flatMap(rs =>
-                  IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _)
-                )
-              }
+            spawnAll(specs)
+              .map(survivors ++ _)
               .flatMap { combined =>
                 pools.put(key, state.copy(nodes = combined, distribution = newDist))
                 updatePoolEntityDist(key, newDist, combined.size)
