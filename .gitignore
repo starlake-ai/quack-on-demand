@@ -119,9 +119,9 @@ website/node_modules/
 website/build/
 website/.docusaurus/
 website/static/openapi.yaml
-website/docs/reference/configuration.md
 src/main/scala/ai/starlake/quack/edge/.metals-scala-cli
 screens
 .venv-release/
 cli/dist
 /.bloop
+/docs
