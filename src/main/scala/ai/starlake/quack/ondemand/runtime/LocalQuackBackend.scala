@@ -35,6 +35,15 @@ final class LocalQuackBackend(
     // Defaults from application.conf apply first; per-pool entries from
     // CreatePoolRequest.metastore override them.
     val env = pb.environment()
+    // When running from an installed app-image (QOD_APP_HOME set), prepend the bundled duckdb bin
+    // so spawn-quack-node.sh's `command -v duckdb` resolves it. Additive: no-op in dev/source runs.
+    LocalQuackBackend.duckdbPathPrefix(sys.env.get("QOD_APP_HOME")).foreach { prefix =>
+      val current = Option(env.get("PATH")).getOrElse("")
+      env.put(
+        "PATH",
+        if current.isEmpty then prefix else s"$prefix${java.io.File.pathSeparator}$current"
+      )
+    }
     defaultMetastore.foreach { case (k, v) => env.put(k, v) }
     spec.metastore.foreach { case (k, v) => env.put(k, v) }
     env.put("kind", spec.kindWire)
@@ -153,6 +162,13 @@ object LocalQuackBackend:
     * this constant is the in-repo fallback so the test suite and zero-config dev runs keep working.
     */
   val DefaultSpawnScript: String = "./scripts/spawn-quack-node.sh"
+
+  /** Directory to prepend to the spawned node's PATH so it resolves the bundled `duckdb`. Set only
+    * when `QOD_APP_HOME` is present (installed app-image); `None` for repo/dev runs, which rely on
+    * `duckdb` already being on PATH.
+    */
+  def duckdbPathPrefix(appHome: Option[String]): Option[String] =
+    appHome.filter(_.nonEmpty).map(h => s"$h/duckdb/bin")
 
   /** In-repo Windows fallback spawn script (a PowerShell mirror of
     * `spawn-quack-node.sh`). Production passes `mgrCfg.spawnScriptWindows`
