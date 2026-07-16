@@ -7,7 +7,6 @@
 
 # Quack on Demand
 
-[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)](https://starlake-ai.github.io/quack-on-demand/operating/resilience)
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/ai.starlake/quack-on-demand_3.svg?label=maven%20central)](https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
@@ -24,10 +23,10 @@ DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the eng
 
 **Beta.** In active use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
 
-The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process. [Resilience](https://starlake-ai.github.io/quack-on-demand/operating/resilience) documents the failure-and-recovery matrix in full; multi-manager mode is tracked on the issues board.
+The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process.
 
-**Documentation:** https://starlake-ai.github.io/quack-on-demand/ - full guides, configuration reference, and REST API.
-Jump to: [Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://starlake-ai.github.io/quack-on-demand/concepts/architecture) · [RBAC model](https://starlake-ai.github.io/quack-on-demand/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
+**Documentation:** https://qod.starlake.ai - full guides, configuration reference, and REST API.
+Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://qod.starlake.ai/concepts/architecture) · [RBAC model](https://qod.starlake.ai/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ---
 
@@ -88,7 +87,7 @@ Connect a BI tool or JDBC client:
 jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
 ```
 
-ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://starlake-ai.github.io/quack-on-demand/getting-started/quickstart)** and **[Connecting clients](https://starlake-ai.github.io/quack-on-demand/connecting/clients)**.
+ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://qod.starlake.ai/getting-started/quickstart)** and **[Connecting clients](https://qod.starlake.ai/connecting/clients)**.
 
 Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
 
@@ -102,7 +101,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 - **Arrow Flight SQL edge** with auto-generated self-signed TLS (drop in a CA-signed cert for prod)
 - **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
-- **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://starlake-ai.github.io/quack-on-demand/operating/rbac-model)
+- **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://qod.starlake.ai/operating/rbac-model)
 - **Column-level security & dynamic data masking** - per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too, behind an experimental `QOD_RLS_ENABLED` flag
 - **Admin REST API** with an `X-API-Key` static key OR a session token from `/api/auth/login`
 
@@ -116,7 +115,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 - **React admin console** at `http://localhost:20900/ui/` - tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
 - **Observability built in** - Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships a Grafana dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
-- **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://starlake-ai.github.io/quack-on-demand/operating/resilience)
+- **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://qod.starlake.ai/operating/resilience)
 - **Every config key is overridable** via a `QOD_*` env var
 
 ---
@@ -161,7 +160,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
 | Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
 
-Full reference: [Configuration](https://starlake-ai.github.io/quack-on-demand/reference/configuration).
+Full reference: [Configuration](https://qod.starlake.ai/reference/configuration).
 
 ---
 
