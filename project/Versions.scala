@@ -21,6 +21,7 @@ object Versions {
   val hikariCp       = "6.2.1"
   val jbcrypt        = "0.10.2"
   val postgresql     = "42.7.4"
+  val embeddedPostgres = "2.0.7"
   val wireMock       = "3.9.2"
   val blobstore      = "0.10.1"
   val starlakeJdbc   = "0.7"
