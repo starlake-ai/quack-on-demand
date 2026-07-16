@@ -194,12 +194,10 @@ object ManifestExporter:
         )
       }
 
-      // Users may be keyed by tenant id or tenant displayName depending on
-      // how they were seeded; union both keys and dedup by user id.
-      val tenantUsers = (
-        usersByTenant.getOrElse(Some(t.id), Nil) ++
-          usersByTenant.getOrElse(Some(t.id), Nil)
-      ).distinctBy(_.id)
+      // qodstate_user.tenant carries the tenant id (the slug IS the id since
+      // the slug-id refactor), so a single id lookup covers every user.
+      val tenantUsers = usersByTenant
+        .getOrElse(Some(t.id), Nil)
         .sortBy(_.username)
         .map { u =>
           val userRoleNames =
