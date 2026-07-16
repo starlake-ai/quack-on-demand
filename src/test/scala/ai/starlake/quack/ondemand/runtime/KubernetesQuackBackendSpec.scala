@@ -608,3 +608,51 @@ class KubernetesQuackBackendSpec
     val envNames = quack.getEnv.asScala.map(_.getName).toSet
     envNames should not contain "MY_SECRET"
     envNames should contain("QOD_NODE_TOKEN")
+
+  it should "apply the configured serviceAccount and Service type to spawned resources" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      serviceAccount = Some("quack-nodes"),
+      serviceType = "NodePort"
+    )
+    val spec = NodeSpec(
+      PoolKey("acme", "acme_default", "sales"),
+      "quack-sa1",
+      Role.Dual,
+      metastore = Map("pgHost" -> "pg"),
+      s3 = Map.empty
+    )
+    val node = backend.start(spec).unsafeRunSync()
+    val pod  = server.getClient.pods.inNamespace("default").withName(node.podName.get).get()
+    pod.getSpec.getServiceAccountName shouldBe "quack-nodes"
+    val svc = server.getClient.services.inNamespace("default").withName("quack-sa1").get()
+    svc.getSpec.getType shouldBe "NodePort"
+
+  it should "leave serviceAccountName unset and default the Service type to ClusterIP" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true
+    )
+    val spec = NodeSpec(
+      PoolKey("acme", "acme_default", "sales"),
+      "quack-sa2",
+      Role.Dual,
+      metastore = Map("pgHost" -> "pg"),
+      s3 = Map.empty
+    )
+    val node = backend.start(spec).unsafeRunSync()
+    val pod  = server.getClient.pods.inNamespace("default").withName(node.podName.get).get()
+    pod.getSpec.getServiceAccountName shouldBe null
+    val svc = server.getClient.services.inNamespace("default").withName("quack-sa2").get()
+    svc.getSpec.getType shouldBe "ClusterIP"

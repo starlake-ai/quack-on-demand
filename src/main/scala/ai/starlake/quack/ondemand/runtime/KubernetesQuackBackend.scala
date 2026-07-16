@@ -34,7 +34,10 @@ final class KubernetesQuackBackend(
     defaultMetastore: Map[String, String] = Map.empty,
     readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
     readEnv: String => Option[String] = name => Option(System.getenv(name)),
-    podTemplateEnabled: Boolean = false
+    podTemplateEnabled: Boolean = false,
+    // k8s.serviceAccount / k8s.serviceType (QOD_K8S_SERVICE_ACCOUNT / QOD_K8S_SERVICE_TYPE).
+    serviceAccount: Option[String] = None,
+    serviceType: String = "ClusterIP"
 ) extends QuackBackend:
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -159,6 +162,7 @@ final class KubernetesQuackBackend(
     val pod     = templated.getOrElse(new Pod())
     val podSpec = Option(pod.getSpec).getOrElse(new PodSpec())
     pod.setSpec(podSpec)
+    serviceAccount.foreach(podSpec.setServiceAccountName)
 
     // Locate or create the quack container.
     val containers = Option(podSpec.getContainers).map(_.asScala.toList).getOrElse(Nil)
@@ -228,6 +232,7 @@ final class KubernetesQuackBackend(
     val svcSpec = new ServiceSpec()
     svcSpec.setSelector(selector)
     svcSpec.setPorts(java.util.List.of(svcPort))
+    svcSpec.setType(serviceType)
 
     val svcLabels = new java.util.HashMap[String, String]()
     svcLabels.put(labelKey, labelValue)
