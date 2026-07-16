@@ -69,6 +69,47 @@ final class PostgresTelemetryStore(
         finally ps.close()
       }
 
+  /** How a query treats rows whose `tenant` column is NULL (system-scope audit events). The
+    * statement/rollup tables never carry NULL tenants, so their queries use [[NullTenants.Ignore]].
+    */
+  private enum NullTenants:
+    case Ignore  // tenant is never null in this table: no null handling at all
+    case Exclude // hide null-tenant rows (tenant admins must not see system events)
+    case Include // null-tenant rows visible (superuser), or selected exactly (noTenant=true)
+
+  /** WHERE fragment + binder for the tenant-scope filter, shared by every query method so the
+    * scoping SQL cannot drift between telemetry surfaces:
+    *   - `Some(empty)` matches nothing (or exactly the null-tenant rows under `Include`),
+    *   - `Some(ts)` pins to `tenant IN (...)` (OR IS NULL under `Include`),
+    *   - `None` leaves the query unrestricted (or excludes null rows under `Exclude`).
+    */
+  private def tenantFragment(
+      tenants: Option[Set[String]],
+      nulls: NullTenants = NullTenants.Ignore
+  ): Option[(String, (PreparedStatement, Int) => Int)] =
+    tenants match
+      case Some(ts) if ts.isEmpty =>
+        val frag = if nulls == NullTenants.Include then "tenant IS NULL" else "FALSE"
+        Some((frag, (_, i) => i))
+      case Some(ts) =>
+        val tenantList   = ts.toList
+        val placeholders = tenantList.map(_ => "?").mkString(", ")
+        val frag         =
+          if nulls == NullTenants.Include then s"(tenant IN ($placeholders) OR tenant IS NULL)"
+          else s"tenant IN ($placeholders)"
+        Some(
+          (
+            frag,
+            (ps, i) => {
+              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
+              i + tenantList.size
+            }
+          )
+        )
+      case None =>
+        if nulls == NullTenants.Exclude then Some(("tenant IS NOT NULL", (_, i) => i))
+        else None
+
   override def listAudit(q: AuditQuery): List[AuditRow] =
     withConn { c =>
       // Each part: (sql_fragment, setter(ps, startIdx) => nextIdx).
@@ -103,25 +144,8 @@ final class PostgresTelemetryStore(
       q.beforeId.foreach { v =>
         parts += (("id < ?", (ps, i) => { ps.setLong(i, v); i + 1 }))
       }
-      q.tenants match
-        case Some(ts) if ts.isEmpty =>
-          val frag = if q.includeNullTenant then "tenant IS NULL" else "FALSE"
-          parts += ((frag, (_, i) => i))
-        case Some(ts) =>
-          val tenantList   = ts.toList
-          val placeholders = tenantList.map(_ => "?").mkString(", ")
-          val frag         =
-            if q.includeNullTenant then s"(tenant IN ($placeholders) OR tenant IS NULL)"
-            else s"tenant IN ($placeholders)"
-          parts += ((
-            frag,
-            (ps, i) => {
-              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
-              i + tenantList.size
-            }
-          ))
-        case None =>
-          if !q.includeNullTenant then parts += (("tenant IS NOT NULL", (_, i) => i))
+      val nulls = if q.includeNullTenant then NullTenants.Include else NullTenants.Exclude
+      tenantFragment(q.tenants, nulls).foreach(parts += _)
 
       val builtParts = parts.result()
       val whereSql   =
@@ -204,20 +228,7 @@ final class PostgresTelemetryStore(
       // sequentially with a running counter.
       val parts = List.newBuilder[(String, (PreparedStatement, Int) => Int)]
 
-      q.tenants match
-        case Some(ts) if ts.isEmpty =>
-          parts += (("FALSE", (_, i) => i))
-        case Some(ts) =>
-          val tenantList   = ts.toList
-          val placeholders = tenantList.map(_ => "?").mkString(", ")
-          parts += ((
-            s"tenant IN ($placeholders)",
-            (ps, i) => {
-              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
-              i + tenantList.size
-            }
-          ))
-        case None => // no tenant restriction for superuser callers
+      tenantFragment(q.tenants).foreach(parts += _)
 
       q.pool.foreach { v =>
         parts += (("pool = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
@@ -427,20 +438,7 @@ final class PostgresTelemetryStore(
 
       parts += (("granularity = ?", (ps, i) => { ps.setString(i, q.granularity); i + 1 }))
 
-      q.tenants match
-        case Some(ts) if ts.isEmpty =>
-          parts += (("FALSE", (_, i) => i))
-        case Some(ts) =>
-          val tenantList   = ts.toList
-          val placeholders = tenantList.map(_ => "?").mkString(", ")
-          parts += ((
-            s"tenant IN ($placeholders)",
-            (ps, i) => {
-              tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
-              i + tenantList.size
-            }
-          ))
-        case None => ()
+      tenantFragment(q.tenants).foreach(parts += _)
 
       q.pool.foreach { v =>
         parts += (("pool = ?", (ps, i) => { ps.setString(i, v); i + 1 }))
@@ -519,22 +517,7 @@ final class PostgresTelemetryStore(
       val keyCount = if q.groupBy == "tenant" then 1 else 2
 
       // Tenant-scope fragment is shared by the aggregate query and the dataStart query.
-      val tenantPart: Option[(String, (PreparedStatement, Int) => Int)] = q.tenants match
-        case Some(ts) if ts.isEmpty =>
-          Some(("FALSE", (_, i) => i))
-        case Some(ts) =>
-          val tenantList   = ts.toList
-          val placeholders = tenantList.map(_ => "?").mkString(", ")
-          Some(
-            (
-              s"tenant IN ($placeholders)",
-              (ps, i) => {
-                tenantList.zipWithIndex.foreach { case (t, o) => ps.setString(i + o, t) }
-                i + tenantList.size
-              }
-            )
-          )
-        case None => None
+      val tenantPart = tenantFragment(q.tenants)
 
       val parts = List.newBuilder[(String, (PreparedStatement, Int) => Int)]
       parts += (("granularity = 'day'", (_, i) => i))
