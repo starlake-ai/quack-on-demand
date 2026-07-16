@@ -28,7 +28,7 @@ java -Darrow.allocation.manager.type=Unsafe \
   -jar distrib/quack-on-demand-assembly-*.jar demo
 ```
 
-It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
+It starts an embedded throwaway Postgres, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
 
 ### Demo admin console
 
@@ -49,8 +49,8 @@ All four users work with any Arrow Flight SQL client (JDBC, ADBC, ODBC) against 
 |---|---|---|
 | `alice` | `demo-alice` | analyst: `customer`, `orders`, `nation`, `region` read-only; `c_phone` masked to `***`; only `c_mktsegment = 'BUILDING'` rows; any other table denied |
 | `acme-admin` | `demo-acme-admin` | everything in acme, full and unmasked |
-| `root` | `demo-root` | superuser, bypasses per-statement ACL (add `superuser=true`) |
-| `admin` | `admin` | superuser, same as `root` (add `superuser=true`) |
+| `root` | `demo-root` | superuser, bypasses per-statement ACL |
+| `admin` | `admin` | superuser, same as `root` |
 
 **JDBC** (DBeaver, Spark, any JDBC tool; driver `org.apache.arrow:flight-sql-jdbc-driver`):
 
