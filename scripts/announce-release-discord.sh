@@ -35,8 +35,10 @@ section="$(awk -v v="$version" '
 ' "$REPO_DIR/CHANGELOG.md")"
 # Non-blank check via grep, NOT ${section//[[:space:]]/}: macOS /bin/bash 3.2
 # evaluates that substitution quadratically (minutes of CPU on a ~20KB section).
+# A missing section must not break the release flow: warn and announce the
+# repo + release-notes links without a changelog body.
 grep -q '[^[:space:]]' <<<"$section" \
-  || { echo "ERROR: no '## $version' section in CHANGELOG.md." >&2; exit 1; }
+  || echo "WARNING: no '## $version' section in CHANGELOG.md; announcing links only." >&2
 
 header="**quack-on-demand v${version} released**
 https://github.com/starlake-ai/quack-on-demand
