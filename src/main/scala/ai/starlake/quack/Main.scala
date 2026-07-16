@@ -158,6 +158,8 @@ object Main extends IOApp with LazyLogging:
           val store  = PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
           ai.starlake.quack.cli.ManifestCli.importFrom(store, System.in)
         }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
+      case "demo" :: rest =>
+        ai.starlake.quack.ondemand.demo.DemoRunner.runDemo(rest)
       case _ =>
         normalManagerRun
 
@@ -170,7 +172,7 @@ object Main extends IOApp with LazyLogging:
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     bootManager(mgrCfg, edgeCfg, authCfg, aclCfg, metricsCfg)
 
-  private def bootManager(
+  private[quack] def bootManager(
       mgrCfg: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
@@ -1285,7 +1287,7 @@ object Main extends IOApp with LazyLogging:
       val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
       def leaderDuties: IO[Unit] =
         DemoBootstrapHook.run(
-          env = sys.env.get,
+          env = k => sys.env.get(k).orElse(sys.props.get(k)),
           readFile = path =>
             if path.startsWith("classpath:") then
               val resource = path.stripPrefix("classpath:")
