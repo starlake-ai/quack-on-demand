@@ -171,7 +171,23 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             val expr     = si.getExpression
             val replaced = visitor.visit(expr)
             if replaced ne expr then
-              si.asInstanceOf[SelectItem[Expression]].setExpression(replaced)
+              val item = si.asInstanceOf[SelectItem[Expression]]
+              item.setExpression(replaced)
+              // A bare `SELECT c_phone` (no explicit AS) relies on the projected Column's own name
+              // for the result-set's field name. Masking replaces that Column with a value
+              // expression (e.g. the literal `'***'`), which has no name of its own -- DuckDB would
+              // otherwise synthesize one from the expression text, changing the column name a
+              // client sees out from under it (breaking `SELECT c_phone ...` -> a result column NOT
+              // named `c_phone`). Preserve the original name as an explicit alias so masking is
+              // transparent to the caller. Only for a directly-masked top-level Column: an explicit
+              // user alias (`SELECT c_phone AS foo`) is left alone, and a masked column nested
+              // inside a function/CASE/etc. keeps whatever name that enclosing expression gets --
+              // there's no bare column name to preserve there.
+              if item.getAlias == null then
+                expr match
+                  case col: net.sf.jsqlparser.schema.Column =>
+                    item.setAlias(new net.sf.jsqlparser.expression.Alias(col.getColumnName))
+                  case _ => ()
               changed.set(true)
             visitor.topLevelOverride = None
             idx += 1
