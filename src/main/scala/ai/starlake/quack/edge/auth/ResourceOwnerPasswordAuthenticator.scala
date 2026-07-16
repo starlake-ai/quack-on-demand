@@ -55,7 +55,7 @@ class ResourceOwnerPasswordAuthenticator(
       else
         // Parse the access_token from the JSON response
         val responseBody = response.body()
-        extractJsonField(responseBody, "access_token") match
+        JsonField.first(responseBody, "access_token") match
           case None =>
             Left(s"$name: no access_token in response")
           case Some(accessToken) =>
@@ -94,10 +94,3 @@ class ResourceOwnerPasswordAuthenticator(
     val enc = (s: String) => URLEncoder.encode(s, StandardCharsets.UTF_8)
     s"grant_type=password&client_id=${enc(clientId)}&client_secret=${enc(clientSecret)}" +
       s"&username=${enc(username)}&password=${enc(password)}"
-
-  /** Simple JSON field extraction without adding a JSON parser dependency. Handles:
-    * {"access_token":"value",...}
-    */
-  private def extractJsonField(json: String, field: String): Option[String] =
-    val pattern = s""""$field"\\s*:\\s*"([^"]+)"""".r
-    pattern.findFirstMatchIn(json).map(_.group(1))

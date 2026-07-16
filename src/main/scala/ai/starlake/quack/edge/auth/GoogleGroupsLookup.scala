@@ -128,7 +128,8 @@ class GoogleGroupsLookup(
         s"Token request failed: ${response.statusCode()} ${response.body()}"
       )
 
-    cachedAccessToken = extractJsonField(response.body(), "access_token")
+    cachedAccessToken = JsonField
+      .first(response.body(), "access_token")
       .getOrElse(throw new RuntimeException("No access_token in response"))
     tokenExpiry = now.plusSeconds(3500) // refresh 100s before actual expiry
     cachedAccessToken
@@ -137,19 +138,21 @@ class GoogleGroupsLookup(
   /** Parse group emails from Directory API JSON response. */
   private def parseGroupEmails(json: String): Set[String] =
     // Extract all "email" values from the "groups" array
-    val pattern = """"email"\s*:\s*"([^"]+)"""".r
-    pattern.findAllMatchIn(json).map(_.group(1).toLowerCase).toSet
+    JsonField.all(json, "email").map(_.toLowerCase).toSet
 
   private def loadServiceAccountKey(): (String, RSAPrivateKey, String) =
     val content =
       new String(Files.readAllBytes(new File(serviceAccountKeyPath).toPath), StandardCharsets.UTF_8)
 
-    val email = extractJsonField(content, "client_email")
+    val email = JsonField
+      .first(content, "client_email")
       .getOrElse(throw new RuntimeException("client_email not found in service account key"))
-    val keyPem = extractJsonField(content, "private_key")
+    val keyPem = JsonField
+      .first(content, "private_key")
       .getOrElse(throw new RuntimeException("private_key not found in service account key"))
       .replace("\\n", "\n")
-    val uri = extractJsonField(content, "token_uri")
+    val uri = JsonField
+      .first(content, "token_uri")
       .getOrElse("https://oauth2.googleapis.com/token")
 
     val stripped = keyPem
@@ -162,7 +165,3 @@ class GoogleGroupsLookup(
 
     logger.info(s"Google Directory API service account loaded: $email")
     (email, key, uri)
-
-  private def extractJsonField(json: String, field: String): Option[String] =
-    val pattern = s""""$field"\\s*:\\s*"([^"]+)"""".r
-    pattern.findFirstMatchIn(json).map(_.group(1))

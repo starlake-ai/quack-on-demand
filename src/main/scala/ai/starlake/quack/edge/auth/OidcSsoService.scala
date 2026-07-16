@@ -102,13 +102,14 @@ class OidcSsoService(
               httpExchange(ep.tokenUrl, form).left
                 .map(_ => OidcSsoError.IdpError)
                 .flatMap { body =>
-                  extractField(body, "id_token").toRight(OidcSsoError.IdpError).flatMap { idToken =>
-                    buildValidator(ep).authenticate(idToken) match
-                      case Left(_)        => Left(OidcSsoError.IdpError)
-                      case Right(profile) =>
-                        if profile.claims.get("nonce").contains(claims.nonce) then
-                          Right(OidcCallbackResult(profile, scope, claims.returnTo, idToken))
-                        else Left(OidcSsoError.IdpError)
+                  JsonField.first(body, "id_token").toRight(OidcSsoError.IdpError).flatMap {
+                    idToken =>
+                      buildValidator(ep).authenticate(idToken) match
+                        case Left(_)        => Left(OidcSsoError.IdpError)
+                        case Right(profile) =>
+                          if profile.claims.get("nonce").contains(claims.nonce) then
+                            Right(OidcCallbackResult(profile, scope, claims.returnTo, idToken))
+                          else Left(OidcSsoError.IdpError)
                   }
                 }
             }
@@ -134,7 +135,3 @@ class OidcSsoService(
       !decoded.startsWith("//") &&
       !decoded.contains("\\")
     if ok then returnTo else "/ui/"
-
-  private def extractField(json: String, field: String): Option[String] =
-    val pattern = s""""$field"\\s*:\\s*"([^"]+)"""".r
-    pattern.findFirstMatchIn(json).map(_.group(1))

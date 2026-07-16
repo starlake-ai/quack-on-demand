@@ -124,6 +124,30 @@ final class FlightProducerImpl(
       )
     ByteString.copyFrom(baos.toByteArray)
 
+  /** UNAUTHENTICATED failure for a peer with no bound (or expired) session. */
+  private def noContext(
+      peer: String,
+      description: String => String = p => s"no connection context for peer $p"
+  ): RuntimeException =
+    CallStatus.UNAUTHENTICATED.withDescription(description(peer)).toRuntimeException()
+
+  /** Standard single-endpoint FlightInfo for a metadata RPC: the command packed into the one
+    * Ticket, unknown record / byte counts.
+    */
+  private def singleEndpointInfo(
+      command: com.google.protobuf.Message,
+      schema: Schema,
+      descriptor: FlightDescriptor
+  ): FlightInfo =
+    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
+    new FlightInfo(
+      schema,
+      descriptor,
+      Collections.singletonList(new FlightEndpoint(ticket)),
+      -1L,
+      -1L
+    )
+
   /** Diagnostic-only `getStream` override. Earlier in this branch we shipped a self-auth ticket
     * envelope here to bridge a Flight SQL ODBC driver that claimed to skip the bearer on DoGet; the
     * wire evidence (see commit log of `0282a37`) showed the real Power BI build never sends
@@ -238,13 +262,8 @@ final class FlightProducerImpl(
     val sql  = request.getQuery
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
 
-    (
-      ConnectionContext.poolFor(peer),
-      ConnectionContext.connectionIdFor(peer),
-      ConnectionContext.userFor(peer)
-    ) match
-      case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff      = ConnectionContext.effectiveSetFor(peer)
+    ConnectionContext.entry(peer) match
+      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
         val kind     = router.classifier.classify(sql)
         val strategy = PrepareStrategy.choose(sql, kind)
 
@@ -336,11 +355,7 @@ final class FlightProducerImpl(
               case scala.util.Failure(t) =>
                 listener.onError(internalError("createPreparedStatement", t))
       case _ =>
-        listener.onError(
-          CallStatus.UNAUTHENTICATED
-            .withDescription(s"no connection context for peer $peer")
-            .toRuntimeException()
-        )
+        listener.onError(noContext(peer))
 
   override def closePreparedStatement(
       request: FlightSql.ActionClosePreparedStatementRequest,
@@ -446,14 +461,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_CATALOGS_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_CATALOGS_SCHEMA, descriptor)
 
   override def getStreamCatalogs(
       context: FlightProducer.CallContext,
@@ -473,14 +481,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_SCHEMAS_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_SCHEMAS_SCHEMA, descriptor)
 
   override def getStreamSchemas(
       command: FlightSql.CommandGetDbSchemas,
@@ -513,19 +514,12 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
     // include_schema=true emits a fifth `table_schema` column (the per-table
     // Arrow schema, IPC-serialized) on top of GET_TABLES_SCHEMA_NO_SCHEMA.
     val schema =
       if command.getIncludeSchema then Schemas.GET_TABLES_SCHEMA
       else Schemas.GET_TABLES_SCHEMA_NO_SCHEMA
-    new FlightInfo(
-      schema,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, schema, descriptor)
 
   override def getStreamTables(
       command: FlightSql.CommandGetTables,
@@ -568,13 +562,8 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
-    (
-      ConnectionContext.poolFor(peer),
-      ConnectionContext.connectionIdFor(peer),
-      ConnectionContext.userFor(peer)
-    ) match
-      case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff           = ConnectionContext.effectiveSetFor(peer)
+    ConnectionContext.entry(peer) match
+      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
         val tablesAttempt = scala.util.Try(
           router.execute(connId, user, poolKey, listSql, eff).unsafeRunSync()
         )
@@ -591,11 +580,7 @@ final class FlightProducerImpl(
             }
             emitTablesWithSchema(withSchemas, listener)
       case _ =>
-        listener.error(
-          CallStatus.UNAUTHENTICATED
-            .withDescription(s"no connection context for peer $peer")
-            .toRuntimeException()
-        )
+        listener.error(noContext(peer))
 
   /** Drain a QueryResult into a List of (catalog, schema, name, type) tuples. */
   private def collectRowsAndClose(
@@ -647,15 +632,7 @@ final class FlightProducerImpl(
         try
           // Drain one batch so the IPC schema message is fully parsed.
           qr.rows.loadNextBatch()
-          val schema = qr.rows.getVectorSchemaRoot.getSchema
-          val baos   = new java.io.ByteArrayOutputStream()
-          org.apache.arrow.vector.ipc.message.MessageSerializer.serialize(
-            new org.apache.arrow.vector.ipc.WriteChannel(
-              java.nio.channels.Channels.newChannel(baos)
-            ),
-            schema
-          )
-          baos.toByteArray
+          serializeSchema(qr.rows.getVectorSchemaRoot.getSchema).toByteArray
         catch
           case t: Throwable =>
             logger.warn(s"probe schema for $ident failed: ${t.getMessage}")
@@ -716,14 +693,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_TABLE_TYPES_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_TABLE_TYPES_SCHEMA, descriptor)
 
   override def getStreamTableTypes(
       context: FlightProducer.CallContext,
@@ -761,14 +731,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_PRIMARY_KEYS_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_PRIMARY_KEYS_SCHEMA, descriptor)
 
   override def getStreamPrimaryKeys(
       command: FlightSql.CommandGetPrimaryKeys,
@@ -782,14 +745,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_IMPORTED_KEYS_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_IMPORTED_KEYS_SCHEMA, descriptor)
 
   override def getStreamImportedKeys(
       command: FlightSql.CommandGetImportedKeys,
@@ -803,14 +759,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_EXPORTED_KEYS_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_EXPORTED_KEYS_SCHEMA, descriptor)
 
   override def getStreamExportedKeys(
       command: FlightSql.CommandGetExportedKeys,
@@ -824,14 +773,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(command).toByteArray)
-    new FlightInfo(
-      Schemas.GET_CROSS_REFERENCE_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(command, Schemas.GET_CROSS_REFERENCE_SCHEMA, descriptor)
 
   override def getStreamCrossReference(
       command: FlightSql.CommandGetCrossReference,
@@ -862,25 +804,16 @@ final class FlightProducerImpl(
     new Runnable:
       def run(): Unit =
         drainPutStream(flightStream)
-        (
-          ConnectionContext.poolFor(peer),
-          ConnectionContext.connectionIdFor(peer),
-          ConnectionContext.userFor(peer)
-        ) match
-          case (Some(poolKey), Some(connId), Some(user)) =>
+        ConnectionContext.entry(peer) match
+          case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
             logger.debug(s"acceptPutStatement pool=$poolKey sql='$sql'")
-            val eff = ConnectionContext.effectiveSetFor(peer)
             ackUpdateResult(
               scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()),
               ackStream,
               "acceptPutStatement"
             )
           case _ =>
-            ackStream.onError(
-              CallStatus.UNAUTHENTICATED
-                .withDescription("no pool bound to session; authenticate first")
-                .toRuntimeException()
-            )
+            ackStream.onError(noContext(peer, _ => "no pool bound to session; authenticate first"))
 
   /** FlightSQL "execute a prepared update" entrypoint. Arrow JDBC / ADBC / DBeaver prepare *every*
     * statement, so a literal INSERT / UPDATE / DELETE / DDL the user runs arrives here (not via
@@ -1003,14 +936,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
-    new FlightInfo(
-      Schemas.GET_TYPE_INFO_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(request, Schemas.GET_TYPE_INFO_SCHEMA, descriptor)
 
   override def getStreamTypeInfo(
       request: FlightSql.CommandGetXdbcTypeInfo,
@@ -1358,14 +1284,7 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    val ticket = new Ticket(ProtoAny.pack(request).toByteArray)
-    new FlightInfo(
-      Schemas.GET_SQL_INFO_SCHEMA,
-      descriptor,
-      Collections.singletonList(new FlightEndpoint(ticket)),
-      -1L,
-      -1L
-    )
+    singleEndpointInfo(request, Schemas.GET_SQL_INFO_SCHEMA, descriptor)
 
   override def getStreamSqlInfo(
       command: FlightSql.CommandGetSqlInfo,
@@ -1425,13 +1344,8 @@ final class FlightProducerImpl(
       peer: String,
       sql: String
   ): Option[Schema] =
-    (
-      ConnectionContext.poolFor(peer),
-      ConnectionContext.connectionIdFor(peer),
-      ConnectionContext.userFor(peer)
-    ) match
-      case (Some(poolKey), Some(connId), Some(user)) =>
-        val eff                         = ConnectionContext.effectiveSetFor(peer)
+    ConnectionContext.entry(peer) match
+      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
         val kind                        = router.classifier.classify(sql)
         val strategy                    = PrepareStrategy.choose(sql, kind)
         val probeSqlOpt: Option[String] = strategy match
@@ -1453,9 +1367,7 @@ final class FlightProducerImpl(
               throw internalError("probeStatementSchema", t)
         }
       case _ =>
-        throw CallStatus.UNAUTHENTICATED
-          .withDescription(s"no connection context for peer $peer")
-          .toRuntimeException()
+        throw noContext(peer)
 
   /** R5 / Power BI ODBC: serve the dedicated GetSchema RPC for `CommandStatementQuery`. Driver
     * teams that read the schema from this RPC (rather than from `FlightInfo.schema`) get the same
@@ -1488,14 +1400,9 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
-    (
-      ConnectionContext.poolFor(peer),
-      ConnectionContext.connectionIdFor(peer),
-      ConnectionContext.userFor(peer)
-    ) match
-      case (Some(poolKey), Some(connId), Some(user)) =>
+    ConnectionContext.entry(peer) match
+      case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
         logger.debug(s"runStatement pool=$poolKey sql='$sql'")
-        val eff     = ConnectionContext.effectiveSetFor(peer)
         val outcome =
           scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
         outcome match
@@ -1512,11 +1419,7 @@ final class FlightProducerImpl(
             listener.error(toFlightException(f))
 
       case _ =>
-        listener.error(
-          CallStatus.UNAUTHENTICATED
-            .withDescription(s"no connection context for peer $peer")
-            .toRuntimeException()
-        )
+        listener.error(noContext(peer))
 
   /** Read batches from `reader` and push them to the Flight `listener`. Reuses
     * `reader.getVectorSchemaRoot()` directly - the listener flushes the current state of the root

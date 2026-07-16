@@ -128,12 +128,9 @@ class SqlTokenOidcService(
           // carries by OIDC spec. The access_token's aud is the provider's resource
           // (Keycloak "account", Azure Graph) or opaque (Google), so it would be
           // rejected. The access_token is only a fallback for non-standard providers.
-          extractJson(body, "id_token")
-            .orElse(extractJson(body, "access_token"))
+          JsonField
+            .first(body, "id_token")
+            .orElse(JsonField.first(body, "access_token"))
             .toRight("no id_token or access_token in token response")
         }
       }
-
-  private def extractJson(json: String, field: String): Option[String] =
-    val m = s""""$field"\\s*:\\s*"([^"]+)"""".r
-    m.findFirstMatchIn(json).map(_.group(1))

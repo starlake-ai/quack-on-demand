@@ -65,8 +65,7 @@ open class QuackHttpClient(
   // (host:port, token) targets produces "Authentication failed" / "Invalid
   // connection id" errors when the cached entry doesn't match the call.
   // We keep one DuckDB per `endpoint` (which already encodes host:port);
-  // the rootConn below is used only for the first INSTALL / proxy SET and
-  // becomes the seed for the per-endpoint pool.
+  // each is created lazily by `freshDuckDB()` on first use.
   private val perEndpoint =
     new java.util.concurrent.ConcurrentHashMap[String, DuckDBConnection]()
 
@@ -83,27 +82,6 @@ open class QuackHttpClient(
   // this entirely (no embedded DuckDB in the request path) and is the
   // production-grade default -- see [[nativeClient]]. */
   private val embeddedJvmLock = new Object()
-
-  // One shared in-process DuckDB. We hand out per-call connections via
-  // `duplicate()` so multiple Flight requests don't serialise.
-  private val rootConn: DuckDBConnection = {
-    Class.forName("org.duckdb.DuckDBDriver")
-    val c    = DriverManager.getConnection("jdbc:duckdb:").asInstanceOf[DuckDBConnection]
-    val stmt = c.createStatement()
-    try
-      // DuckDB ignores HTTP_PROXY/HTTPS_PROXY env vars for `INSTALL` - the
-      // download goes through libcurl with the `http_proxy` setting. Mirror
-      // what `spawn-quack-node.sh` does for child Quack nodes so a corporate
-      // proxy reaches both the manager-side embed and the child supervisors.
-      QuackHttpClient.proxyHostPort.foreach { hp =>
-        stmt.execute(s"SET http_proxy = '$hp'")
-        logger.info(s"DuckDB http_proxy set to $hp for extension downloads")
-      }
-      stmt.execute("INSTALL quack")
-      stmt.execute("LOAD quack")
-    finally stmt.close()
-    c
-  }
 
   /** Execute `sql` on the Quack instance reachable at `endpoint` (a `quack:host:port` URI) using
     * `token` for auth. Returns a streaming [[QuackResponse.Ok]] whose `close` callback the caller
