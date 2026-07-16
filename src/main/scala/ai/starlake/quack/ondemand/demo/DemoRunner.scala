@@ -31,8 +31,8 @@ object DemoRunner:
     // DemoSeed) that can throw. `cleanup` is attached via `.guarantee` around the WHOLE setup+boot
     // chain (not just the boot), so a mid-setup failure -- e.g. a bad config -- still stops PG and
     // deletes the home instead of leaking both under ${TMPDIR}/qod-demo.
-    val home  = DemoHome.create(explicitHome)
-    val pgRef = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
+    val home    = DemoHome.create(explicitHome)
+    val pgRef   = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
     val cleanup = IO.blocking {
       logger.info("demo: tearing down")
       try pgRef.get().foreach(_.stop())
@@ -43,13 +43,26 @@ object DemoRunner:
       .guarantee(cleanup)
 
   /** Blocking, ordered setup: embedded PG -> databases -> config overlay -> seed manifest env ->
-    * data seed. `pgRef` is populated as soon as PG starts so `runDemo`'s cleanup can stop it even if
-    * a later step here fails.
+    * data seed. `pgRef` is populated as soon as PG starts so `runDemo`'s cleanup can stop it even
+    * if a later step here fails.
     */
   private def setup(
       home: DemoHome,
       pgRef: java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]]
   ): DemoConfigs =
+    // RLS/CLS are the whole point of the demo banner's promise, but both are read straight off
+    // `com.typesafe.config.ConfigFactory.load()` deep inside `Main.bootManager` (`cls.enabled` /
+    // `rls.enabled` under `quack-on-demand`) rather than through the `ManagerConfig` case class
+    // `DemoConfig.overlay` copies -- so that overlay can't reach them. Unlike `QOD_BOOTSTRAP_YAML`
+    // (a plain `sys.env`-reading Scala function DemoBootstrapHook owns), these are genuine HOCON
+    // keys resolved via Typesafe Config, which DOES treat JVM system properties as the
+    // highest-priority override layer -- so setting the config keys themselves (not the `QOD_*`
+    // env-var aliases) as system properties works. Done first, before `loadBase()`'s pureconfig
+    // call ever touches `ConfigFactory`, with an explicit `invalidateCaches()` as a safety net
+    // against Typesafe Config's internal system-properties snapshot caching.
+    System.setProperty("quack-on-demand.cls.enabled", "true")
+    System.setProperty("quack-on-demand.rls.enabled", "true")
+    com.typesafe.config.ConfigFactory.invalidateCaches()
     val pg = DemoPostgres.start(home.pgDir)
     pgRef.set(Some(pg))
     pg.createDatabase("qod")  // control plane
@@ -85,10 +98,27 @@ object DemoRunner:
   // env var still wins for normal boots; only the demo path relies on the sysprop fallback.
 
   private def bootWithBanner(home: DemoHome, configs: DemoConfigs): IO[ExitCode] =
-    val authCfg =
+    val baseAuthCfg =
       ConfigSource.default
         .at("quack-flightsql.auth")
         .loadOrThrow[ai.starlake.quack.edge.config.AuthenticationConfig]
+    // `auth.database.{jdbcUrl,username,password}` is templated in application.conf off
+    // `quack-on-demand.defaultMetastore.*` (HOCON substitution at parse time), so reloading it
+    // fresh from `ConfigSource.default` here re-resolves against the REAL default metastore coords
+    // -- not `configs.manager.defaultMetastore`, which only exists as an in-memory overlay produced
+    // by `DemoConfig.overlay` and was never written back to a config source. Left unpatched, the
+    // demo's DB-auth backend probes the wrong Postgres (the operator's real dev instance, if any, or
+    // a connection-refused) instead of the embedded one -- a silent Guardrail-1-adjacent gap, not
+    // the deliberate insecure-posture overlay itself. Point it at the SAME coords + `qod` database
+    // DemoConfig.overlay already put in `configs.manager.defaultMetastore`.
+    val ms      = configs.manager.defaultMetastore
+    val authCfg = baseAuthCfg.copy(
+      database = baseAuthCfg.database.copy(
+        jdbcUrl = s"jdbc:postgresql://${ms.pgHost}:${ms.pgPort}/${ms.dbName}",
+        username = ms.pgUser,
+        password = ms.pgPassword
+      )
+    )
     val metricsCfg =
       ConfigSource.default
         .at("quack-on-demand.metrics")

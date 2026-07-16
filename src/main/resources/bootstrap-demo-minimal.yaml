@@ -69,7 +69,7 @@ users:
     username: alice
     password: demo-alice
     role: admin
-    roles: [analyst, tenant_admin]
+    roles: [analyst]
     poolGrants:
       - { pool: bi }
 

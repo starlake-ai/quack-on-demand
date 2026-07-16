@@ -33,7 +33,16 @@ object DemoConfig:
     val manager = baseManager.copy(
       runtimeType = "local",
       apiKey = None,
-      defaultMetastore = metastore
+      defaultMetastore = metastore,
+      // The demo must run unmodified on any host: the JNI native client
+      // (`quackwire`) is an ABI-pinned, opt-in-classifier native lib (see
+      // CLAUDE.md "JVM forking" / "native installers") that can fail to load
+      // on a glibc it wasn't built against (observed: `UnsatisfiedLinkError:
+      // GLIBC_2.32 not found`). The plain HTTP client (`QuackHttpClient`'s
+      // non-native path) is the documented fallback for exactly this case, so
+      // the demo pins it rather than inheriting whatever `QOD_NATIVE_CLIENT`
+      // happens to be set to in the operator's shell.
+      nativeClient = false
     )
     val flight = baseFlight.copy(tlsEnabled = false, port = 31338)
     val acl    = baseAcl.copy(enabled = true)
