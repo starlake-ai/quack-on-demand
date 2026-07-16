@@ -30,11 +30,61 @@ java -Darrow.allocation.manager.type=Unsafe \
 
 It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
 
-The seeded principals demonstrate row + column security:
+### Demo admin console
 
-- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
-- `acme-admin` / `demo-acme-admin` - full, unmasked data
-- a table `alice` has no grant on - denied
+Browse to **`http://localhost:20900/ui/`** and log in with:
+
+| Tenant ID | Username | Password | View |
+|---|---|---|---|
+| leave blank | `root` | `demo-root` | superuser console (all tenants) |
+| leave blank | `admin` | `admin` | superuser console (all tenants) |
+| `acme` | `acme-admin` | `demo-acme-admin` | acme-scoped roles, groups, users, pools |
+| `acme` | `alice` | `demo-alice` | acme-scoped view |
+
+### Demo SQL clients
+
+All four users work with any Arrow Flight SQL client (JDBC, ADBC, ODBC) against `localhost:31338`, with `tenant=acme` and `pool=bi` as routing headers. What each sees demonstrates row + column security:
+
+| Username | Password | Access |
+|---|---|---|
+| `alice` | `demo-alice` | analyst: `customer`, `orders`, `nation`, `region` read-only; `c_phone` masked to `***`; only `c_mktsegment = 'BUILDING'` rows; any other table denied |
+| `acme-admin` | `demo-acme-admin` | everything in acme, full and unmasked |
+| `root` | `demo-root` | superuser, bypasses per-statement ACL (add `superuser=true`) |
+| `admin` | `admin` | superuser, same as `root` (add `superuser=true`) |
+
+**JDBC** (DBeaver, Spark, any JDBC tool; driver `org.apache.arrow:flight-sql-jdbc-driver`):
+
+```
+jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=alice&password=demo-alice&tenant=acme&pool=bi
+```
+
+Swap `user` / `password` for any row above; for `root` or `admin` exclusively also append `&superuser=true`.
+
+**ADBC** (Python, `pip install adbc_driver_flightsql adbc_driver_manager`):
+
+```python
+from adbc_driver_flightsql import dbapi
+conn = dbapi.connect("grpc+tls://localhost:31338",
+                     db_kwargs={"username": "alice", "password": "demo-alice",
+                                "adbc.flight.sql.client_option.tls_skip_verify": "true",
+                                "adbc.flight.sql.rpc.call_header.tenant": "acme",
+                                "adbc.flight.sql.rpc.call_header.pool": "bi",
+                                "adbc.flight.sql.rpc.call_header.db": "acme_tpch"})
+```
+
+**ODBC** (any Arrow Flight SQL ODBC driver, e.g. the Dremio one; see [ODBC](/connecting/clients#odbc) for the `odbc.ini` form):
+
+```
+Driver={Arrow Flight SQL ODBC Driver};HOST=localhost;PORT=31338;useEncryption=true;disableCertificateVerification=true;UID=alice;PWD=demo-alice;RPCCallHeaders=tenant=acme;pool=bi
+```
+
+Once connected, try:
+
+```sql
+SELECT c_name, c_phone, c_mktsegment FROM acme_tpch.tpch1.customer LIMIT 5;
+```
+
+As `alice`, `c_phone` comes back masked and only BUILDING-segment rows appear; reconnect as `acme-admin` and the same query returns full data.
 
 :::warning
 Demo mode is insecure by design (self-signed TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the paths below with your own Postgres.
