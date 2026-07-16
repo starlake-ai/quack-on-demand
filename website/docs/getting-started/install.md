@@ -36,6 +36,28 @@ QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=*** ./scripts/run-docker.sh
 
 **Note:** do not mix Docker and native-jar runs against the same catalog DB. DuckLake records the absolute data path in Postgres metadata. Inside the container that path is `/app/ducklake/<db>`; natively it is `<host-cwd>/ducklake/<db>`. Use a different `PG_DBNAME` (or `QOD_PG_DBNAME`) per mode, or wipe the data directory between switches.
 
+## Demo mode (self-contained, no Postgres)
+
+The fastest way to try Quack on Demand end to end. `demo` is a subcommand of the assembly jar that boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**. The only prerequisites are a **JDK 21** and the **`duckdb` CLI** on your `PATH`.
+
+```bash
+# after `sbt assembly` (or any downloaded assembly jar):
+java -Darrow.allocation.manager.type=Unsafe \
+  -jar distrib/quack-on-demand-assembly-*.jar demo
+```
+
+It starts an embedded throwaway Postgres, applies the Liquibase schema, seeds the minimal demo (tenant `acme`, tenant-db `acme_tpch`, schema `tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS off), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is removed on exit (Ctrl-C).
+
+The seeded principals demonstrate row + column security:
+
+- `alice` / `demo-alice` (analyst) - `customer.c_phone` is masked to `***` and only `c_mktsegment = 'BUILDING'` rows are visible
+- `acme-admin` / `demo-acme-admin` - full, unmasked data
+- a table `alice` has no grant on - denied
+
+:::warning
+Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral catalog). It is for evaluation only - never expose it or use it in production. For a durable install, use the Binaries or Docker paths below with your own Postgres.
+:::
+
 ## Binaries
 
 ### Prerequisites

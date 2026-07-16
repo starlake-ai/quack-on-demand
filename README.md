@@ -71,6 +71,28 @@ Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`R
 
 ## Quick start
 
+### Fastest taste: `demo` mode (no Postgres, no Docker)
+
+One self-contained command boots a fully seeded instance against an **embedded, throwaway Postgres** - the only prerequisites are a JDK 21 and the `duckdb` CLI on your `PATH`:
+
+```bash
+sbt assembly                                                    # builds distrib/quack-on-demand-assembly-<version>.jar
+java -Darrow.allocation.manager.type=Unsafe \
+  -jar distrib/quack-on-demand-assembly-*.jar demo
+```
+
+It starts an embedded ephemeral Postgres, seeds tenant `acme` (`acme_tpch.tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS off), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is deleted when you stop it with Ctrl-C.
+
+Connect as the seeded analyst to watch row + column security apply, then switch principals:
+
+- `alice` / `demo-alice` (analyst) - `c_phone` comes back masked to `***`, and only `BUILDING`-segment rows appear
+- `acme-admin` / `demo-acme-admin` - full, unmasked data
+- a table `alice` has no grant on - denied
+
+> Demo mode is insecure by design (no TLS, open REST, demo credentials, ephemeral catalog). Use it to evaluate, never in production.
+
+### Full multi-tenant stack (Docker)
+
 Zero to first query in under 5 minutes. Clone this repo, then:
 
 ```bash
