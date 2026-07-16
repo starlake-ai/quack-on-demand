@@ -39,7 +39,11 @@ object DemoPostgres:
   Class.forName("org.postgresql.Driver")
 
   /** Start an embedded Postgres rooted at `dataDir` on an OS-assigned free port. zonky's default
-    * superuser is `postgres` with an empty password.
+    * superuser is `postgres`; it authenticates via `trust` (the password is not verified), so we
+    * report a non-empty placeholder password. Downstream consumers (`LiquibaseRunner`,
+    * `PostgresControlPlaneStore`, spawned Quack nodes) require a non-empty `pgPassword`
+    * (`required(_).filter(_.nonEmpty)`); an empty string fails their config gate even though trust
+    * auth would accept it. The value itself is irrelevant to the embedded server.
     */
   def start(dataDir: Path): DemoPostgres =
     val instance = EmbeddedPostgres
@@ -47,5 +51,5 @@ object DemoPostgres:
       .setOverrideWorkingDirectory(dataDir.toFile)
       .setDataDirectory(dataDir.resolve("pgdata").toFile)
       .start()
-    val coords = PgCoords("localhost", instance.getPort, "postgres", "")
+    val coords = PgCoords("localhost", instance.getPort, "postgres", "postgres")
     new DemoPostgres(instance, coords)
