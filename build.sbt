@@ -1,8 +1,7 @@
 import xerial.sbt.Sonatype.sonatypeCentralHost
-import ReleaseTransformations._
 
-// Version lives in `version.sbt` so sbt-release can rewrite it across the
-// release / next-snapshot bumps without touching this file.
+// Version lives in `version.sbt` so scripts/release-jar.sh can rewrite it
+// across the release / next-snapshot bumps without touching this file.
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
@@ -292,25 +291,6 @@ lazy val root = (project in file("."))
     // their own `def main`), and `java -jar` then fails with
     // "no main manifest attribute".
     assembly / mainClass := Some("ai.starlake.quack.Main"),
-
-    // sbt-release flow - mirrors starlake-core's `sbt 'release with-defaults'`
-    // dance: bump version (drop -SNAPSHOT), commit, tag, sign+publish to
-    // Central Portal, release the bundle, bump to next snapshot, commit,
-    // push. Tests + clean are skipped because the assembly already does
-    // a full compile and we want releases to be fast/predictable; flip them
-    // on if you start cutting releases from dirty trees.
-    releaseProcess := Seq[ReleaseStep](
-      checkSnapshotDependencies,
-      inquireVersions,
-      setReleaseVersion,
-      commitReleaseVersion,
-      tagRelease,
-      releaseStepCommandAndRemaining("publishSigned"),
-      releaseStepCommand("sonatypeBundleRelease"),
-      setNextVersion,
-      commitNextVersion,
-      pushChanges
-    ),
     genOpenApi := Def.taskDyn {
       val v = version.value
       (Compile / runMain).toTask(
