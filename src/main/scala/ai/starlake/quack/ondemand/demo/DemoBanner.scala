@@ -17,7 +17,10 @@ object DemoBanner:
         |
         |  from adbc_driver_flightsql import dbapi
         |  conn = dbapi.connect("grpc://localhost:$flightPort",
-        |                       db_kwargs={"username": "alice", "password": "demo-alice"})
+        |                       db_kwargs={"username": "alice", "password": "demo-alice",
+        |                                  "adbc.flight.sql.rpc.call_header.tenant": "acme",
+        |                                  "adbc.flight.sql.rpc.call_header.pool": "bi",
+        |                                  "adbc.flight.sql.rpc.call_header.db": "acme_tpch"})
         |
         |  Try: SELECT c_name, c_phone, c_mktsegment FROM acme_tpch.tpch1.customer LIMIT 5
         |       -- c_phone comes back masked ('***'); only BUILDING-segment rows appear
