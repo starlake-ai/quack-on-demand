@@ -102,37 +102,21 @@ final class AuthHandlers(
       forwardedProto.exists(_.equalsIgnoreCase("https"))
     )
 
-  private def sessionCookie(token: String, forwardedProto: Option[String]): CookieValueWithMeta =
-    CookieValueWithMeta.unsafeApply(
-      value = token,
-      maxAge = Some(tokens.maxAgeSeconds),
-      path = Some(cookiePath),
-      domain = None,
-      secure = deriveSecure(forwardedProto),
-      httpOnly = true,
-      sameSite = sameSiteLax,
-      expires = None,
-      otherDirectives = Map.empty
-    )
-
-  private def clearCookie(forwardedProto: Option[String]): CookieValueWithMeta =
-    CookieValueWithMeta.unsafeApply(
-      value = "",
-      maxAge = Some(0L),
-      path = Some(cookiePath),
-      domain = None,
-      secure = deriveSecure(forwardedProto),
-      httpOnly = true,
-      sameSite = sameSiteLax,
-      expires = None,
-      otherDirectives = Map.empty
-    )
-
-  private def stateCookie(value: String, forwardedProto: Option[String]): CookieValueWithMeta =
+  /** All qod cookies share the same hardened attributes (HttpOnly, SameSite=Lax, per-request Secure
+    * derivation from X-Forwarded-Proto); only value, lifetime and path vary. The cookie NAME is
+    * bound at the endpoint's setCookie output, so the two clear-variants stay distinct defs purely
+    * for call-site readability.
+    */
+  private def cookie(
+      value: String,
+      maxAge: Long,
+      forwardedProto: Option[String],
+      path: String = cookiePath
+  ): CookieValueWithMeta =
     CookieValueWithMeta.unsafeApply(
       value = value,
-      maxAge = Some(600L),
-      path = Some(cookiePath),
+      maxAge = Some(maxAge),
+      path = Some(path),
       domain = None,
       secure = deriveSecure(forwardedProto),
       httpOnly = true,
@@ -141,18 +125,17 @@ final class AuthHandlers(
       otherDirectives = Map.empty
     )
 
+  private def sessionCookie(token: String, forwardedProto: Option[String]): CookieValueWithMeta =
+    cookie(token, tokens.maxAgeSeconds, forwardedProto)
+
+  private def clearCookie(forwardedProto: Option[String]): CookieValueWithMeta =
+    cookie("", 0L, forwardedProto)
+
+  private def stateCookie(value: String, forwardedProto: Option[String]): CookieValueWithMeta =
+    cookie(value, 600L, forwardedProto)
+
   private def clearStateCookie(forwardedProto: Option[String]): CookieValueWithMeta =
-    CookieValueWithMeta.unsafeApply(
-      value = "",
-      maxAge = Some(0L),
-      path = Some(cookiePath),
-      domain = None,
-      secure = deriveSecure(forwardedProto),
-      httpOnly = true,
-      sameSite = sameSiteLax,
-      expires = None,
-      otherDirectives = Map.empty
-    )
+    cookie("", 0L, forwardedProto)
 
   def oidcStart(
       tenant: Option[String],
@@ -250,17 +233,7 @@ final class AuthHandlers(
       forwardedProto: Option[String],
       maxAge: Long
   ): CookieValueWithMeta =
-    CookieValueWithMeta.unsafeApply(
-      value = value,
-      maxAge = Some(maxAge),
-      path = Some(sqlTokenStatePath),
-      domain = None,
-      secure = deriveSecure(forwardedProto),
-      httpOnly = true,
-      sameSite = sameSiteLax,
-      expires = None,
-      otherDirectives = Map.empty
-    )
+    cookie(value, maxAge, forwardedProto, path = sqlTokenStatePath)
 
   def sqlTokenStart(
       forwardedProto: Option[String]

@@ -29,16 +29,7 @@ final class ManifestHandlers(
   private def superuserCheck(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Option[(StatusCode, ErrorResponse)] =
-    apiKey.flatMap(scopeOf) match
-      case Some(s) if !s.superuser =>
-        Some(
-          StatusCode.Forbidden ->
-            ErrorResponse(
-              "superuser_required",
-              "manifest export/import is restricted to superusers"
-            )
-        )
-      case _ => None
+    SuperuserCheck.reject(apiKey, "manifest export/import is restricted to superusers")(scopeOf)
 
   def exportYaml(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

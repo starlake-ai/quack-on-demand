@@ -76,16 +76,15 @@ final class FederatedSourceHandlers(
           // Try an upsert by alias: if one already exists reuse its id.
           val existing = fedStore.getSource(tenantDbId, req.alias)
           val id = existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fs"))
-          fedStore.upsertSource(
-            FederatedSource(
-              id = id,
-              tenantDbId = tenantDbId,
-              alias = req.alias,
-              setupSql = req.setupSql,
-              description = req.description,
-              disabled = req.disabled
-            )
+          val source = FederatedSource(
+            id = id,
+            tenantDbId = tenantDbId,
+            alias = req.alias,
+            setupSql = req.setupSql,
+            description = req.description,
+            disabled = req.disabled
           )
+          fedStore.upsertSource(source)
           // NEVER include setupSql in detail (may contain connection strings).
           audit.rest(
             apiKey,
@@ -95,22 +94,8 @@ final class FederatedSourceHandlers(
             tenant = tenantIdResolver(tenantName),
             target = Some(req.alias)
           )
-          Right(
-            toSourceResponse(
-              fedStore
-                .getSource(tenantDbId, req.alias)
-                .getOrElse(
-                  FederatedSource(
-                    id,
-                    tenantDbId,
-                    req.alias,
-                    req.setupSql,
-                    req.description,
-                    req.disabled
-                  )
-                )
-            )
-          )
+          // The upsert wrote every field of `source`; no re-fetch needed.
+          Right(toSourceResponse(source))
     }
 
   def listSources(tenantName: String, tenantDbName: String): Out[FederatedSourceListResponse] =

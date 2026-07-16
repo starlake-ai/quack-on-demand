@@ -196,15 +196,9 @@ final class SessionTokenStore(
   // ---------- internals ----------
 
   private def lookup(token: String): Option[Session] =
-    parse(token).flatMap { case (claims, jti) =>
-      val now = clock()
-      val exp = Option(claims.getExpirationTime).map(_.toInstant)
-      if exp.exists(_.isBefore(now)) then
-        sweepDenylist()
-        None
-      else if denylist.containsKey(jti) then None
-      else Some(reconstruct(claims))
-    }
+    lookupResult(token) match
+      case SessionTokenStore.LookupResult.Ok(session) => Some(session)
+      case _                                          => None
 
   /** Parse + HMAC-verify + sanity-check `jti`. Returns None on any failure (malformed JWT, bad
     * signature, missing jti).

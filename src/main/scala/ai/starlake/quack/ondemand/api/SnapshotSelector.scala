@@ -1,5 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
+import sttp.model.StatusCode
+
 import java.time.Instant
 
 /** Pure snapshot-selector resolution shared by the catalog table endpoint and
@@ -28,6 +30,27 @@ object SnapshotSelector:
       case None                  => SelectorError.EmptyCatalog
       case Some(max) if id > max => SelectorError.BeyondLatest(id)
       case Some(_)               => SelectorError.Expired(id)
+
+  /** Uniform HTTP mapping for selector failures, shared by every time-travel surface (catalog
+    * detail, preview / data-diff, tag resolution): (status, wire error code, message).
+    */
+  def httpError(e: SelectorError): (StatusCode, String, String) = e match
+    case SelectorError.MultipleSelectors =>
+      (StatusCode.BadRequest, "invalid_selector", "supply only one of asOf, asOfTag, or asOfTs")
+    case SelectorError.TagNotFound(tag) =>
+      (StatusCode.NotFound, "not_found", s"tag '$tag' not found")
+    case SelectorError.BeforeFirstSnapshot =>
+      (StatusCode.UnprocessableEntity, "invalid_snapshot", "timestamp is before the first snapshot")
+    case SelectorError.EmptyCatalog =>
+      (StatusCode.UnprocessableEntity, "invalid_snapshot", "catalog has no snapshots")
+    case SelectorError.BeyondLatest(id) =>
+      (
+        StatusCode.UnprocessableEntity,
+        "invalid_snapshot",
+        s"snapshot $id is beyond the latest snapshot"
+      )
+    case SelectorError.Expired(id) =>
+      (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
 
   def resolve(
       asOf: Option[Long],

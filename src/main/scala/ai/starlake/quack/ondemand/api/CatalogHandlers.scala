@@ -163,31 +163,7 @@ final class CatalogHandlers(
         )
         selectorRes match
           case Left(e) =>
-            val (sc, errCode, msg) = e match
-              case SnapshotSelector.SelectorError.MultipleSelectors =>
-                (
-                  StatusCode.BadRequest,
-                  "invalid_selector",
-                  "supply only one of asOf, asOfTag, or asOfTs"
-                )
-              case SnapshotSelector.SelectorError.TagNotFound(tag) =>
-                (StatusCode.NotFound, "not_found", s"tag '$tag' not found")
-              case SnapshotSelector.SelectorError.BeforeFirstSnapshot =>
-                (
-                  StatusCode.UnprocessableEntity,
-                  "invalid_snapshot",
-                  "timestamp is before the first snapshot"
-                )
-              case SnapshotSelector.SelectorError.EmptyCatalog =>
-                (StatusCode.UnprocessableEntity, "invalid_snapshot", "catalog has no snapshots")
-              case SnapshotSelector.SelectorError.BeyondLatest(id) =>
-                (
-                  StatusCode.UnprocessableEntity,
-                  "invalid_snapshot",
-                  s"snapshot $id is beyond the latest snapshot"
-                )
-              case SnapshotSelector.SelectorError.Expired(id) =>
-                (StatusCode.Gone, "snapshot_expired", s"snapshot $id has been vacuumed")
+            val (sc, errCode, msg) = SnapshotSelector.httpError(e)
             err(sc, errCode, msg)
           case Right(res) =>
             res match

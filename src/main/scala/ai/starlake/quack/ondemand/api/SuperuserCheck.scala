@@ -8,13 +8,13 @@ import sttp.model.StatusCode
   * job); a resolved session is admitted only when it is a superuser session.
   */
 object SuperuserCheck:
-  def reject(apiKey: Option[String])(
+  def reject(
+      apiKey: Option[String],
+      message: String = "this operation requires a superuser session"
+  )(
       scopeOf: String => Option[SessionScope]
   ): Option[(StatusCode, ErrorResponse)] =
     apiKey.flatMap(scopeOf) match
       case Some(s) if !s.superuser =>
-        Some(
-          StatusCode.Forbidden ->
-            ErrorResponse("superuser_required", "this operation requires a superuser session")
-        )
+        Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", message))
       case _ => None
