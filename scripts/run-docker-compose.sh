@@ -68,6 +68,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=_docker-common.sh
+source "$REPO_DIR/scripts/_docker-common.sh"
 cd "$REPO_DIR"
 
 QOD_VERSION="${QOD_VERSION:-latest}"
@@ -197,21 +199,9 @@ fi
 export QOD_VERSION
 
 # ---- Rewrite host-loopback proxy URLs for container reachability ----
-# A common corporate setup runs cntlm/squid on the host's loopback (e.g.
-# http://127.0.0.1:3128). Inside the container 127.0.0.1 is the
-# container's own loopback, not the host - the proxy is unreachable.
-# Rewrite to host.docker.internal so the extra_hosts entry in compose
-# resolves to the host gateway. Touches only loopback addresses; remote
-# proxy URLs pass through unchanged.
-rewrite_loopback_proxy() {
-  local raw="${1:-}"
-  [[ -z "$raw" ]] && { echo ""; return; }
-  if [[ "$raw" =~ ^([a-zA-Z]+://)(127\.0\.0\.1|localhost)(.*)$ ]]; then
-    echo "${BASH_REMATCH[1]}host.docker.internal${BASH_REMATCH[3]}"
-  else
-    echo "$raw"
-  fi
-}
+# rewrite_loopback_proxy comes from _docker-common.sh; the loop below keeps
+# this launcher's model (export for the compose process; extra_hosts in the
+# compose file resolves host.docker.internal on Linux).
 LOOPBACK_PROXY_PORTS=()
 for var in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
   original="${!var:-}"
@@ -232,42 +222,11 @@ for var in NO_PROXY no_proxy; do
 done
 
 # ---- Auto-bridge loopback-only proxies onto the docker bridge ----
-# cntlm/squid often bind 127.0.0.1 only; the URL rewrite above makes the
-# container LOOK UP the right name but the proxy still refuses
-# connections from 172.17.0.1. Spawn a socat passthrough that listens on
-# the docker bridge IP and forwards to the host loopback, but only when
-# the proxy is reachable from loopback AND not yet from the bridge.
-# Skipped entirely on non-proxied or already-routable setups.
-BRIDGE_IP="172.17.0.1"
-DOCKER_BRIDGE_GATEWAY="$(docker network inspect bridge \
-  -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
-[[ -n "$DOCKER_BRIDGE_GATEWAY" ]] && BRIDGE_IP="$DOCKER_BRIDGE_GATEWAY"
-
-probe_tcp() { (echo > "/dev/tcp/$1/$2") >/dev/null 2>&1; }
-
+# start_loopback_proxy_bridges (in _docker-common.sh) spawns one socat
+# passthrough per loopback-only proxy port; stop-docker.sh tears the
+# `quack-proxy-bridge-*` containers down.
 if (( ${#LOOPBACK_PROXY_PORTS[@]} > 0 )); then
-  # Dedupe ports (HTTP+HTTPS commonly share one).
-  IFS=$'\n' read -r -d '' -a UNIQ_PORTS < <(
-    printf '%s\n' "${LOOPBACK_PROXY_PORTS[@]}" | sort -u && printf '\0'
-  )
-  for port in "${UNIQ_PORTS[@]}"; do
-    name="quack-proxy-bridge-$port"
-    if [[ -n "$(docker ps -q -f "name=^${name}$" 2>/dev/null)" ]]; then
-      echo "proxy bridge already running: $name ($BRIDGE_IP:$port -> 127.0.0.1:$port)"
-      continue
-    fi
-    if probe_tcp "$BRIDGE_IP" "$port"; then
-      continue  # someone else is already listening on the bridge IP
-    fi
-    if ! probe_tcp "127.0.0.1" "$port"; then
-      echo "WARN: no proxy reachable on 127.0.0.1:$port; container will likely fail to reach it" >&2
-      continue
-    fi
-    docker rm -f "$name" >/dev/null 2>&1 || true
-    echo "starting proxy bridge: $BRIDGE_IP:$port -> 127.0.0.1:$port (container=$name)"
-    docker run -d --rm --name "$name" --network host alpine/socat \
-      "TCP-LISTEN:$port,bind=$BRIDGE_IP,fork,reuseaddr" "TCP:127.0.0.1:$port" >/dev/null
-  done
+  start_loopback_proxy_bridges "${LOOPBACK_PROXY_PORTS[@]}"
 fi
 
 # ---- Port-conflict auto-bump ----

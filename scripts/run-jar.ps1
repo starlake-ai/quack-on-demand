@@ -328,7 +328,6 @@ $javaVer = & { $ErrorActionPreference = 'Continue'; (& $JavaBin -version 2>&1 | 
 Write-Host ("java: " + $javaVer)
 
 # ---- Postgres probe + PG16 gate (only when psql present) ----
-$stateMode = Get-EnvOr 'QOD_STATE_STORAGE' 'postgres'
 $pgHost    = Get-EnvOr 'QOD_PG_HOST' 'localhost'
 $pgPort    = Get-EnvOr 'QOD_PG_PORT' '5432'
 $pgUser    = Get-EnvOr 'QOD_PG_USER' 'postgres'
@@ -358,7 +357,7 @@ function Invoke-Psql([string]$Db, [string]$Sql) {
   return $out.Trim()
 }
 
-if ($stateMode -eq 'postgres' -and (Get-Command psql -ErrorAction SilentlyContinue)) {
+if (Get-Command psql -ErrorAction SilentlyContinue) {
   if ((Invoke-Psql $pgAdminDb 'SELECT 1') -eq '1') {
     $pgMajor = Invoke-Psql $pgAdminDb 'SHOW server_version_num'
     if (-not $pgMajor -or [int]$pgMajor -lt 160000) {
@@ -370,7 +369,7 @@ if ($stateMode -eq 'postgres' -and (Get-Command psql -ErrorAction SilentlyContin
   } else {
     Write-Warning "cannot reach Postgres at $pgUser@${pgHost}:$pgPort; the manager will fail at startup if it cannot persist state."
   }
-} elseif ($stateMode -eq 'postgres') {
+} else {
   Write-Host "postgres: psql not on PATH; skipping reachability probe (manager still needs a reachable PG 16+)."
 }
 
@@ -383,14 +382,14 @@ if ($env:NUKE -eq '1') {
     Write-Host "  stopping running manager"
     & (Join-Path $PSScriptRoot 'stop-jar.ps1') *> $null
   } catch { }
-  if ($stateMode -eq 'postgres' -and $pgReachable -and $pgDbName) {
+  if ($pgReachable -and $pgDbName) {
     Write-Host "  dropping Postgres database: $pgDbName (control plane)"
     Invoke-Psql $pgAdminDb "DROP DATABASE IF EXISTS ""$pgDbName"" WITH (FORCE)" | Out-Null
     foreach ($demo in @('acme_tpch','globex_tpcds')) {
       Write-Host "  dropping Postgres database: $demo (demo tenant-db)"
       Invoke-Psql $pgAdminDb "DROP DATABASE IF EXISTS ""$demo"" WITH (FORCE)" | Out-Null
     }
-  } elseif ($stateMode -eq 'postgres') {
+  } else {
     Write-Warning "  Postgres unreachable; skipping DB drop (local wipes still proceed)"
   }
   foreach ($d in @((Join-Path $RepoDir 'ducklake'), (Join-Path $RepoDir 'state'), (Join-Path $RepoDir 'certs'))) {
@@ -399,7 +398,7 @@ if ($env:NUKE -eq '1') {
 }
 
 # ---- Bootstrap control-plane DB (idempotent) ----
-if ($stateMode -eq 'postgres' -and $pgReachable -and $pgDbName) {
+if ($pgReachable -and $pgDbName) {
   if ((Invoke-Psql $pgAdminDb "SELECT 1 FROM pg_database WHERE datname='$pgDbName'") -eq '1') {
     Write-Host "catalog db: '$pgDbName' already exists"
   } else {
@@ -444,7 +443,7 @@ $flightHost = Get-EnvOr 'PROXY_HOST' '0.0.0.0'
 $flightPort = Get-EnvOr 'PROXY_PORT' '31338'
 Write-Host "REST + UI:  http://${restHost}:$restPort/ui/"
 Write-Host "FlightSQL:  ${flightHost}:$flightPort  (TLS=$(Get-EnvOr 'PROXY_TLS_ENABLED' 'true'))"
-Write-Host "State:      $stateMode"
+Write-Host "State:      postgres ($pgUser@${pgHost}:$pgPort/$pgDbName)"
 Write-Host "Runtime:    $(Get-EnvOr 'QOD_RUNTIME_TYPE' 'local')"
 Write-Host ""
 

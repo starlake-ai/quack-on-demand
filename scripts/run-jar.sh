@@ -555,8 +555,7 @@ command -v "${JAVA_BIN:-java}" >/dev/null 2>&1 || {
 }
 echo "java: $("${JAVA_BIN:-java}" -version 2>&1 | head -1)"
 
-# ---- Sanity: Postgres reachable when stateStorage=postgres (the default) ----
-state_mode="${QOD_STATE_STORAGE:-postgres}"
+# ---- Sanity: Postgres reachable (the control plane always lives there) ----
 pg_host="${QOD_PG_HOST:-localhost}"
 pg_port="${QOD_PG_PORT:-5432}"
 pg_user="${QOD_PG_USER:-postgres}"
@@ -565,7 +564,7 @@ pg_admin_db="${QOD_PG_ADMIN_DB:-postgres}"
 pg_dbname="${QOD_PG_DBNAME:-qod}"
 
 pg_reachable=0
-if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
+if command -v psql >/dev/null 2>&1; then
   if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc 'SELECT 1' >/dev/null 2>&1; then
     # Version gate: the control plane uses `gen_random_uuid()` (PG13+
@@ -586,7 +585,7 @@ if [[ "$state_mode" == "postgres" ]] && command -v psql >/dev/null 2>&1; then
     pg_reachable=1
   else
     echo "WARN: cannot reach Postgres at $pg_user@$pg_host:$pg_port; manager will fail at startup if it cannot persist state." >&2
-    echo "      Either start Postgres, set QOD_STATE_STORAGE=file, or override QOD_PG_*." >&2
+    echo "      Either start Postgres or override QOD_PG_*." >&2
   fi
 fi
 
@@ -612,7 +611,7 @@ if [[ "$NUKE" == "1" ]]; then
   # from a previous run. Runtime-created tenant-dbs (via the REST API,
   # not the bundled demo YAML) are NOT covered; drop them manually if
   # you want them gone.
-  if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
+  if [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
     echo "  dropping Postgres database: $pg_dbname (control plane)"
     PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc "DROP DATABASE IF EXISTS \"$pg_dbname\" WITH (FORCE)" >/dev/null
@@ -621,7 +620,7 @@ if [[ "$NUKE" == "1" ]]; then
       PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
          -tAc "DROP DATABASE IF EXISTS \"$demo_db\" WITH (FORCE)" >/dev/null
     done
-  elif [[ "$state_mode" == "postgres" ]]; then
+  else
     echo "  WARN: Postgres unreachable; skipping DB drop (local wipes still proceed)" >&2
   fi
   # Wipe local state directories that the JVM and child quack nodes write to.
@@ -637,7 +636,7 @@ fi
 # Without this a brand-new install fails at the first Hikari connection
 # with "database does not exist". Skipped when Postgres isn't reachable or
 # psql isn't installed.
-if [[ "$state_mode" == "postgres" ]] && [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
+if [[ "$pg_reachable" == "1" ]] && [[ -n "$pg_dbname" ]]; then
   if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$pg_admin_db" \
        -tAc "SELECT 1 FROM pg_database WHERE datname='$pg_dbname'" 2>/dev/null | grep -q 1; then
     echo "catalog db: '$pg_dbname' already exists"
@@ -704,7 +703,7 @@ fi
 # ---- Effective settings ----
 echo "REST + UI:  http://${QOD_ON_DEMAND_HOST:-0.0.0.0}:${QOD_ON_DEMAND_PORT:-20900}/ui/"
 echo "FlightSQL:  ${PROXY_HOST:-0.0.0.0}:${PROXY_PORT:-31338}  (TLS=${PROXY_TLS_ENABLED:-true})"
-echo "State:      $state_mode"
+echo "State:      postgres ($pg_user@$pg_host:$pg_port/$pg_dbname)"
 echo "Runtime:    ${QOD_RUNTIME_TYPE:-local}"
 echo ""
 

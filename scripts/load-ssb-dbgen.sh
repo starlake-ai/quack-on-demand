@@ -54,205 +54,30 @@
 
 set -euo pipefail
 
-# ---- Config ----
-PG_HOST="${PG_HOST:-localhost}"
-PG_PORT="${PG_PORT:-5432}"
-PG_USER="${PG_USER:-postgres}"
-PG_PASS="${PG_PASS:-azizam}"
-
+# ---- Config / sanity / storage / idempotency (shared) ----
+# Dataset knobs consumed by scripts/_load-common.sh, which owns the full env
+# contract (PG_*, DB_NAME, SCHEMA_NAME, DATA_PATH, TEMP_DIR, MEMORY_LIMIT, SF)
+# plus the Postgres provisioning, remote-storage detection, and the two-step
+# idempotency probe. The PowerShell twin sources _load-common.ps1 the same way.
+DATASET="ssb"
+DATASET_LABEL="SSB"
 DB_NAME="${DB_NAME:-acme_tpch}"
 SCHEMA_NAME="${SCHEMA_NAME:-ssb1}"
 SF="${SF:-1}"
+SENTINEL_TABLE="lineorder"
+SENTINEL_COLUMN="lo_orderkey"
+SCALE_NOTE="approx $((SF * 6))M lineorder rows"
 
-# DuckDB's default temp_directory is the cwd-relative `./.tmp/`. At SF>=10
-# dbgen() exceeds the default memory budget and DuckDB spills to disk; if
-# `.tmp/` doesn't exist the entire load aborts. Anchor the temp directory
-# to an absolute path we control (see load-tpch-dbgen.sh for the war
-# story). Override via TEMP_DIR when running under a read-only / quota'd
-# filesystem.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEMP_DIR="${TEMP_DIR:-$REPO_DIR/.tmp/duckdb-ssb-load}"
-mkdir -p "$TEMP_DIR"
+# shellcheck source=_load-common.sh
+source "$SCRIPT_DIR/_load-common.sh"
 
-# DuckDB's default memory budget is ~80% of *host* RAM and ignores the cgroup
-# limit, so inside a memory-capped container dbgen() at SF>=10 overruns the
-# limit and the kernel OOM-kills the process (exit 137). Bound it instead, so
-# DuckDB spills to TEMP_DIR rather than overcommit. Default = 40% of the
-# cgroup limit (leaving the rest for the JVM); override with MEMORY_LIMIT
-# (e.g. MEMORY_LIMIT=3GiB), or MEMORY_LIMIT= to keep DuckDB's default.
-cgroup_memory_bytes() {
-  local v=""
-  if [[ -r /sys/fs/cgroup/memory.max ]]; then                       # cgroup v2
-    v="$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
-  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then   # cgroup v1
-    v="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"
-  fi
-  [[ "$v" =~ ^[0-9]+$ ]] || return 0                                # "max"/empty -> unset
-  # Skip the v1 "unlimited" sentinel (~2^63); treat only real caps as limits.
-  (( v > 0 && v < 9000000000000000000 )) && echo "$v"
-}
-default_memory_limit() {
-  local bytes mib
-  bytes="$(cgroup_memory_bytes)"
-  [[ -n "$bytes" ]] || return 0
-  mib=$(( bytes / 1024 / 1024 * 40 / 100 ))
-  (( mib < 1024 )) && mib=1024
-  echo "${mib}MiB"
-}
-MEMORY_LIMIT="${MEMORY_LIMIT-$(default_memory_limit)}"
-MEMORY_LIMIT_SQL=""
-[[ -n "$MEMORY_LIMIT" ]] && MEMORY_LIMIT_SQL="SET memory_limit='$MEMORY_LIMIT';"
-
-# Default DATA_PATH matches `scripts/run-docker.sh` (CWD-anchored, not
-# repo-anchored) so a native loader and a same-CWD `docker run` agree on
-# the same absolute string. Override DATA_PATH to point at any location
-# that BOTH the loader and the manager will see (see warning above).
-DATA_PATH="${DATA_PATH:-$PWD/ducklake/$DB_NAME}"
-
-# ---- Sanity ----
-command -v duckdb >/dev/null 2>&1 || {
-  echo "ERROR: duckdb CLI not on PATH." >&2
-  echo "       Install via 'brew install duckdb' or https://duckdb.org/docs/installation/" >&2
-  exit 1
-}
-
-if [[ "$SCHEMA_NAME" == "$DB_NAME" ]]; then
-  echo "ERROR: SCHEMA_NAME ($SCHEMA_NAME) must differ from DB_NAME ($DB_NAME)." >&2
-  echo "       DuckDB rejects 2-part identifiers like \"$DB_NAME\".<table> as ambiguous" >&2
-  echo "       when a catalog and a schema share a name." >&2
-  exit 1
-fi
-
-# Provision the target Postgres database if it doesn't exist, so this
-# loader also works standalone (LOAD_SSB without LOAD_TPCH) and before the
-# manager boots. Same idiom as load-tpch-dbgen.sh; skipped silently when
-# psql is absent -- the ATTACH below will then surface the missing-database
-# error itself. A concurrent load-tpch-dbgen.sh may win the CREATE race;
-# the WARN path tolerates that.
-if command -v psql >/dev/null 2>&1; then
-  PG_ADMIN_DB="${PG_ADMIN_DB:-postgres}"
-  EXISTS=$(PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
-    -d "$PG_ADMIN_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" 2>/dev/null || true)
-  if [[ "$EXISTS" != "1" ]]; then
-    echo "load-ssb: creating Postgres database $DB_NAME"
-    PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
-      -d "$PG_ADMIN_DB" -tAc "CREATE DATABASE \"$DB_NAME\"" >/dev/null || {
-        echo "WARN: CREATE DATABASE $DB_NAME failed; ATTACH below may fail" >&2
-      }
-  fi
-fi
-
-# Detect remote DATA_PATH (s3:// / SeaweedFS / MinIO / R2, gs://, azure://) and
-# emit the matching DuckDB extension + SECRET so the ATTACH below can read/write
-# parquet against the bucket. Skips mkdir + canonicalize for remote schemes.
-IS_REMOTE=0
-STORAGE_SQL=""
-case "$DATA_PATH" in
-  s3://*|s3a://*|gs://*|r2://*)
-    IS_REMOTE=1
-    STORAGE_SQL="INSTALL httpfs; LOAD httpfs;"
-    if [[ -n "${QOD_S3_ACCESS_KEY_ID:-}" && -n "${QOD_S3_SECRET_ACCESS_KEY:-}" ]]; then
-      ep="${QOD_S3_ENDPOINT:-}"
-      ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
-      STORAGE_SQL="$STORAGE_SQL
-CREATE OR REPLACE SECRET quack_s3 (
-  TYPE s3,
-  KEY_ID '${QOD_S3_ACCESS_KEY_ID}',
-  SECRET '${QOD_S3_SECRET_ACCESS_KEY}',
-  REGION '${QOD_S3_REGION:-us-east-1}',
-  ENDPOINT '${ep}',
-  URL_STYLE '${QOD_S3_URL_STYLE:-path}',
-  USE_SSL ${QOD_S3_USE_SSL:-true}
-);"
-    fi
-    ;;
-  az://*|azure://*|abfss://*)
-    IS_REMOTE=1
-    STORAGE_SQL="INSTALL azure; LOAD azure;"
-    if [[ -n "${QOD_AZURE_CONNECTION_STRING:-}" ]]; then
-      STORAGE_SQL="$STORAGE_SQL
-CREATE OR REPLACE SECRET quack_azure (
-  TYPE azure,
-  CONNECTION_STRING '${QOD_AZURE_CONNECTION_STRING}'
-);"
-    fi
-    ;;
-esac
-
-if [[ "$IS_REMOTE" == "0" ]]; then
-  mkdir -p "$DATA_PATH"
-  # Canonicalize - DuckLake persists this exact string in the catalog.
-  DATA_PATH="$(cd "$DATA_PATH" && pwd)"
-
-  if [[ "$DATA_PATH" != /app/ducklake/* ]] && [[ -e /.dockerenv || "${IN_DOCKER:-}" == "1" ]]; then
-    : # we're inside Docker but DATA_PATH isn't /app/* - caller probably knows
-  elif [[ "$DATA_PATH" != /app/ducklake/* ]]; then
-    echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
-    echo "If you plan to run the manager in Docker, the container will look for the" >&2
-    echo "data files at /app/ducklake/$DB_NAME (its bind-mount target), NOT at" >&2
-    echo "'$DATA_PATH'. Use 'docker compose exec quack /app/scripts/load-ssb-dbgen.sh'" >&2
-    echo "to load SSB from inside the container (paths match by construction)." >&2
-    echo "" >&2
-  fi
-fi
-
-echo "postgres:    $PG_USER@$PG_HOST:$PG_PORT/$DB_NAME"
-echo "catalog:     $DB_NAME.$SCHEMA_NAME"
-echo "data path:   $DATA_PATH"
-echo "scale:       SF=$SF (approx $((SF * 6))M lineorder rows)"
-echo "memory:      ${MEMORY_LIMIT:-DuckDB default} (spill dir: $TEMP_DIR)"
-echo ""
-
-# ---- Idempotency probe ----
-# Same two-step check as load-tpch-dbgen.sh: count(*) hits DuckLake
-# metadata only; the LIMIT 1 file-probe verifies the parquet files the
-# catalog references are actually reachable (catches the wiped-ducklake/
-# kept-pgdata desync before boot instead of at first client query).
-PROBE_SQL="$(mktemp -t load-ssb-probe.XXXXXX.sql)"
-cat > "$PROBE_SQL" <<SQL
-INSTALL ducklake; LOAD ducklake;
-INSTALL postgres; LOAD postgres;
-$STORAGE_SQL
-ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
-  (DATA_PATH '$DATA_PATH');
-.mode csv
-.headers off
-SELECT count(*) FROM $DB_NAME.$SCHEMA_NAME.lineorder;
-SQL
-existing_rows="$(duckdb < "$PROBE_SQL" 2>/dev/null | tr -d '\r\n ' || true)"
-rm -f "$PROBE_SQL"
-if [[ "$existing_rows" =~ ^[0-9]+$ ]] && (( existing_rows > 0 )); then
-  FILE_PROBE_SQL="$(mktemp -t load-ssb-file-probe.XXXXXX.sql)"
-  cat > "$FILE_PROBE_SQL" <<SQL
-INSTALL ducklake; LOAD ducklake;
-INSTALL postgres; LOAD postgres;
-$STORAGE_SQL
-ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
-  (DATA_PATH '$DATA_PATH');
-.mode csv
-.headers off
-SELECT lo_orderkey FROM $DB_NAME.$SCHEMA_NAME.lineorder LIMIT 1;
-SQL
-  file_probe_err="$(duckdb < "$FILE_PROBE_SQL" 2>&1 1>/dev/null || true)"
-  rm -f "$FILE_PROBE_SQL"
-  if [[ -n "$file_probe_err" && "$file_probe_err" == *"Cannot open file"* ]]; then
-    echo "ERROR: catalog claims $existing_rows rows in $DB_NAME.$SCHEMA_NAME.lineorder" >&2
-    echo "       but the parquet files it references are missing on disk:" >&2
-    echo "$file_probe_err" | sed -n 's/.*Cannot open file "\([^"]*\)".*/         \1/p' \
-      | head -1 >&2
-    echo "" >&2
-    echo "Catalog metadata in Postgres got out of sync with the data files. Most" >&2
-    echo "likely cause: ./ducklake/ (or the S3 prefix) was wiped while ./pgdata/" >&2
-    echo "was kept. Either re-create both from scratch (NUKE=1) or manually" >&2
-    echo "drop the stale schema:" >&2
-    echo "  DROP SCHEMA $DB_NAME.$SCHEMA_NAME CASCADE;" >&2
-    exit 1
-  fi
-  echo "already loaded: $DB_NAME.$SCHEMA_NAME.lineorder has $existing_rows rows; skipping."
-  echo "(delete the schema or override SCHEMA_NAME to force a reload)"
-  exit 0
-fi
+load_config
+load_sanity
+load_ensure_pg_database
+load_resolve_storage
+load_print_banner
+load_exit_if_already_loaded
 
 # ---- Generate + run ----
 INIT_SQL="$(mktemp -t load-ssb-dbgen.XXXXXX.sql)"
@@ -267,13 +92,7 @@ SET temp_directory='$TEMP_DIR';
 -- overrunning the container cgroup limit and getting OOM-killed (exit 137).
 $MEMORY_LIMIT_SQL
 
-INSTALL ducklake; LOAD ducklake;
-INSTALL postgres; LOAD postgres;
-INSTALL tpch;     LOAD tpch;
-$STORAGE_SQL
-
-ATTACH 'ducklake:postgres:host=$PG_HOST port=$PG_PORT dbname=$DB_NAME user=$PG_USER password=$PG_PASS' AS $DB_NAME
-  (DATA_PATH '$DATA_PATH');
+$(load_preamble_sql "INSTALL tpch;     LOAD tpch;")
 
 CREATE SCHEMA IF NOT EXISTS $DB_NAME.$SCHEMA_NAME;
 
