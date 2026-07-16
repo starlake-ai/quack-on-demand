@@ -19,13 +19,43 @@ For development (editable install, plus pytest/respx):
 pip install -e 'cli[dev]'
 ```
 
-Released versions are published to PyPI as `qod-cli`:
+Released versions are published to PyPI as `qod` (`qod-cli`, the original name,
+remains as a compatibility alias built from [shim-qod-cli/](shim-qod-cli/)):
 
 ```bash
-pip install qod-cli
+pip install qod
 ```
 
-Both routes install the `qod` console script.
+Both routes install the `qod` console script. With [uv](https://docs.astral.sh/uv/)
+no install step is needed at all:
+
+```bash
+uvx qod demo
+```
+
+## Demo
+
+`qod demo` runs the self-contained manager demo (embedded Postgres, seeded
+TPC-H sample, RLS/CLS showcase) without any local checkout: it downloads the
+manager jar for the matching release from GitHub Releases, verifies it against
+the published sha256, caches it under the user cache dir, and launches it with
+the required JVM flags. If no Java 21+ is found it offers to download a cached
+Temurin 21 JRE. `--jar <path>` runs a local jar instead; `--version X.Y.Z`
+pins a different release; extra arguments are passed through to the jar's
+demo subcommand.
+
+## Run a manager
+
+`qod start` boots a real manager against your own Postgres (pointed at by
+`QOD_PG_HOST` / `QOD_PG_PORT` / `QOD_PG_USER` / `QOD_PG_PASSWORD`) with the
+same provisioning as the demo, plus the libduckdb native client. It honors
+the `scripts/run-jar.sh` env-var surface: `QOD_VERSION` (release pin or
+`latest`), `JAVA_BIN`, `JAVA_OPTS`, `JAR_CACHE_DIR`, `DUCKDB_VERSION`,
+`DUCKDB_CACHE_DIR`, the `LOAD_TPCH` / `LOAD_TPCDS` / `LOAD_SSB` / `LOAD_TPC`
+benchmark seeders, `DEMO=full|minimal`, and `NUKE=1`. State (DuckLake data,
+TLS certs) anchors under the platform user data dir. `qod stop` finds the
+running manager by its ports and tears it and its nodes down (SIGTERM, then
+SIGKILL after `FORCE_AFTER` seconds).
 
 ## Quick start
 

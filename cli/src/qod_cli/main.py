@@ -91,6 +91,16 @@ from .commands import sql_cmd  # noqa: E402
 
 app.command("sql")(sql_cmd.sql)
 
+from .commands import demo, start, stop  # noqa: E402
+
+app.command(
+    "demo", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)(demo.demo)
+app.command(
+    "start", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)(start.start)
+app.command("stop")(stop.stop)
+
 
 def main() -> None:
     app()
