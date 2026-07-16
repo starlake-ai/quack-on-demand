@@ -7,7 +7,9 @@
   <root level="INFO">
     <appender-ref ref="STDOUT" />
   </root>
-  <logger name="ai.starlake.quack" level="DEBUG" />
+  <!-- Quiet by default; set QOD_LOG_LEVEL=DEBUG (env var or -D system property)
+       to get application-level debug logs back when diagnosing. -->
+  <logger name="ai.starlake.quack" level="${QOD_LOG_LEVEL:-INFO}" />
   <!-- Reached via the JUL-to-slf4j bridge installed in Main. WARN here is almost always
        the benign stream-cancel race (client RST_STREAM while DATA frames sit queued),
        e.g. DBeaver abandoning a Flight result stream after its first fetch page. -->
