@@ -25,13 +25,18 @@ WORKDIR /src
 
 # Pre-fetch deps using only the build descriptors - keeps the layer cached
 # across source-only changes.
+# The node_modules cache is keyed per TARGETARCH: a multi-platform buildx run
+# executes the amd64 and arm64 stages concurrently, and `npm ci` starts by
+# wiping node_modules - two builds sharing one cache mount race into
+# ENOTEMPTY. The contents are arch-specific anyway (esbuild/rollup natives).
+ARG TARGETARCH
 COPY build.sbt /src/
 COPY project/  /src/project/
 COPY ui/package.json ui/package-lock.json* /src/ui/
 RUN --mount=type=cache,target=/root/.sbt \
     --mount=type=cache,target=/root/.ivy2/cache \
     --mount=type=cache,target=/root/.cache/coursier \
-    --mount=type=cache,target=/src/ui/node_modules \
+    --mount=type=cache,target=/src/ui/node_modules,id=ui-node-modules-$TARGETARCH \
     sbt -no-colors update && \
     (cd /src/ui && npm ci)
 
@@ -40,11 +45,10 @@ COPY . /src/
 # cache-mount target above is always an existing (possibly empty) directory,
 # so we re-run `npm ci` here to guarantee the tsc/vite binaries are present
 # before `sbt assembly` invokes `npm run build`.
-ARG TARGETARCH
 RUN --mount=type=cache,target=/root/.sbt \
     --mount=type=cache,target=/root/.ivy2/cache \
     --mount=type=cache,target=/root/.cache/coursier \
-    --mount=type=cache,target=/src/ui/node_modules <<EOF
+    --mount=type=cache,target=/src/ui/node_modules,id=ui-node-modules-$TARGETARCH <<EOF
 set -eu
 cd /src/ui && npm ci
 cd /src && sbt -no-colors assembly
