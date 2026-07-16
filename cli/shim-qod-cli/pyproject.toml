@@ -1,0 +1,24 @@
+# Compatibility shim: qod-cli was the original PyPI name of the CLI; the real
+# package is now `qod` (same code, same `qod` console script). This shim keeps
+# `pip install qod-cli` working by depending on the matching qod release.
+# release-jar.sh stamps the version and the qod pin below at release time.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qod-cli"
+version = "0.3.7"
+description = "Compatibility alias for the qod package (the quack-on-demand CLI)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "qod==0.3.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/starlake-ai/quack-on-demand"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qod_cli_shim"]

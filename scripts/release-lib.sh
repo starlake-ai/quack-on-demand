@@ -123,8 +123,11 @@ sbt_signed() {
     "$@"
 }
 
-# ---- qod-cli (PyPI) --------------------------------------------------------
+# ---- qod CLI (PyPI) --------------------------------------------------------
+# The CLI publishes as `qod`; `qod-cli` (the original name) is a shim package
+# that pins the matching qod release. Both ship from every release.
 CLI_VERSION_FILE="$REPO_DIR/cli/src/qod_cli/__init__.py"
+CLI_SHIM_PYPROJECT="$REPO_DIR/cli/shim-qod-cli/pyproject.toml"
 
 cli_version() {
   sed -nE 's|^__version__ = "([^"]+)"$|\1|p' "$CLI_VERSION_FILE"
@@ -135,7 +138,19 @@ set_cli_version() {
   rm "${CLI_VERSION_FILE}.bak"
 }
 
+set_cli_shim_version() {
+  sed -i.bak -E \
+    -e "s|^version = \".*\"$|version = \"$1\"|" \
+    -e "s|\"qod==[^\"]*\"|\"qod==$1\"|" \
+    "$CLI_SHIM_PYPROJECT"
+  rm "${CLI_SHIM_PYPROJECT}.bak"
+}
+
 cli_on_pypi() {
+  curl -fsS -o /dev/null "https://pypi.org/pypi/qod/$1/json"
+}
+
+cli_shim_on_pypi() {
   curl -fsS -o /dev/null "https://pypi.org/pypi/qod-cli/$1/json"
 }
 

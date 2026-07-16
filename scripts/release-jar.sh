@@ -12,7 +12,7 @@
 #   - version.sbt already at the release version -> skip the set + commit
 #   - tag v<version> already exists              -> skip tag
 #   - manager already on Maven Central           -> skip publish
-#   - qod-cli already on PyPI                    -> skip PyPI publish
+#   - qod / qod-cli shim already on PyPI         -> skip that PyPI publish
 #   - GitHub release already exists              -> skip gh release
 #   - version.sbt already bumped to -SNAPSHOT    -> skip the finalize bumps
 #
@@ -40,6 +40,7 @@ require_pgp
 require_cmd python3
 require_pypi_creds
 require_cmd gh
+require_cmd shasum
 gh auth status >/dev/null 2>&1 || die "'gh auth login' first (needed to create the GitHub release)."
 
 # ---- Gate: libquackwire must be released (checkSnapshotDependencies) ----
@@ -79,14 +80,17 @@ else
   echo "version.sbt already at ${release_version}; skipping set/commit."
 fi
 
-# qod-cli __version__ tracks the manager release version in lockstep; stamp it
+# The CLI __version__ tracks the manager release version in lockstep; stamp it
 # even on a resumed run so it lands regardless of where a prior run stopped.
+# The qod-cli shim pyproject is stamped alongside (version + qod== pin).
 if [[ "$(cli_version)" != "$release_version" ]]; then
   echo "setting cli __version__ -> $release_version"
   set_cli_version "$release_version"
   git add cli/src/qod_cli/__init__.py
-  git diff --cached --quiet || git commit -m "Setting qod-cli version to ${release_version}" -q
 fi
+set_cli_shim_version "$release_version"
+git add cli/shim-qod-cli/pyproject.toml
+git diff --cached --quiet || git commit -m "Setting qod version to ${release_version}" -q
 
 # ---- 2. Tag (idempotent) -------------------------------------------------
 if git rev-parse -q --verify "refs/tags/v${release_version}" >/dev/null; then
@@ -110,12 +114,23 @@ else
   sbt_signed "publishSigned" "sonatypeBundleRelease"
 fi
 
-# ---- 3b. PyPI: qod-cli (idempotent) ---------------------------------------
+# ---- 3b. PyPI: qod + qod-cli shim (idempotent) -----------------------------
 if cli_on_pypi "$release_version"; then
-  echo "qod-cli ${release_version} already on PyPI; skipping."
+  echo "qod ${release_version} already on PyPI; skipping."
 else
-  echo "building + publishing qod-cli ${release_version} to PyPI..."
+  echo "building + publishing qod ${release_version} to PyPI..."
   ( cd "$REPO_DIR/cli"
+    rm -rf dist
+    "$(pypi_python)" -m build
+    TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" "$(pypi_python)" -m twine upload dist/*
+  )
+fi
+
+if cli_shim_on_pypi "$release_version"; then
+  echo "qod-cli shim ${release_version} already on PyPI; skipping."
+else
+  echo "building + publishing qod-cli shim ${release_version} to PyPI..."
+  ( cd "$REPO_DIR/cli/shim-qod-cli"
     rm -rf dist
     "$(pypi_python)" -m build
     TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" "$(pypi_python)" -m twine upload dist/*
@@ -160,19 +175,37 @@ git push origin HEAD
 git push origin "v${release_version}"
 
 # ---- 5. GitHub release (idempotent) --------------------------------------
+# The .sha256 companion asset is the integrity source for every downstream
+# installer (qod demo launcher, install.sh, brew formula). Content is the
+# standard "hash  basename" line so `shasum -c` works next to the download.
+jar_name="quack-on-demand-assembly-${release_version}.jar"
 if gh release view "v${release_version}" >/dev/null 2>&1; then
   echo "GitHub release v${release_version} already exists; skipping."
+  # Backfill the .sha256 asset if the release predates it (or a prior run was
+  # interrupted mid-upload). Hash the PUBLISHED jar, not a local rebuild:
+  # sbt assembly is not byte-reproducible, so a rebuilt jar's hash would not
+  # match the asset evaluators actually download.
+  if ! gh release view "v${release_version}" --json assets --jq '.assets[].name' \
+      | grep -qxF "${jar_name}.sha256"; then
+    echo "backfilling ${jar_name}.sha256 on the existing release..."
+    sha_tmp="$(mktemp -d)"
+    gh release download "v${release_version}" --pattern "$jar_name" --dir "$sha_tmp"
+    ( cd "$sha_tmp" && shasum -a 256 "$jar_name" > "${jar_name}.sha256" )
+    gh release upload "v${release_version}" "$sha_tmp/${jar_name}.sha256"
+    rm -rf "$sha_tmp"
+  fi
 else
-  jar="distrib/quack-on-demand-assembly-${release_version}.jar"
+  jar="distrib/${jar_name}"
   if [[ ! -f "$jar" ]]; then
     echo "assembly jar missing; building $jar..."
     sbt assembly
   fi
+  ( cd distrib && shasum -a 256 "$jar_name" > "${jar_name}.sha256" )
   echo "creating GitHub release v${release_version}"
   gh release create "v${release_version}" \
     --title "v${release_version}" \
     --generate-notes \
-    "$jar"
+    "$jar" "${jar}.sha256"
 
   # ---- 5b. Discord #news announcement (best-effort) ----------------------
   # Inside the create branch on purpose: a resumed run that found the GH

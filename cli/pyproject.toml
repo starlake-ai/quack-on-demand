@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "qod-cli"
+name = "qod"
 dynamic = ["version"]
 description = "Command-line client for quack-on-demand: admin REST plane and FlightSQL plane"
 requires-python = ">=3.10"

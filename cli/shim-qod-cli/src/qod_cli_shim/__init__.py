@@ -1,0 +1,1 @@
+"""Empty marker module: qod-cli is a compatibility alias for the qod package."""
