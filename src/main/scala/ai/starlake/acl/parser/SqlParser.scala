@@ -112,6 +112,31 @@ object SqlParser:
         val message = Option(e.getMessage).getOrElse("Unknown parse error")
         StatementResult.ParseError(0, snippet, message)
 
+  /** Shared tail of every write/DDL arm: qualify the read sources and the single target table,
+    * grant `targetVerb` on the target plus Read on every source, and carry the qualification errors
+    * (source errors first) and unsupported constructs through. Each arm only decides WHICH clauses
+    * are walked for read sources and which verb the target gets.
+    */
+  private def targetPlusReads(
+      index: Int,
+      snippet: String,
+      target: Table,
+      reads: TableExtraction,
+      targetVerb: Verb,
+      config: Config
+  ): StatementResult =
+    val (qSrc, e1) = TableQualifier.qualify(reads.tables, config)
+    val (qTgt, e2) = TableQualifier.qualify(List(target), config)
+    val accesses   = qTgt.map(t => TableAccess(t, targetVerb)).toSet ++
+      qSrc.map(t => TableAccess(t, Verb.Read)).toSet
+    StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, reads.unsupported)
+
+  /** Read sources of a CTAS-style statement: the extraction of its SELECT when present, empty
+    * otherwise (plain INSERT VALUES, bare CREATE TABLE).
+    */
+  private def selectReads(select: Option[Select]): TableExtraction =
+    select.map(TableExtractor.extract).getOrElse(TableExtraction(Nil, Nil))
+
   private def processStatement(
       stmt: Statement,
       index: Int,
@@ -127,35 +152,36 @@ object SqlParser:
 
       // parser-3: INSERT
       case ins: Insert =>
-        val target      = ins.getTable
-        val srcExtract  = Option(ins.getSelect).map(TableExtractor.extract)
-        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
-        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
-        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
+        targetPlusReads(
+          index,
+          snippet,
+          ins.getTable,
+          selectReads(Option(ins.getSelect)),
+          Verb.Write,
+          config
+        )
 
       // parser-4: UPDATE
       case upd: Update =>
-        val target      = upd.getTable
-        val readExtract = UpdateReadExtractor.extract(upd)
-        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
+        targetPlusReads(
+          index,
+          snippet,
+          upd.getTable,
+          UpdateReadExtractor.extract(upd),
+          Verb.Write,
+          config
+        )
 
       // parser-5: DELETE
       case del: Delete =>
-        val target      = del.getTable
-        val readExtract = DeleteReadExtractor.extract(del)
-        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
+        targetPlusReads(
+          index,
+          snippet,
+          del.getTable,
+          DeleteReadExtractor.extract(del),
+          Verb.Write,
+          config
+        )
 
       // parser-6: MERGE
       case mrg: Merge =>
@@ -178,37 +204,29 @@ object SqlParser:
           case _ => ()
         })
         Option(mrg.getOnCondition).foreach(v.visitExpression)
-        val target      = mrg.getTable
-        val readExtract = v.result
-        val (qSrc, e1)  = TableQualifier.qualify(readExtract.tables, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Write)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, readExtract.unsupported)
+        targetPlusReads(index, snippet, mrg.getTable, v.result, Verb.Write, config)
 
       // parser-7: CREATE TABLE
       case ct: CreateTable =>
-        val target      = ct.getTable
-        val srcExtract  = Option(ct.getSelect).map(TableExtractor.extract)
-        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
-        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
-        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
+        targetPlusReads(
+          index,
+          snippet,
+          ct.getTable,
+          selectReads(Option(ct.getSelect)),
+          Verb.Ddl,
+          config
+        )
 
       // parser-7: CREATE VIEW
       case cv: CreateView =>
-        val target      = cv.getView
-        val srcExtract  = Option(cv.getSelect).map(TableExtractor.extract)
-        val srcRaw      = srcExtract.map(_.tables).getOrElse(Nil)
-        val unsupported = srcExtract.map(_.unsupported).getOrElse(Nil)
-        val (qSrc, e1)  = TableQualifier.qualify(srcRaw, config)
-        val (qTgt, e2)  = TableQualifier.qualify(List(target), config)
-        val accesses    = qTgt.map(t => TableAccess(t, Verb.Ddl)).toSet ++
-          qSrc.map(t => TableAccess(t, Verb.Read)).toSet
-        StatementResult.Extracted(index, snippet, accesses, e1 ++ e2, unsupported)
+        targetPlusReads(
+          index,
+          snippet,
+          cv.getView,
+          selectReads(Option(cv.getSelect)),
+          Verb.Ddl,
+          config
+        )
 
       // parser-8: DROP
       case dr: Drop =>
