@@ -138,6 +138,19 @@ set_cli_version() {
   rm "${CLI_VERSION_FILE}.bak"
 }
 
+# The manager release the CLI pairs with (resolve_jar's offline fallback),
+# stamped from version.sbt alongside __version__.
+MANAGER_VERSION_FILE="$REPO_DIR/cli/src/qod_cli/_manager_version.py"
+
+cli_manager_version() {
+  sed -nE 's|^MANAGER_VERSION = "([^"]+)"$|\1|p' "$MANAGER_VERSION_FILE"
+}
+
+set_cli_manager_version() {
+  sed -i.bak -E "s|^MANAGER_VERSION = \".*\"$|MANAGER_VERSION = \"$1\"|" "$MANAGER_VERSION_FILE"
+  rm "${MANAGER_VERSION_FILE}.bak"
+}
+
 set_cli_shim_version() {
   sed -i.bak -E \
     -e "s|^version = \".*\"$|version = \"$1\"|" \

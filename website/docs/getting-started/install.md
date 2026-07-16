@@ -61,8 +61,7 @@ QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=*** ./scripts/run-docker.sh
 ```bash
 uv tool install qod            # or: pip install qod
 
-qod start                      # this CLI's matching release
-QOD_VERSION=latest qod start   # newest release
+qod start                      # latest release
 QOD_VERSION=0.3.8 qod start    # pinned release
 qod start --jar path/to/quack-on-demand-assembly-X.Y.Z.jar   # a jar you built
 ```

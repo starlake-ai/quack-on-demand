@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.10
+
+### Distribution
+
+- **`qod demo` / `qod start` now run the latest release by default.** The
+  launcher resolves the newest GitHub release on every run instead of pinning
+  the jar to the CLI's own version. When the lookup fails (offline), it falls
+  back to the manager release stamped into the CLI build from `version.sbt`,
+  so a cached jar still boots without network. `--version X.Y.Z` or
+  `QOD_VERSION` pin a release as before.
+
+### Release tooling
+
+- The Discord release announce warns instead of failing when CHANGELOG.md has
+  no section for the version, posting the repo and release-notes links only.
+- Fixed a multi-platform Docker release race: the amd64 and arm64 builds no
+  longer share one `node_modules` cache mount (concurrent `npm ci` runs could
+  fail with ENOTEMPTY).
+
+---
+
 ## 0.3.9
 
 ### Security

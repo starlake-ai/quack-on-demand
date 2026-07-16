@@ -126,7 +126,7 @@ def start(
         None,
         "--version",
         envvar="QOD_VERSION",
-        help="Manager release to run (default: this CLI's release; `latest` forces the newest).",
+        help="Manager release to run (default: the latest release).",
     ),
     jar: Path = typer.Option(None, "--jar", help="Run this local jar instead of downloading."),
     yes: bool = typer.Option(

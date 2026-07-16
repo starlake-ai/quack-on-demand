@@ -621,6 +621,48 @@ def test_qod_version_latest_forces_latest_release(monkeypatch):
     assert asked["v"] == "0.5.0"
 
 
+def test_no_version_defaults_to_latest_release_even_on_a_release_cli(monkeypatch):
+    from qod_cli.commands import _launch
+
+    monkeypatch.setattr(_launch, "MANAGER_VERSION", "0.3.9")
+    monkeypatch.setattr(launcher, "latest_release_version", lambda: "0.5.0")
+    asked = {}
+    monkeypatch.setattr(launcher, "ensure_jar", lambda v, cache_dir=None: asked.setdefault("v", v))
+    _launch.resolve_jar(None)
+    assert asked["v"] == "0.5.0"
+
+
+def test_no_version_falls_back_to_stamped_manager_version_when_latest_lookup_fails(
+    monkeypatch, capsys
+):
+    from qod_cli.commands import _launch
+
+    def boom():
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(_launch, "MANAGER_VERSION", "0.3.9")
+    monkeypatch.setattr(launcher, "latest_release_version", boom)
+    asked = {}
+    monkeypatch.setattr(launcher, "ensure_jar", lambda v, cache_dir=None: asked.setdefault("v", v))
+    _launch.resolve_jar(None)
+    assert asked["v"] == "0.3.9"
+    assert "0.3.9" in capsys.readouterr().err
+
+
+def test_no_version_dev_build_errors_when_latest_lookup_fails(monkeypatch):
+    import typer
+
+    from qod_cli.commands import _launch
+
+    def boom():
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(_launch, "MANAGER_VERSION", "0.3.10.dev0")
+    monkeypatch.setattr(launcher, "latest_release_version", boom)
+    with pytest.raises(typer.Exit):
+        _launch.resolve_jar(None)
+
+
 def test_jar_cache_dir_env_overrides_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("JAR_CACHE_DIR", str(tmp_path / "jarcache"))
     (tmp_path / "jarcache").mkdir()

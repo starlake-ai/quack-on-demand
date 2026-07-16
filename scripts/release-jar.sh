@@ -88,6 +88,11 @@ if [[ "$(cli_version)" != "$release_version" ]]; then
   set_cli_version "$release_version"
   git add cli/src/qod_cli/__init__.py
 fi
+if [[ "$(cli_manager_version)" != "$release_version" ]]; then
+  echo "setting cli MANAGER_VERSION -> $release_version"
+  set_cli_manager_version "$release_version"
+  git add cli/src/qod_cli/_manager_version.py
+fi
 set_cli_shim_version "$release_version"
 git add cli/shim-qod-cli/pyproject.toml
 git diff --cached --quiet || git commit -m "Setting qod version to ${release_version}" -q
@@ -151,10 +156,11 @@ if [[ "$(manager_version)" != *-SNAPSHOT ]]; then
 fi
 
 cli_next="${next_version%-SNAPSHOT}.dev0"
-if [[ "$(cli_version)" != "$cli_next" ]]; then
-  echo "bumping cli __version__ -> $cli_next"
+if [[ "$(cli_version)" != "$cli_next" || "$(cli_manager_version)" != "$cli_next" ]]; then
+  echo "bumping cli __version__ + MANAGER_VERSION -> $cli_next"
   set_cli_version "$cli_next"
-  git add cli/src/qod_cli/__init__.py
+  set_cli_manager_version "$cli_next"
+  git add cli/src/qod_cli/__init__.py cli/src/qod_cli/_manager_version.py
   git commit -m "next dev version: qod-cli ${cli_next}" -q
 fi
 

@@ -8,7 +8,8 @@ from pathlib import Path
 
 import typer
 
-from .. import __version__, launcher
+from .. import launcher
+from .._manager_version import MANAGER_VERSION
 
 
 def _exec(cmd: list[str], env: dict) -> None:
@@ -51,16 +52,26 @@ def resolve_java(yes: bool) -> str:
 
 
 def resolve_jar(version: str | None) -> Path:
-    """The manager jar to run: `version` if given (else this CLI's release,
-    else the latest GitHub release), floor-guarded, downloaded and verified."""
-    if version == "latest":  # run-jar.sh convention
-        jar_version = launcher.latest_release_version()
+    """The manager jar to run: `version` if given, else the latest GitHub
+    release, falling back to the manager release stamped into this CLI build
+    (from version.sbt, see _manager_version.py) when the lookup fails, so a
+    cached jar still boots offline. Floor-guarded, downloaded and verified."""
+    if version:
+        jar_version = launcher.latest_release_version() if version == "latest" else version
     else:
-        jar_version = (
-            version
-            or launcher.resolved_jar_version(__version__)
-            or launcher.latest_release_version()
-        )
+        try:
+            jar_version = launcher.latest_release_version()
+        except Exception as e:
+            fallback = launcher.resolved_jar_version(MANAGER_VERSION)
+            if fallback is None:
+                typer.echo(f"could not resolve the latest release: {e}", err=True)
+                raise typer.Exit(1)
+            typer.echo(
+                f"could not resolve the latest release ({e}); "
+                f"falling back to this build's manager release {fallback}.",
+                err=True,
+            )
+            jar_version = fallback
     if not re.fullmatch(r"\d+(\.\d+)*", jar_version):
         typer.echo(
             f"'{jar_version}' is not a release version. QOD_VERSION=BUILD/LOCAL are "
