@@ -168,7 +168,15 @@ object Main extends IOApp with LazyLogging:
     val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+    bootManager(mgrCfg, edgeCfg, authCfg, aclCfg, metricsCfg)
 
+  private def bootManager(
+      mgrCfg: ManagerConfig,
+      edgeCfg: FlightConfig,
+      authCfg: AuthenticationConfig,
+      aclCfg: AclConfig,
+      metricsCfg: MetricsConfig
+  ): IO[ExitCode] =
     HaPreconditions
       .validate(
         mgrCfg.ha.enabled,
