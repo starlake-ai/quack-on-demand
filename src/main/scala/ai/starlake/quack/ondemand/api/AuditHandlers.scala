@@ -41,9 +41,7 @@ final class AuditHandlers(store: TelemetryStore):
       case Some(s) if !s.superuser =>
         // Pin to manageable tenants; ?tenant= narrows within them; ?noTenant= is ignored
         // (tenant admins can never see null-tenant rows).
-        val allowed =
-          tenant.filter(s.manageableTenants.contains).map(Set(_)).getOrElse(s.manageableTenants)
-        (Some(allowed), false)
+        (SessionScope.tenantsFilter(scoped, tenant), false)
       case _ =>
         // Superuser / static key. noTenant=true wins over any tenant filter and selects
         // exactly the null-tenant rows; a tenant filter selects that tenant only; no

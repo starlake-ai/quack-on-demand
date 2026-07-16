@@ -39,17 +39,7 @@ final class HistoryHandlers(store: TelemetryStore):
         )
       )
     else
-      val scoped  = apiKey.flatMap(scopeOf)
-      val tenants = scoped match
-        case Some(s) if !s.superuser =>
-          val allowed =
-            tenant
-              .filter(s.manageableTenants.contains)
-              .map(Set(_))
-              .getOrElse(s.manageableTenants)
-          Some(allowed)
-        case _ =>
-          tenant.map(Set(_))
+      val tenants = SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), tenant)
 
       for
         f <- QueryParams.instant(from, "from")
@@ -95,17 +85,7 @@ final class HistoryHandlers(store: TelemetryStore):
       before: Option[String],
       apiKey: Option[String]
   )(scopeOf: String => Option[SessionScope]): Out[StatementSearchResponse] = IO.blocking {
-    val scoped  = apiKey.flatMap(scopeOf)
-    val tenants = scoped match
-      case Some(s) if !s.superuser =>
-        val allowed =
-          tenant
-            .filter(s.manageableTenants.contains)
-            .map(Set(_))
-            .getOrElse(s.manageableTenants)
-        Some(allowed)
-      case _ =>
-        tenant.map(Set(_))
+    val tenants = SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), tenant)
 
     for
       f <- QueryParams.instant(from, "from")

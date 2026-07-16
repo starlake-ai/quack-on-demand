@@ -47,173 +47,106 @@ final class MembershipHandlers(
   ): Option[(StatusCode, ErrorResponse)] =
     TenantScopeCheck.rejectForResource(apiKey, sup.tenantForGroup(groupId))(scopeOf)
 
-  def addUserRole(req: UserRoleMembershipRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+  /** Shared skeleton of every membership endpoint: gate the caller, audit "denied" (no target) on
+    * rejection, otherwise run the supervisor op and audit "ok" with the edge as target on success.
+    */
+  private def membershipOp(
+      action: String,
+      apiKey: Option[String],
+      ten: Option[String],
+      gate: Option[(StatusCode, ErrorResponse)],
+      target: String,
+      op: => IO[Either[SupervisorError, Unit]]
   ): Out[Unit] =
-    val ten = sup.tenantForUser(req.userId).flatten
-    gateOnUser(apiKey, req.userId)(scopeOf) match
+    gate match
       case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipUserRoleAdd,
-          "denied",
-          tenant = ten
-        )
+        audit.rest(apiKey, "control-plane", action, "denied", tenant = ten)
         IO.pure(Left(err))
       case None =>
-        mapErr(sup.addUserRole(req.userId, req.roleId)).map { r =>
+        mapErr(op).map { r =>
           if r.isRight then
             audit.rest(
               apiKey,
               "control-plane",
-              AuditActions.MembershipUserRoleAdd,
+              action,
               "ok",
               tenant = ten,
-              target = Some(s"${req.userId}:${req.roleId}")
+              target = Some(target)
             )
           r
         }
+
+  def addUserRole(req: UserRoleMembershipRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    membershipOp(
+      AuditActions.MembershipUserRoleAdd,
+      apiKey,
+      sup.tenantForUser(req.userId).flatten,
+      gateOnUser(apiKey, req.userId)(scopeOf),
+      s"${req.userId}:${req.roleId}",
+      sup.addUserRole(req.userId, req.roleId)
+    )
 
   def removeUserRole(req: UserRoleMembershipRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val ten = sup.tenantForUser(req.userId).flatten
-    gateOnUser(apiKey, req.userId)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipUserRoleRemove,
-          "denied",
-          tenant = ten
-        )
-        IO.pure(Left(err))
-      case None =>
-        mapErr(sup.removeUserRole(req.userId, req.roleId)).map { r =>
-          if r.isRight then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MembershipUserRoleRemove,
-              "ok",
-              tenant = ten,
-              target = Some(s"${req.userId}:${req.roleId}")
-            )
-          r
-        }
+    membershipOp(
+      AuditActions.MembershipUserRoleRemove,
+      apiKey,
+      sup.tenantForUser(req.userId).flatten,
+      gateOnUser(apiKey, req.userId)(scopeOf),
+      s"${req.userId}:${req.roleId}",
+      sup.removeUserRole(req.userId, req.roleId)
+    )
 
   def addUserGroup(req: UserGroupMembershipRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val ten = sup.tenantForUser(req.userId).flatten
-    gateOnUser(apiKey, req.userId)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipUserGroupAdd,
-          "denied",
-          tenant = ten
-        )
-        IO.pure(Left(err))
-      case None =>
-        mapErr(sup.addUserGroup(req.userId, req.groupId)).map { r =>
-          if r.isRight then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MembershipUserGroupAdd,
-              "ok",
-              tenant = ten,
-              target = Some(s"${req.userId}:${req.groupId}")
-            )
-          r
-        }
+    membershipOp(
+      AuditActions.MembershipUserGroupAdd,
+      apiKey,
+      sup.tenantForUser(req.userId).flatten,
+      gateOnUser(apiKey, req.userId)(scopeOf),
+      s"${req.userId}:${req.groupId}",
+      sup.addUserGroup(req.userId, req.groupId)
+    )
 
   def removeUserGroup(req: UserGroupMembershipRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val ten = sup.tenantForUser(req.userId).flatten
-    gateOnUser(apiKey, req.userId)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipUserGroupRemove,
-          "denied",
-          tenant = ten
-        )
-        IO.pure(Left(err))
-      case None =>
-        mapErr(sup.removeUserGroup(req.userId, req.groupId)).map { r =>
-          if r.isRight then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MembershipUserGroupRemove,
-              "ok",
-              tenant = ten,
-              target = Some(s"${req.userId}:${req.groupId}")
-            )
-          r
-        }
+    membershipOp(
+      AuditActions.MembershipUserGroupRemove,
+      apiKey,
+      sup.tenantForUser(req.userId).flatten,
+      gateOnUser(apiKey, req.userId)(scopeOf),
+      s"${req.userId}:${req.groupId}",
+      sup.removeUserGroup(req.userId, req.groupId)
+    )
 
   def addGroupRole(req: GroupRoleMembershipRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val ten = sup.tenantForGroup(req.groupId)
-    gateOnGroup(apiKey, req.groupId)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipGroupRoleAdd,
-          "denied",
-          tenant = ten
-        )
-        IO.pure(Left(err))
-      case None =>
-        mapErr(sup.addGroupRole(req.groupId, req.roleId)).map { r =>
-          if r.isRight then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MembershipGroupRoleAdd,
-              "ok",
-              tenant = ten,
-              target = Some(s"${req.groupId}:${req.roleId}")
-            )
-          r
-        }
+    membershipOp(
+      AuditActions.MembershipGroupRoleAdd,
+      apiKey,
+      sup.tenantForGroup(req.groupId),
+      gateOnGroup(apiKey, req.groupId)(scopeOf),
+      s"${req.groupId}:${req.roleId}",
+      sup.addGroupRole(req.groupId, req.roleId)
+    )
 
   def removeGroupRole(req: GroupRoleMembershipRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
-    val ten = sup.tenantForGroup(req.groupId)
-    gateOnGroup(apiKey, req.groupId)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.MembershipGroupRoleRemove,
-          "denied",
-          tenant = ten
-        )
-        IO.pure(Left(err))
-      case None =>
-        mapErr(sup.removeGroupRole(req.groupId, req.roleId)).map { r =>
-          if r.isRight then
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.MembershipGroupRoleRemove,
-              "ok",
-              tenant = ten,
-              target = Some(s"${req.groupId}:${req.roleId}")
-            )
-          r
-        }
+    membershipOp(
+      AuditActions.MembershipGroupRoleRemove,
+      apiKey,
+      sup.tenantForGroup(req.groupId),
+      gateOnGroup(apiKey, req.groupId)(scopeOf),
+      s"${req.groupId}:${req.roleId}",
+      sup.removeGroupRole(req.groupId, req.roleId)
+    )
 
   def listGroupRoles(groupId: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

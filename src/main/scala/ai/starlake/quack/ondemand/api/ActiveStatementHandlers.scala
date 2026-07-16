@@ -38,9 +38,9 @@ final class ActiveStatementHandlers(
       apiKey: Option[String],
       scopeOf: String => Option[SessionScope]
   ): Option[Set[String]] =
-    apiKey.flatMap(scopeOf) match
-      case Some(s) if !s.superuser => Some(s.manageableTenants)
-      case _                       => None // superuser, static key, or no key: unrestricted
+    // No ?tenant= param on this surface: admins pin to their manageable set,
+    // superuser / static key / no key stay unrestricted.
+    SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), requested = None)
 
   def list(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

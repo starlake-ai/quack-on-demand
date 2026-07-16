@@ -228,15 +228,18 @@ object Main extends IOApp with LazyLogging:
             )
       probeResult.left.foreach(msg => sys.error(msg))
 
-    val bootstrapUserStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-    val admins             = mgrCfg.admin.usernameList
+    // Single shared UserStore (one Hikari pool against qodstate_user): reused by
+    // the admin bootstrap below, the SSO grants lookup, and the RBAC user
+    // handlers. Closed in the shutdown hook.
+    val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val admins    = mgrCfg.admin.usernameList
     if admins.isEmpty then
       logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
     else
       admins.foreach { name =>
         // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
         // CHECK only forbids empty-string tenants now; NULL alone is fine.
-        val out = bootstrapUserStore.upsertUser(
+        val out = userStore.upsertUser(
           tenant = None,
           username = name,
           plaintext = mgrCfg.admin.password,
@@ -592,10 +595,8 @@ object Main extends IOApp with LazyLogging:
       loadTenant = id => sup.getTenantById(id),
       systemMode = systemAuthMode
     )
-    val authUserStore: Option[UserStore] =
-      Some(UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap))
     val grantsForIdentity: GrantsLookup =
-      (identity, email) => authUserStore.map(_.grantsForIdentity(identity, email)).getOrElse(Nil)
+      (identity, email) => userStore.grantsForIdentity(identity, email)
     // 'auto' -> None (handler derives Secure from X-Forwarded-Proto per request); 'true' / 'false'
     // -> explicit override. Unknown values fall back to auto with a warning so a typo in the env
     // var doesn't accidentally weaken the cookie.
@@ -1033,8 +1034,7 @@ object Main extends IOApp with LazyLogging:
       // and the in-memory RbacResolver cache stay in lockstep. The user
       // handler is built first because role / group / pool-permission
       // handlers share its DTO mappers.
-      val userStoreForRbac   = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-      val userHandlers       = new UserHandlers(sup, userStoreForRbac, audit = auditRecorder)
+      val userHandlers       = new UserHandlers(sup, userStore, audit = auditRecorder)
       val roleHandlers       = new RoleHandlers(sup, userHandlers, audit = auditRecorder)
       val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
       val membershipHandlers = new MembershipHandlers(sup, userHandlers, audit = auditRecorder)
@@ -1361,7 +1361,7 @@ object Main extends IOApp with LazyLogging:
                     // idempotent + no-op if already closed.
                   try store.close()
                   catch case _: Throwable => ()
-                  try authUserStore.foreach(_.close())
+                  try userStore.close()
                   catch case _: Throwable => ()
                     // Close every cached catalog reader's Hikari pool. The
                     // map shouldn't see new entries past this point because
