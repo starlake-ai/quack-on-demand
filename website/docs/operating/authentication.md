@@ -144,7 +144,7 @@ The management plane covers `/api/*` calls from the admin UI and any REST client
 
 In `oidc` mode the management login skips the database authenticator entirely, even if `auth.database.enabled=true`. The DB authenticator continues to serve the FlightSQL edge.
 
-`auth.management.identityClaim` (default `preferred_username`) picks the JWT claim matched against `qodstate_user.username`. The `email` claim is tried as a fallback.
+The JWT's `preferred_username` claim is matched against `qodstate_user.username`; the `email` claim is tried as a fallback.
 
 ### Multi-tenant scope
 

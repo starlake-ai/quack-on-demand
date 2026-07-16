@@ -17,28 +17,25 @@ class ManagementAuthConfigSpec extends AnyFlatSpec, Matchers:
   private val sessionFields =
     """sessionJwtSecret = "", sessionCookieSecure = "auto", sessionCookiePath = "/api""""
 
-  "ManagementAuthConfig" should "default to db identity source and preferred_username claim" in {
+  "ManagementAuthConfig" should "parse db identity source" in {
     val cfg = ConfigFactory.parseString(
-      s"""auth.management { identitySource = "db", identityClaim = "preferred_username", $sessionFields }"""
+      s"""auth.management { identitySource = "db", $sessionFields }"""
     )
     val mac = ConfigSource.fromConfig(cfg).at("auth.management").loadOrThrow[ManagementAuthConfig]
     mac.identitySource shouldBe "db"
-    mac.identityClaim shouldBe "preferred_username"
   }
 
   it should "parse oidc identity source" in {
     val cfg = ConfigFactory.parseString(
-      s"""auth.management { identitySource = "oidc", identityClaim = "email", $sessionFields }"""
+      s"""auth.management { identitySource = "oidc", $sessionFields }"""
     )
     val mac = ConfigSource.fromConfig(cfg).at("auth.management").loadOrThrow[ManagementAuthConfig]
     mac.identitySource shouldBe "oidc"
-    mac.identityClaim shouldBe "email"
   }
 
   it should "default publicBaseUrl to empty and accept an override" in {
     val cfg = ManagementAuthConfig(
       identitySource = "db",
-      identityClaim = "preferred_username",
       sessionJwtSecret = "x",
       sessionCookieSecure = "auto",
       sessionCookiePath = "/api",

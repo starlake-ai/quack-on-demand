@@ -13,9 +13,6 @@ package ai.starlake.quack.model
   *     `displayName` after normalization.
   *   - `displayName` : human-facing label persisted on `qodstate_tenant`.
   *   - `disabled` : soft-delete marker.
-  *   - `metastore` : flat key/value map kept on the row so older fixtures and tests that wire
-  *     storage at the tenant level still compile; production storage lives on the child
-  *     [[TenantDb]] rows.
   *   - `authProvider` : one of {db, keycloak, google, azure, aws}. Defaults to `db` -- the username
   *     on `qodstate_user` IS the identity, no extra configuration needed.
   *   - `authConfig` : provider-specific config. Empty for `db`. For OIDC providers, the keys read
@@ -28,7 +25,6 @@ package ai.starlake.quack.model
 final case class Tenant(
     id: String,
     displayName: String = "",
-    metastore: Map[String, String] = Map.empty,
     disabled: Boolean = false,
     authProvider: String = "db",
     authConfig: Map[String, String] = Map.empty

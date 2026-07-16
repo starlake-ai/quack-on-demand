@@ -119,12 +119,6 @@ final case class ManagementAuthConfig(
     )
     identitySource: String,
     @field @ConfigField(
-      envVar = "QOD_MGMT_IDENTITY_CLAIM",
-      description =
-        "JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback)."
-    )
-    identityClaim: String,
-    @field @ConfigField(
       envVar = "QOD_SESSION_JWT_SECRET",
       description =
         "HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make " +

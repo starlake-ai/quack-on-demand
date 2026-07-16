@@ -26,7 +26,6 @@ class OidcSsoServiceSpec extends AnyFlatSpec with Matchers:
   // Tenant constructor: name, metastore, id, displayName, disabled, authProvider, authConfig
   private def tenant(authConfig: Map[String, String]): Tenant =
     Tenant(
-      metastore = Map.empty,
       id = "test-id",
       displayName = "Test Tenant",
       disabled = false,

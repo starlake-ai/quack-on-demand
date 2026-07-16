@@ -64,7 +64,6 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       case "acme" =>
         Some(
           Tenant(
-            metastore = Map.empty,
             id = "acme",
             displayName = "Acme Corp",
             disabled = false,
