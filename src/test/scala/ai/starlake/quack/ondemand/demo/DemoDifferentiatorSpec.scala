@@ -54,8 +54,19 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
       )
       .getOrElse(1) == 0
 
+  // Final-review Fix 2: none of these are legitimately set outside a demo run, so their absence
+  // here doubles as "nothing else already polluted this JVM fork" and lets the assertion after
+  // teardown (below) be a plain null-check rather than a snapshot/compare.
+  private val DemoMutatedSysProps = List(
+    "quack-on-demand.cls.enabled",
+    "quack-on-demand.rls.enabled",
+    "QOD_BOOTSTRAP_YAML"
+  )
+
   "qod demo" should "apply RLS/CLS for the analyst and deny ungranted tables" in {
     if !duckdbAvailable then cancel("duckdb CLI not on PATH; skipping demo integration test")
+
+    DemoMutatedSysProps.foreach(k => System.getProperty(k) shouldBe null)
 
     val home  = java.nio.file.Files.createTempDirectory("demo-diff-spec")
     val fiber = DemoRunner.runDemo(List(home.toString)).start.unsafeRunSync()
@@ -65,6 +76,14 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
       //    boot here means: embedded PG start, control-plane migrate, RBAC manifest import,
       //    TPC-H dbgen seed, and a spawned Quack node -- budget generously.
       waitForFlightReady(FlightPort, 150.seconds)
+
+      // Final-review Fix 2, mid-lifecycle half of the proof: `setup` has unconditionally run by
+      // the time Flight answers (it runs before `bootWithBanner`), so the mutated properties must
+      // be live now -- the teardown assertion in `finally` below is only meaningful if we first
+      // confirm they were actually set, not just absent because `setup` never ran.
+      System.getProperty("quack-on-demand.cls.enabled") shouldBe "true"
+      System.getProperty("quack-on-demand.rls.enabled") shouldBe "true"
+      System.getProperty("QOD_BOOTSTRAP_YAML") shouldBe "classpath:bootstrap-demo-minimal.yaml"
 
       // 2. alice (analyst): c_phone masked to '***', only BUILDING rows. The Quack node may still
       //    be warming up after Flight starts accepting connections, so retry transient failures.
@@ -104,7 +123,13 @@ class DemoDifferentiatorSpec extends AnyFlatSpec with Matchers:
       }
       ex.getMessage.toLowerCase should include("denied")
     finally
+      // `Fiber#cancel` completes only once the target fiber's finalizers -- including `runDemo`'s
+      // `.guarantee(cleanup)`, which restores the mutated system properties (Fix 2) -- have run, so
+      // no extra wait/poll is needed before the assertion right below.
       fiber.cancel.unsafeRunSync()
+      // Final-review Fix 2, teardown half of the proof: back to unset, exactly the pre-demo state
+      // asserted at the top of this test.
+      DemoMutatedSysProps.foreach(k => System.getProperty(k) shouldBe null)
       // best-effort dir cleanup; runDemo's guarantee also removes its own home
       DemoHome(home, home, home, home).deleteRecursively()
   }

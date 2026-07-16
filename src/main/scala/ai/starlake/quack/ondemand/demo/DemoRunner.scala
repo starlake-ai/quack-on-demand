@@ -24,6 +24,36 @@ object DemoRunner:
   private val DbName = "acme_tpch"
   private val Schema = "tpch1"
 
+  // Final-review Fix 2: every JVM-global system property `setup` mutates, listed once so
+  // snapshot/restore stay obviously symmetric (add here, not ad hoc at each call site, if a future
+  // change makes `setup` set another one). `Test/fork := true` runs each spec class in its own JVM,
+  // but within ONE suite class multiple tests (or, worse, a later spec sharing that fork) would
+  // otherwise inherit whatever `runDemo` last left set -- e.g. `QOD_BOOTSTRAP_YAML` pointing at the
+  // demo's minimal manifest, or cls/rls forced on -- an order-dependent flake.
+  private val MutatedSysProps = List(
+    "quack-on-demand.cls.enabled",
+    "quack-on-demand.rls.enabled",
+    "QOD_BOOTSTRAP_YAML"
+  )
+
+  /** Capture the current value (`Some`) or absence (`None`) of every property [[MutatedSysProps]]
+    * lists, so [[restoreSysProps]] can put the JVM back exactly how it found it.
+    */
+  private def snapshotSysProps(): Map[String, Option[String]] =
+    MutatedSysProps.map(k => k -> Option(System.getProperty(k))).toMap
+
+  /** Undo `setup`'s system-property mutations: re-set whatever was previously present, clear
+    * whatever was previously absent, then invalidate Typesafe Config's cache so a later boot in the
+    * same JVM (e.g. the next spec in this fork) re-reads the restored values instead of a stale
+    * snapshot.
+    */
+  private def restoreSysProps(snapshot: Map[String, Option[String]]): Unit =
+    snapshot.foreach {
+      case (k, Some(v)) => System.setProperty(k, v)
+      case (k, None)    => System.clearProperty(k)
+    }
+    com.typesafe.config.ConfigFactory.invalidateCaches()
+
   def runDemo(args: List[String]): IO[ExitCode] =
     val explicitHome = args.headOption
     // `home` is created up front (a cheap, side-effect-free mkdir) and `pgRef` records the embedded
@@ -31,12 +61,15 @@ object DemoRunner:
     // DemoSeed) that can throw. `cleanup` is attached via `.guarantee` around the WHOLE setup+boot
     // chain (not just the boot), so a mid-setup failure -- e.g. a bad config -- still stops PG and
     // deletes the home instead of leaking both under ${TMPDIR}/qod-demo.
-    val home    = DemoHome.create(explicitHome)
-    val pgRef   = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
-    val cleanup = IO.blocking {
+    val home          = DemoHome.create(explicitHome)
+    val propsSnapshot = snapshotSysProps() // captured BEFORE `setup` sets any of MutatedSysProps
+    val pgRef         = new java.util.concurrent.atomic.AtomicReference[Option[DemoPostgres]](None)
+    val cleanup       = IO.blocking {
       logger.info("demo: tearing down")
       try pgRef.get().foreach(_.stop())
-      finally home.deleteRecursively()
+      finally
+        try home.deleteRecursively()
+        finally restoreSysProps(propsSnapshot)
     }
     IO.blocking(setup(home, pgRef))
       .flatMap(configs => bootWithBanner(home, configs))
