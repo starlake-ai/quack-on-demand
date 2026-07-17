@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.11
+
+### Distribution
+
+- **BREAKING: `qod demo` is now `qod start --demo`.** The demo is a flag on
+  `start` instead of a separate subcommand; behavior is unchanged (embedded
+  ephemeral Postgres, seeded TPC-H, RLS/CLS showcase, no external Postgres).
+  The jar's `demo` subcommand is untouched, so `docker run ... demo` and
+  `java -jar ... demo` work as before.
+- **The demo banner prints when the manager is ready, not before boot.** It
+  now lands at the end of the boot output with the admin UI logins and
+  copy-pastable JDBC / ADBC / ODBC configurations for every seeded credential.
+
+---
+
 ## 0.3.10
 
 ### Distribution

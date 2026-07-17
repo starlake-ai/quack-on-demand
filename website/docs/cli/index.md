@@ -5,7 +5,7 @@ title: The qod CLI
 
 `qod` is a single command-line client for both planes of quack-on-demand: the manager's admin REST surface on `:20900` (tenants, databases, pools, nodes, RBAC, catalog, federation, audit, usage) and the FlightSQL query plane on `:31338` (`qod sql`, one-shot or interactive). Every REST path has a matching noun-verb command - `POST /api/tenant/create` is `qod tenant create`, `GET /api/pool/list` is `qod pool list`, and so on - so if you know the API you already know most of the CLI.
 
-It is also the launcher: `qod demo` runs the self-contained demo, and `qod start` / `qod stop` run a real manager against your own Postgres - see [Installation](/getting-started/install) and the [manager jar reference](/reference/cli).
+It is also the launcher: `qod start --demo` runs the self-contained demo, and `qod start` / `qod stop` run a real manager against your own Postgres - see [Installation](/getting-started/install) and the [manager jar reference](/reference/cli).
 
 ## Install
 

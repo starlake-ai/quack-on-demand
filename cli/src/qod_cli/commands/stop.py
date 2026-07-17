@@ -3,7 +3,7 @@
 Discovers the manager by its listening ports (it owns both the REST and the
 FlightSQL edge port in one JVM) and the quack nodes by their spawn script,
 SIGTERMs everything, waits up to FORCE_AFTER seconds, then escalates to
-SIGKILL. Works regardless of how the manager was started (qod start, qod demo,
+SIGKILL. Works regardless of how the manager was started (qod start, qod start --demo,
 run-jar.sh).
 """
 

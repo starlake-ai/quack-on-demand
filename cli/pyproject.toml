@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "qod"
 dynamic = ["version"]
-description = "Command-line client for quack-on-demand: admin REST plane and FlightSQL plane"
+description = "Launcher and CLI for Quack on Demand, the multi-tenant DuckDB/DuckLake FlightSQL gateway: try it with `uvx qod start --demo` (no install, no Postgres), run a real manager with `qod start`, administer tenants/pools/RBAC over REST, and run SQL over Arrow FlightSQL"
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12",

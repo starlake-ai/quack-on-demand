@@ -76,10 +76,10 @@ Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`R
 One command boots a fully seeded instance against an **embedded, throwaway Postgres**. With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the launcher fetches the release jar (sha256-verified against the GitHub release), a Java 21 runtime if none is present, and the pinned `duckdb` CLI, all cached under your user cache dir. Works the same on macOS, Linux, and Windows:
 
 ```bash
-uvx qod demo
+uvx qod start --demo
 ```
 
-`pip install qod && qod demo` is equivalent. Other routes to the same demo:
+`pip install qod && qod start --demo` is equivalent. Other routes to the same demo:
 
 ```bash
 # Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a

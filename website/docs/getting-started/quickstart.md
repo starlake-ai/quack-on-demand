@@ -12,10 +12,10 @@ The fastest way to try Quack on Demand end to end. `demo` boots a fully seeded i
 With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Java runtime if none is on your machine (it asks first, cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
 
 ```bash
-uvx qod demo
+uvx qod start --demo
 ```
 
-`pip install qod && qod demo` is equivalent. Two more routes to the same demo:
+`pip install qod && qod start --demo` is equivalent. Two more routes to the same demo:
 
 ```bash
 # Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a

@@ -162,5 +162,13 @@ object DemoRunner:
       dataPath = home.dataPath.toString,
       rows = "~150K"
     )
-    IO.blocking(println(banner)) *>
+    // Print the banner once the manager REST port actually accepts connections, so the
+    // connect recipes land at the END of the boot output instead of scrolling away under
+    // it. Runs on a background fiber (bootManager blocks until shutdown); if the port
+    // never comes up within the budget, print anyway - the recipes must never be lost.
+    val printWhenReady = IO.blocking {
+      DemoBanner.awaitPort("127.0.0.1", configs.manager.port, timeoutMs = 180000L)
+      println(banner)
+    }
+    printWhenReady.start *>
       Main.bootManager(configs.manager, configs.flight, authCfg, configs.acl, metricsCfg)

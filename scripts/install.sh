@@ -56,4 +56,4 @@ esac
 say ""
 say "qod installed: $("$bin_dir/qod" --version 2>/dev/null || printf 'run: qod --version')"
 say "try the self-contained demo (embedded Postgres, seeded TPC-H, RLS/CLS):"
-say "  qod demo"
+say "  qod start --demo"

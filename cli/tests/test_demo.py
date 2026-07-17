@@ -265,7 +265,7 @@ def test_demo_launches_local_jar_with_system_java(runner, monkeypatch, tmp_path)
     jar.write_text("")
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     captured = _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--jar", str(jar)])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar)])
     assert result.exit_code == 0, result.output
     assert captured["cmd"] == ["/usr/bin/java", ARROW_FLAG, "-jar", str(jar), "demo"]
 
@@ -277,7 +277,7 @@ def test_demo_passes_extra_args_to_the_jar(runner, monkeypatch, tmp_path):
     jar.write_text("")
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     captured = _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--jar", str(jar), "--sf", "1"])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar), "--sf", "1"])
     assert result.exit_code == 0, result.output
     assert captured["cmd"][-3:] == ["demo", "--sf", "1"]
 
@@ -297,7 +297,7 @@ def test_demo_dev_build_falls_back_to_latest_release(runner, monkeypatch, tmp_pa
     monkeypatch.setattr(launcher, "latest_release_version", lambda: "0.3.8")
     monkeypatch.setattr(launcher, "ensure_jar", fake_ensure_jar)
     captured = _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo"])  # CLI __version__ is a .dev0 build
+    result = runner.invoke(app, ["start", "--demo"])  # CLI __version__ is a .dev0 build
     assert result.exit_code == 0, result.output
     assert asked["version"] == "0.3.8"
     assert captured["cmd"][3] == str(jar)
@@ -317,7 +317,7 @@ def test_demo_version_option_pins_the_jar(runner, monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "ensure_jar", fake_ensure_jar)
     _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--version", "0.9.9"])
+    result = runner.invoke(app, ["start", "--demo", "--version", "0.9.9"])
     assert result.exit_code == 0, result.output
     assert asked["version"] == "0.9.9"
 
@@ -331,7 +331,7 @@ def test_demo_without_java_provisions_jre(runner, monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
     monkeypatch.setattr(launcher, "ensure_jre", lambda cache_dir=None: "/cache/jre/bin/java")
     captured = _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--jar", str(jar), "--yes"])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar), "--yes"])
     assert result.exit_code == 0, result.output
     assert captured["cmd"][0] == "/cache/jre/bin/java"
 
@@ -343,7 +343,7 @@ def test_demo_without_java_on_musl_fails_with_apk_hint(runner, monkeypatch, tmp_
     jar.write_text("")
     monkeypatch.setattr(launcher, "find_java", lambda: None)
     monkeypatch.setattr(launcher, "is_musl", lambda root=None: True)
-    result = runner.invoke(app, ["demo", "--jar", str(jar), "--yes"])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar), "--yes"])
     assert result.exit_code == 1
     assert "apk add" in result.output
 
@@ -356,7 +356,7 @@ def test_demo_integrity_error_refuses_with_message(runner, monkeypatch):
 
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "ensure_jar", bad_jar)
-    result = runner.invoke(app, ["demo", "--version", "0.9.9"])
+    result = runner.invoke(app, ["start", "--demo", "--version", "0.9.9"])
     assert result.exit_code == 1
     assert "refusing to run" in result.output
 
@@ -369,7 +369,7 @@ def test_demo_download_failure_suggests_local_jar(runner, monkeypatch):
 
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "ensure_jar", down)
-    result = runner.invoke(app, ["demo", "--version", "0.9.9"])
+    result = runner.invoke(app, ["start", "--demo", "--version", "0.9.9"])
     assert result.exit_code == 1
     assert "--jar" in result.output
 
@@ -385,7 +385,7 @@ def test_demo_refuses_jar_versions_predating_the_demo(runner, monkeypatch):
 
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--version", "0.3.7"])
+    result = runner.invoke(app, ["start", "--demo", "--version", "0.3.7"])
     assert result.exit_code == 1
     assert "0.3.8" in result.output
 
@@ -396,7 +396,7 @@ def test_demo_refuses_when_latest_release_predates_the_demo(runner, monkeypatch)
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "latest_release_version", lambda: "0.3.7")
     _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo"])
+    result = runner.invoke(app, ["start", "--demo"])
     assert result.exit_code == 1
     assert "0.3.8" in result.output
 
@@ -492,7 +492,7 @@ def test_demo_provisions_app_home_and_passes_env(runner, monkeypatch, tmp_path):
         captured["cmd"], captured["env"] = cmd, env
 
     monkeypatch.setattr(demo_cmd, "_exec", fake_exec)
-    result = runner.invoke(app, ["demo", "--jar", str(jar)])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar)])
     assert result.exit_code == 0, result.output
     assert captured["env"]["QOD_SPAWN_SCRIPT"] == str(sh)
     assert str(tmp_path / "duckdb" / "bin") in captured["env"]["PATH"]
@@ -513,7 +513,7 @@ def test_demo_honors_qod_version_env(runner, monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     monkeypatch.setattr(launcher, "ensure_jar", fake_ensure_jar)
     _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo"])
+    result = runner.invoke(app, ["start", "--demo"])
     assert result.exit_code == 0, result.output
     assert asked["version"] == "0.4.0"
 
@@ -523,7 +523,7 @@ def test_demo_rejects_non_release_version_with_hint(runner, monkeypatch):
 
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
     _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["demo", "--version", "BUILD"])
+    result = runner.invoke(app, ["start", "--demo", "--version", "BUILD"])
     assert result.exit_code == 1
     assert "--jar" in result.output
 

@@ -30,12 +30,12 @@ Both routes install the `qod` console script. With [uv](https://docs.astral.sh/u
 no install step is needed at all:
 
 ```bash
-uvx qod demo
+uvx qod start --demo
 ```
 
 ## Demo
 
-`qod demo` runs the self-contained manager demo (embedded Postgres, seeded
+`qod start --demo` runs the self-contained manager demo (embedded Postgres, seeded
 TPC-H sample, RLS/CLS showcase) without any local checkout: it downloads the
 manager jar for the latest release from GitHub Releases (falling back to the
 release stamped into the CLI build when the lookup fails and a cached jar

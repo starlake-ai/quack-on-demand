@@ -3,7 +3,7 @@ id: install
 title: Installation
 ---
 
-Quack on Demand ships as a Docker image and as a single uber-jar driven by the `qod` CLI (`pip install qod`, or no install at all with `uvx`). The fastest way to evaluate it is [Demo mode](/getting-started/quickstart#demo-mode-self-contained-no-postgres) via `uvx qod demo`. For a durable deployment, two paths are supported: Docker, and the native jar via [`qod start`](#native-jar-qod-start). Both run on **Linux, macOS, and Windows** (Windows support is experimental; see [Run on Windows](#run-on-windows) below). GitHub Releases hosts the raw jar artifacts, but you should rarely need to download one by hand - every path below fetches what it needs.
+Quack on Demand ships as a Docker image and as a single uber-jar driven by the `qod` CLI (`pip install qod`, or no install at all with `uvx`). The fastest way to evaluate it is [Demo mode](/getting-started/quickstart#demo-mode-self-contained-no-postgres) via `uvx qod start --demo`. For a durable deployment, two paths are supported: Docker, and the native jar via [`qod start`](#native-jar-qod-start). Both run on **Linux, macOS, and Windows** (Windows support is experimental; see [Run on Windows](#run-on-windows) below). GitHub Releases hosts the raw jar artifacts, but you should rarely need to download one by hand - every path below fetches what it needs.
 
 ## Docker
 
@@ -108,7 +108,7 @@ NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 Windows support is **experimental**. The `qod` launcher needs release **0.3.8 or later** (older releases predate the `demo`/`start` subcommand support and are refused).
 :::
 
-The manager runs natively on Windows - no WSL, no Docker. `pip install qod` installs the same `qod.exe` entry point, and `qod demo` / `qod start` work as on Linux/macOS: Java 21 is auto-provisioned when missing, DuckDB (CLI + `duckdb.dll`) is self-installed, and Quack nodes are spawned through the bundled PowerShell mirror of the node-spawn script.
+The manager runs natively on Windows - no WSL, no Docker. `pip install qod` installs the same `qod.exe` entry point, and `qod start --demo` / `qod start` work as on Linux/macOS: Java 21 is auto-provisioned when missing, DuckDB (CLI + `duckdb.dll`) is self-installed, and Quack nodes are spawned through the bundled PowerShell mirror of the node-spawn script.
 
 ```powershell
 pip install qod

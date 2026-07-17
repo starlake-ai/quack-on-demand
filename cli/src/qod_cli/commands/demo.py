@@ -7,20 +7,10 @@ from .. import launcher
 from ._launch import _exec, resolve_jar, resolve_java
 
 
-def demo(
-    ctx: typer.Context,
-    version: str = typer.Option(
-        None,
-        "--version",
-        envvar="QOD_VERSION",
-        help="Manager release to run (default: the latest release).",
-    ),
-    jar: Path = typer.Option(None, "--jar", help="Run this local jar instead of downloading."),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Do not prompt before downloading a Java runtime."
-    ),
-):
-    """Run the self-contained quack-on-demand demo (embedded Postgres, seeded data)."""
+def run_demo(ctx: typer.Context, version: str | None, jar: Path | None, yes: bool) -> None:
+    """The `qod start --demo` path: the self-contained quack-on-demand demo
+    (embedded ephemeral Postgres, seeded data). Kept in its own module so the
+    demo provisioning stays independent of the real-manager start path."""
     java = resolve_java(yes)
     jar_path = jar if jar is not None else resolve_jar(version)
 

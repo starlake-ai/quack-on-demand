@@ -1,4 +1,4 @@
-"""Resolve and launch the quack-on-demand manager jar (used by `qod demo`).
+"""Resolve and launch the quack-on-demand manager jar (used by `qod start --demo`).
 
 The jar is not bundled in the wheel: it is fetched from the GitHub release
 matching the CLI version (they release in lockstep), verified against the
