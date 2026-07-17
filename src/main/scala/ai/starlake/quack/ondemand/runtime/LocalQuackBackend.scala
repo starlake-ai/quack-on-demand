@@ -170,9 +170,9 @@ object LocalQuackBackend:
   def duckdbPathPrefix(appHome: Option[String]): Option[String] =
     appHome.filter(_.nonEmpty).map(h => s"$h/duckdb/bin")
 
-  /** In-repo Windows fallback spawn script (a PowerShell mirror of
-    * `spawn-quack-node.sh`). Production passes `mgrCfg.spawnScriptWindows`
-    * (HOCON `quack-on-demand.spawnScriptWindows`, env `QOD_SPAWN_SCRIPT_WINDOWS`).
+  /** In-repo Windows fallback spawn script (a PowerShell mirror of `spawn-quack-node.sh`).
+    * Production passes `mgrCfg.spawnScriptWindows` (HOCON `quack-on-demand.spawnScriptWindows`, env
+    * `QOD_SPAWN_SCRIPT_WINDOWS`).
     */
   val DefaultSpawnScriptWindows: String = "./scripts/spawn-quack-node.ps1"
 
@@ -212,9 +212,9 @@ object LocalQuackBackend:
         )
     else (_, port, token) => List(unixScript, port.toString, token)
 
-  /** Terminate a spawned node by pid. On Windows uses `taskkill /PID <pid> /T` (`/F` when
-    * `force`) so the whole process tree — the PowerShell wrapper and its `duckdb.exe` child — is
-    * killed; `Process.destroy()` alone would leave the grandchild orphaned. On Unix routes through
+  /** Terminate a spawned node by pid. On Windows uses `taskkill /PID <pid> /T` (`/F` when `force`)
+    * so the whole process tree — the PowerShell wrapper and its `duckdb.exe` child — is killed;
+    * `Process.destroy()` alone would leave the grandchild orphaned. On Unix routes through
     * `ProcessHandle` so behavior matches the prior `destroy()` / `destroyForcibly()` path.
     */
   private[runtime] def terminate(pid: Long, force: Boolean): Unit =
@@ -223,9 +223,12 @@ object LocalQuackBackend:
         if force then List("taskkill", "/PID", pid.toString, "/T", "/F")
         else List("taskkill", "/PID", pid.toString, "/T")
       try
-        val p = new java.lang.ProcessBuilder(cmd*).redirectOutput(
-          java.lang.ProcessBuilder.Redirect.DISCARD
-        ).redirectError(java.lang.ProcessBuilder.Redirect.DISCARD).start()
+        val p = new java.lang.ProcessBuilder(cmd*)
+          .redirectOutput(
+            java.lang.ProcessBuilder.Redirect.DISCARD
+          )
+          .redirectError(java.lang.ProcessBuilder.Redirect.DISCARD)
+          .start()
         p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
         ()
       catch case _: Throwable => ()

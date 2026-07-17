@@ -187,10 +187,10 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
       recoverable = rs.getBoolean("recoverable")
     )
 
-  /** Discovery list only: a drop whose (schema, name) is live again - an undrop recovery
-    * re-created it, or an unrelated table took the name - is excluded, because its default
-    * Undrop action would 409 name_conflict. [[findDroppedTable]] deliberately keeps no such
-    * filter so an explicit undrop with asName can still recover an occupied name.
+  /** Discovery list only: a drop whose (schema, name) is live again - an undrop recovery re-created
+    * it, or an unrelated table took the name - is excluded, because its default Undrop action would
+    * 409 name_conflict. [[findDroppedTable]] deliberately keeps no such filter so an explicit
+    * undrop with asName can still recover an occupied name.
     */
   private val nameNotLiveAgain =
     """   AND NOT EXISTS (SELECT 1 FROM ducklake_table l
