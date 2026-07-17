@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3
+
+### Distribution
+
+- **Windows on ARM: DuckDB provisioning works.** The launcher now maps
+  `(win32, arm64)` to DuckDB's native `windows-arm64` CLI and libduckdb
+  assets; previously `qod start` on ARM Windows (e.g. Parallels on Apple
+  Silicon) failed with "could not provision the duckdb CLI". Note the native
+  `quackwire.dll` remains x86_64-only: set `QOD_NATIVE_CLIENT=false` for
+  `qod start` on ARM Windows (the demo already forces it).
+
+---
+
 ## 0.4.2
 
 ### Distribution

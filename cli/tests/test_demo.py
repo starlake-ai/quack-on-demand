@@ -422,6 +422,9 @@ def test_duckdb_cli_url_platform_mapping():
     assert launcher.duckdb_cli_url("linux", "x86_64") == f"{base}/duckdb_cli-linux-amd64.zip"
     assert launcher.duckdb_cli_url("linux", "aarch64") == f"{base}/duckdb_cli-linux-arm64.zip"
     assert launcher.duckdb_cli_url("win32", "AMD64") == f"{base}/duckdb_cli-windows-amd64.zip"
+    # Windows on ARM (e.g. Parallels on Apple Silicon): platform.machine() is
+    # "ARM64"; duckdb ships native windows-arm64 assets.
+    assert launcher.duckdb_cli_url("win32", "ARM64") == f"{base}/duckdb_cli-windows-arm64.zip"
 
 
 def _duckdb_zip():
@@ -547,6 +550,7 @@ def test_libduckdb_url_platform_mapping():
     base = "https://github.com/duckdb/duckdb/releases/download/v1.5.4"
     assert launcher.libduckdb_url("darwin", "arm64") == f"{base}/libduckdb-osx-universal.zip"
     assert launcher.libduckdb_url("linux", "x86_64") == f"{base}/libduckdb-linux-amd64.zip"
+    assert launcher.libduckdb_url("win32", "ARM64") == f"{base}/libduckdb-windows-arm64.zip"
 
 
 def _libduckdb_zip(name):

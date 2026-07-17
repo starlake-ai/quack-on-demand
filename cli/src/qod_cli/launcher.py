@@ -295,6 +295,10 @@ _DUCKDB_PLAT = {
     ("linux", "arm64"): "linux-arm64",
     ("win32", "amd64"): "windows-amd64",
     ("win32", "x86_64"): "windows-amd64",
+    # Windows on ARM (platform.machine() == "ARM64", e.g. Parallels on
+    # Apple Silicon); duckdb ships native windows-arm64 CLI + lib assets.
+    ("win32", "arm64"): "windows-arm64",
+    ("win32", "aarch64"): "windows-arm64",
 }
 
 
