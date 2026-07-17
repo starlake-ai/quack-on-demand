@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 
 [[package]]
@@ -319,10 +319,10 @@ wheels = [
 name = "qod"
 source = { editable = "." }
 dependencies = [
-    { name = "adbc-driver-flightsql" },
+    { name = "adbc-driver-flightsql", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
     { name = "httpx" },
     { name = "platformdirs" },
-    { name = "pyarrow" },
+    { name = "pyarrow", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
     { name = "pyreadline3", marker = "sys_platform == 'win32'" },
     { name = "rich" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -338,10 +338,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "adbc-driver-flightsql", specifier = ">=1.0" },
+    { name = "adbc-driver-flightsql", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "platformdirs", specifier = ">=4.0" },
-    { name = "pyarrow", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "platform_machine != 'ARM64' or sys_platform != 'win32'", specifier = ">=16.0" },
     { name = "pyreadline3", marker = "sys_platform == 'win32'", specifier = ">=3.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
