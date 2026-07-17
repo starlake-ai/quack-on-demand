@@ -82,8 +82,8 @@ object SqlParser:
         a + 1 < n && sql(a) == '=' && sql(a + 1) == '>'
     def skipGroup(openParen: Int): Int =
       // index just past the balanced close paren, skipping quoted literals and identifiers
-      var depth = 1
-      var p     = openParen + 1
+      var depth                         = 1
+      var p                             = openParen + 1
       def skipQuoted(quote: Char): Unit =
         p += 1
         var closed = false
