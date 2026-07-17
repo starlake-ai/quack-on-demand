@@ -81,7 +81,7 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 // etc.) copied from the pinned DuckDB source. A DuckDB bump can change those
 // values or introduce new unresolved symbols on the Windows link. See that
 // file's header for how to re-derive them.
-val libquackwireVersion = "1.5.4-40de7badae41-8-SNAPSHOT"
+val libquackwireVersion = "1.5.4-40de7badae41-7"
 
 // Opt-in Windows native classifier. Default OFF so existing Linux/macOS/CI
 // `sbt assembly` / `sbt test` never try to resolve a windows-x86_64 classifier

@@ -7,16 +7,16 @@
 # downloaded from the latest green `quackwire native build` CI run on main),
 # then publishSigned + sonatypeBundleRelease.
 #
-# The next-dev-cycle -SNAPSHOT bump is NOT done here: the manager release
-# (release-jar.sh) runs `checkSnapshotDependencies`, which needs build.sbt to
-# keep pinning this just-released (non-SNAPSHOT) libquackwire. release-jar.sh
-# performs the libquackwire -SNAPSHOT bump at the very end, after the manager
-# release succeeds.
+# There is no automatic -SNAPSHOT bump anywhere: after this release build.sbt
+# keeps pinning the released (non-SNAPSHOT) coord, and manager releases reuse
+# it as-is. The libquackwire version only moves when its inputs change (the
+# DuckDB pin or the C++ under native/quackwire/): bump `libquackwireVersion`
+# in build.sbt to a new -SNAPSHOT manually, which re-arms the CI snapshot
+# publisher and this script.
 #
 # Idempotent: if the target coord is already on Maven Central (Central is
 # immutable), the build + publish are skipped, so a re-run after a partial
-# failure is safe. If the C++ under native/quackwire/ has changed since that
-# coord, bump the rev in build.sbt manually before re-running.
+# failure is safe.
 #
 # Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE.
 #

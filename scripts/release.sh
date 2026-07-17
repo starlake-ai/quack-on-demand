@@ -2,7 +2,8 @@
 #
 # Cut a full release by running the three phase scripts in order:
 #   1. release-libquackwire.sh  - native libquackwire jars -> Maven Central
-#   2. release-jar.sh           - manager jar -> Maven Central, tag, GH release
+#   2. release-jar.sh           - tag, PyPI, GH release (the jar's canonical
+#                                 channel; the manager is NOT on Maven Central)
 #   3. release-docker.sh        - multi-arch image -> Docker Hub  (skip: NO_DOCKER=1)
 #
 # Each phase is individually re-runnable and idempotent, so if this stops
@@ -10,13 +11,14 @@
 # failed phase directly - you don't have to restart from the top. See each
 # script's header for details.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PYPI_TOKEN.
+# Required env: PYPI_TOKEN; SONATYPE_USERNAME, SONATYPE_PASSWORD, and
+# PGP_PASSPHRASE only when phase 1 has a new libquackwire to publish.
 # Optional env: NO_DOCKER=1, RELEASE_VERSION, NEXT_VERSION, REGISTRY_IMAGE,
 #               DOCKERHUB_USERNAME, DOCKER_PASSWORD.
 #
 # Usage:
 #   ./scripts/release.sh                 # full release + docker push
-#   NO_DOCKER=1 ./scripts/release.sh     # sonatype + tag only
+#   NO_DOCKER=1 ./scripts/release.sh     # tag + PyPI + GH release only
 #   RELEASE_VERSION=0.2.0 NEXT_VERSION=0.3.0-SNAPSHOT ./scripts/release.sh
 
 set -euo pipefail
@@ -53,5 +55,5 @@ fi
 echo
 echo "release complete."
 echo "  - tag:   v${release_version} (pushed)"
-echo "  - jar:   https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3/${release_version}"
+echo "  - jar:   https://github.com/starlake-ai/quack-on-demand/releases/tag/v${release_version}"
 [[ "$NO_DOCKER" != "1" ]] && echo "  - image: docker pull $REGISTRY_IMAGE:${release_version}"

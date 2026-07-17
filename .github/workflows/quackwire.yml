@@ -263,6 +263,11 @@ jobs:
   # plain `publish` (no GPG signing required), targets Central snapshots
   # because libquackwireVersion in build.sbt ends in -SNAPSHOT.
   #
+  # build.sbt keeps pinning the last RELEASED (non-SNAPSHOT) coord between
+  # libquackwire changes; the publish step below fails fast in that state to
+  # signal that a native change landed without bumping libquackwireVersion
+  # to a new -SNAPSHOT.
+  #
   # Required repo secrets (shared with the manager's snapshot workflow):
   #   SONATYPE_USERNAME    Central Portal user token (NOT legacy OSSRH)
   #   SONATYPE_PASSWORD    Central Portal user token secret
@@ -308,4 +313,13 @@ jobs:
           QOD_WITH_WINDOWS_NATIVE: 'true'
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
-        run: sbt --no-colors --batch "libquackwire/publish"
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's|^val libquackwireVersion = "(.*)"$|\1|p' build.sbt)
+          if [[ "$version" != *-SNAPSHOT ]]; then
+            echo "::error::libquackwireVersion is '$version' (non-SNAPSHOT): a native change" \
+              "landed without bumping the version. Bump libquackwireVersion in build.sbt to a" \
+              "new -SNAPSHOT (new rev; new duckdb prefix/hash if those changed) and re-push."
+            exit 1
+          fi
+          sbt --no-colors --batch "libquackwire/publish"
