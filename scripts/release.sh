@@ -37,11 +37,14 @@ echo "   manager:      $current -> $release_version"
 echo "   libquackwire: $(libquackwire_version)"
 echo "   docker push:  $([[ "$NO_DOCKER" == "1" ]] && echo skipped || echo "yes -> $REGISTRY_IMAGE")"
 echo "==========================================================="
-echo "Runs 3 phases; each re-runnable on failure. Proceed? [y/N]"
-read -r confirm
-[[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+if [[ "${RELEASE_YES:-0}" != "1" ]]; then
+  echo "Runs 3 phases; each re-runnable on failure. Proceed? [y/N]"
+  read -r confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+fi
 
-# Confirmed once here; the phases don't re-prompt.
+# Confirmed once here (or pre-confirmed via RELEASE_YES=1); the phases
+# don't re-prompt.
 export RELEASE_YES=1
 
 "$SCRIPTS/release-libquackwire.sh"

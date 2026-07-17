@@ -133,6 +133,20 @@ else
   )
 fi
 
+# ---- 3b. Build the release assembly (idempotent) --------------------------
+# Must happen BEFORE the next-snapshot bump below: since the Maven Central
+# publish was dropped, nothing else builds the jar while version.sbt still
+# holds the release version, and a build after the bump would produce a
+# -SNAPSHOT-versioned jar that step 5 cannot upload.
+jar_name="quack-on-demand-assembly-${release_version}.jar"
+if [[ -f "distrib/${jar_name}" ]]; then
+  echo "distrib/${jar_name} already built; skipping assembly."
+else
+  echo "building distrib/${jar_name}..."
+  sbt --no-colors assembly
+  [[ -f "distrib/${jar_name}" ]] || die "sbt assembly did not produce distrib/${jar_name}."
+fi
+
 # ---- 4. Finalize: bump to next dev snapshots + push commits + tag --------
 # Push must happen BEFORE the GitHub release: `gh release create` requires the
 # tag to already exist on the remote. Bumps are idempotent (skip once the
@@ -170,7 +184,6 @@ git push origin "v${release_version}"
 # The .sha256 companion asset is the integrity source for every downstream
 # installer (qod demo launcher, install.sh, brew formula). Content is the
 # standard "hash  basename" line so `shasum -c` works next to the download.
-jar_name="quack-on-demand-assembly-${release_version}.jar"
 if gh release view "v${release_version}" >/dev/null 2>&1; then
   echo "GitHub release v${release_version} already exists; skipping."
   # Backfill the .sha256 asset if the release predates it (or a prior run was
@@ -188,10 +201,13 @@ if gh release view "v${release_version}" >/dev/null 2>&1; then
   fi
 else
   jar="distrib/${jar_name}"
-  if [[ ! -f "$jar" ]]; then
-    echo "assembly jar missing; building $jar..."
-    sbt assembly
-  fi
+  # Do NOT rebuild here: version.sbt is already bumped to the next -SNAPSHOT,
+  # so an assembly at this point would carry the wrong version. Step 3b built
+  # the jar pre-bump; on a resumed run that lost it, rebuild from the tag:
+  #   git show "v${release_version}:version.sbt" > version.sbt
+  #   sbt assembly && git checkout version.sbt
+  [[ -f "$jar" ]] \
+    || die "$jar missing and version.sbt is already past ${release_version}; rebuild it from the tag (see comment above) and re-run."
   ( cd distrib && shasum -a 256 "$jar_name" > "${jar_name}.sha256" )
   echo "creating GitHub release v${release_version}"
   gh release create "v${release_version}" \
