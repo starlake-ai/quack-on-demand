@@ -14,8 +14,13 @@ dependencies = [
     "platformdirs>=4.0",
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
-    "adbc-driver-flightsql>=1.0",
-    "pyarrow>=16.0",
+    # adbc-driver-flightsql and its pyarrow dependency ship no wheels for Windows
+    # on ARM64 and can't build from source there, which would break `uvx qod`
+    # (and `qod start --demo`) entirely. They are only needed by `qod sql`, so
+    # skip them on that one platform; SqlClient.connect prints a clear hint if a
+    # `qod sql` invocation lands there. Every other platform keeps the wheels.
+    "adbc-driver-flightsql>=1.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
+    "pyarrow>=16.0; sys_platform != 'win32' or platform_machine != 'ARM64'",
     "pyreadline3>=3.4; sys_platform == 'win32'",
 ]
 

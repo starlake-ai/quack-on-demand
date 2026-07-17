@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.4
+
+### Distribution
+
+- **`qod` installs on Windows on ARM.** `adbc-driver-flightsql` and `pyarrow`
+  ship no Windows ARM64 wheels, and their sdist builds fail, which broke
+  `uvx qod` entirely on that platform. The dependencies are now skipped there
+  via environment markers; the launcher, REST commands, and `qod start
+  --demo` are unaffected, and `qod sql` explains the limitation instead of
+  crashing.
+
+---
+
 ## 0.4.3
 
 ### Distribution

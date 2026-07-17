@@ -20,8 +20,18 @@ class SqlClient:
 
     @classmethod
     def connect(cls, settings: Settings) -> "SqlClient":
-        import adbc_driver_flightsql.dbapi as flight_sql
-        from adbc_driver_flightsql import DatabaseOptions
+        try:
+            import adbc_driver_flightsql.dbapi as flight_sql
+            from adbc_driver_flightsql import DatabaseOptions
+        except ImportError:
+            print(
+                "error: the FlightSQL client (adbc-driver-flightsql) is not installed.\n"
+                "It ships no wheels for this platform (e.g. Windows on ARM64), so qod\n"
+                "skips it there. Run `qod sql` from an x86-64 Python, or point another\n"
+                "FlightSQL client at the edge. The `qod start` manager is unaffected.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
         scheme = "grpc+tls" if settings.edge_tls else "grpc"
         uri = f"{scheme}://{settings.edge_host}:{settings.edge_port}"
