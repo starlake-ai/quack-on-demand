@@ -40,8 +40,9 @@ TPC-H sample, RLS/CLS showcase) without any local checkout: it downloads the
 manager jar for the latest release from GitHub Releases (falling back to the
 release stamped into the CLI build when the lookup fails and a cached jar
 exists), verifies it against the published sha256, caches it under the user
-cache dir, and launches it with the required JVM flags. If no Java 21+ is found it offers to download a cached
-Temurin 21 JRE. `--jar <path>` runs a local jar instead; `--version X.Y.Z`
+cache dir, and launches it with the required JVM flags. If no Java 21+ is
+found it downloads a cached Temurin 21 JRE (announced, never prompted).
+`--jar <path>` runs a local jar instead; `--version X.Y.Z`
 pins a different release; extra arguments are passed through to the jar's
 demo subcommand.
 

@@ -329,9 +329,26 @@ def test_demo_without_java_provisions_jre(runner, monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
     monkeypatch.setattr(launcher, "ensure_jre", lambda cache_dir=None: "/cache/jre/bin/java")
     captured = _capture_exec(monkeypatch)
-    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar), "--yes"])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar)])
     assert result.exit_code == 0, result.output
     assert captured["cmd"][0] == "/cache/jre/bin/java"
+
+
+def test_resolve_java_downloads_without_prompting_even_on_a_tty(monkeypatch):
+    import typer
+
+    from qod_cli.commands import _launch
+
+    def no_prompt(*a, **kw):
+        raise AssertionError("typer.confirm must not be called")
+
+    monkeypatch.delenv("JAVA_BIN", raising=False)
+    monkeypatch.setattr(launcher, "find_java", lambda: None)
+    monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
+    monkeypatch.setattr(launcher, "ensure_jre", lambda cache_dir=None: "/cache/jre/bin/java")
+    monkeypatch.setattr(typer, "confirm", no_prompt)
+    monkeypatch.setattr(_launch.sys.stdin, "isatty", lambda: True)
+    assert _launch.resolve_java() == "/cache/jre/bin/java"
 
 
 def test_demo_without_java_on_musl_fails_with_apk_hint(runner, monkeypatch, tmp_path):
@@ -341,7 +358,7 @@ def test_demo_without_java_on_musl_fails_with_apk_hint(runner, monkeypatch, tmp_
     jar.write_text("")
     monkeypatch.setattr(launcher, "find_java", lambda: None)
     monkeypatch.setattr(launcher, "is_musl", lambda root=None: True)
-    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar), "--yes"])
+    result = runner.invoke(app, ["start", "--demo", "--jar", str(jar)])
     assert result.exit_code == 1
     assert "apk add" in result.output
 
@@ -591,7 +608,7 @@ def test_java_bin_env_overrides_detection(monkeypatch):
 
     monkeypatch.setenv("JAVA_BIN", "/custom/java")
     monkeypatch.setattr(launcher, "find_java", lambda: "/usr/bin/java")
-    assert _launch.resolve_java(yes=True) == "/custom/java"
+    assert _launch.resolve_java() == "/custom/java"
 
 
 def test_build_jar_command_splices_java_opts():

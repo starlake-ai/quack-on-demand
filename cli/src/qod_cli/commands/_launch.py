@@ -18,10 +18,10 @@ def _exec(cmd: list[str], env: dict) -> None:
     os.execvpe(cmd[0], cmd, env)
 
 
-def resolve_java(yes: bool) -> str:
+def resolve_java() -> str:
     """A Java >= MIN_JAVA_MAJOR: `JAVA_BIN` verbatim when set (run-jar.sh
     convention, trusted), else the system one, else a Temurin JRE
-    auto-provisioned into the cache (prompted on a TTY unless `yes`)."""
+    auto-provisioned into the cache (announced, never prompted)."""
     java_bin = os.environ.get("JAVA_BIN")
     if java_bin:
         return java_bin
@@ -36,18 +36,11 @@ def resolve_java(yes: bool) -> str:
             err=True,
         )
         raise typer.Exit(1)
-    prompt = (
-        f"No Java {launcher.MIN_JAVA_MAJOR}+ found. Download a Temurin "
-        f"{launcher.JRE_MAJOR} JRE (about 50 MB, cached)?"
+    typer.echo(
+        f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Temurin "
+        f"{launcher.JRE_MAJOR} JRE (about 50 MB, cached for next time)...",
+        err=True,
     )
-    if not yes and sys.stdin.isatty():
-        typer.confirm(prompt, abort=True)
-    else:
-        typer.echo(
-            f"No Java {launcher.MIN_JAVA_MAJOR}+ found; downloading a Temurin "
-            f"{launcher.JRE_MAJOR} JRE (cached for next time)...",
-            err=True,
-        )
     return launcher.ensure_jre()
 
 

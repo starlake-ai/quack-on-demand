@@ -53,7 +53,7 @@ QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=*** ./scripts/run-docker.sh
     postgres:16-alpine
   ```
 
-- **Java 21+ is found, not required.** `qod start` uses `JAVA_HOME` or `java` on `PATH` when a 21+ JVM is present; otherwise it offers to download a cached Temurin 21 JRE (about 50 MB, one time). `JAVA_BIN` forces a specific binary; `JAVA_OPTS` adds JVM flags (e.g. `-Xmx2g`).
+- **Java 21+ is found, not required.** `qod start` uses `JAVA_HOME` or `java` on `PATH` when a 21+ JVM is present; otherwise it downloads a cached Temurin 21 JRE (about 50 MB, one time, no prompt). `JAVA_BIN` forces a specific binary; `JAVA_OPTS` adds JVM flags (e.g. `-Xmx2g`).
 - **DuckDB is self-installed** (CLI + `libduckdb` at the ABI libquackwire links against) into the user cache dir - a system duckdb at the wrong ABI would crash the first node spawn, so it is never used. `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR` override the pin and location; air-gapped operators can pre-populate `$DUCKDB_CACHE_DIR/$VERSION/{bin,lib}` and no network fetch happens.
 
 ### Run from Linux/MacOS

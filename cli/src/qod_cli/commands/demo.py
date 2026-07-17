@@ -7,11 +7,11 @@ from .. import launcher
 from ._launch import _exec, resolve_jar, resolve_java
 
 
-def run_demo(ctx: typer.Context, version: str | None, jar: Path | None, yes: bool) -> None:
+def run_demo(ctx: typer.Context, version: str | None, jar: Path | None) -> None:
     """The `qod start --demo` path: the self-contained quack-on-demand demo
     (embedded ephemeral Postgres, seeded data). Kept in its own module so the
     demo provisioning stays independent of the real-manager start path."""
-    java = resolve_java(yes)
+    java = resolve_java()
     jar_path = jar if jar is not None else resolve_jar(version)
 
     # The jar spawns nodes through the spawn script and the `duckdb` CLI, both

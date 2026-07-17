@@ -9,7 +9,7 @@ Boot the gateway, connect a client, and run your first SQL query against a live 
 
 The fastest way to try Quack on Demand end to end. `demo` boots a fully seeded instance against an **embedded, ephemeral Postgres** - so unlike every other path below, it needs **no external Postgres and no Docker**.
 
-With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Java runtime if none is on your machine (it asks first, cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
+With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the `qod` launcher downloads the release jar (verified against the published sha256), a Java runtime if none is on your machine (cached), and the ABI-pinned `duckdb` CLI, all under your user cache directory. The same command works on macOS, Linux, and Windows:
 
 ```bash
 uvx qod start --demo

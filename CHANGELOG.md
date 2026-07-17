@@ -12,6 +12,9 @@
 - **The demo banner prints when the manager is ready, not before boot.** It
   now lands at the end of the boot output with the admin UI logins and
   copy-pastable JDBC / ADBC / ODBC configurations for every seeded credential.
+- **The Java runtime download no longer prompts.** When no Java 21+ is found,
+  `qod start` announces the Temurin JRE download and proceeds; the now
+  purposeless `--yes` / `-y` flag is removed.
 
 ---
 
