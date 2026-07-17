@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1
+
+### Release tooling
+
+- **The manager is no longer published to Maven Central.** GitHub Releases is
+  the canonical jar channel (sha256-verified by the qod launcher); PyPI and
+  Docker Hub are unchanged. libquackwire stays on Maven Central since it is a
+  build-time dependency that must resolve anonymously.
+- **libquackwire no longer version-bumps on every manager release.** Its
+  version now only moves when its inputs change (the DuckDB pin or the native
+  source); between changes build.sbt keeps pinning the last released coord,
+  and the CI snapshot publisher fails fast if a native change lands without a
+  version bump.
+
+---
+
 ## 0.4.0
 
 ### Distribution
@@ -15,15 +31,6 @@
 - **The Java runtime download no longer prompts.** When no Java 21+ is found,
   `qod start` announces the Temurin JRE download and proceeds; the now
   purposeless `--yes` / `-y` flag is removed.
-- **The manager is no longer published to Maven Central.** GitHub Releases is
-  the canonical jar channel (sha256-verified by the qod launcher); PyPI and
-  Docker Hub are unchanged. libquackwire stays on Maven Central since it is a
-  build-time dependency that must resolve anonymously.
-- **libquackwire no longer version-bumps on every manager release.** Its
-  version now only moves when its inputs change (the DuckDB pin or the native
-  source); between changes build.sbt keeps pinning the last released coord,
-  and the CI snapshot publisher fails fast if a native change lands without a
-  version bump.
 
 ---
 
