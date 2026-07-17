@@ -10,6 +10,17 @@
   back to the embedded HTTP client instead of crashing at JNI load. Setting
   `QOD_NATIVE_CLIENT=false` by hand on ARM Windows is no longer needed.
 
+### Catalog
+
+- **Restore / rollback to a snapshot (Spec 04).** `POST /api/catalog/restore` rolls a live
+  table back to a prior snapshot (id or tag) as a new forward snapshot: history is preserved
+  and the pre-restore state stays queryable. Dry-run returns the exact change summary that
+  will be undone; `expectedCurrentSnapshot` turns a concurrent write into a 409 instead of a
+  silent overwrite. Surfaced as a Restore action in the snapshot browser and the table
+  history timeline, and as `qod catalog restore`. Requires an ALL grant, or DDL plus RO/RW,
+  on the table. Time-travel `AT (VERSION => n)` clauses are now stripped before ACL parsing,
+  so grant-holding (non-superuser) principals can run time-travel statements at all surfaces.
+
 ---
 
 ## 0.4.4

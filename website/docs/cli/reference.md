@@ -152,6 +152,16 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 | `qod catalog schema-diff` | Schema diff of a table between two snapshot selectors. |
 | `qod catalog recoverable` | Dropped tables still recoverable via undrop. |
 | `qod catalog undrop` | Recover a dropped table, optionally under a different name. |
+| `qod catalog restore` | Roll a live table back to a prior snapshot or tag, as a new forward snapshot. |
+
+```bash
+qod catalog restore --tenant acme --db acme_tpch --schema tpch1 --table orders --to 480 --dry-run
+```
+
+`--to` takes a snapshot id or a tag name. `qod catalog restore` is non-destructive: it runs the
+dry run first and prints the change summary, then prompts to confirm before writing the new
+snapshot (skip the prompt with `--yes`, or stop after the preview with `--dry-run`). Requires an
+ALL grant, or DDL plus RO/RW, on the table. For dropped tables, use `qod catalog undrop` instead.
 
 ## tag
 

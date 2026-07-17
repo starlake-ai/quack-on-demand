@@ -171,3 +171,36 @@ def undrop(
     if from_snapshot is not None:
         body["fromSnapshot"] = from_snapshot
     call(ctx, "POST", "/api/catalog/undrop", body=body)
+
+
+@app.command()
+def restore(
+    ctx: typer.Context,
+    tenant: str = typer.Option(..., "--tenant"),
+    db: str = typer.Option(..., "--db"),
+    schema: str = typer.Option(..., "--schema"),
+    table: str = typer.Option(..., "--table"),
+    to: str = typer.Option(..., "--to", help="Target snapshot id or tag name."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview the change summary; no write."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the interactive confirmation."),
+):
+    """Restore a live table to a prior snapshot (non-destructive: writes a new snapshot).
+
+    Runs the dry run first and shows the rows that will be reverted; requires an ALL grant,
+    or DDL plus RO/RW, on the table. For dropped tables use undrop instead.
+    """
+    body = {"tenant": tenant, "tenantDb": db, "schema": schema, "table": table, "to": to}
+    preview = call(ctx, "POST", "/api/catalog/restore", body={**body, "dryRun": True})
+    if dry_run:
+        return
+    if not yes and not typer.confirm(
+        f"Restore {schema}.{table} to snapshot {preview['toSnapshot']}"
+        f" (current {preview['currentSnapshot']})?"
+    ):
+        raise typer.Exit(1)
+    call(
+        ctx,
+        "POST",
+        "/api/catalog/restore",
+        body={**body, "expectedCurrentSnapshot": preview["currentSnapshot"]},
+    )
