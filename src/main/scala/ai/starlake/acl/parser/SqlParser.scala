@@ -43,6 +43,77 @@ import scala.jdk.CollectionConverters.*
   */
 object SqlParser:
 
+  /** DuckLake time-travel clauses (`AT (VERSION => n)` / `AT (TIMESTAMP => expr)`) are not in
+    * JSqlParser's grammar (verified on the pinned fork 5.3.218: any statement carrying one is a
+    * ParseException, which the validator denies fail-closed). For ACL purposes a time-travel read
+    * of a table is exactly a read of that table, so the clause is removed before parsing. The scan
+    * is quote-aware: single-quoted literals and double-quoted identifiers are copied verbatim; the
+    * AT keyword must be a standalone word whose parenthesized group starts with VERSION or
+    * TIMESTAMP followed by =>; parens inside the group are balanced, and quoted literals inside the
+    * group may contain parens.
+    */
+  private[parser] def stripTimeTravelClauses(sql: String): String =
+    val out                           = new StringBuilder
+    var i                             = 0
+    val n                             = sql.length
+    def isWordChar(c: Char)           = c.isLetterOrDigit || c == '_'
+    def copyQuoted(quote: Char): Unit =
+      out.append(sql(i)); i += 1
+      var closed = false
+      while i < n && !closed do
+        out.append(sql(i))
+        if sql(i) == quote then
+          if i + 1 < n && sql(i + 1) == quote then
+            out.append(sql(i + 1)); i += 1
+          else closed = true
+        i += 1
+    def timeTravelGroup(openParen: Int): Boolean =
+      // does the group starting at sql(openParen) == '(' begin with VERSION|TIMESTAMP =>
+      var k = openParen + 1
+      while k < n && sql(k).isWhitespace do k += 1
+      var w = k
+      while w < n && isWordChar(sql(w)) do w += 1
+      val kw = sql.substring(k, w).toUpperCase
+      if kw != "VERSION" && kw != "TIMESTAMP" then false
+      else
+        var a = w
+        while a < n && sql(a).isWhitespace do a += 1
+        a + 1 < n && sql(a) == '=' && sql(a + 1) == '>'
+    def skipGroup(openParen: Int): Int =
+      // index just past the balanced close paren, skipping quoted literals
+      var depth = 1
+      var p     = openParen + 1
+      while p < n && depth > 0 do
+        sql(p) match
+          case '('  => depth += 1
+          case ')'  => depth -= 1
+          case '\'' =>
+            p += 1
+            var closed = false
+            while p < n && !closed do
+              if sql(p) == '\'' then
+                if p + 1 < n && sql(p + 1) == '\'' then p += 1 else closed = true
+              if !closed then p += 1
+          case _ => ()
+        p += 1
+      p
+    while i < n do
+      val c = sql(i)
+      if c == '\'' || c == '"' then copyQuoted(c)
+      else if (c == 'a' || c == 'A')
+        && (i == 0 || !isWordChar(sql(i - 1)))
+        && i + 1 < n && (sql(i + 1) == 't' || sql(i + 1) == 'T')
+        && (i + 2 >= n || !isWordChar(sql(i + 2)))
+      then
+        var j = i + 2
+        while j < n && sql(j).isWhitespace do j += 1
+        if j < n && sql(j) == '(' && timeTravelGroup(j) then i = skipGroup(j)
+        else
+          out.append(c); i += 1
+      else
+        out.append(c); i += 1
+    out.toString
+
   /** Extract table references from a SQL string that may contain multiple statements.
     *
     * Each statement is processed independently:
@@ -65,7 +136,7 @@ object SqlParser:
   def extract(sql: String, config: Config): ExtractionResult =
     try
       val stmts: Statements = CCJSqlParserUtil.parseStatements(
-        sql,
+        stripTimeTravelClauses(sql),
         (parser: net.sf.jsqlparser.parser.CCJSqlParser) => {
           val featureConfig = new FeatureConfiguration()
           featureConfig.setValue(Feature.allowUnsupportedStatements, true): Unit
