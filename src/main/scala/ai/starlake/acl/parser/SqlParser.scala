@@ -49,8 +49,9 @@ object SqlParser:
     * of a table is exactly a read of that table, so the clause is removed before parsing. The scan
     * is quote-aware: single-quoted literals and double-quoted identifiers are copied verbatim; the
     * AT keyword must be a standalone word whose parenthesized group starts with VERSION or
-    * TIMESTAMP followed by =>; parens inside the group are balanced, and quoted literals inside the
-    * group may contain parens.
+    * TIMESTAMP followed by =>; parens inside the group are balanced, and single-quoted literals or
+    * double-quoted identifiers inside the group may contain parens without desyncing the depth
+    * counter.
     */
   private[parser] def stripTimeTravelClauses(sql: String): String =
     val out                           = new StringBuilder
@@ -80,21 +81,21 @@ object SqlParser:
         while a < n && sql(a).isWhitespace do a += 1
         a + 1 < n && sql(a) == '=' && sql(a + 1) == '>'
     def skipGroup(openParen: Int): Int =
-      // index just past the balanced close paren, skipping quoted literals
+      // index just past the balanced close paren, skipping quoted literals and identifiers
       var depth = 1
       var p     = openParen + 1
+      def skipQuoted(quote: Char): Unit =
+        p += 1
+        var closed = false
+        while p < n && !closed do
+          if sql(p) == quote then if p + 1 < n && sql(p + 1) == quote then p += 1 else closed = true
+          if !closed then p += 1
       while p < n && depth > 0 do
         sql(p) match
-          case '('  => depth += 1
-          case ')'  => depth -= 1
-          case '\'' =>
-            p += 1
-            var closed = false
-            while p < n && !closed do
-              if sql(p) == '\'' then
-                if p + 1 < n && sql(p + 1) == '\'' then p += 1 else closed = true
-              if !closed then p += 1
-          case _ => ()
+          case '('              => depth += 1
+          case ')'              => depth -= 1
+          case q @ ('\'' | '"') => skipQuoted(q)
+          case _                => ()
         p += 1
       p
     while i < n do

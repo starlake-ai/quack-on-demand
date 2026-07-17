@@ -51,6 +51,20 @@ class SqlParserTimeTravelSpec extends AnyFlatSpec with Matchers:
     SqlParser.stripTimeTravelClauses(sql) shouldBe sql
   }
 
+  it should "not desync the depth counter on an embedded paren inside a quoted identifier" in {
+    SqlParser
+      .stripTimeTravelClauses(
+        """SELECT * FROM t AT (VERSION => "x(y") UNION SELECT * FROM secret"""
+      ) shouldBe "SELECT * FROM t  UNION SELECT * FROM secret"
+  }
+
+  it should "not close early on an embedded paren inside a quoted identifier" in {
+    SqlParser
+      .stripTimeTravelClauses(
+        """SELECT * FROM t AT (VERSION => "a)b") WHERE x = 1"""
+      ) shouldBe "SELECT * FROM t  WHERE x = 1"
+  }
+
   "extract" should "authorize a time-travel SELECT as a plain read" in {
     headExtracted("SELECT * FROM t AT (VERSION => 480)") shouldBe Set(
       "testdb.public.t" -> Verb.Read
