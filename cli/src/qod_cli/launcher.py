@@ -251,7 +251,9 @@ def ensure_jre(
     arch = arch if arch is not None else platform.machine()
     resp = httpx.get(adoptium_assets_url(os_name, arch), follow_redirects=True, timeout=30)
     resp.raise_for_status()
-    package = resp.json()[0]["binaries"][0]["package"]
+    # /v3/assets/latest/... returns objects with a singular `binary` holding
+    # `package` directly (not `binaries[]`, which is the feature_releases shape).
+    package = resp.json()[0]["binary"]["package"]
 
     suffix = ".zip" if package["link"].endswith(".zip") else ".tar.gz"
     archive = cache_dir / f"temurin-jre{suffix}"

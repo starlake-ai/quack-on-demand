@@ -191,14 +191,12 @@ def test_ensure_jre_downloads_verifies_and_extracts(tmp_path, monkeypatch):
             200,
             json=[
                 {
-                    "binaries": [
-                        {
-                            "package": {
-                                "link": pkg_url,
-                                "checksum": hashlib.sha256(tarball).hexdigest(),
-                            }
+                    "binary": {
+                        "package": {
+                            "link": pkg_url,
+                            "checksum": hashlib.sha256(tarball).hexdigest(),
                         }
-                    ]
+                    }
                 }
             ],
         )
@@ -217,7 +215,7 @@ def test_ensure_jre_checksum_mismatch_refuses(tmp_path, monkeypatch):
     respx.get(launcher.adoptium_assets_url("linux", "x86_64")).mock(
         return_value=httpx.Response(
             200,
-            json=[{"binaries": [{"package": {"link": pkg_url, "checksum": "0" * 64}}]}],
+            json=[{"binary": {"package": {"link": pkg_url, "checksum": "0" * 64}}}],
         )
     )
     respx.get(pkg_url).mock(return_value=httpx.Response(200, content=tarball))
