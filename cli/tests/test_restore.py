@@ -56,3 +56,14 @@ def test_declined_confirm_does_not_execute(runner):
     result = runner.invoke(app, ARGS, input="n\n")
     assert result.exit_code == 1
     assert route.call_count == 1
+
+
+@respx.mock
+def test_json_yes_prints_a_single_json_object(runner):
+    route = respx.post(f"{BASE}/api/catalog/restore").mock(
+        side_effect=[httpx.Response(200, json=DRY), httpx.Response(200, json=DONE)]
+    )
+    result = runner.invoke(app, ["--json"] + ARGS + ["--yes"])
+    assert result.exit_code == 0, result.output
+    assert route.call_count == 2
+    assert json.loads(result.output) == DONE

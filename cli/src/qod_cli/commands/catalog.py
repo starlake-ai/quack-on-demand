@@ -186,11 +186,17 @@ def restore(
 ):
     """Restore a live table to a prior snapshot (non-destructive: writes a new snapshot).
 
-    Runs the dry run first and shows the rows that will be reverted; requires an ALL grant,
+    Runs the dry run first and shows how many rows will be reverted; requires an ALL grant,
     or DDL plus RO/RW, on the table. For dropped tables use undrop instead.
     """
     body = {"tenant": tenant, "tenantDb": db, "schema": schema, "table": table, "to": to}
-    preview = call(ctx, "POST", "/api/catalog/restore", body={**body, "dryRun": True})
+    preview = call(
+        ctx,
+        "POST",
+        "/api/catalog/restore",
+        body={**body, "dryRun": True},
+        quiet=ctx.obj.json_output and not dry_run,
+    )
     if dry_run:
         return
     if not yes and not typer.confirm(
