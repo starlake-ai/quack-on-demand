@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2
+
+### Distribution
+
+- **TLS cert auto-generation no longer requires `openssl`.** The edge now
+  generates its self-signed certificate with the JRE's own `keytool` (present
+  in every runtime the manager boots on), extracting the key in-process, so
+  `qod start` and `qod start --demo` work on stock Windows where `openssl` is
+  not on PATH. `openssl` remains as a fallback for JREs without keytool.
+
+---
+
 ## 0.4.1
 
 ### Release tooling

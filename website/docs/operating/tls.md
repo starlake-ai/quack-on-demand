@@ -18,14 +18,14 @@ Paths are resolved relative to the JVM working directory (the qod state dir, e.g
 
 ### Automatic self-signed certificate generation
 
-If either file is missing at boot, the server generates a self-signed certificate automatically using the system `openssl` binary. The generated certificate has these properties:
+If either file is missing at boot, the server generates a self-signed certificate automatically using the JRE's own `keytool` (no external binary needed, so this works on stock Windows). The generated certificate has these properties:
 
 - Algorithm: RSA 2048-bit, no passphrase
 - Validity: 3650 days (approximately 10 years)
 - Subject CN: `localhost`
 - Subject Alternative Names: `DNS:localhost`, `IP:127.0.0.1`
 
-`openssl` must be on `PATH`. If it is not found, or if the `openssl` command fails, the server throws a `RuntimeException` with the full openssl output and does not start. In that case, either install `openssl` or supply your own certificate files at the configured paths before starting the server.
+On the rare JRE that ships without `keytool`, the server falls back to the system `openssl`. If neither is available (or generation fails), it throws a `RuntimeException` with the tool's output and does not start; supply your own certificate files at the configured paths in that case.
 
 After a successful generation, the server logs a warning at `WARN` level containing the certificate path and its SHA-256 fingerprint in colon-separated uppercase hex format, for example:
 
