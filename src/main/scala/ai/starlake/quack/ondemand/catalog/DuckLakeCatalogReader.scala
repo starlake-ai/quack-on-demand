@@ -633,6 +633,24 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
       table
     )(_.getLong("table_id")).headOption
 
+  /** `(table_id, begin_snapshot)` of the CURRENT `ducklake_table` row for `(schema, table)`, or
+    * None when the table is not live. `begin_snapshot` is the snapshot that created this table
+    * record: after a `CREATE OR REPLACE` it is the replace snapshot itself, which is how the
+    * restore handler reports the new snapshot id without racing other writers (`maxSnapshotId` is
+    * db-global). `table_id` changes across a replace, which the restore handler uses as its
+    * committed-despite-timeout probe (verified live, see Spec 04 Task 1 findings).
+    */
+  def currentTableInfo(schema: String, table: String): Option[(Long, Long)] =
+    query(
+      """SELECT t.table_id, t.begin_snapshot
+        |  FROM ducklake_schema s
+        |  JOIN ducklake_table t ON t.schema_id = s.schema_id
+        | WHERE s.schema_name = ? AND t.table_name = ?
+        |   AND s.end_snapshot IS NULL AND t.end_snapshot IS NULL""".stripMargin,
+      schema,
+      table
+    )(rs => (rs.getLong("table_id"), rs.getLong("begin_snapshot"))).headOption
+
   /** Escapes POSIX-regex metacharacters so identifier names can be embedded in a `~` pattern. */
   private def regexEscape(s: String): String =
     s.replaceAll("""([.^$*+?()\[\]{}|\\])""", """\\$1""")
@@ -843,6 +861,12 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
       }
       TableHistoryPage(tid, raw.take(limit), hasMore = raw.length > limit)
     }
+
+  /** Latest snapshot that touched `(schema, table)` (DDL, DML, or maintenance): the head of the
+    * Spec 01 history timeline, i.e. the table's current version. None when the table is not live.
+    */
+  def latestTableSnapshot(schema: String, table: String): Option[Long] =
+    listTableHistory(schema, table, limit = 1).flatMap(_.commits.headOption).map(_.snapshotId)
 
   /** Resolves `table_id` for (schema, table) visible at snapshot `n`. Table identity survives a
     * rename (verified against a live catalog: `ALTER TABLE ... RENAME TO` inserts a new
