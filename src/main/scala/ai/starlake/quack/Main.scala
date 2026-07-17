@@ -755,7 +755,10 @@ object Main extends IOApp with LazyLogging:
     val arrowAllocator     = new org.apache.arrow.memory.RootAllocator()
     val client             = new QuackHttpClient(
       arrowAllocator,
-      nativeClient = mgrCfg.nativeClient,
+      // Degrades to the embedded HTTP client on platforms with no bundled
+      // libquackwire native (Windows on ARM64) instead of crashing at JNI load.
+      nativeClient = ai.starlake.quack.edge.adapter.QuackNativeSupport
+        .effectiveNativeClient(mgrCfg.nativeClient),
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter = new QuackHttpAdapter(client, tracker)

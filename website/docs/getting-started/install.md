@@ -125,7 +125,7 @@ qod start
 - **Native wire (default, fastest)** needs `native\windows-x86_64\quackwire.dll` bundled in the assembly. The published cross-platform jar carries it; a jar you build yourself only carries it when built with `QOD_WITH_WINDOWS_NATIVE=true` (see below).
 - **Embedded DuckDB (JDBC), no native build** - set `$env:QOD_NATIVE_CLIENT = 'false'`. The DuckDB JDBC driver ships its own Windows native, so this works with any assembly jar out of the box (slower; serialized). Good for a first run.
 
-On **Windows on ARM** (e.g. Parallels on Apple Silicon), DuckDB is provisioned as native `windows-arm64`, but the bundled `quackwire.dll` is x86_64-only and cannot load in the arm64 JVM: set `$env:QOD_NATIVE_CLIENT = 'false'` for `qod start` (the demo already forces it).
+On **Windows on ARM** (e.g. Parallels on Apple Silicon), DuckDB is provisioned as native `windows-arm64`, but the bundled `quackwire.dll` is x86_64-only and cannot load in the arm64 JVM. The manager detects this at boot and falls back to the embedded client automatically (a `WARN` is logged); no configuration needed.
 
 **Building the Windows native (`quackwire.dll`), optional.** Requires MSVC (Visual Studio Build Tools) + CMake + `sbt`. Assemble a `DUCKDB_HOME` with `duckdb.lib` plus the full `duckdb/` include tree (see `.github/workflows/quackwire.yml`, step "Install libduckdb v1.5.4 (Windows)"), then:
 

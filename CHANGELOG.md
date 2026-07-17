@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.5
+
+### Distribution
+
+- **The native client degrades gracefully where no libquackwire is bundled.**
+  On platforms with no native binary for the running JVM (Windows on ARM64:
+  `quackwire.dll` is x86_64-only), the manager now logs a warning and falls
+  back to the embedded HTTP client instead of crashing at JNI load. Setting
+  `QOD_NATIVE_CLIENT=false` by hand on ARM Windows is no longer needed.
+
+---
+
 ## 0.4.4
 
 ### Distribution
