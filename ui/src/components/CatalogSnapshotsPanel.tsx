@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CatalogSnapshotEntry, CatalogTagEntry } from '../api/types';
 import { Modal } from './Modal';
+import RestoreDialog from './RestoreDialog';
 
 const PAGE = 200;
 
@@ -36,6 +37,11 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
   const [tagProtect, setTagProtect] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
+  const [restoring, setRestoring] = useState<{ schema: string; table: string; toSnapshot: number } | null>(null);
+  // Local refresh bump so a completed restore refetches this panel without
+  // depending on a sibling panel's refreshToken bump.
+  const [localRefresh, setLocalRefresh] = useState(0);
+
   function reloadTags() {
     api.listCatalogTags(tenant, tenantDb).then(setTags).catch(() => setTags([]));
   }
@@ -67,7 +73,7 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
       .then(r => { if (!cancelled) setTags(r); })
       .catch(() => { if (!cancelled) setTags([]); });
     return () => { cancelled = true; };
-  }, [tenant, tenantDb, tableFilter, refreshToken]);
+  }, [tenant, tenantDb, tableFilter, refreshToken, localRefresh]);
 
   const tagsBySnapshot = useMemo(() => {
     const m = new Map<number, CatalogTagEntry[]>();
@@ -223,6 +229,14 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                             >
                               {t.schema}.{t.name}
                             </Link>
+                            <button
+                              type="button"
+                              style={chipBtn}
+                              title={`Restore ${t.schema}.${t.name} to its state at this snapshot`}
+                              onClick={() => setRestoring({ schema: t.schema, table: t.name, toSnapshot: tableAsOf })}
+                            >
+                              restore
+                            </button>
                           </span>
                         ))}
                       </td>
@@ -320,6 +334,18 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
               </div>
             </form>
         </Modal>
+      )}
+
+      {restoring && (
+        <RestoreDialog
+          tenant={tenant}
+          tenantDb={tenantDb}
+          schema={restoring.schema}
+          table={restoring.table}
+          toSnapshot={restoring.toSnapshot}
+          onClose={() => setRestoring(null)}
+          onRestored={() => setLocalRefresh(x => x + 1)}
+        />
       )}
     </section>
   );

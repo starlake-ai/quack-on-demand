@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { CatalogHistoryCommit } from '../api/types';
+import RestoreDialog from './RestoreDialog';
 
 const PAGE = 50;
 
@@ -56,6 +57,7 @@ export default function CatalogHistoryPanel({
   const [op, setOp] = useState('');
   const [author, setAuthor] = useState('');
   const [authorQuery, setAuthorQuery] = useState('');
+  const [restoreAt, setRestoreAt] = useState<number | null>(null);
   // Monotonic request sequence: only the newest in-flight request may commit
   // its result (or its error/loading flip), so a slow older response cannot
   // clobber a newer one.
@@ -167,6 +169,9 @@ export default function CatalogHistoryPanel({
                         <button type="button" onClick={() => onViewAsOf(c.snapshotId)}>
                           View table at this snapshot
                         </button>
+                        <button type="button" onClick={() => setRestoreAt(c.snapshotId)}>
+                          Restore to this snapshot
+                        </button>
                         <button
                           type="button"
                           disabled={!c.schemaChanged || i + 1 >= commits.length}
@@ -193,6 +198,18 @@ export default function CatalogHistoryPanel({
           <button type="button" onClick={() => load(false)}>Load more</button>
         )}
       </div>
+
+      {restoreAt !== null && (
+        <RestoreDialog
+          tenant={tenant}
+          tenantDb={tenantDb}
+          schema={schema}
+          table={table}
+          toSnapshot={restoreAt}
+          onClose={() => setRestoreAt(null)}
+          onRestored={() => { setRestoreAt(null); load(true); }}
+        />
+      )}
     </div>
   );
 }

@@ -727,6 +727,28 @@ export interface UndropResponse {
   fromSnapshot: number;
 }
 
+// ----- Restore / rollback to a snapshot (Spec 04) -----
+
+export interface RestoreRequest {
+  tenant: string;
+  tenantDb: string;
+  schema: string;
+  table: string;
+  to: string;
+  dryRun?: boolean;
+  expectedCurrentSnapshot?: number;
+}
+
+export interface RestoreResponse {
+  schema: string;
+  table: string;
+  toSnapshot: number;
+  currentSnapshot: number;
+  summary?: DataDiffSummary;
+  newSnapshot?: number;
+  dryRun: boolean;
+}
+
 // ----- Managed maintenance (EPIC Spec 09) -----
 // Mirrors the Scala DTOs in ondemand/api/Dtos.scala; field names must match
 // the circe codecs exactly. Absent optionals serialize as null on responses.

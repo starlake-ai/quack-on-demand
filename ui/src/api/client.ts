@@ -41,6 +41,8 @@ import type {
   RecoverableListResponse,
   UndropRequest,
   UndropResponse,
+  RestoreRequest,
+  RestoreResponse,
   SchemaDiffResponse,
   // Managed maintenance
   MaintenancePolicyUpsertRequest,
@@ -430,6 +432,7 @@ export const api = {
     );
   },
   undropTable: (req: UndropRequest) => post<UndropResponse>('/catalog/undrop', req),
+  restoreTable: (req: RestoreRequest) => post<RestoreResponse>('/catalog/restore', req),
   catalogDataDiff: (
     tenant: string, tenantDb: string, schema: string, table: string, from: string, to: string,
     opts?: { limit?: number; cursor?: string; changeType?: string }
