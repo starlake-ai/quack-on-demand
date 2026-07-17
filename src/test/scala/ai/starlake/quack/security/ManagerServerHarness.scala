@@ -357,8 +357,23 @@ object ManagerServerHarness:
             schema: String,
             table: String
         ): Option[ai.starlake.quack.ondemand.catalog.DroppedTableEntry] = None
+        override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
+        override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
     val previewReader: (String, String) => DuckLakeCatalogReader =
       catalogReader.getOrElse((_, _) => noSnapshotReader)
+
+    // Restore's own reader stub (Spec 04 Task 5): unlike noSnapshotReader above, snapshotExists /
+    // maxSnapshotId must succeed so `resolveTo`'s bound-resolution step clears BEFORE the
+    // live-table lookup runs; RestoreAuthzSpec pins the 404 not_found from that lookup (the
+    // "not live" case), not from bound resolution (already pinned by DataDiffAuthzSpec /
+    // PreviewAuthzSpec against noSnapshotReader, so it must keep reporting an empty catalog).
+    val restoreReader: DuckLakeCatalogReader =
+      new DuckLakeCatalogReader(null):
+        override def snapshotExists(id: Long): Boolean = true
+        override def maxSnapshotId(): Option[Long]     = Some(1L)
+        override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
+        override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
+
     val previewHandlers = new CatalogPreviewHandlers(
       sup,
       store,
@@ -372,6 +387,16 @@ object ManagerServerHarness:
       sup,
       previewExecutor,
       previewReader,
+      CatalogConfig(),
+      sessions.get,
+      audit = audit
+    )
+    val restoreHandlers = new CatalogRestoreHandlers(
+      sup,
+      store,
+      previewExecutor,
+      previewExecutor,
+      (_, _) => restoreReader,
       CatalogConfig(),
       sessions.get,
       audit = audit
@@ -408,6 +433,7 @@ object ManagerServerHarness:
       preview = Some(previewHandlers),
       catalogHistory = catalogHistoryHandlers,
       undrop = Some(undropHandlers),
+      restore = Some(restoreHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,
