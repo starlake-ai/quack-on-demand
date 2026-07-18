@@ -56,7 +56,10 @@ final class ManagerServer(
     auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
     auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore),
     history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore),
-    usage: UsageHandlers = new UsageHandlers(NoopTelemetryStore)
+    usage: UsageHandlers = new UsageHandlers(NoopTelemetryStore),
+    moduleEndpoints: List[ServerEndpoint[Any, IO]] = Nil,
+    modulePublicPrefixes: Set[String] = Set.empty,
+    moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -80,7 +83,8 @@ final class ManagerServer(
       path == "/api/auth/mode" ||
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout" ||
-      path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback"
+      path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
+      modulePublicPrefixes.exists(p => path.startsWith(p))
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
@@ -614,7 +618,13 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+
+    val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
+    if collisions.nonEmpty then
+      throw new IllegalStateException(
+        s"duplicate REST routes between core and modules: ${collisions.mkString("; ")}"
+      )
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 
@@ -632,6 +642,19 @@ final class ManagerServer(
     }
     val uiRoutes = Router("/ui" -> (uiAssets <+> spaFallback))
 
+    // Module static mounts (SPI): same shape as the /ui mount above, one per
+    // registered ai.starlake.quack.spi.StaticMount.
+    val moduleStatic: HttpRoutes[IO] =
+      moduleStaticMounts.foldLeft(HttpRoutes.empty[IO]) { (acc, m) =>
+        val assets = staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
+        val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
+          StaticFile
+            .fromResource[IO](s"${m.classpathDir}/index.html", Some(req))
+            .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+        }
+        acc <+> Router(m.urlPrefix -> (assets <+> fallback))
+      }
+
     // Redirect the bare root (`/`) to `/ui/` so visiting the manager host
     // lands on the admin UI instead of a 404. The React SPA itself lives
     // under basename="/ui" (see ui/src/App.tsx).
@@ -647,5 +670,7 @@ final class ManagerServer(
       .default[IO]
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
-      .withHttpApp((apiKeyGuard(apiRoutes) <+> uiRoutes <+> rootRedirect).orNotFound)
+      .withHttpApp(
+        (apiKeyGuard(apiRoutes) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
+      )
       .build
