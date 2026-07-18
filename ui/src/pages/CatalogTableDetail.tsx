@@ -13,6 +13,7 @@ import Breadcrumb from '../components/Breadcrumb';
 import SnapshotPicker, { parseSnapshotSelector, type SnapshotSelectorValue } from '../components/SnapshotPicker';
 import Tabs from '../components/Tabs';
 import CatalogHistoryPanel from '../components/CatalogHistoryPanel';
+import RestoreDialog from '../components/RestoreDialog';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -65,6 +66,11 @@ export default function CatalogTableDetail() {
   const [snaps, setSnaps] = useState<CatalogSnapshotEntry[]>([]);
   const [tags, setTags] = useState<CatalogTagEntry[]>([]);
 
+  // Restore entry point for the snapshot being viewed (?asOf / tag / ts resolved to an id).
+  // null = dialog closed. `refresh` refetches detail + snapshots after a completed restore.
+  const [restoreAt, setRestoreAt] = useState<number | null>(null);
+  const [refresh, setRefresh] = useState(0);
+
   // ----- Preview (fetched when the Preview tab is activated) -----
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -109,7 +115,7 @@ export default function CatalogTableDetail() {
       .catch(e => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, tenantDb, schema, table, selector]);
+  }, [tenant, tenantDb, schema, table, selector, refresh]);
 
   useEffect(() => {
     if (!tenant || !tenantDb) return;
@@ -121,7 +127,7 @@ export default function CatalogTableDetail() {
       .then(r => { if (!cancelled) setTags(r); })
       .catch(() => { if (!cancelled) setTags([]); });
     return () => { cancelled = true; };
-  }, [tenant, tenantDb]);
+  }, [tenant, tenantDb, refresh]);
 
   // Reset the preview whenever the table or its selector changes; refetch
   // right away when the Preview tab is the one showing, so the visible rows
@@ -269,32 +275,24 @@ export default function CatalogTableDetail() {
           snapshots={snaps}
           tags={tags}
         />
-        {selector !== '' && (
-          <span style={{ background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
-                         color: 'var(--warn)', borderRadius: 4, padding: '2px 8px', fontSize: '0.9rem' }}>
-            Viewing as of {parseSnapshotSelector(selector).asOfTs
-              ? `timestamp ${parseSnapshotSelector(selector).asOfTs}`
-              : `snapshot ${detail?.resolvedSnapshot ?? parseSnapshotSelector(selector).asOf ?? ''}`}
-            {detail?.resolvedAt && ` (resolved at ${new Date(detail.resolvedAt).toLocaleString()})`}
-            {(() => {
-              const asOfId = parseSnapshotSelector(selector).asOf;
-              const s = asOfId != null ? snaps.find(x => x.snapshotId === asOfId) : undefined;
-              return s ? ` (${new Date(s.committedAt).toLocaleString()})` : '';
-            })()}
+        {selector !== '' && (() => {
+          // The picker itself shows the selection and can go back to current, so no banner;
+          // instead the viewed snapshot gets its "act" companion. Tag/timestamp selectors
+          // resolve through the loaded detail; until it arrives the button is disabled.
+          const resolvedId = detail?.resolvedSnapshot ?? parseSnapshotSelector(selector).asOf ?? null;
+          return (
             <button
               type="button"
-              style={{
-                marginLeft: 8, background: 'none', border: 'none', color: 'var(--text)',
-                cursor: 'pointer', padding: 0, font: 'inherit', textDecoration: 'underline',
-              }}
-              onClick={() => {
-                const next = new URLSearchParams(searchParams);
-                writeSelectorToSearchParams(next, '');
-                setSearchParams(next);
-              }}
-            >back to current</button>
-          </span>
-        )}
+              disabled={resolvedId == null}
+              title={resolvedId == null
+                ? 'resolving the selected snapshot...'
+                : `Restore ${schema}.${table} to its state at snapshot ${resolvedId}`}
+              onClick={() => resolvedId != null && setRestoreAt(resolvedId)}
+            >
+              Restore to this snapshot
+            </button>
+          );
+        })()}
       </div>
 
       <div style={{ marginBottom: 16, fontSize: '0.9rem' }}>
@@ -690,6 +688,20 @@ export default function CatalogTableDetail() {
             ]}
           />
         </>
+      )}
+
+      {/* Page-level dialog: this component has a single return (loading is inline), so the
+          dialog cannot be unmounted mid-flow by a data refetch (the snapshots-panel loop). */}
+      {restoreAt != null && (
+        <RestoreDialog
+          tenant={tenant!}
+          tenantDb={tenantDb!}
+          schema={schema!}
+          table={table!}
+          toSnapshot={restoreAt}
+          onClose={() => setRestoreAt(null)}
+          onRestored={() => setRefresh(x => x + 1)}
+        />
       )}
     </div>
   );
