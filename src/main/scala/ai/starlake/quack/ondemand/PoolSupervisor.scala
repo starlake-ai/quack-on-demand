@@ -28,6 +28,7 @@ import ai.starlake.quack.ondemand.state.{
   RolePermission
 }
 import ai.starlake.quack.route.PoolSnapshot
+import ai.starlake.quack.spi.ManagerEvent
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.slf4j.LoggerFactory
@@ -85,6 +86,10 @@ final class PoolSupervisor(
       * catalog reader is replaced by a fresh one that picks up the new credentials.
       */
     onTenantDbChanged: (String, String) => Unit = (_, _) => (),
+    /** Module event emission (SPI). Noop by default; Main wires the ModuleEventBus sink. Emit AFTER
+      * the store/state mutation succeeds so modules never observe an uncommitted change.
+      */
+    events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop,
     /** Cross-replica per-pool lock. In non-HA mode the
       * [[ai.starlake.quack.ondemand.ha.PoolLocker.noop]] default makes every wrap a pass-through,
       * so single-manager behavior is unchanged. Under HA a
@@ -427,10 +432,30 @@ final class PoolSupervisor(
     * must not inherit a lingering draining=true flag from a prior scale-down). Returns the started
     * nodes in spawn order.
     */
-  private def spawnAll(specs: List[NodeSpec]): IO[List[RunningNode]] =
+  private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
     specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-      acc.flatMap(rs => IO.delay(tracker.remove(spec.nodeId)) *> backend.start(spec).map(rs :+ _))
+      acc.flatMap(rs =>
+        IO.delay(tracker.remove(spec.nodeId)) *> startNodeEmitting(key, spec).map(rs :+ _)
+      )
     }
+
+  /** Start one node through the backend and emit [[ManagerEvent.NodeStarted]] once it is running.
+    * Every `backend.start` call site routes through here so module event emission cannot drift out
+    * of sync with a new spawn path.
+    */
+  private def startNodeEmitting(key: PoolKey, spec: NodeSpec): IO[RunningNode] =
+    backend
+      .start(spec)
+      .flatTap(n =>
+        IO(events.emit(ManagerEvent.NodeStarted(key.tenant, key.tenantDb, key.pool, n.nodeId)))
+      )
+
+  /** Stop one node through the backend and emit [[ManagerEvent.NodeStopped]] with `reason`. Every
+    * `backend.stop` call site routes through here for the same reason as [[startNodeEmitting]].
+    */
+  private def stopNodeEmitting(key: PoolKey, nodeId: String, reason: String): IO[Unit] =
+    backend.stop(nodeId) <*
+      IO(events.emit(ManagerEvent.NodeStopped(key.tenant, key.tenantDb, key.pool, nodeId, reason)))
 
   private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =
     specFromState(key, state, n.nodeId, n.role, placementForNodeId(key, n.nodeId), n.maxConcurrent)
@@ -484,8 +509,7 @@ final class PoolSupervisor(
               )
               val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
               IO.delay(tracker.remove(n.nodeId)) *>
-                backend
-                  .start(respawnSpec(key, state, n))
+                startNodeEmitting(key, respawnSpec(key, state, n))
                   .flatMap { fresh =>
                     // Re-apply the pre-remove quarantine flag so an operator quarantine
                     // survives a node crash. restartNode intentionally clears it; only
@@ -530,7 +554,7 @@ final class PoolSupervisor(
         state.maxConcurrentPerNode
       )
     }
-    spawnAll(specs)
+    spawnAll(key, specs)
       .flatMap { running =>
         val updated = state.copy(nodes = running)
         pools.put(key, updated)
@@ -729,6 +753,7 @@ final class PoolSupervisor(
             rbacResolver.putRole(adminRole)
             rbacResolver.putRolePermission(adminPerm)
             publish.topologyChanged()
+            events.emit(ManagerEvent.TenantCreated(withId.id))
             Right(withId)
     }
   }
@@ -800,10 +825,12 @@ final class PoolSupervisor(
                   logger.warn(
                     s"deleteTenant: tenant-db row removed but DROP DATABASE \"${td.name}\" failed: $err"
                   )
+              events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
             store.deleteTenant(t.id)
             tenants.remove(t.id)
             publish.topologyChanged()
+            events.emit(ManagerEvent.TenantDeleted(name))
             Right(())
     }
   }
@@ -886,11 +913,13 @@ final class PoolSupervisor(
                           store.upsertTenantDb(td)
                           tenantDbs.put(td.id, td)
                           publish.topologyChanged()
+                          events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                           Right(td)
                     case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                       store.upsertTenantDb(td)
                       tenantDbs.put(td.id, td)
                       publish.topologyChanged()
+                      events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                       Right(td)
     }
   }
@@ -928,6 +957,7 @@ final class PoolSupervisor(
                           s"DROP DATABASE \"${td.name}\" failed: $err"
                       )
                   publish.topologyChanged()
+                  events.emit(ManagerEvent.TenantDbDeleted(tenantName, tenantDbName))
                   Right(())
       }
     }
@@ -1196,14 +1226,17 @@ final class PoolSupervisor(
                 maxConcurrentPerNode
               )
             }
-            spawnAll(specs)
+            spawnAll(key, specs)
               .flatMap { running =>
                 pools.put(key, preState.copy(nodes = running))
                 running
                   .foldLeft(IO.unit)((acc, n) =>
                     acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
                   )
-                  .map(_ => publish.topologyChanged())
+                  .map { _ =>
+                    publish.topologyChanged()
+                    events.emit(ManagerEvent.PoolCreated(key.tenant, key.tenantDb, key.pool))
+                  }
                   .as(running)
               }
           }
@@ -1361,10 +1394,13 @@ final class PoolSupervisor(
           val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))
 
           val stopRemoved =
-            if force then toRemove.foldLeft(IO.unit)((acc, n) => acc *> backend.stop(n.nodeId))
+            if force then
+              toRemove.foldLeft(IO.unit)((acc, n) =>
+                acc *> stopNodeEmitting(key, n.nodeId, "scale-down")
+              )
             else
               toRemove.foldLeft(IO.unit) { (acc, n) =>
-                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(n)
+                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
               }
           val deleteRemoved =
             // Drop both the store row and the tracker entry now that the node is
@@ -1375,7 +1411,7 @@ final class PoolSupervisor(
             }
 
           stopRemoved *> deleteRemoved *>
-            spawnAll(specs)
+            spawnAll(key, specs)
               .map(survivors ++ _)
               .flatMap { combined =>
                 pools.put(key, state.copy(nodes = combined, distribution = newDist))
@@ -1413,10 +1449,13 @@ final class PoolSupervisor(
       case None        => IO.unit
       case Some(state) =>
         val stopAll =
-          if force then state.nodes.foldLeft(IO.unit)((acc, n) => acc *> backend.stop(n.nodeId))
+          if force then
+            state.nodes.foldLeft(IO.unit)((acc, n) =>
+              acc *> stopNodeEmitting(key, n.nodeId, "pool-delete")
+            )
           else
             state.nodes.foldLeft(IO.unit) { (acc, n) =>
-              acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(n)
+              acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
             }
         stopAll *>
           state.nodes.foldLeft(IO.unit)((acc, n) =>
@@ -1432,9 +1471,11 @@ final class PoolSupervisor(
             pools.remove(key)
             poolIdByKey.remove(key)
             publish.topologyChanged()
+            events.emit(ManagerEvent.PoolDeleted(key.tenant, key.tenantDb, key.pool))
           }
 
-  private def drainAndStop(n: RunningNode): IO[Unit] = backend.stop(n.nodeId)
+  private def drainAndStop(key: PoolKey, n: RunningNode): IO[Unit] =
+    stopNodeEmitting(key, n.nodeId, "drain")
 
   /** Operator-initiated restart of a single node: stop it (all its in-flight statements fail to
     * their clients), respawn through the same NodeSpec path reconcile uses, clear any quarantine so
@@ -1452,9 +1493,9 @@ final class PoolSupervisor(
                 IO.pure(Left(SupervisorError.NotFound(s"node $nodeId not found in $key")))
               case Some(n) =>
                 for
-                  _     <- backend.stop(n.nodeId)
+                  _     <- stopNodeEmitting(key, n.nodeId, "respawn")
                   _     <- IO.delay(tracker.remove(n.nodeId))
-                  fresh <- backend.start(respawnSpec(key, state, n))
+                  fresh <- startNodeEmitting(key, respawnSpec(key, state, n))
                   _     <- poolIdByKey.get(key) match
                     case Some(pid) => IO.blocking(store.upsertNode(fresh, pid))
                     case None      => IO.unit

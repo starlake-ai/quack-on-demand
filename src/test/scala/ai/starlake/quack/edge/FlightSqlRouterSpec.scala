@@ -21,6 +21,7 @@ import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -43,7 +44,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     */
   private def defaultStub: () => QuackResponse = () => TestArrow.okResponse()
 
-  private def setup(stub: () => QuackResponse = defaultStub) =
+  private def setup(
+      stub: () => QuackResponse = defaultStub,
+      events: ManagerEventSink = ManagerEventSink.noop
+  ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -89,7 +93,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
 
     val sessions = new SessionRegistry
-    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    val router   =
+      new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si, events = events)
     (router, sessions, node)
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
@@ -1081,3 +1086,67 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     result shouldBe a[Right[?, ?]]
     calls.size shouldBe 2
     calls.map(_._1).forall(_.isDefined) shouldBe true
+
+  // ---------- SPI module events ----------
+
+  "module events" should "emit SessionOpened then StatementExecuted with ok=true on success" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val out = router.execute("evt-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+
+    val seen             = received.toArray.toList.map(_.asInstanceOf[ManagerEvent])
+    val sessionOpenedIdx = seen.indexWhere {
+      case ManagerEvent.SessionOpened(t, u, via) =>
+        t == poolKey.tenant && u == "alice" && via == "flightsql"
+      case _ => false
+    }
+    sessionOpenedIdx should be >= 0
+
+    val executedIdx = seen.indexWhere {
+      case _: ManagerEvent.StatementExecuted => true
+      case _                                 => false
+    }
+    executedIdx should be > sessionOpenedIdx
+
+    seen(executedIdx) match
+      case se: ManagerEvent.StatementExecuted =>
+        se.ok shouldBe true
+        se.kind shouldBe "Select"
+        se.tenant shouldBe poolKey.tenant
+        se.tenantDb shouldBe poolKey.tenantDb
+        se.pool shouldBe poolKey.pool
+      case other => fail(s"expected StatementExecuted, got $other")
+
+  it should "emit StatementExecuted with ok=false when execution fails" in:
+    val denying = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult = Denied("you can't read this")
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (base, _, _)           = setup()
+    val router                 = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      validator = denying,
+      stmtInstruments = si,
+      events = sink
+    )
+    val out = router.execute("evt-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Left[_, _]]
+
+    val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
+    executed should not be empty
+    executed.head.ok shouldBe false
+
+  it should "emit no module events when recordExecution=false (probe-style call)" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val out                    = router
+      .execute("evt-3", "alice", poolKey, "SELECT 1", recordExecution = false)
+      .unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+    received.toArray.toList shouldBe Nil

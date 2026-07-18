@@ -39,7 +39,10 @@ object LiquibaseRunner:
   /** Build a runner from the global `defaultMetastore` map (pgHost, pgPort, pgUser, pgPassword,
     * dbName). Each key must be set.
     */
-  def fromDefaultMetastore(meta: Map[String, String]): LiquibaseRunner =
+  def fromDefaultMetastore(
+      meta: Map[String, String],
+      changelogPath: String = "db/changelog/db.changelog-master.yaml"
+  ): LiquibaseRunner =
     def required(k: String): String =
       meta
         .get(k)
@@ -53,4 +56,4 @@ object LiquibaseRunner:
     val pass = required("pgPassword")
     val db   = required("dbName")
     val url  = s"jdbc:postgresql://$host:$port/$db"
-    new LiquibaseRunner(url, user, pass)
+    new LiquibaseRunner(url, user, pass, changelogPath)

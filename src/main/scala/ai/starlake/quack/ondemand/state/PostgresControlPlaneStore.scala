@@ -57,6 +57,11 @@ final class PostgresControlPlaneStore(
     hc.setPoolName("qod-control-plane")
     new HikariDataSource(hc)
 
+  /** SPI access for module-owned qodhosted_* tables. Modules share the control-plane pool rather
+    * than opening their own.
+    */
+  def jdbcDataSource: javax.sql.DataSource = dataSource
+
   private def withConn[A](f: Connection => A): A =
     val c = dataSource.getConnection
     try f(c)
