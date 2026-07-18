@@ -104,7 +104,8 @@ object ManagerServerHarness:
     tlsEnabled = false,
     tlsCertChain = "",
     tlsPrivateKey = "",
-    sessionTtlSec = 3600L
+    sessionTtlSec = 3600L,
+    resumeHoldTimeoutSec = 60L
   )
 
   // ------------------------------------------------------------------

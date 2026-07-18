@@ -495,5 +495,10 @@ final case class FlightConfig(
       envVar = "QOD_SESSION_TTL_SEC",
       description = "Edge session TTL in seconds before a fresh handshake is forced."
     )
-    sessionTtlSec: Long
+    sessionTtlSec: Long,
+    @field @ConfigField(
+      envVar = "PROXY_RESUME_HOLD_TIMEOUT_SEC",
+      description = "Max seconds the edge holds a statement while a suspended pool cold-starts."
+    )
+    resumeHoldTimeoutSec: Long
 )
