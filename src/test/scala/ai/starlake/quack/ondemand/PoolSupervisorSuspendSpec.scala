@@ -85,6 +85,36 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     sup.get(key).get.nodes shouldBe empty
   }
 
+  it should "drain live nodes of a pool marked suspended (crash-mid-suspend heal)" in {
+    // Simulate a crash between suspendPool's flag persist and its drain: the pool row says
+    // suspended=true while the node rows and processes are still live. Restart is simulated
+    // by building a second supervisor over the same store and backend and boot-loading it.
+    val backend = new StubQuackBackend()
+    val store   = new InMemoryControlPlaneStore()
+    val sup     =
+      new PoolSupervisor(backend, new NodeLoadTracker, store, events = new RecordingSink)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    val row = store.listPools(store.listTenantDbs("acme").head.id).head
+    store.upsertPool(row.copy(suspended = true)) // crash window: flag persisted, drain never ran
+
+    val sink2 = new RecordingSink
+    val sup2  = new PoolSupervisor(backend, new NodeLoadTracker, store, events = sink2)
+    sup2.restore() // restart-after-crash boot load: suspended=true with live node rows
+    sup2.get(key).get.nodes should have size 2 // precondition: the desync is reproduced
+
+    sup2.reconcile().unsafeRunSync()
+
+    sup2.get(key).get.nodes shouldBe empty
+    sup2.get(key).get.suspended shouldBe true
+    val stops = sink2.seen.collect { case e: ManagerEvent.NodeStopped => e }
+    stops should have size 2
+    stops.map(_.reason).distinct shouldBe List("suspend")
+    sink2.seen.collect { case e: ManagerEvent.PoolSuspended => e } shouldBe empty
+    store.listNodes(row.id) shouldBe empty
+  }
+
   "createPool(startSuspended)" should "persist the pool suspended with zero nodes" in {
     val sink    = new RecordingSink
     val store   = new InMemoryControlPlaneStore()

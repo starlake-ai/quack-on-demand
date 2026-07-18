@@ -491,7 +491,21 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
-    if state.nodes.isEmpty && state.distribution.total > 0 && !state.suspended then
+    if state.suspended && state.nodes.nonEmpty then
+      // Crash-mid-suspend heal: suspendPool persists suspended=true BEFORE draining, so a
+      // manager crash in that window reloads a suspended pool whose nodes are still alive.
+      // Drain-stop and forget them exactly the way suspendPool would have. No PoolSuspended
+      // re-emission: the suspend already happened and was announced; this is healing, not a
+      // state change. The per-node NodeStopped(reason = "suspend") events still flow through
+      // drainAndStop.
+      drainAndForgetNodes(key, state.nodes) *>
+        IO.delay {
+          val updated = state.copy(nodes = Nil)
+          pools.put(key, updated)
+          publish.topologyChanged()
+          updated
+        }
+    else if state.nodes.isEmpty && state.distribution.total > 0 && !state.suspended then
       // Pool persisted with zero running nodes. Happens after a fresh
       // YAML bootstrap (ManifestImporter writes the pool row but does
       // not spawn nodes the way createPool would). Spawn the full
@@ -1446,7 +1460,8 @@ final class PoolSupervisor(
       case Some(_) => scale(key, 0, RoleDistribution(0, 0, 0), force).void
 
   /** Scale-to-zero: set suspended=true, then drain-stop every node while KEEPING the persisted
-    * distribution (unlike [[stopPool]], which zeroes it). Reconcile skips suspended pools; the
+    * distribution (unlike [[stopPool]], which zeroes it). Reconcile never respawns suspended pools
+    * (and drains any live nodes a crash in the flag-persist/drain window left behind); the
     * FlightSQL edge (or [[resumePool]]) wakes them. Idempotent. The flag is set FIRST so a query
     * racing the drain observes suspended=true and re-wakes the pool once the lock frees.
     */
@@ -1472,14 +1487,7 @@ final class PoolSupervisor(
                 pools.put(key, state.copy(suspended = true))
                 publish.topologyChanged()
               }
-              val drainIO = state.nodes.foldLeft(IO.unit) { (acc, n) =>
-                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *>
-                  drainAndStop(key, n, reason = "suspend")
-              }
-              val forgetIO = state.nodes.foldLeft(IO.unit) { (acc, n) =>
-                acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
-              }
-              flagIO *> drainIO *> forgetIO *> IO
+              flagIO *> drainAndForgetNodes(key, state.nodes) *> IO
                 .delay {
                   pools.put(key, state.copy(nodes = Nil, suspended = true))
                   publish.topologyChanged()
@@ -1568,6 +1576,21 @@ final class PoolSupervisor(
 
   private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
     stopNodeEmitting(key, n.nodeId, reason)
+
+  /** Drain-stop then forget each of `nodes`: mark draining + [[drainAndStop]] with reason "suspend"
+    * for every node, then delete the store row and tracker entry per node. Shared by
+    * [[suspendPool]] and reconcile's suspended-pool heal so the per-node sequence cannot drift
+    * between them.
+    */
+  private def drainAndForgetNodes(key: PoolKey, nodes: List[RunningNode]): IO[Unit] =
+    val drainIO = nodes.foldLeft(IO.unit) { (acc, n) =>
+      acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *>
+        drainAndStop(key, n, reason = "suspend")
+    }
+    val forgetIO = nodes.foldLeft(IO.unit) { (acc, n) =>
+      acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
+    }
+    drainIO *> forgetIO
 
   /** Operator-initiated restart of a single node: stop it (all its in-flight statements fail to
     * their clients), respawn through the same NodeSpec path reconcile uses, clear any quarantine so
