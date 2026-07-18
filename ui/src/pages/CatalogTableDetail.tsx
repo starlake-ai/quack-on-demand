@@ -71,6 +71,12 @@ export default function CatalogTableDetail() {
   const [restoreAt, setRestoreAt] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
 
+  // Tag management for the viewed snapshot (Summary section row). The snapshots panel only
+  // DISPLAYS tags; mutations live here, against the picker-selected snapshot.
+  const [newTagName, setNewTagName] = useState('');
+  const [newTagProtect, setNewTagProtect] = useState(false);
+  const [tagOpError, setTagOpError] = useState<string | null>(null);
+
   // ----- Preview (fetched when the Preview tab is activated) -----
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -246,6 +252,46 @@ export default function CatalogTableDetail() {
     setActiveTab('compare');
   }
 
+  // The db snapshot being viewed, resolved to a concrete id: tag/timestamp selectors resolve
+  // through the loaded detail; a plain ?asOf is usable before the detail arrives.
+  const resolvedId = selector !== ''
+    ? detail?.resolvedSnapshot ?? parseSnapshotSelector(selector).asOf ?? null
+    : null;
+  const snapshotTags = resolvedId != null ? tags.filter(t => t.snapshotId === resolvedId) : [];
+
+  function afterTagOp() {
+    setTagOpError(null);
+    setRefresh(x => x + 1);
+  }
+
+  function addTag(ev: React.FormEvent) {
+    ev.preventDefault();
+    if (resolvedId == null || !tenant || !tenantDb) return;
+    api.createCatalogTag({
+      tenant, tenantDb, name: newTagName.trim(), snapshotId: resolvedId, protected: newTagProtect,
+    })
+      .then(() => { setNewTagName(''); setNewTagProtect(false); afterTagOp(); })
+      .catch(e => setTagOpError(errorMessage(e)));
+  }
+
+  function removeTag(t: CatalogTagEntry) {
+    if (t.protected && !window.confirm(`Remove retention hold '${t.name}'?`)) return;
+    api.deleteCatalogTag({ tenant: tenant!, tenantDb: tenantDb!, name: t.name })
+      .then(afterTagOp)
+      .catch(e => setTagOpError(errorMessage(e)));
+  }
+
+  function toggleProtect(t: CatalogTagEntry) {
+    api.protectCatalogTag({ tenant: tenant!, tenantDb: tenantDb!, name: t.name, protected: !t.protected })
+      .then(afterTagOp)
+      .catch(e => setTagOpError(errorMessage(e)));
+  }
+
+  const chipBtn: CSSProperties = {
+    background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+    font: 'inherit', fontSize: '0.9em', color: 'inherit', textDecoration: 'underline',
+  };
+
   const tEnc  = encodeURIComponent(tenant!);
   const tdEnc = encodeURIComponent(tenantDb!);
   const sEnc  = encodeURIComponent(schema!);
@@ -275,24 +321,20 @@ export default function CatalogTableDetail() {
           snapshots={snaps}
           tags={tags}
         />
-        {selector !== '' && (() => {
+        {selector !== '' && (
           // The picker itself shows the selection and can go back to current, so no banner;
-          // instead the viewed snapshot gets its "act" companion. Tag/timestamp selectors
-          // resolve through the loaded detail; until it arrives the button is disabled.
-          const resolvedId = detail?.resolvedSnapshot ?? parseSnapshotSelector(selector).asOf ?? null;
-          return (
-            <button
-              type="button"
-              disabled={resolvedId == null}
-              title={resolvedId == null
-                ? 'resolving the selected snapshot...'
-                : `Restore ${schema}.${table} to its state at snapshot ${resolvedId}`}
-              onClick={() => resolvedId != null && setRestoreAt(resolvedId)}
-            >
-              Restore to this snapshot
-            </button>
-          );
-        })()}
+          // instead the viewed snapshot gets its "act" companion.
+          <button
+            type="button"
+            disabled={resolvedId == null}
+            title={resolvedId == null
+              ? 'resolving the selected snapshot...'
+              : `Restore ${schema}.${table} to its state at snapshot ${resolvedId}`}
+            onClick={() => resolvedId != null && setRestoreAt(resolvedId)}
+          >
+            Restore to this snapshot
+          </button>
+        )}
       </div>
 
       <div style={{ marginBottom: 16, fontSize: '0.9rem' }}>
@@ -332,6 +374,73 @@ export default function CatalogTableDetail() {
                     {detail.table.folder
                       ? <code style={{ fontSize: '0.9em', color: '#444' }}>{detail.table.folder}</code>
                       : <em style={{ color: '#888' }}>--</em>}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ paddingRight: 16, color: '#555', verticalAlign: 'top' }}>Tags</td>
+                  <td>
+                    {resolvedId == null
+                      ? <em style={{ color: '#888' }}>select a snapshot above to view and manage its tags</em>
+                      : (
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {snapshotTags.map(t => (
+                            <span
+                              key={t.name}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 6,
+                                border: '1px solid #ccc', borderRadius: 12,
+                                padding: '1px 8px', fontSize: '0.85em',
+                              }}
+                            >
+                              {t.name}
+                              {t.protected && (
+                                <span style={{
+                                  background: 'rgba(251, 191, 36, 0.15)', border: '1px solid var(--warn)',
+                                  color: 'var(--warn)', borderRadius: 4, padding: '0 4px', fontSize: '0.9em',
+                                }}>hold</span>
+                              )}
+                              <button
+                                type="button"
+                                style={chipBtn}
+                                title={t.protected
+                                  ? 'Remove the retention hold (snapshot becomes expirable)'
+                                  : 'Protect: pin this snapshot against expiry'}
+                                onClick={() => toggleProtect(t)}
+                              >
+                                {t.protected ? 'unprotect' : 'protect'}
+                              </button>
+                              <button
+                                type="button"
+                                style={chipBtn}
+                                title={`Delete tag '${t.name}'`}
+                                onClick={() => removeTag(t)}
+                              >
+                                &times;
+                              </button>
+                            </span>
+                          ))}
+                          <form onSubmit={addTag} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                            <input
+                              value={newTagName}
+                              onChange={ev => setNewTagName(ev.target.value)}
+                              placeholder="new tag name"
+                              required
+                              style={{ width: 140 }}
+                              title="Per-database handle for the viewed snapshot; names cannot be all digits"
+                            />
+                            <label style={{ fontSize: '0.85em' }}>
+                              <input
+                                type="checkbox"
+                                checked={newTagProtect}
+                                onChange={ev => setNewTagProtect(ev.target.checked)}
+                              />{' '}
+                              protect
+                            </label>
+                            <button type="submit">Add tag</button>
+                          </form>
+                          {tagOpError && <span style={{ color: 'red' }}>{tagOpError}</span>}
+                        </div>
+                      )}
                   </td>
                 </tr>
               </tbody>
