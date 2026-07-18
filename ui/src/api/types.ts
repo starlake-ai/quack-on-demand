@@ -60,6 +60,10 @@ export interface PoolResponse {
   // pgPassword is redacted.
   metastore: Record<string, string>;
   disabled: boolean;
+  // True while the pool is hibernated (scaled to 0 by the suspend action,
+  // distinct from `disabled`). The pool's `status` string stays "ready"
+  // while suspended - key UI state off this flag, not `status`.
+  suspended?: boolean;
   // Persisted placement plan. Empty array (the default) means no
   // placement constraint - all nodes scheduled wherever the runtime puts
   // them. Only meaningful on the Kubernetes backend.
@@ -111,6 +115,12 @@ export interface StopPoolRequest {
   tenantDb: string;
   pool: string;
   force?: boolean;
+}
+
+export interface PoolRefRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
 }
 
 export interface DeletePoolRequest {

@@ -294,6 +294,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     {p.pool}
                   </a>
                   {p.disabled && <span className="subtle"> (disabled)</span>}
+                  {p.suspended && <span className="subtle"> (hibernated)</span>}
                 </td>
                 <td align="right">{p.nodes.length}</td>
                 <td align="right">
