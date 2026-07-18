@@ -19,11 +19,13 @@ import scala.concurrent.duration.DurationInt
   * routed through the write executor (`recordExecution = true` in Main, so the replace snapshot
   * carries the principal's author stamp and the statement is ACL-checked per table: the CTAS emits
   * Ddl + Read on the table, so the caller needs ALL, or DDL plus RO/RW). The dry run is the Spec 02
-  * aggregate over `(toSnapshot, currentSnapshot]` on the read executor: exactly the changes the
-  * restore will undo. Verified-live engine facts (Spec 04 Task 1): the replace assigns a new
-  * table_id whose begin_snapshot is the replace snapshot (the basis of both the `newSnapshot` in
-  * the response and the committed-despite-timeout probe), and a failed replace leaves the current
-  * state intact.
+  * aggregate over `(toSnapshot, currentSnapshot]`, run on the read executor under the system
+  * identity rather than the caller's: the ACL parser fail-closed denies the
+  * `ducklake_table_changes` table function as an unsupported construct, and the summary carries
+  * aggregate counts only, behind the tenant-db gate already cleared above. Verified-live engine
+  * facts (Spec 04 Task 1): the replace assigns a new table_id whose begin_snapshot is the replace
+  * snapshot (the basis of both the `newSnapshot` in the response and the committed-despite-timeout
+  * probe), and a failed replace leaves the current state intact.
   *
   * Restore is a mutation: audited unconditionally, dry-runs included (detail carries dryRun). Known
   * race, by design (no auto-pin): a maintenance expiry between the probes and the CTAS fails the
@@ -274,7 +276,16 @@ final class CatalogRestoreHandlers(
             toSnapshot,
             currentSnapshot
           )
-          readExecutor(s"restore-dryrun-$tid-$db", identityOf(apiKey), poolKey, sql)
+          // Runs as SuperuserIdentity rather than identityOf(apiKey): the ACL parser has no
+          // grammar for the ducklake_table_changes table function and fail-closed denies it as
+          // an unsupported construct, which would wall an ACL'd (DDL+RO, no ALL) caller out of
+          // the mandatory dry-run leg even though their CTAS execute is correctly authorized.
+          // Sound to bypass here because (a) the response carries only aggregate counts, never
+          // rows, (b) the caller already cleared TenantDbGate + TenantScopeCheck for this
+          // tenant-db above, and (c) that same gate already exposes equivalent aggregate
+          // metadata via the catalog history/snapshot reads -- this isn't a missing table grant,
+          // it's a parser gap on one specific table function.
+          readExecutor(s"restore-dryrun-$tid-$db", SuperuserIdentity, poolKey, sql)
             .timeout(cfg.previewTimeoutSec.seconds)
             .attempt
             .map {

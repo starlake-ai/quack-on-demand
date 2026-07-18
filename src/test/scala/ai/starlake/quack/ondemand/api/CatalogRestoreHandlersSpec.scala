@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
@@ -23,6 +24,7 @@ import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.time.Instant
 
 class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
@@ -126,6 +128,8 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     var writeSql: Option[String]   = None
     var readPool: Option[PoolKey]  = None
     var writePool: Option[PoolKey] = None
+    var readUser: Option[String]   = None
+    var writeUser: Option[String]  = None
     var closed                     = false
     var readResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(
@@ -148,13 +152,18 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     var writeResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
     val readExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, poolKey, sql) => { readSql = Some(sql); readPool = Some(poolKey); readResult }
+      (_, user, poolKey, sql) => {
+        readSql = Some(sql); readPool = Some(poolKey); readUser = Some(user); readResult
+      }
     val writeExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, poolKey, sql) => { writeSql = Some(sql); writePool = Some(poolKey); writeResult }
+      (_, user, poolKey, sql) => {
+        writeSql = Some(sql); writePool = Some(poolKey); writeUser = Some(user); writeResult
+      }
 
     def handlers(
         readerOverride: DuckLakeCatalogReader = stubReader(),
-        cfgOverride: CatalogConfig = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
+        cfgOverride: CatalogConfig = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30),
+        sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None
     ): CatalogRestoreHandlers =
       new CatalogRestoreHandlers(
         sup,
@@ -163,7 +172,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         writeExecutor,
         (_, _) => readerOverride,
         cfgOverride,
-        _ => None,
+        sessionsOverride,
         audit = audit
       )
 
@@ -173,11 +182,12 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         dryRun: Option[Boolean] = None,
         expected: Option[Long] = None,
         schema: String = "tpch1",
-        table: String = "orders"
+        table: String = "orders",
+        apiKey: Option[String] = NoKey
     ) =
       h.restore(
         RestoreRequest("acme", "acme_tpch1", schema, table, to, dryRun, expected),
-        NoKey
+        apiKey
       )(NoScope)
         .unsafeRunSync()
 
@@ -269,6 +279,19 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createPool(PoolKey("acme", "acme_tpch1", "aro"), RoleDistribution(1, 0, 0)).unsafeRunSync()
     restore(handlers(), to = "39", dryRun = Some(true))
     readPool shouldBe Some(PoolKey("acme", "acme_tpch1", "bi"))
+
+  it should "run the dry-run summary under the system identity, but execute under the caller's" in new Stubs:
+    val profile = AuthenticatedProfile("alice", "user", Set.empty, Map.empty, "db", Some("acme"))
+    val session = SessionTokenStore.Session(
+      profile,
+      SessionScope(superuser = false, manageableTenants = Set("acme")),
+      Instant.now()
+    )
+    val h = handlers(sessionsOverride = tok => if tok == "alice-tok" then Some(session) else None)
+    restore(h, to = "39", dryRun = Some(true), apiKey = Some("alice-tok"))
+    readUser shouldBe Some(CatalogPreviewHandlers.SuperuserIdentity)
+    restore(h, to = "39", apiKey = Some("alice-tok"))
+    writeUser shouldBe Some("alice")
 
   it should "execute the CREATE OR REPLACE and report the new snapshot" in new Stubs:
     val h   = handlers()
