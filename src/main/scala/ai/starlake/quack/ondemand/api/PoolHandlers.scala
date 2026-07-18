@@ -181,13 +181,13 @@ final class PoolHandlers(
                 .createPool(
                   key,
                   req.roleDistribution,
-                  req.maxConcurrentPerNode,
-                  cohorts,
-                  req.disabled,
-                  req.initSql.getOrElse(""),
-                  req.cpu,
-                  req.memory,
-                  req.podTemplateYaml
+                  maxConcurrentPerNode = req.maxConcurrentPerNode,
+                  cohorts = cohorts,
+                  disabled = req.disabled,
+                  initSql = req.initSql.getOrElse(""),
+                  cpu = req.cpu,
+                  memory = req.memory,
+                  podTemplateYaml = req.podTemplateYaml
                 )
                 .map(_ =>
                   audit.rest(

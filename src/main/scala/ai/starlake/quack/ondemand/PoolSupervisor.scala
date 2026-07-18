@@ -1094,6 +1094,11 @@ final class PoolSupervisor(
       // spawned -- same semantics as calling setPoolDisabled(true) right
       // after a normal create.
       disabled: Boolean = false,
+      // Persist with suspended=true and spawn NO nodes: the pool exists in
+      // the control plane (catalog init still runs) and cold-starts on the
+      // first statement or an explicit resume. Signup's mass-provisioning
+      // path depends on this being cheap.
+      startSuspended: Boolean = false,
       // Free-form per-pool SQL prepended to the federation blob and shipped
       // to spawn-quack-node.sh via $extraSetupSql. PRAGMAs / SET / INSTALL /
       // LOAD live here; ATTACH aliases live on federation sources. Order
@@ -1179,6 +1184,7 @@ final class PoolSupervisor(
             distribution = dist,
             maxConcurrentPerNode = maxConcurrentPerNode,
             disabled = disabled,
+            suspended = startSuspended,
             cohorts = cohorts,
             initSql = initSql,
             cpu = cpu,
@@ -1206,6 +1212,7 @@ final class PoolSupervisor(
               td.objectStore,
               maxConcurrentPerNode,
               disabled = disabled,
+              suspended = startSuspended,
               kindWire = kindWire,
               // Federation blob only; respawn concatenates with initSql fresh.
               extraSetupSql = fedBlob,
@@ -1227,7 +1234,9 @@ final class PoolSupervisor(
                 maxConcurrentPerNode
               )
             }
-            spawnAll(key, specs)
+            val spawnIO: IO[List[RunningNode]] =
+              if startSuspended then IO.pure(Nil) else spawnAll(key, specs)
+            spawnIO
               .flatMap { running =>
                 pools.put(key, preState.copy(nodes = running))
                 running

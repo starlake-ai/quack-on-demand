@@ -84,3 +84,21 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     sup.reconcile().unsafeRunSync()
     sup.get(key).get.nodes shouldBe empty
   }
+
+  "createPool(startSuspended)" should "persist the pool suspended with zero nodes" in {
+    val sink    = new RecordingSink
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(new StubQuackBackend(), tracker, store, events = sink)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val nodes =
+      sup.createPool(key, RoleDistribution(0, 1, 1), startSuspended = true).unsafeRunSync()
+    nodes shouldBe empty
+    val st = sup.get(key).get
+    st.suspended shouldBe true
+    st.distribution.total shouldBe 2
+    // and it wakes normally
+    sup.resumePool(key, "rest").unsafeRunSync().isRight shouldBe true
+    sup.get(key).get.nodes should have size 2
+  }
