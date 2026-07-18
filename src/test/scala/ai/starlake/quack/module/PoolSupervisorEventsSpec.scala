@@ -101,3 +101,31 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
     sup.deleteTenant("acme").unsafeRunSync()
     received.asScala.toList should contain(ManagerEvent.TenantDeleted(tenant.id))
   }
+
+  it should "emit TenantDbDeleted then TenantDeleted when deleteTenant cascades" in {
+    val cascadeReceived =
+      new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val cascadeSink: ManagerEventSink = e => { cascadeReceived.add(e); () }
+    val sup                           = new PoolSupervisor(
+      new StubQuackBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      events = cascadeSink
+    )
+
+    val tenant = sup.createTenant(Tenant("cascade")).unsafeRunSync().toOption.get
+    val td     = sup
+      .createTenantDb("cascade", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    // No pools created, so the cascade removes the tenant-db then the tenant.
+    sup.deleteTenant("cascade").unsafeRunSync().toOption.get
+
+    val events           = cascadeReceived.asScala.toList
+    val dbDeletedIdx     = events.indexOf(ManagerEvent.TenantDbDeleted("cascade", td.name))
+    val tenantDeletedIdx = events.indexOf(ManagerEvent.TenantDeleted(tenant.id))
+    dbDeletedIdx should be >= 0
+    tenantDeletedIdx should be >= 0
+    dbDeletedIdx should be < tenantDeletedIdx
+  }

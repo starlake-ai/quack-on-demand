@@ -215,7 +215,11 @@ final class FlightSqlRouter(
   ): IO[Either[RouterFailure, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse {
       val opened = sessions.open(connectionId, user, poolKey)
-      events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, "flightsql"))
+      // Gate module telemetry on recordExecution: internal probes and prepare-time
+      // probes pass recordExecution=false and must not emit, matching every other
+      // telemetry surface in execute.
+      if recordExecution then
+        events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, "flightsql"))
       opened
     }
     val kind = classifier.classify(sql)
@@ -489,21 +493,26 @@ final class FlightSqlRouter(
                         }
 
     val startedAtNanos = System.nanoTime()
-    resultIO.flatTap { r =>
-      IO(
-        events.emit(
-          ManagerEvent.StatementExecuted(
-            tenant = poolKey.tenant,
-            tenantDb = poolKey.tenantDb,
-            pool = poolKey.pool,
-            kind = kind.toString,
-            user = user,
-            durationMs = (System.nanoTime() - startedAtNanos) / 1000000L,
-            ok = r.isRight
+    // Gate the module StatementExecuted event on recordExecution: internal probes and
+    // prepare-time probes pass recordExecution=false and must not emit, matching every
+    // other telemetry surface in execute.
+    if recordExecution then
+      resultIO.flatTap { r =>
+        IO(
+          events.emit(
+            ManagerEvent.StatementExecuted(
+              tenant = poolKey.tenant,
+              tenantDb = poolKey.tenantDb,
+              pool = poolKey.pool,
+              kind = kind.toString,
+              user = user,
+              durationMs = (System.nanoTime() - startedAtNanos) / 1000000L,
+              ok = r.isRight
+            )
           )
         )
-      )
-    }
+      }
+    else resultIO
 
   /** Prepend `USE <dbName>.<schemaName>;` so the remote DuckDB session lands in the pool's
     * catalog+schema, letting unqualified table names AND 2-part `"schema"."table"` paths resolve.

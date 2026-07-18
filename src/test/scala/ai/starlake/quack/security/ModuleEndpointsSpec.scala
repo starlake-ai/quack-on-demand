@@ -2,10 +2,13 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.module.TestModule
-import ai.starlake.quack.spi.StaticMount
+import ai.starlake.quack.spi.*
+import cats.effect.IO
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import sttp.tapir.*
+import sttp.tapir.server.ServerEndpoint
 
 import scala.compiletime.uninitialized
 
@@ -72,6 +75,39 @@ class ModuleEndpointsSpec
       deep.statusCode() shouldBe 200
     }
     deep.body() should include("portal-index")
+  }
+
+  "a public prefix" should "match on segment boundaries, not raw string prefixes" in {
+    // Declared public prefix is "/api/hosted-test/ping"; the endpoint below is
+    // "/api/hosted-test/pingx", which shares the raw string prefix but is NOT a
+    // sub-path of it. Segment-safe matching must keep pingx gated behind the key.
+    val localModule = new ManagerModule:
+      def name: String                             = "prefix-boundary-module"
+      def changelogPath: Option[String]            = None
+      def start(ctx: ManagerContext): IO[Unit]     = IO.unit
+      def endpoints: List[ServerEndpoint[Any, IO]] = List(
+        endpoint.get
+          .in("api" / "hosted-test" / "pingx")
+          .out(stringBody)
+          .serverLogicSuccess[IO](_ => IO.pure("pongx"))
+      )
+      def publicPathPrefixes: Set[String]        = Set("/api/hosted-test/ping")
+      def onEvent(event: ManagerEvent): IO[Unit] = IO.unit
+      def stop: IO[Unit]                         = IO.unit
+
+    val fix   = SecurityFixtures.freshStore()
+    val local = ManagerServerHarness.boot(
+      fix.store,
+      staticApiKey = Some(ApiKey),
+      moduleEndpoints = localModule.endpoints,
+      modulePublicPrefixes = localModule.publicPathPrefixes
+    )
+    try
+      val denied = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/pingx")
+      withClue(s"GET /api/hosted-test/pingx (no key) body: ${denied.body()}") {
+        denied.statusCode() shouldBe 401
+      }
+    finally local.shutdown()
   }
 
   "route collisions" should "fail server construction" in {

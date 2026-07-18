@@ -509,8 +509,7 @@ final class PoolSupervisor(
               )
               val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
               IO.delay(tracker.remove(n.nodeId)) *>
-                backend
-                  .start(respawnSpec(key, state, n))
+                startNodeEmitting(key, respawnSpec(key, state, n))
                   .flatMap { fresh =>
                     // Re-apply the pre-remove quarantine flag so an operator quarantine
                     // survives a node crash. restartNode intentionally clears it; only
@@ -826,6 +825,7 @@ final class PoolSupervisor(
                   logger.warn(
                     s"deleteTenant: tenant-db row removed but DROP DATABASE \"${td.name}\" failed: $err"
                   )
+              events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
             store.deleteTenant(t.id)
             tenants.remove(t.id)

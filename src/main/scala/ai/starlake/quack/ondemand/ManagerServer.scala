@@ -84,7 +84,7 @@ final class ManagerServer(
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout" ||
       path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
-      modulePublicPrefixes.exists(p => path.startsWith(p))
+      modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning

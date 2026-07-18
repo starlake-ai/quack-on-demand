@@ -1140,3 +1140,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
     executed should not be empty
     executed.head.ok shouldBe false
+
+  it should "emit no module events when recordExecution=false (probe-style call)" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val out                    = router
+      .execute("evt-3", "alice", poolKey, "SELECT 1", recordExecution = false)
+      .unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+    received.toArray.toList shouldBe Nil
