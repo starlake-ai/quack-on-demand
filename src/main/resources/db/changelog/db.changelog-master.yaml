@@ -49,3 +49,5 @@ databaseChangeLog:
       file: db/changelog/0021-maintenance.yaml
   - include:
       file: db/changelog/0022-user-enabled.yaml
+  - include:
+      file: db/changelog/0023-pool-suspended.yaml
