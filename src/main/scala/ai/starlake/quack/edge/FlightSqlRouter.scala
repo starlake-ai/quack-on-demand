@@ -7,12 +7,14 @@ import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
-import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import ai.starlake.sql.SqlCommentStripper
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
+
+import scala.concurrent.duration.*
 
 /** Carries a streaming result back through the router. The caller MUST invoke `close()` once all
   * batches have been consumed. `nodeId` is the Quack node that produced the stream, exposed so the
@@ -50,7 +52,9 @@ final class FlightSqlRouter(
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
     val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
-    val events: ManagerEventSink = ManagerEventSink.noop
+    val events: ManagerEventSink = ManagerEventSink.noop,
+    val resumeHoldTimeout: FiniteDuration = 60.seconds,
+    val resumePollInterval: FiniteDuration = 250.millis
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -380,12 +384,20 @@ final class FlightSqlRouter(
       aclCheck.flatMap(_ => clsRewritten()).flatMap(rlsRewritten) match
         case Left(f)         => IO.pure(Left(f))
         case Right(finalSql) =>
-          supervisor.snapshot(poolKey) match
-            case None =>
+          resolveSnapshot(poolKey).flatMap {
+            case Left(f: RouterFailure.NotFound) =>
               if s.txOpen then sessions.invalidatePin(connectionId)
               maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
-              IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
-            case Some(snap) =>
+              IO.pure(Left(f))
+            case Left(f) =>
+              maybeRecord(
+                nodeId = "-",
+                durationMs = 0,
+                status = "resume-timeout",
+                error = Some("pool is resuming")
+              )
+              IO.pure(Left(f))
+            case Right(snap) =>
               // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
               // current snapshot; otherwise None lets Router.pick run its load-aware choice.
               val txPin  = s.pinnedNodeId.filter(_ => s.txOpen)
@@ -491,6 +503,7 @@ final class FlightSqlRouter(
                             maybeRecord(nodeId, latency, "permanent", Some(m))
                             IO.pure(Left(classifyPermanent(m)))
                         }
+          }
 
     val startedAtNanos = System.nanoTime()
     // Gate the module StatementExecuted event on recordExecution: internal probes and
@@ -545,6 +558,35 @@ final class FlightSqlRouter(
             s"USE $db.$schema; $sql"
           case None => sql
       case _ => sql
+
+  /** Resolve the routing snapshot, waking a suspended pool first. On a suspended (and not disabled)
+    * pool this fires resumePool(reason="query") and polls until a routable node appears, bounded by
+    * resumeHoldTimeout; expiry yields the retryable "pool is resuming" UNAVAILABLE. Disabled pools
+    * are never auto-woken. resumePool errors are swallowed here (.attempt): the flag is already
+    * cleared, so reconcile retries the spawn and the poll either sees a node or times out.
+    */
+  private def resolveSnapshot(poolKey: PoolKey): IO[Either[RouterFailure, PoolSnapshot]] =
+    supervisor.get(poolKey) match
+      case None => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
+      case Some(st) if st.suspended && !st.disabled =>
+        // IO.defer is load-bearing: without it the snapshot check (and the recursive
+        // poll construction) would run eagerly, BEFORE resumePool executes, and the
+        // whole chain would pre-resolve to the timeout against the still-empty pool.
+        def poll(remaining: FiniteDuration): IO[Either[RouterFailure, PoolSnapshot]] =
+          IO.defer {
+            supervisor.snapshot(poolKey) match
+              case Some(snap) if snap.nodes.exists(n => snap.loadOf(n.nodeId).routable) =>
+                IO.pure(Right(snap))
+              case _ if remaining <= Duration.Zero =>
+                IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
+              case _ =>
+                IO.sleep(resumePollInterval) *> poll(remaining - resumePollInterval)
+          }
+        supervisor.resumePool(poolKey, "query").attempt *> poll(resumeHoldTimeout)
+      case Some(_) =>
+        supervisor.snapshot(poolKey) match
+          case None       => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
+          case Some(snap) => IO.pure(Right(snap))
 
   private def retryOnce(
       connectionId: String,

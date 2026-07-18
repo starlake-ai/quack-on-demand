@@ -31,6 +31,7 @@ import org.scalatest.matchers.should.Matchers
 import java.nio.file.Files
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.*
 
 class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
@@ -1150,3 +1151,115 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Right[_, _]]
     received.toArray.toList shouldBe Nil
+
+  // ---------- Suspend / resume: edge wake-and-hold ----------
+
+  /** Like setup() but exposes the supervisor and lets tests tune the wake-and-hold knobs. The
+    * backend's start can be flipped to fail AFTER pool creation (`failResumeStarts`), so a resume
+    * clears the suspended flag but never produces a node - exercising the hold-timeout arm.
+    */
+  private def setupWithSupervisor(
+      failResumeStarts: Boolean = false,
+      resumeHoldTimeout: FiniteDuration = 60.seconds,
+      resumePollInterval: FiniteDuration = 250.millis
+  ) =
+    val failStart = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val backend   = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) =
+        if failStart.get() then IO.raiseError(new RuntimeException("spawn refused (test)"))
+        else
+          IO {
+            val r = RunningNode(
+              s.nodeId,
+              s.poolKey,
+              s.role,
+              "127.0.0.1",
+              28000 + n.size,
+              "tok",
+              Some(1L),
+              None,
+              Instant.EPOCH,
+              maxConcurrent = s.maxConcurrent
+            )
+            n.put(s.nodeId, r); r
+          }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    if failResumeStarts then failStart.set(true)
+
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      resumeHoldTimeout = resumeHoldTimeout,
+      resumePollInterval = resumePollInterval
+    )
+    (router, sup)
+
+  "execute on a suspended pool" should "wake the pool and run the statement" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    sup.get(poolKey).get.suspended shouldBe true
+    val r = router
+      .execute("wake-1", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isRight shouldBe true
+    sup.get(poolKey).get.suspended shouldBe false
+    sup.get(poolKey).get.nodes should not be empty
+
+  it should "time out with a retryable error when no node comes up" in:
+    val (router, sup) = setupWithSupervisor(
+      failResumeStarts = true,
+      resumeHoldTimeout = 500.millis,
+      resumePollInterval = 50.millis
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val r = router
+      .execute("wake-2", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r match
+      case Left(RouterFailure.Unavailable(msg)) => msg should include("resuming")
+      case other => fail(s"expected Unavailable('pool is resuming...'), got $other")
+
+  it should "not wake a disabled pool" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    sup.setPoolDisabled(poolKey, disabled = true).unsafeRunSync()
+    val r = router
+      .execute("wake-3", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isLeft shouldBe true
+    // Untouched: a disabled pool is never auto-woken by traffic.
+    sup.get(poolKey).get.suspended shouldBe true
+
+  "execute on a stopPool'ed pool" should "fail immediately without waking" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.stopPool(poolKey, force = true).unsafeRunSync()
+    val t0 = System.nanoTime()
+    val r  = router
+      .execute("wake-4", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isLeft shouldBe true
+    // The existing "pool is empty" error must surface immediately - no 60s hold.
+    (System.nanoTime() - t0) should be < 2_000_000_000L
