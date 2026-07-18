@@ -42,6 +42,13 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
   // depending on a sibling panel's refreshToken bump.
   const [localRefresh, setLocalRefresh] = useState(0);
 
+  // Close a stale restore dialog when the panel is pointed elsewhere. Deliberately NOT keyed
+  // on localRefresh/refreshToken: those refetches happen underneath an open dialog and must
+  // not close it (see the unmount note above the early returns).
+  useEffect(() => {
+    setRestoring(null);
+  }, [tenant, tenantDb, tableFilter]);
+
   function reloadTags() {
     api.listCatalogTags(tenant, tenantDb).then(setTags).catch(() => setTags([]));
   }
@@ -143,10 +150,32 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
       .catch(e => setTagError(String(e)));
   }
 
-  if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
-  if (!snaps) return <p>Loading snapshots...</p>;
+  // The restore dialog must survive the panel's own loading/error states: onRestored bumps
+  // localRefresh, whose refetch nulls `snaps`, and an early return that drops the dialog from
+  // the tree unmounts it mid-flow. That wiped the success screen and remounted a fresh
+  // confirm-state dialog after every completed restore, re-asking for confirmation in an
+  // endless loop (one real restore per click).
+  const restoreDialog = restoring && (
+    <RestoreDialog
+      tenant={tenant}
+      tenantDb={tenantDb}
+      schema={restoring.schema}
+      table={restoring.table}
+      toSnapshot={restoring.toSnapshot}
+      onClose={() => setRestoring(null)}
+      onRestored={() => setLocalRefresh(x => x + 1)}
+    />
+  );
+
+  // All three returns share the same fragment shape with the dialog as the second child, so
+  // React keeps the dialog instance mounted (by position) across loading/error/loaded
+  // transitions; a differing ROOT type between returns would remount the whole subtree and
+  // reintroduce the loop.
+  if (error) return <><p style={{ color: 'red' }}>Error: {error}</p>{restoreDialog}</>;
+  if (!snaps) return <><p>Loading snapshots...</p>{restoreDialog}</>;
 
   return (
+    <>
     <section style={{ marginTop: 24 }}>
       <h3>Snapshots</h3>
       <form onSubmit={applyTableFilter} style={{ margin: '8px 0', display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -336,17 +365,8 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
         </Modal>
       )}
 
-      {restoring && (
-        <RestoreDialog
-          tenant={tenant}
-          tenantDb={tenantDb}
-          schema={restoring.schema}
-          table={restoring.table}
-          toSnapshot={restoring.toSnapshot}
-          onClose={() => setRestoring(null)}
-          onRestored={() => setLocalRefresh(x => x + 1)}
-        />
-      )}
     </section>
+    {restoreDialog}
+    </>
   );
 }
