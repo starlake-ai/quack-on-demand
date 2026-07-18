@@ -25,6 +25,8 @@ object AuditActions:
   val PoolScale            = "pool.scale"
   val PoolStop             = "pool.stop"
   val PoolDelete           = "pool.delete"
+  val PoolSuspend          = "pool.suspend"
+  val PoolResume           = "pool.resume"
   val PoolSetDisabled      = "pool.setDisabled"
   val PoolSetResources     = "pool.setResources"
   val PoolSetPodTemplate   = "pool.setPodTemplate"
@@ -106,6 +108,8 @@ object AuditActions:
     PoolScale,
     PoolStop,
     PoolDelete,
+    PoolSuspend,
+    PoolResume,
     PoolSetDisabled,
     PoolSetResources,
     PoolSetPodTemplate,
