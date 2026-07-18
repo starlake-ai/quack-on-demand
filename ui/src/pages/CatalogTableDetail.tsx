@@ -74,7 +74,6 @@ export default function CatalogTableDetail() {
   // Tag management for the viewed snapshot (Summary section row). The snapshots panel only
   // DISPLAYS tags; mutations live here, against the picker-selected snapshot.
   const [newTagName, setNewTagName] = useState('');
-  const [newTagProtect, setNewTagProtect] = useState(false);
   const [tagOpError, setTagOpError] = useState<string | null>(null);
 
   // ----- Preview (fetched when the Preview tab is activated) -----
@@ -268,9 +267,9 @@ export default function CatalogTableDetail() {
     ev.preventDefault();
     if (resolvedId == null || !tenant || !tenantDb) return;
     api.createCatalogTag({
-      tenant, tenantDb, name: newTagName.trim(), snapshotId: resolvedId, protected: newTagProtect,
+      tenant, tenantDb, name: newTagName.trim(), snapshotId: resolvedId, protected: false,
     })
-      .then(() => { setNewTagName(''); setNewTagProtect(false); afterTagOp(); })
+      .then(() => { setNewTagName(''); afterTagOp(); })
       .catch(e => setTagOpError(errorMessage(e)));
   }
 
@@ -419,24 +418,15 @@ export default function CatalogTableDetail() {
                               </button>
                             </span>
                           ))}
-                          <form onSubmit={addTag} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                          <form onSubmit={addTag} style={{ display: 'inline-flex' }}>
                             <input
                               value={newTagName}
                               onChange={ev => setNewTagName(ev.target.value)}
-                              placeholder="new tag name"
+                              placeholder="new tag name (Enter)"
                               required
-                              style={{ width: 140 }}
-                              title="Per-database handle for the viewed snapshot; names cannot be all digits"
+                              style={{ width: 150 }}
+                              title="Per-database handle for the viewed snapshot; names cannot be all digits. Press Enter to add; protect it afterwards from its chip."
                             />
-                            <label style={{ fontSize: '0.85em' }}>
-                              <input
-                                type="checkbox"
-                                checked={newTagProtect}
-                                onChange={ev => setNewTagProtect(ev.target.checked)}
-                              />{' '}
-                              protect
-                            </label>
-                            <button type="submit">Add tag</button>
                           </form>
                           {tagOpError && <span style={{ color: 'red' }}>{tagOpError}</span>}
                         </div>
