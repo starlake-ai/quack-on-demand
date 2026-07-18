@@ -10,6 +10,7 @@ final case class PoolState(
     s3: Map[String, String],
     maxConcurrentPerNode: Int = 0,
     disabled: Boolean = false,
+    suspended: Boolean = false,    // scale-to-zero; see Pool.suspended
     kindWire: String = "ducklake", // propagated to NodeSpec for spawn-quack-node.sh
     extraSetupSql: String = "",    // resolved federation blob; propagated to NodeSpec
     /** The owning tenant-db's initSql. Runs EARLIEST in the node boot sequence: right after the

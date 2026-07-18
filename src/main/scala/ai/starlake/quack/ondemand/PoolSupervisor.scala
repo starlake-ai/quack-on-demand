@@ -246,6 +246,7 @@ final class PoolSupervisor(
             s3 = td.objectStore,
             maxConcurrentPerNode = p.maxConcurrentPerNode,
             disabled = p.disabled,
+            suspended = p.suspended,
             dbInitSql = td.initSql,
             initSql = p.initSql,
             // Session defaults for the SQL validation / policy-rewrite context.
@@ -490,7 +491,7 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
-    if state.nodes.isEmpty && state.distribution.total > 0 then
+    if state.nodes.isEmpty && state.distribution.total > 0 && !state.suspended then
       // Pool persisted with zero running nodes. Happens after a fresh
       // YAML bootstrap (ManifestImporter writes the pool row but does
       // not spawn nodes the way createPool would). Spawn the full
@@ -1435,6 +1436,88 @@ final class PoolSupervisor(
       case None    => IO.unit
       case Some(_) => scale(key, 0, RoleDistribution(0, 0, 0), force).void
 
+  /** Scale-to-zero: set suspended=true, then drain-stop every node while KEEPING the persisted
+    * distribution (unlike [[stopPool]], which zeroes it). Reconcile skips suspended pools; the
+    * FlightSQL edge (or [[resumePool]]) wakes them. Idempotent. The flag is set FIRST so a query
+    * racing the drain observes suspended=true and re-wakes the pool once the lock frees.
+    */
+  def suspendPool(key: PoolKey, reason: String): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key)(withCacheRecoveryIO("suspendPool")(IO.defer {
+      pools.get(key) match
+        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+        case Some(state) =>
+          poolIdByKey.get(key).flatMap(poolRows.get) match
+            case None =>
+              IO.pure(
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
+                )
+              )
+            case Some(p) =>
+              val updated = p.copy(suspended = true)
+              val flagIO  = IO.blocking {
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(suspended = true))
+                publish.topologyChanged()
+              }
+              val drainIO = state.nodes.foldLeft(IO.unit) { (acc, n) =>
+                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *>
+                  drainAndStop(key, n, reason = "suspend")
+              }
+              val forgetIO = state.nodes.foldLeft(IO.unit) { (acc, n) =>
+                acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
+              }
+              flagIO *> drainIO *> forgetIO *> IO
+                .delay {
+                  pools.put(key, state.copy(nodes = Nil, suspended = true))
+                  publish.topologyChanged()
+                  events.emit(
+                    ManagerEvent.PoolSuspended(key.tenant, key.tenantDb, key.pool, reason)
+                  )
+                }
+                .as(Right(updated))
+    }))
+
+  /** Wake a suspended pool: clear the flag, respawn to the stored distribution (via the same
+    * [[spawnFromDistribution]] path reconcile uses). Idempotent; resuming a non-suspended pool is a
+    * no-op success. Returns once spawning has been initiated; callers observe readiness through
+    * [[snapshot]].
+    */
+  def resumePool(key: PoolKey, reason: String): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key)(withCacheRecoveryIO("resumePool")(IO.defer {
+      pools.get(key) match
+        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+        case Some(state) =>
+          poolIdByKey.get(key).flatMap(poolRows.get) match
+            case None =>
+              IO.pure(
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
+                )
+              )
+            case Some(p) if !state.suspended => IO.pure(Right(p))
+            case Some(p)                     =>
+              val updated = p.copy(suspended = false)
+              val cleared = state.copy(suspended = false)
+              IO.blocking {
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, cleared)
+                publish.topologyChanged()
+              } *>
+                (if state.nodes.isEmpty && state.distribution.total > 0 then
+                   spawnFromDistribution(key, cleared).void
+                 else IO.unit) *>
+                IO.delay(
+                  events.emit(ManagerEvent.PoolResumed(key.tenant, key.tenantDb, key.pool, reason))
+                ).as(Right(updated))
+    }))
+
   /** Remove the pool entirely: stop every node, then delete the pool and its node rows from the
     * control plane and forget it in memory. This is the only path that deletes a pool; [[stopPool]]
     * merely scales it to 0.
@@ -1474,8 +1557,8 @@ final class PoolSupervisor(
             events.emit(ManagerEvent.PoolDeleted(key.tenant, key.tenantDb, key.pool))
           }
 
-  private def drainAndStop(key: PoolKey, n: RunningNode): IO[Unit] =
-    stopNodeEmitting(key, n.nodeId, "drain")
+  private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
+    stopNodeEmitting(key, n.nodeId, reason)
 
   /** Operator-initiated restart of a single node: stop it (all its in-flight statements fail to
     * their clients), respawn through the same NodeSpec path reconcile uses, clear any quarantine so

@@ -36,6 +36,10 @@ object ManagerEvent:
   final case class TenantDbDeleted(tenant: String, tenantDb: String)           extends ManagerEvent
   final case class PoolCreated(tenant: String, tenantDb: String, pool: String) extends ManagerEvent
   final case class PoolDeleted(tenant: String, tenantDb: String, pool: String) extends ManagerEvent
+  final case class PoolSuspended(tenant: String, tenantDb: String, pool: String, reason: String)
+      extends ManagerEvent
+  final case class PoolResumed(tenant: String, tenantDb: String, pool: String, reason: String)
+      extends ManagerEvent
 
   /** A new session was established. `via` identifies the entry point:
     *   - `"flightsql"`: an Arrow FlightSQL handshake.
