@@ -270,7 +270,11 @@ function Write-LoadBanner($cfg, [string]$ScaleNote) {
 # The SET temp_directory + optional memory_limit preamble every generation
 # script opens with.
 function Get-PreambleSql($cfg) {
-  $sql = "SET temp_directory='$($cfg.TempDir -replace '\\','/')';`n"
+  # Mirror of _load-common.sh: the seed loaders can share the console with the
+  # manager, and duckdb's carriage-return progress bar overprints its log
+  # lines; plain line output interleaves cleanly.
+  $sql = "SET enable_progress_bar = false;`n"
+  $sql += "SET temp_directory='$($cfg.TempDir -replace '\\','/')';`n"
   if ($cfg.MemoryLimit) { $sql += "SET memory_limit='$($cfg.MemoryLimit)';`n" }
   return $sql
 }
