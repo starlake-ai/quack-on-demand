@@ -83,6 +83,8 @@ import ai.starlake.quack.ondemand.state.{
 }
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.effect.unsafe.implicits.global
+import cats.syntax.foldable.*
+import cats.syntax.traverse.*
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
 import pureconfig.generic.ProductHint
@@ -172,14 +174,22 @@ object Main extends IOApp with LazyLogging:
     val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
-    bootManager(mgrCfg, edgeCfg, authCfg, aclCfg, metricsCfg)
+    bootManager(
+      mgrCfg,
+      edgeCfg,
+      authCfg,
+      aclCfg,
+      metricsCfg,
+      modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover()
+    )
 
   private[quack] def bootManager(
       mgrCfg: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
       aclCfg: AclConfig,
-      metricsCfg: MetricsConfig
+      metricsCfg: MetricsConfig,
+      modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
   ): IO[ExitCode] =
     HaPreconditions
       .validate(
@@ -208,6 +218,8 @@ object Main extends IOApp with LazyLogging:
     // of the control plane) must exist before we upsert the admin row.
     // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
     LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+
+    ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
     // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
     // must each project (password_hash, role, enabled) -- exactly the shape
@@ -329,7 +341,7 @@ object Main extends IOApp with LazyLogging:
     val tracker            = new NodeLoadTracker
     val engineStatsTracker = new EngineStatsTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
-    val store: ControlPlaneStore =
+    val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // Control-plane JDBC coordinates, derived once from the same keys
     // `fromDefaultMetastore` uses. HA leader election and cross-replica
@@ -399,7 +411,9 @@ object Main extends IOApp with LazyLogging:
       else PoolLocker.noop
     val publisher =
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
-    val sup = new PoolSupervisor(
+    val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
+    val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
+    val sup            = new PoolSupervisor(
       backend,
       tracker,
       store,
@@ -409,7 +423,8 @@ object Main extends IOApp with LazyLogging:
       onTenantDbDeleted = evictCatalogReader,
       onTenantDbChanged = evictCatalogReader,
       locks = poolLocks,
-      publish = publisher
+      publish = publisher,
+      events = moduleEventBus.sink
     )
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
@@ -482,6 +497,20 @@ object Main extends IOApp with LazyLogging:
     // auditRecorder built here so the sessionTokens.get lookup closure is ready.
     // All handlers (early and inside runWithMetrics) share this instance.
     val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
+
+    // SPI: context handed to each module at start, plus the ordered start action.
+    // moduleStart is sequenced into the boot IO chain before the ManagerServer
+    // resource binds, so a module's endpoints/staticMounts are live once serving.
+    val moduleCtx = ai.starlake.quack.spi.ManagerContext(
+      supervisor = sup,
+      users = userStore,
+      controlPlaneDs = store.jdbcDataSource,
+      rawConfig = com.typesafe.config.ConfigFactory.load(),
+      audit = auditRecorder,
+      singleton = singletonTasks
+    )
+    val moduleStart: IO[Unit] =
+      modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
 
     val pools = new PoolHandlers(
       sup,
@@ -747,7 +776,8 @@ object Main extends IOApp with LazyLogging:
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
       oidc = oidcSso,
       sqlToken = sqlTokenSvc,
-      audit = auditRecorder
+      audit = auditRecorder,
+      events = moduleEventBus.sink
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
@@ -987,7 +1017,8 @@ object Main extends IOApp with LazyLogging:
         activeStatements,
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
-        attachedCatalogsOf = attachedCatalogsOf
+        attachedCatalogsOf = attachedCatalogsOf,
+        events = moduleEventBus.sink
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
@@ -1283,7 +1314,10 @@ object Main extends IOApp with LazyLogging:
         auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter(),
         auditHandlers = auditHandlers,
         history = historyApiHandlers,
-        usage = usageHandlers
+        usage = usageHandlers,
+        moduleEndpoints = modules.flatMap(_.endpoints),
+        modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
+        moduleStaticMounts = modules.flatMap(_.staticMounts)
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own
@@ -1359,6 +1393,9 @@ object Main extends IOApp with LazyLogging:
         // do a one-shot purge at boot (unconditional) to keep expired denylist
         // rows from accumulating.
         IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
+        // Start SPI modules before the server binds so their endpoints and
+        // static mounts are live from the first served request.
+        moduleStart *>
         mgr.serve.use { _ =>
           logger.info(
             s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
@@ -1444,6 +1481,16 @@ object Main extends IOApp with LazyLogging:
                     )
                   ) *>
                   waitForDrain *>
+                  // Stop SPI modules after the edge has drained but before the
+                  // control-plane pools close, so a module's stop can still reach
+                  // its qodhosted_* tables. A stop failure is logged, not fatal.
+                  IO.delay(logger.info("graceful shutdown: stopping modules")) *>
+                  modules.traverse_(m =>
+                    m.stop.handleErrorWith(t =>
+                      IO(logger.warn(s"module ${m.name}: stop failed: ${t.getMessage}"))
+                    )
+                  ) *>
+                  IO.delay(moduleEventBus.shutdown()) *>
                   IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
                   backend.cleanup() *>
                   IO.delay(logger.info("graceful shutdown: complete"))
@@ -1697,6 +1744,14 @@ object Main extends IOApp with LazyLogging:
                     )).foreverM.void.start
                 else IO.unit.start
 
+              // SPI module fibers: one per-event dispatch loop, plus the singleton
+              // task loops (leader-gated under HA). `dispatchers` builds fresh loop
+              // closures on each call, so it is evaluated exactly once here.
+              val moduleDispatcherFibers =
+                moduleEventBus.dispatchers.traverse(_.start)
+              val moduleSingletonFibers =
+                singletonTasks.loops(() => coordinator.forall(_.isLeader)).traverse(_.start)
+
               healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
                 reconcileFiber.flatMap { rcFiber =>
                   coordinatorFiber.flatMap { coFiber =>
@@ -1706,13 +1761,19 @@ object Main extends IOApp with LazyLogging:
                           rollupFiber.flatMap { rlFiber =>
                             maintenanceSchedulerFiber.flatMap { msFiber =>
                               maintenanceDrainFiber.flatMap { mdFiber =>
-                                IO.never[Unit]
-                                  .guarantee(
-                                    fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                      hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                      rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
-                                      gracefulShutdown
-                                  )
+                                moduleDispatcherFibers.flatMap { modDispFibers =>
+                                  moduleSingletonFibers.flatMap { modSingFibers =>
+                                    IO.never[Unit]
+                                      .guarantee(
+                                        fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                          hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                          rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
+                                          modDispFibers.traverse_(_.cancel) *>
+                                          modSingFibers.traverse_(_.cancel) *>
+                                          gracefulShutdown
+                                      )
+                                  }
+                                }
                               }
                             }
                           }
