@@ -36,7 +36,13 @@ object ManagerEvent:
   final case class TenantDbDeleted(tenant: String, tenantDb: String)           extends ManagerEvent
   final case class PoolCreated(tenant: String, tenantDb: String, pool: String) extends ManagerEvent
   final case class PoolDeleted(tenant: String, tenantDb: String, pool: String) extends ManagerEvent
-  final case class SessionOpened(tenant: String, user: String, via: String)    extends ManagerEvent
+
+  /** A new session was established. `via` identifies the entry point:
+    *   - `"flightsql"`: an Arrow FlightSQL handshake.
+    *   - `"rest"`: a REST password login (`AuthHandlers.login`).
+    *   - `"oidc"`: a REST OIDC callback login (`AuthHandlers.oidcCallback`).
+    */
+  final case class SessionOpened(tenant: String, user: String, via: String) extends ManagerEvent
 
 /** Core-side emission interface. Implementations must never block: the routing hot path calls
   * `emit` inline.

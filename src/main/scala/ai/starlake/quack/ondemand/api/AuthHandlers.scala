@@ -200,7 +200,13 @@ final class AuthHandlers(
             val required = result.scope match
               case OidcScope.System    => RequiredScope.SystemStrict
               case OidcScope.Tenant(t) => RequiredScope.Tenant(t)
-            mintSessionFor(result.profile, required, forwardedProto, ManagementAuthMode.Oidc) match
+            mintSessionFor(
+              result.profile,
+              required,
+              forwardedProto,
+              ManagementAuthMode.Oidc,
+              "oidc"
+            ) match
               case Left((_, err)) =>
                 (
                   StatusCode.Found,
@@ -327,7 +333,7 @@ final class AuthHandlers(
             case Left(err) =>
               Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
             case Right(mode) =>
-              mintSessionFor(profile, required, forwardedProto, mode)
+              mintSessionFor(profile, required, forwardedProto, mode, "rest")
   }
 
   /** Shared authorization + session minting for both the password login and the OIDC callback.
@@ -339,12 +345,16 @@ final class AuthHandlers(
     *
     * The grant computation and the not_provisioned / admin_required gates are identical to the
     * original inline `login` logic, so the two entry points cannot drift.
+    *
+    * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
+    * `"rest"` from `login`, `"oidc"` from `oidcCallback`.
     */
   private def mintSessionFor(
       profile: AuthenticatedProfile,
       required: RequiredScope,
       forwardedProto: Option[String],
-      mode: ManagementAuthMode
+      mode: ManagementAuthMode,
+      via: String
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
     val grants = mode match
       case ManagementAuthMode.Db =>
@@ -447,7 +457,7 @@ final class AuthHandlers(
       // superuser flag plus a set of manageable tenants (no single tenant id to
       // read here), so profile.tenant is the reliable source for tenantOrEmpty.
       events.emit(
-        ManagerEvent.SessionOpened(profile.tenant.getOrElse(""), profile.username, "rest")
+        ManagerEvent.SessionOpened(profile.tenant.getOrElse(""), profile.username, via)
       )
       val resp = LoginResponse(
         token = token,

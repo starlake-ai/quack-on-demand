@@ -467,9 +467,10 @@ final class FlightSqlRouter(
                                 )
                               )
                             else
-                              // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT rewrittenSql
-                              // (CLS only, pre-RLS) -- otherwise a retried query returns rows the row
-                              // policy should have filtered. See security-audit-2026-07-02 #5b.
+                              // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT
+                              // rewrittenSql (CLS only, pre-RLS) -- otherwise a retried query
+                              // returns rows the row policy should have filtered. See
+                              // security-audit-2026-07-02 #5b.
                               retryOnce(
                                 connectionId,
                                 user,
