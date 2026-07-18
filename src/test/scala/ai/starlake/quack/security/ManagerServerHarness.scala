@@ -249,7 +249,10 @@ object ManagerServerHarness:
       // unchanged. Task 10 passes real values sourced from loaded modules.
       moduleEndpoints: List[sttp.tapir.server.ServerEndpoint[Any, IO]] = Nil,
       modulePublicPrefixes: Set[String] = Set.empty,
-      moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil
+      moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
+      // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
+      // compiles unchanged; specs that want to observe emissions pass a recording sink.
+      events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -283,7 +286,8 @@ object ManagerServerHarness:
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
       ),
-      audit = audit
+      audit = audit,
+      events = events
     )
 
     val statementStore     = new StatementHistoryStore()

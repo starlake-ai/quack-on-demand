@@ -17,6 +17,7 @@ import ai.starlake.quack.ondemand.auth.{
 }
 import ai.starlake.quack.ondemand.state.UserGrant
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import sttp.model.StatusCode
 import sttp.model.headers.{Cookie, CookieValueWithMeta}
@@ -78,7 +79,11 @@ final class AuthHandlers(
     /** Audit recorder for auth events (login, logout, revoke). Defaults to noop so callers that
       * don't wire telemetry (tests, legacy code) are unaffected.
       */
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    /** SPI module event sink. Defaults to noop so callers that don't wire module telemetry (tests,
+      * legacy code) are unaffected.
+      */
+    events: ManagerEventSink = ManagerEventSink.noop
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -435,6 +440,14 @@ final class AuthHandlers(
         "ok",
         tenant = profile.tenant,
         detail = Map("authMethod" -> profile.authMethod)
+      )
+      // profile.tenant already mirrors the requested AuthScope.tenantId (see
+      // DatabaseAuthenticator/OIDC providers): None for a system/superuser scope,
+      // Some(id) for a tenant-scoped login. SessionScope itself carries only a
+      // superuser flag plus a set of manageable tenants (no single tenant id to
+      // read here), so profile.tenant is the reliable source for tenantOrEmpty.
+      events.emit(
+        ManagerEvent.SessionOpened(profile.tenant.getOrElse(""), profile.username, "rest")
       )
       val resp = LoginResponse(
         token = token,
