@@ -2,9 +2,11 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
+import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
+import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -113,6 +115,69 @@ class PoolSupervisorSuspendSpec extends AnyFlatSpec with Matchers:
     stops.map(_.reason).distinct shouldBe List("suspend")
     sink2.seen.collect { case e: ManagerEvent.PoolSuspended => e } shouldBe empty
     store.listNodes(row.id) shouldBe empty
+  }
+
+  it should "not drain a pool resumed after the pass snapshot (in-lock state refresh)" in {
+    // Deterministic staleness: reconcile() snapshots pools.toList BEFORE taking the
+    // per-pool lock, then reconcilePoolUnlocked runs under it. The hooked PoolLocker
+    // fires resumePool between that snapshot and the lock body, so the captured state
+    // still says suspended=true while the pool has just respawned its nodes and
+    // persisted their rows. The in-lock refresh must act on the fresh in-memory state
+    // and keep the nodes instead of healing them away.
+    var hook: IO[Unit] = IO.unit
+    val locker         = new PoolLocker:
+      def withLock[A](k: PoolKey)(io: IO[A]): IO[A] =
+        IO.defer { val h = hook; hook = IO.unit; h } *> io
+    val sink  = new RecordingSink
+    val store = new InMemoryControlPlaneStore()
+    val sup   =
+      new PoolSupervisor(
+        new StubQuackBackend(),
+        new NodeLoadTracker,
+        store,
+        events = sink,
+        locks = locker
+      )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
+    sup.suspendPool(key, "idle").unsafeRunSync().isRight shouldBe true
+
+    hook = sup.resumePool(key, "query").void
+    sup.reconcile().unsafeRunSync()
+
+    val st = sup.get(key).get
+    st.suspended shouldBe false
+    st.nodes should have size 2
+    // Only the explicit suspend drained nodes; the reconcile pass must not have.
+    sink.seen.collect {
+      case e: ManagerEvent.NodeStopped if e.reason == "suspend" => e
+    } should have size 2
+  }
+
+  "scale" should "be rejected on a suspended pool" in {
+    val (sup, _, _) = setup()
+    sup.suspendPool(key, "rest").unsafeRunSync().isRight shouldBe true
+    val boom = intercept[IllegalStateException] {
+      sup.scale(key, 3, RoleDistribution(0, 2, 1), force = false).unsafeRunSync()
+    }
+    boom.getMessage should include("suspended")
+    val st = sup.get(key).get
+    st.nodes shouldBe empty
+    st.suspended shouldBe true
+  }
+
+  "stopPool" should "keep a suspended pool down (zeroed distribution, flag cleared)" in {
+    val (sup, store, _) = setup()
+    sup.suspendPool(key, "rest").unsafeRunSync().isRight shouldBe true
+    sup.stopPool(key, force = false).unsafeRunSync()
+    val st = sup.get(key).get
+    st.nodes shouldBe empty
+    st.distribution.total shouldBe 0
+    st.suspended shouldBe false
+    val row = store.listPools(store.listTenantDbs("acme").head.id).head
+    row.suspended shouldBe false
+    row.distribution.total shouldBe 0
   }
 
   "createPool(startSuspended)" should "persist the pool suspended with zero nodes" in {

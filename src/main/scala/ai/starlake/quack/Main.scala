@@ -1023,7 +1023,7 @@ object Main extends IOApp with LazyLogging:
         attachedCatalogsOf = attachedCatalogsOf,
         events = moduleEventBus.sink,
         resumeHoldTimeout =
-          scala.concurrent.duration.DurationInt(edgeCfg.resumeHoldTimeoutSec.toInt).seconds
+          scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

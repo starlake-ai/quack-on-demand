@@ -113,6 +113,28 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
+  it should "return 409 pool_suspended on a suspended pool" in:
+    val h = freshHandlers
+    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), None)(_ => None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val out = h
+      .scalePool(
+        ScalePoolRequest(
+          "acme",
+          "acme_default",
+          "sales",
+          3,
+          RoleDistribution(0, 2, 1),
+          force = false
+        ),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Conflict)
+    out.left.toOption.map(_._2.error) shouldBe Some("pool_suspended")
+
   "stopPool" should "stop a known pool but keep it (scaled to 0)" in:
     val h = freshHandlers
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)

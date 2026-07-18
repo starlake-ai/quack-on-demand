@@ -231,6 +231,18 @@ final class PoolHandlers(
         sup.get(key) match
           case None =>
             IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(st) if st.suspended =>
+            IO.pure(
+              Left(
+                (
+                  StatusCode.Conflict,
+                  ErrorResponse(
+                    "pool_suspended",
+                    s"pool $key is suspended; resume it before scaling"
+                  )
+                )
+              )
+            )
           case Some(_) =>
             if !req.roleDistribution.isValidFor(req.targetSize) then
               IO.pure(

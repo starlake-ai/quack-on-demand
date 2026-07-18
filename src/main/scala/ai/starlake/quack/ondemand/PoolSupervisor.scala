@@ -386,19 +386,26 @@ final class PoolSupervisor(
     }
 
   private def reconcilePoolUnlocked(key: PoolKey, state: PoolState): IO[PoolState] =
-    // Re-read the pool's persisted node rows INSIDE the advisory lock so a second
+    // Refresh BOTH halves of the pool's state INSIDE the advisory lock so a second
     // lock holder acts on the first holder's committed writes, not on the pre-lock
-    // PoolState that reconcile()'s fold captured. Deferred via IO.blocking so the
-    // read runs when withLock's bracket executes this IO (i.e. after the lock is
-    // acquired), not eagerly at IO-construction time. Fall back to the passed state
-    // when the pool id or rows are missing (InMemory / no-row cases), preserving
-    // today's behavior including the empty-nodes spawn-from-distribution path.
+    // PoolState that reconcile()'s fold captured:
+    //   1. the in-memory PoolState (suspendPool / resumePool mutate `pools` under the
+    //      same per-pool lock, so `pools.get` here is current) -- acting on the captured
+    //      `state` instead would let the heal arm below drain a pool that resumed
+    //      between the pass snapshot and this pool's turn, on its stale suspended=true;
+    //   2. the persisted node rows, applied on top of that fresh state.
+    // Deferred via IO.blocking so the reads run when withLock's bracket executes this
+    // IO (i.e. after the lock is acquired), not eagerly at IO-construction time. Fall
+    // back to the passed state / fresh state when the pool or its rows are missing
+    // (InMemory / no-row cases), preserving today's behavior including the
+    // empty-nodes spawn-from-distribution path.
     IO.blocking {
+      val current = pools.get(key).getOrElse(state)
       poolId(key) match
         case Some(pid) =>
           val rows = store.listNodes(pid)
-          if rows.nonEmpty then state.copy(nodes = rows) else state
-        case None => state
+          if rows.nonEmpty then current.copy(nodes = rows) else current
+        case None => current
     }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
 
   /** The full NodeSpec for one slot of a pool, derived from its PoolState. Shared by every spawn
@@ -1373,7 +1380,14 @@ final class PoolSupervisor(
       force: Boolean
   ): IO[List[RunningNode]] =
     pools.get(key) match
-      case None        => IO.raiseError(new NoSuchElementException(s"pool not found: $key"))
+      case None => IO.raiseError(new NoSuchElementException(s"pool not found: $key"))
+      case Some(state) if state.suspended =>
+        // Scaling a hibernated pool would spawn nodes while suspended stays true,
+        // and the next reconcile heal pass would drain them right back. The REST
+        // handler pre-checks and 409s; this raise covers non-REST callers.
+        IO.raiseError(
+          new IllegalStateException(s"pool $key is suspended; resume it before scaling")
+        )
       case Some(state) =>
         val poolId = poolIdByKey.getOrElse(key, "")
 
@@ -1452,11 +1466,40 @@ final class PoolSupervisor(
     * so the pool is effectively scaled to 0 and stays drained across a manager restart (reconcile
     * only respawns when the persisted distribution is non-zero). Use [[deletePool]] to remove the
     * pool entirely. `force=true` kills nodes immediately; `force=false` drains them (stop accepting
-    * new queries, then shut down).
+    * new queries, then shut down). On a suspended pool (nodes already gone) the same end state is
+    * persisted directly: distribution zeroed and the suspended flag cleared, so the pool stays down
+    * instead of auto-waking on the next query.
     */
   def stopPool(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match
-      case None    => IO.unit
+      case None                   => IO.unit
+      case Some(s) if s.suspended =>
+        // A suspended pool has no nodes, so delegating to scale(0) would early-return
+        // without persisting the zeroed distribution: distribution stays non-zero and
+        // suspended stays true, so the next query auto-wakes a pool the operator
+        // explicitly stopped. Persist the stopPool contract directly instead: zero
+        // the distribution AND clear the flag so the pool stays down exactly like a
+        // normal stopPool result. Re-checked under the lock in case a resume raced
+        // the unlocked read above (then the plain scale-to-zero path applies).
+        locks.withLock(key)(withCacheRecoveryIO("stopPool")(IO.defer {
+          pools.get(key) match
+            case None                            => IO.unit
+            case Some(state) if !state.suspended =>
+              scaleUnlocked(key, 0, RoleDistribution(0, 0, 0), force).void
+            case Some(state) =>
+              val zero = RoleDistribution(0, 0, 0)
+              poolIdByKey.get(key).flatMap(poolRows.get) match
+                case None    => IO.unit
+                case Some(p) =>
+                  val updated =
+                    p.copy(size = 0, distribution = zero, cohorts = Nil, suspended = false)
+                  IO.blocking {
+                    store.upsertPool(updated)
+                    poolRows.put(updated.id, updated)
+                    pools.put(key, state.copy(nodes = Nil, distribution = zero, suspended = false))
+                    publish.topologyChanged()
+                  }
+        }))
       case Some(_) => scale(key, 0, RoleDistribution(0, 0, 0), force).void
 
   /** Scale-to-zero: set suspended=true, then drain-stop every node while KEEPING the persisted
