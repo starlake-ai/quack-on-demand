@@ -15,13 +15,15 @@ def call(
     params: dict | None = None,
     body: Any | None = None,
     text: bool = False,
+    quiet: bool = False,
 ) -> Any:
     try:
         data = RestClient(ctx.obj.settings).request(method, path, params=params, body=body, text=text)
     except ApiError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
-    render(data, ctx.obj.json_output)
+    if not quiet:
+        render(data, ctx.obj.json_output)
     return data
 
 

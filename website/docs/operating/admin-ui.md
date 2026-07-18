@@ -157,6 +157,23 @@ On the table detail page, a **Snapshot** selector switches between the current s
 
 Snapshot semantics (linear history, inlined DML, retention and expiry) are covered in [DuckLake catalogs](/concepts/catalogs#snapshots-and-time-travel).
 
+#### Restore
+
+Both the Snapshots panel and the History tab offer a **Restore** action on a live table: a
+**restore** chip next to each affected table in a snapshot row, and a **Restore to this
+snapshot** button in the History tab's commit detail drawer. Either entry point opens the same
+dialog, which runs a dry run immediately and shows the change summary that will be undone
+(rows inserted, deleted, and updated since the target snapshot) before enabling the **Restore**
+button; there is no way to write without seeing the preview first.
+
+Restore is non-destructive: it writes the table's state at the target snapshot as a new forward
+snapshot rather than rewriting history. The pre-restore state stays queryable by time travel, but
+the table gets a new identity, so its History tab timeline restarts at the restore snapshot. If
+the table changed between the preview and the confirm click, the execute call gets a 409 and the
+dialog re-runs the dry run and asks you to confirm again against the fresh preview, instead of
+silently restoring over the intervening write. The same flow is available from the CLI as
+`qod catalog restore` (see [Command reference](/cli/reference#catalog)).
+
 #### Row preview
 
 The table detail page carries a **Preview** section that fetches a sample of live rows from the table. The preview executes through the same FlightSQL pipeline as production data traffic: pool access-control lists apply (a user without SELECT on the table is denied), row-level and column-level security policies are enforced, and reads route only to ReadOnly/Dual nodes to avoid load on write-capable pool members. Every preview is recorded in the audit log. The preview is bounded (default 100 rows, configurable via the UI) and labeled with the snapshot it reflects ("current" or the snapshot id) so the operator knows the exact version being examined.

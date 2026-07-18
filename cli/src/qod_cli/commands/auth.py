@@ -21,6 +21,7 @@ def login(
     url: str = typer.Option(None, "--url", help="Manager URL; defaults to the profile value."),
     username: str = typer.Option("admin", "--username"),
     tenant: str = typer.Option(None, "--tenant", help="Tenant for tenant-scoped admins."),
+    pool: str = typer.Option(None, "--pool", help="Default pool for qod sql; stored in the profile."),
 ):
     """Mint a session, store it and the edge settings in the active profile."""
     settings = ctx.obj.settings
@@ -46,6 +47,8 @@ def login(
             "manager_url": manager_url,
             "token": login_resp["token"],
             "sql_user": username,
+            "tenant": tenant,
+            "pool": pool,
             "edge_host": edge_host,
             "edge_port": edge.get("flightSqlPort", 31338),
             "edge_tls": edge.get("flightSqlTls", True),

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.model.{PoolKey, Role}
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -64,21 +64,11 @@ final class CatalogUndropHandlers(
       requireDuckLake = Some("undrop requires a ducklake tenant-db")
     )(scopeOf)
 
-  /** Pool pick preferring a WRITE-eligible node (a CTAS needs WriteOnly/Dual to route), the write
-    * mirror of [[CatalogPreviewHandlers]]'s read-preferring pick; falls through to the first
-    * candidate by name so the router stays the authority on routability.
+  /** Pool pick preferring a WRITE-eligible node (a CTAS needs WriteOnly/Dual to route); delegates
+    * to [[PoolPicks.writePoolKey]].
     */
   private def writePoolKey(tenant: String, tenantDb: String): Option[PoolKey] =
-    val candidates = sup
-      .list()
-      .map(_.key)
-      .filter(k => k.tenant == tenant && k.tenantDb == tenantDb)
-      .sortBy(_.pool)
-    def hasWriteEligibleNode(key: PoolKey): Boolean =
-      sup
-        .snapshot(key)
-        .exists(_.nodes.exists(n => n.role == Role.WriteOnly || n.role == Role.Dual))
-    candidates.find(hasWriteEligibleNode).orElse(candidates.headOption)
+    PoolPicks.writePoolKey(sup, tenant, tenantDb)
 
   def recoverable(tenant: String, tenantDb: String, limit: Option[Int], apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

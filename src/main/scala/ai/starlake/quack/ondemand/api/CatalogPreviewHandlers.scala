@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
-import ai.starlake.quack.model.{PoolKey, Role}
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -90,27 +90,8 @@ final class CatalogPreviewHandlers(
 
   private def quoteLit(v: String): String = "'" + v.replace("'", "''") + "'"
 
-  // Verified live on the pinned DuckDB 1.5.4 / DuckLake 0.3 (2026-07-14, see
-  // docs/duckdb-pin-bump-checklist.md section 5): ducklake_table_changes emits exactly
-  // insert / delete / update_preimage / update_postimage (inline and flushed writes both
-  // attribute to the logical DML snapshot; no inlined_* variants unlike changes_made); both
-  // bounds are INCLUSIVE, hence the (from + 1, to) call convention for an exclusive-of-from
-  // diff; and a bound naming a nonexistent snapshot is an engine ERROR ("No snapshot found at
-  // version N"), not an empty result, which is why dataDiff short-circuits from == to.
-  private val InsertTypes    = Set("insert")
-  private val DeleteTypes    = Set("delete")
-  private val UpdateTypes    = Set("update_preimage", "update_postimage")
-  private val UpdatePostType = "update_postimage"
-
-  private def diffFn(
-      alias: String,
-      schema: String,
-      table: String,
-      fromId: Long,
-      toId: Long
-  ): String =
-    s"ducklake_table_changes(${quoteLit(alias)}, ${quoteLit(schema)}, ${quoteLit(table)}, " +
-      s"${fromId + 1}, $toId)"
+  // Change-type vocabulary and ducklake_table_changes SQL builders live in DataDiffSql (shared
+  // with the Spec 04 restore dry-run).
 
   private def parseCursor(raw: String): Option[(Long, Long)] =
     raw.split(':') match
@@ -124,9 +105,9 @@ final class CatalogPreviewHandlers(
   private def typesFor(changeType: Option[String]): Either[Unit, Option[Set[String]]] =
     changeType match
       case None           => Right(None)
-      case Some("insert") => Right(Some(InsertTypes))
-      case Some("delete") => Right(Some(DeleteTypes))
-      case Some("update") => Right(Some(UpdateTypes))
+      case Some("insert") => Right(Some(DataDiffSql.InsertTypes))
+      case Some("delete") => Right(Some(DataDiffSql.DeleteTypes))
+      case Some("update") => Right(Some(DataDiffSql.UpdateTypes))
       case Some(_)        => Left(())
 
   /** [[TenantDbGate]] with the kind check: previews require a DuckLake tenant-db (400
@@ -143,28 +124,9 @@ final class CatalogPreviewHandlers(
       requireDuckLake = Some("data preview requires a ducklake tenant-db")
     )(scopeOf)
 
-  /** Pool pick for `(tenant, tenantDb)`, stable across calls (Task 4 review carry-forward:
-    * `sup.list()` iterates a mutable map, so picking "the first" without a deterministic sort could
-    * return a different pool on every call). Sorted by pool name; among the candidates, prefer one
-    * whose CURRENT [[ai.starlake.quack.route.PoolSnapshot]] carries at least one `ReadOnly` or
-    * `Dual` node (a `SELECT` needs [[ai.starlake.quack.route.RoleMatcher]]'s read-eligible roles to
-    * route at all) -- `sup.snapshot(key)` is an O(1) map lookup plus the tracker's
-    * already-materialized load map, so this preference costs nothing extra to compute. A tenant-db
-    * whose only pool is WriteOnly still resolves (falls through to the first candidate by name)
-    * rather than 404 `no_pool`; `Router.pick` inside the real executor is the authority on whether
-    * the query can actually route, and surfaces `RouterFailure.Unavailable` if it can't.
-    */
+  /** Pool pick for `(tenant, tenantDb)`; delegates to [[PoolPicks.readPoolKey]]. */
   private def firstPoolKey(tenant: String, tenantDb: String): Option[PoolKey] =
-    val candidates = sup
-      .list()
-      .map(_.key)
-      .filter(k => k.tenant == tenant && k.tenantDb == tenantDb)
-      .sortBy(_.pool)
-    def hasReadEligibleNode(key: PoolKey): Boolean =
-      sup
-        .snapshot(key)
-        .exists(_.nodes.exists(n => n.role == Role.ReadOnly || n.role == Role.Dual))
-    candidates.find(hasReadEligibleNode).orElse(candidates.headOption)
+    PoolPicks.readPoolKey(sup, tenant, tenantDb)
 
   private def identityOf(apiKey: Option[String]): String =
     apiKey.flatMap(sessions) match
@@ -603,14 +565,14 @@ final class CatalogPreviewHandlers(
       denied: (StatusCode, String, String) => Either[(StatusCode, ErrorResponse), DataDiffResponse]
   ): Out[DataDiffResponse] =
     val alias          = catalogAlias(tid, db)
-    val fn             = diffFn(alias, schema, table, fromId, toId)
+    val fn             = DataDiffSql.diffFn(alias, schema, table, fromId, toId)
     val effectiveLimit = limit.map(_.max(1)).getOrElse(cfg.previewMaxRows).min(cfg.previewMaxRows)
     val fetch          = effectiveLimit * 2 + 2
     val filterPred     = types
       .map(ts => s" AND change_type IN (${ts.toList.sorted.map(quoteLit).mkString(", ")})")
       .getOrElse("")
     val cursorPred = cur.map((s, r) => s" AND (snapshot_id, rowid) > ($s, $r)").getOrElse("")
-    val summarySql = s"SELECT change_type, count(*) AS n FROM $fn GROUP BY change_type"
+    val summarySql = DataDiffSql.summarySql(alias, schema, table, fromId, toId)
     val pageSql    =
       s"SELECT * FROM $fn WHERE 1=1$cursorPred$filterPred " +
         s"ORDER BY snapshot_id, rowid, change_type LIMIT $fetch"
@@ -641,17 +603,7 @@ final class CatalogPreviewHandlers(
           val summary       =
             try
               val (_, rows, _) = ArrowRowsDecoder.decode(summaryResult.rows, 64)
-              val counts       = rows.flatMap { r =>
-                for
-                  ct <- r.headOption.flatMap(_.asString)
-                  n  <- r.lift(1).flatMap(_.asNumber).flatMap(_.toLong)
-                yield ct -> n
-              }.toMap
-              DataDiffSummary(
-                inserted = InsertTypes.toList.map(counts.getOrElse(_, 0L)).sum,
-                deleted = DeleteTypes.toList.map(counts.getOrElse(_, 0L)).sum,
-                updated = counts.getOrElse(UpdatePostType, 0L)
-              )
+              DataDiffSql.foldSummary(rows)
             finally summaryResult.close()
           run(pageSql).map { pageOutcome =>
             failureArm(pageOutcome) match
@@ -696,16 +648,18 @@ final class CatalogPreviewHandlers(
                     while i < src.length && entries.length < effectiveLimit do
                       val (snap, rid, ct, data) = src(i)
                       val paired                =
-                        if UpdateTypes(ct) && i + 1 < src.length then
+                        if DataDiffSql.UpdateTypes(ct) && i + 1 < src.length then
                           val (nSnap, nRid, nCt, nData) = src(i + 1)
                           Option.when(
-                            UpdateTypes(nCt) && nCt != ct && nSnap == snap && nRid == rid
+                            DataDiffSql.UpdateTypes(nCt) && nCt != ct && nSnap == snap &&
+                              nRid == rid
                           )((nCt, nData))
                         else None
                       paired match
                         case Some((nCt, nData)) =>
                           val (before, after) =
-                            if ct == UpdatePostType then (nData, data) else (data, nData)
+                            if ct == DataDiffSql.UpdatePostType then (nData, data)
+                            else (data, nData)
                           entries += DataDiffEntry(
                             "update",
                             snap,
@@ -716,8 +670,8 @@ final class CatalogPreviewHandlers(
                           i += 2
                         case None =>
                           val rendered =
-                            if InsertTypes(ct) then "insert"
-                            else if DeleteTypes(ct) then "delete"
+                            if DataDiffSql.InsertTypes(ct) then "insert"
+                            else if DataDiffSql.DeleteTypes(ct) then "delete"
                             else ct
                           entries += DataDiffEntry(rendered, snap, row = Some(data))
                           lastKey = Some((snap, rid))

@@ -39,6 +39,7 @@ final class ManagerServer(
     preview: Option[CatalogPreviewHandlers],
     catalogHistory: Option[CatalogHistoryHandlers],
     undrop: Option[CatalogUndropHandlers],
+    restore: Option[CatalogRestoreHandlers],
     metricsEndpoint: ai.starlake.quack.observability.metrics.MetricsEndpoint,
     users: UserHandlers,
     roles: RoleHandlers,
@@ -278,6 +279,13 @@ final class ManagerServer(
           h.undrop(req, token)(sessions.scopeOf)
         }
       )
+    }
+
+    // Restore (Spec 04). Session-gated per request via TenantScopeCheck inside the handler.
+    val restoreEndpoints: List[ServerEndpoint[Any, IO]] = restore.toList.map { h =>
+      RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
+        h.restore(req, token)(sessions.scopeOf)
+      }
     }
 
     // Per-table history timeline (EPIC Spec 01). Session-gated per request via
@@ -606,7 +614,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
+    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints
 
     val apiRoutes: HttpRoutes[IO] = interpreter.toRoutes(endpoints)
 

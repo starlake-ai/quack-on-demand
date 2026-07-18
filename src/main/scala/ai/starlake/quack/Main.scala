@@ -105,6 +105,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
+  given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -125,6 +126,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[HaConfig]               = deriveReader[HaConfig]
   given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
+  given ConfigReader[CatalogConfig]          = deriveReader[CatalogConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -1161,7 +1163,8 @@ object Main extends IOApp with LazyLogging:
       // the timeout fires WHILE the HTTP call itself is still in flight -- and in that case no
       // `QueryResult` was ever constructed, so there is nothing for this adapter to close.
       // `recordExecution = false` for read-only probes (preview, data diff: never stamp);
-      // `true` for undrop's CTAS so the recovery snapshot carries the author stamp.
+      // `true` for undrop's CTAS and restore's CREATE OR REPLACE so the snapshot carries the
+      // author stamp. Restore's dry-run summary rides the `false` path.
       def routedExecutor(
           recordExecution: Boolean
       ): ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
@@ -1231,6 +1234,20 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
+      val restoreHandlers: Option[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers] = Some(
+        new ai.starlake.quack.ondemand.api.CatalogRestoreHandlers(
+          sup,
+          store,
+          routedExecutor(recordExecution = false),
+          routedExecutor(recordExecution = true),
+          catalogReader,
+          mgrCfg.catalog,
+          sessionTokens.get,
+          catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+          audit = auditRecorder
+        )
+      )
+
       val mgr = new ManagerServer(
         mgrCfg,
         edgeCfg,
@@ -1249,6 +1266,7 @@ object Main extends IOApp with LazyLogging:
         previewHandlers,
         catalogHistoryHandlers,
         undropHandlers,
+        restoreHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,
