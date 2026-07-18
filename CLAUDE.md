@@ -108,6 +108,17 @@ Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOK
 
 Both Secrets must exist BEFORE pod create (kubelet rejects pods referencing missing Secrets), so `start(spec)` runs `ensureTokenSecret` and `ensureFederationSecret` first, then creates the pod.
 
+### Manager module SPI (hosted-service plug-in)
+
+`ai.starlake.quack.spi` defines `ManagerModule`: jars on the classpath declaring
+`META-INF/services/ai.starlake.quack.spi.ManagerModule` are loaded at boot
+(`ModuleLoader` in `ondemand/module/`), get their Liquibase changelog applied
+(`qodhosted_*` tables on the control-plane DB), contribute Tapir endpoints /
+public path prefixes / static SPA mounts to `ManagerServer`, receive async
+`ManagerEvent`s (bounded lossy queues - freshness signals, not ledgers), and can
+register HA-leader-gated recurring tasks. Zero-module boot is unchanged OSS
+behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
+
 ## Configuration
 
 Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `QOD_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin `admin@localhost.local` / `admin`. `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
