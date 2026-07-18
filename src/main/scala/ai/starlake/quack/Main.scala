@@ -1420,11 +1420,32 @@ object Main extends IOApp with LazyLogging:
                 // to exit (SIGTERM in containers; user Ctrl-C at the
                 // terminal) we want every spawned child Quack node killed
                 // before we let the process die, even if cats-effect's own
-                // cancellation finalizer below has not had time to run.
-                // `cleanup()` is idempotent so running it from both places
-                // is safe.
+                // cancellation finalizer below never runs.
+                //
+                // The hook is a FALLBACK, not a parallel teardown: it first
+                // waits for `gracefulShutdown` (the finalizer chain below) to
+                // terminate. Running both concurrently killed nodes and closed
+                // the control-plane pools mid-drain, and let the
+                // not-yet-cancelled reconcile fiber respawn "dead" nodes after
+                // the hook's cleanup - orphaning them past JVM exit. The latch
+                // fires on any termination of the graceful chain (success,
+                // error, or cancellation); the bounded wait keeps the hook a
+                // real backstop when the runtime is wedged. `cleanup()` is
+                // idempotent so the hook's own pass stays safe either way.
+                val gracefulDone = new java.util.concurrent.CountDownLatch(1)
                 val shutdownHook = new Thread(
                   { () =>
+                    val finished =
+                      try
+                        gracefulDone.await(
+                          mgrCfg.drainTimeoutSec.toLong + 15L,
+                          java.util.concurrent.TimeUnit.SECONDS
+                        )
+                      catch case _: InterruptedException => false
+                    if !finished then
+                      logger.warn(
+                        "shutdown hook: graceful shutdown did not finish in time; forcing teardown"
+                      )
                     try edge.stop()
                     catch case _: Throwable => ()
                     try backend.cleanup().unsafeRunSync()
@@ -1485,7 +1506,7 @@ object Main extends IOApp with LazyLogging:
                   tick
 
                 val gracefulShutdown: IO[Unit] =
-                  IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
+                  (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
                     IO.delay(edge.stop()) *>
                     IO.delay(
                       logger.info(
@@ -1505,7 +1526,11 @@ object Main extends IOApp with LazyLogging:
                     IO.delay(moduleEventBus.shutdown()) *>
                     IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
                     backend.cleanup() *>
-                    IO.delay(logger.info("graceful shutdown: complete"))
+                    IO.delay(logger.info("graceful shutdown: complete")))
+                    // Release the JVM shutdown hook whichever way the WHOLE chain
+                    // ends (success, error, cancellation); otherwise the hook's
+                    // fallback wait runs its full timeout before forcing teardown.
+                    .guaranteeCase(_ => IO.delay(gracefulDone.countDown()))
 
                 // Periodic reconcile: respawn nodes that die while the manager is
                 // up (boot only ran reconcile once). Disabled when the interval is
