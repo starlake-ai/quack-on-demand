@@ -33,5 +33,11 @@ qod = "qod_cli.main:main"
 [tool.hatch.version]
 path = "src/qod_cli/__init__.py"
 
+[tool.hatch.build.targets.sdist]
+# Local virtualenvs (.venv-e2e etc.) contain absolute symlinks that poison the
+# sdist: Python 3.14's tarfile filter refuses to extract them, killing the
+# PyPI publish. Never ship scratch dirs.
+exclude = [".venv*", "dist", "**/__pycache__"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/qod_cli"]
