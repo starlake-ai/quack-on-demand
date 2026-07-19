@@ -4,7 +4,6 @@ only with justification."""
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 import qod_cli.main  # noqa: F401  (imports all command modules -> fills REGISTRY)

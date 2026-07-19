@@ -304,20 +304,23 @@ for the full flag list of any command.
 
 Every REST operation published in the generated OpenAPI specification must be
 reachable from the CLI with every parameter. A parity test (strict, no exceptions
-beyond documented exclusions) checks this after every build.
+beyond documented exclusions) runs with the pytest suite.
 
 **How it works:** The test loads `cli/tests/resources/openapi.yaml` (regenerated
 from the Scala manager source), extracts every HTTP method/path pair, and
 compares it against the CLI's REGISTRY (all commands with their flags). Gaps are
 reported as missing commands or missing parameters on existing commands.
 
-**How to add a command:** Mark the command verb with `@covers(...)` on the
-`Group`-level enum variant that contains it. Each nested verb gets one
-`@covers(method, path)` entry. Parameters are matched by name; descriptive
-value strings (e.g., `"(prompted)"` for the login password,
-`"(computed from the dry-run response, gated by --yes)"`) are allowed in
-`@covers` to document params whose flag value is not a plain boolean - the gate
-compares **keys only**, so these annotations don't affect the test.
+**How to add a command:** Stack
+`@covers(method, path, {param: "--flag" or "(descriptive value)"})` directly on
+the Typer command function, one decorator per REST operation the command
+performs (see `login` in `src/qod_cli/commands/auth.py` for a stacked example).
+Always include the params dict for parameterized endpoints: a `@covers` without
+params registers zero params and fails the gate. Parameters are matched by
+name; descriptive value strings (e.g., `"(prompted)"` for the login password,
+`"(computed from the dry-run response, gated by --yes)"`) are allowed for
+params whose value is not a plain flag - the gate compares **keys only**, so
+these annotations serve as documentation without affecting the test.
 
 **How to justify an exclusion:** Some REST endpoints are not CLI-reachable by
 design (e.g., OIDC redirect targets). Add them to the `EXCLUSIONS` set in
