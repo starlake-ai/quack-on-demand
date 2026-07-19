@@ -39,6 +39,8 @@ def list_(ctx: typer.Context):
         "memory": "--memory",
         "podTemplateYaml": "--pod-template-file",
         "initSql": "--init-sql",
+        "startSuspended": "--start-suspended",
+        "cohorts": "--cohort",
     },
 )
 def create(
@@ -57,6 +59,14 @@ def create(
     cpu: str = typer.Option("", "--cpu"),
     memory: str = typer.Option("", "--memory"),
     pod_template_file: typer.FileText = typer.Option(None, "--pod-template-file"),
+    start_suspended: bool = typer.Option(False, "--start-suspended", help="Persist suspended; no nodes spawned until the first statement or `pool resume`."),
+    cohort: list[str] = typer.Option(
+        None,
+        "--cohort",
+        help="Repeatable placement cohort as writeonly,readonly,dual (e.g. 1,0,0). "
+        "When supplied, cohort counts must sum to --size and roles must sum to "
+        "--writeonly/--readonly/--dual.",
+    ),
 ):
     body = {
         **_key(tenant, db, pool),
@@ -68,9 +78,24 @@ def create(
         "cpu": cpu,
         "memory": memory,
         "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
+        "startSuspended": start_suspended,
     }
     if init_sql is not None:
         body["initSql"] = init_sql
+    if cohort:
+        cohorts = []
+        for spec in cohort:
+            parts = spec.split(",")
+            if len(parts) != 3:
+                raise typer.BadParameter(f"expected writeonly,readonly,dual, got {spec!r}")
+            w, r, d = (int(p) for p in parts)
+            cohorts.append(
+                {
+                    "placement": {"nodeSelector": {}, "tolerations": []},
+                    "distribution": {"writeonly": w, "readonly": r, "dual": d},
+                }
+            )
+        body["cohorts"] = cohorts
     call(ctx, "POST", "/api/pool/create", body=body)
 
 
@@ -151,6 +176,31 @@ def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: 
 )
 def set_pod_template(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, file: typer.FileText = typer.Option(..., "--file")):
     call(ctx, "POST", "/api/pool/setPodTemplate", body={**_key(tenant, db, pool), "podTemplateYaml": file.read()})
+
+
+@app.command()
+@covers("POST", "/api/pool/suspend", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"})
+def suspend(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Scale the pool to zero, keeping its distribution; wakes on the next query."""
+    call(ctx, "POST", "/api/pool/suspend", body=_key(tenant, db, pool))
+
+
+@app.command()
+@covers("POST", "/api/pool/resume", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"})
+def resume(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Wake a suspended pool (respawn to its stored distribution)."""
+    call(ctx, "POST", "/api/pool/resume", body=_key(tenant, db, pool))
+
+
+@app.command()
+@covers(
+    "GET",
+    "/api/pool/{tenant}/{tenantDb}/{pool}/status",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"},
+)
+def status(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Fetch a single pool's live status (nodes, suspended/disabled flags, resources)."""
+    call(ctx, "GET", f"/api/pool/{tenant}/{db}/{pool}/status")
 
 
 @permission_app.command("list")

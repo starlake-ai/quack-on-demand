@@ -84,8 +84,41 @@ CASES = [
             "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
             "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
-            "cpu": "", "memory": "", "podTemplateYaml": "",
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
         },
+    ),
+    (
+        [
+            "pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+            "--size", "2", "--writeonly", "1", "--readonly", "1", "--dual", "0",
+            "--start-suspended", "--cohort", "1,1,0",
+        ],
+        "POST",
+        "/api/pool/create",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
+            "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
+            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": True,
+            "cohorts": [
+                {"placement": {"nodeSelector": {}, "tolerations": []}, "distribution": {"writeonly": 1, "readonly": 1, "dual": 0}},
+            ],
+        },
+    ),
+    (
+        ["pool", "suspend", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/suspend", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
+    ),
+    (
+        ["pool", "resume", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/resume", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
+    ),
+    (
+        ["pool", "status", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "GET", "/api/pool/acme/tpch1/bi/status", {}, None,
     ),
     (
         ["pool", "scale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--target-size", "3", "--writeonly", "1", "--readonly", "2", "--dual", "0", "--force"],
