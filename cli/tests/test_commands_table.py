@@ -325,6 +325,10 @@ CASES = [
         {"from": "10", "to": "20"}, None,
     ),
     (
+        ["catalog", "tags", "acme", "tpch1"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/tags", {}, None,
+    ),
+    (
         ["catalog", "recoverable", "acme", "tpch1", "--limit", "10"],
         "GET", "/api/catalog/tenant/acme/database/tpch1/recoverable", {"limit": "10"}, None,
     ),

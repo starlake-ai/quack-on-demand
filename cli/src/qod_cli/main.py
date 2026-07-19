@@ -4,6 +4,7 @@ import typer
 
 from . import __version__
 from .config import Settings, load_settings
+from .registry import covers
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="quack-on-demand CLI")
 
@@ -34,11 +35,21 @@ def _root(
 
 
 @app.command()
+@covers("GET", "/health")
 def health(ctx: typer.Context):
     """Liveness plus pool/node counts (open endpoint)."""
     from .commands._run import call
 
     call(ctx, "GET", "/health")
+
+
+@app.command()
+@covers("GET", "/ready")
+def ready(ctx: typer.Context):
+    """Readiness probe: 503 until Postgres is reachable, 200 once it is (open endpoint)."""
+    from .commands._run import call
+
+    call(ctx, "GET", "/ready")
 
 
 from .commands import config_cmd  # noqa: E402

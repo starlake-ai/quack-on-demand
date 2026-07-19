@@ -226,6 +226,17 @@ def schema_diff(
 @app.command()
 @covers(
     "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/tags",
+    {"tenant": "TENANT", "tenantDb": "DB"},
+)
+def tags(ctx: typer.Context, tenant: str = TENANT, db: str = DB):
+    """List snapshot tags of the tenant-db (see `tag create`/`delete`/`protect` to manage them)."""
+    call(ctx, "GET", f"{_base(tenant, db)}/tags")
+
+
+@app.command()
+@covers(
+    "GET",
     "/api/catalog/tenant/{tenant}/database/{tenantDb}/recoverable",
     {"tenant": "TENANT", "tenantDb": "DB", "limit": "--limit"},
 )
