@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Pool lifecycle and pool-level access grants.")
@@ -16,11 +17,30 @@ def _key(tenant: str, db: str, pool: str) -> dict:
 
 
 @app.command("list")
+@covers("GET", "/api/pool/list")
 def list_(ctx: typer.Context):
     call(ctx, "GET", "/api/pool/list")
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/pool/create",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "pool": "--pool",
+        "size": "--size",
+        "roleDistribution": "--writeonly/--readonly/--dual",
+        "idleTimeoutSec": "--idle-timeout-sec",
+        "maxConcurrentPerNode": "--max-concurrent-per-node",
+        "disabled": "--disabled",
+        "cpu": "--cpu",
+        "memory": "--memory",
+        "podTemplateYaml": "--pod-template-file",
+        "initSql": "--init-sql",
+    },
+)
 def create(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -55,6 +75,18 @@ def create(
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/pool/scale",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "pool": "--pool",
+        "targetSize": "--target-size",
+        "roleDistribution": "--writeonly/--readonly/--dual",
+        "force": "--force",
+    },
+)
 def scale(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -80,31 +112,53 @@ def scale(
 
 
 @app.command()
+@covers("POST", "/api/pool/stop", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "force": "--force"})
 def stop(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
     call(ctx, "POST", "/api/pool/stop", body={**_key(tenant, db, pool), "force": force})
 
 
 @app.command()
+@covers("POST", "/api/pool/delete", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "force": "--force"})
 def delete(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
     call(ctx, "POST", "/api/pool/delete", body={**_key(tenant, db, pool), "force": force})
 
 
 @app.command("set-disabled")
+@covers(
+    "POST",
+    "/api/pool/setDisabled",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "disabled": "--disabled/--enabled"},
+)
 def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, disabled: bool = typer.Option(..., "--disabled/--enabled")):
     call(ctx, "POST", "/api/pool/setDisabled", body={**_key(tenant, db, pool), "disabled": disabled})
 
 
 @app.command("set-resources")
+@covers(
+    "POST",
+    "/api/pool/setResources",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "cpu": "--cpu", "memory": "--memory"},
+)
 def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, cpu: str = typer.Option(..., "--cpu"), memory: str = typer.Option(..., "--memory")):
     call(ctx, "POST", "/api/pool/setResources", body={**_key(tenant, db, pool), "cpu": cpu, "memory": memory})
 
 
 @app.command("set-pod-template")
+@covers(
+    "POST",
+    "/api/pool/setPodTemplate",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "podTemplateYaml": "--file"},
+)
 def set_pod_template(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, file: typer.FileText = typer.Option(..., "--file")):
     call(ctx, "POST", "/api/pool/setPodTemplate", body={**_key(tenant, db, pool), "podTemplateYaml": file.read()})
 
 
 @permission_app.command("list")
+@covers(
+    "GET",
+    "/api/pool/permission/list",
+    {"tenant": "--tenant", "userId": "--user-id", "groupId": "--group-id"},
+)
 def permission_list(
     ctx: typer.Context,
     tenant: str = typer.Option(None, "--tenant"),
@@ -115,6 +169,11 @@ def permission_list(
 
 
 @permission_app.command("grant")
+@covers(
+    "POST",
+    "/api/pool/permission/grant",
+    {"tenant": "--tenant", "poolId": "--pool-id", "userId": "--user-id", "groupId": "--group-id"},
+)
 def permission_grant(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -133,5 +192,6 @@ def permission_grant(
 
 
 @permission_app.command("revoke")
+@covers("POST", "/api/pool/permission/revoke", {"id": "ID"})
 def permission_revoke(ctx: typer.Context, grant_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/pool/permission/revoke", body={"id": grant_id})

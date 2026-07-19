@@ -4,6 +4,7 @@ import typer
 
 from ..config import save_profile
 from ..output import render
+from ..registry import covers
 from ..rest import ApiError, RestClient
 from ._run import call
 
@@ -11,11 +12,14 @@ app = typer.Typer(help="Authentication mode discovery.")
 
 
 @app.command()
+@covers("GET", "/api/auth/mode")
 def mode(ctx: typer.Context):
     """Show the auth mode (db or oidc) the manager expects."""
     call(ctx, "GET", "/api/auth/mode")
 
 
+@covers("POST", "/api/auth/login", {"username": "--username", "password": "(prompted)", "tenant": "--tenant"})
+@covers("GET", "/api/config/client")
 def login(
     ctx: typer.Context,
     url: str = typer.Option(None, "--url", help="Manager URL; defaults to the profile value."),
@@ -60,11 +64,13 @@ def login(
     )
 
 
+@covers("POST", "/api/auth/logout")
 def logout(ctx: typer.Context):
     """Revoke the current session token."""
     call(ctx, "POST", "/api/auth/logout")
 
 
+@covers("GET", "/api/auth/whoami")
 def whoami(ctx: typer.Context):
     """Verify the current session."""
     call(ctx, "GET", "/api/auth/whoami")

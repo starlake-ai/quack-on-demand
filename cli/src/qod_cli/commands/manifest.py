@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ..rest import ApiError, RestClient
 from ._run import call
 
@@ -7,6 +8,7 @@ app = typer.Typer(help="Topology manifest export/import (YAML).")
 
 
 @app.command()
+@covers("GET", "/api/manifest/export")
 def export(
     ctx: typer.Context,
     out: str = typer.Option(None, "--out", help="File path; omit = stdout."),
@@ -26,6 +28,7 @@ def export(
 
 
 @app.command("import")
+@covers("POST", "/api/manifest/import", {"body": "FILE"})
 def import_(
     ctx: typer.Context,
     file: typer.FileText = typer.Argument(..., help="Manifest YAML file, or - for stdin."),

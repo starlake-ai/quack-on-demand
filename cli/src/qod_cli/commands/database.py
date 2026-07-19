@@ -1,16 +1,33 @@
 import typer
 
+from ..registry import covers
 from ._run import call, kv_pairs
 
 app = typer.Typer(help="Tenant databases (DuckLake catalogs).")
 
 
 @app.command("list")
+@covers("GET", "/api/database/list", {"tenant": "--tenant"})
 def list_(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant")):
     call(ctx, "GET", "/api/database/list", params={"tenant": tenant})
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/database/create",
+    {
+        "tenant": "--tenant",
+        "name": "--name",
+        "kind": "--kind",
+        "metastore": "--metastore",
+        "dataPath": "--data-path",
+        "objectStore": "--object-store",
+        "defaultDatabase": "--default-database",
+        "defaultSchema": "--default-schema",
+        "initSql": "--init-sql",
+    },
+)
 def create(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -40,6 +57,19 @@ def create(
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/database/update",
+    {
+        "tenant": "--tenant",
+        "name": "--name",
+        "metastore": "--metastore",
+        "objectStore": "--object-store",
+        "defaultDatabase": "--default-database",
+        "defaultSchema": "--default-schema",
+        "initSql": "--init-sql",
+    },
+)
 def update(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -65,5 +95,6 @@ def update(
 
 
 @app.command()
+@covers("POST", "/api/database/delete", {"tenant": "--tenant", "name": "--name"})
 def delete(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant"), name: str = typer.Option(..., "--name")):
     call(ctx, "POST", "/api/database/delete", body={"tenant": tenant, "name": name})

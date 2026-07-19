@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="RBAC membership edges.")
@@ -16,35 +17,42 @@ GROUP = typer.Option(..., "--group-id")
 
 
 @user_role_app.command()
+@covers("POST", "/api/membership/user-role/add", {"userId": "--user-id", "roleId": "--role-id"})
 def add(ctx: typer.Context, user_id: str = USER, role_id: str = ROLE):
     call(ctx, "POST", "/api/membership/user-role/add", body={"userId": user_id, "roleId": role_id})
 
 
 @user_role_app.command()
+@covers("POST", "/api/membership/user-role/remove", {"userId": "--user-id", "roleId": "--role-id"})
 def remove(ctx: typer.Context, user_id: str = USER, role_id: str = ROLE):
     call(ctx, "POST", "/api/membership/user-role/remove", body={"userId": user_id, "roleId": role_id})
 
 
 @user_group_app.command("add")
+@covers("POST", "/api/membership/user-group/add", {"userId": "--user-id", "groupId": "--group-id"})
 def ug_add(ctx: typer.Context, user_id: str = USER, group_id: str = GROUP):
     call(ctx, "POST", "/api/membership/user-group/add", body={"userId": user_id, "groupId": group_id})
 
 
 @user_group_app.command("remove")
+@covers("POST", "/api/membership/user-group/remove", {"userId": "--user-id", "groupId": "--group-id"})
 def ug_remove(ctx: typer.Context, user_id: str = USER, group_id: str = GROUP):
     call(ctx, "POST", "/api/membership/user-group/remove", body={"userId": user_id, "groupId": group_id})
 
 
 @group_role_app.command("add")
+@covers("POST", "/api/membership/group-role/add", {"groupId": "--group-id", "roleId": "--role-id"})
 def gr_add(ctx: typer.Context, group_id: str = GROUP, role_id: str = ROLE):
     call(ctx, "POST", "/api/membership/group-role/add", body={"groupId": group_id, "roleId": role_id})
 
 
 @group_role_app.command("remove")
+@covers("POST", "/api/membership/group-role/remove", {"groupId": "--group-id", "roleId": "--role-id"})
 def gr_remove(ctx: typer.Context, group_id: str = GROUP, role_id: str = ROLE):
     call(ctx, "POST", "/api/membership/group-role/remove", body={"groupId": group_id, "roleId": role_id})
 
 
 @group_role_app.command("list")
+@covers("GET", "/api/membership/group-role/list", {"groupId": "--group-id"})
 def gr_list(ctx: typer.Context, group_id: str = GROUP):
     call(ctx, "GET", "/api/membership/group-role/list", params={"groupId": group_id})

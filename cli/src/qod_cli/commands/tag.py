@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Snapshot tags (create, delete, protect).")
@@ -10,6 +11,17 @@ NAME = typer.Option(..., "--name")
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/catalog/tag/create",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "name": "--name",
+        "snapshotId": "--snapshot-id",
+        "isProtected": "--protected",
+    },
+)
 def create(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -27,11 +39,17 @@ def create(
 
 
 @app.command()
+@covers("POST", "/api/catalog/tag/delete", {"tenant": "--tenant", "tenantDb": "--db", "name": "--name"})
 def delete(ctx: typer.Context, tenant: str = TENANT, db: str = DB, name: str = NAME):
     call(ctx, "POST", "/api/catalog/tag/delete", body={"tenant": tenant, "tenantDb": db, "name": name})
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/catalog/tag/protect",
+    {"tenant": "--tenant", "tenantDb": "--db", "name": "--name", "isProtected": "--protected/--unprotected"},
+)
 def protect(
     ctx: typer.Context,
     tenant: str = TENANT,

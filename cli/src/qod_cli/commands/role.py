@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Roles, table permissions, and row/column policies.")
@@ -12,11 +13,13 @@ app.add_typer(column_policy_app, name="column-policy")
 
 
 @app.command("list")
+@covers("GET", "/api/role/list", {"tenant": "--tenant"})
 def list_(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant")):
     call(ctx, "GET", "/api/role/list", params={"tenant": tenant})
 
 
 @app.command()
+@covers("POST", "/api/role/create", {"tenant": "--tenant", "name": "--name", "description": "--description"})
 def create(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -30,16 +33,29 @@ def create(
 
 
 @app.command()
+@covers("POST", "/api/role/delete", {"id": "ID"})
 def delete(ctx: typer.Context, role_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/role/delete", body={"id": role_id})
 
 
 @permission_app.command("list")
+@covers("GET", "/api/role/permission/list", {"roleId": "--role-id"})
 def permission_list(ctx: typer.Context, role_id: str = typer.Option(..., "--role-id")):
     call(ctx, "GET", "/api/role/permission/list", params={"roleId": role_id})
 
 
 @permission_app.command("grant")
+@covers(
+    "POST",
+    "/api/role/permission/grant",
+    {
+        "roleId": "--role-id",
+        "verb": "--verb",
+        "catalog": "--catalog",
+        "schema": "--schema",
+        "table": "--table",
+    },
+)
 def permission_grant(
     ctx: typer.Context,
     role_id: str = typer.Option(..., "--role-id"),
@@ -57,16 +73,29 @@ def permission_grant(
 
 
 @permission_app.command("revoke")
+@covers("POST", "/api/role/permission/revoke", {"id": "ID"})
 def permission_revoke(ctx: typer.Context, permission_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/role/permission/revoke", body={"id": permission_id})
 
 
 @row_policy_app.command("list")
+@covers("GET", "/api/role/row-policy/list", {"roleId": "--role-id"})
 def row_policy_list(ctx: typer.Context, role_id: str = typer.Option(..., "--role-id")):
     call(ctx, "GET", "/api/role/row-policy/list", params={"roleId": role_id})
 
 
 @row_policy_app.command("create")
+@covers(
+    "POST",
+    "/api/role/row-policy/create",
+    {
+        "roleId": "--role-id",
+        "catalogName": "--catalog",
+        "schemaName": "--schema",
+        "tableName": "--table",
+        "predicateSql": "--predicate-sql",
+    },
+)
 def row_policy_create(
     ctx: typer.Context,
     role_id: str = typer.Option(..., "--role-id"),
@@ -90,6 +119,7 @@ def row_policy_create(
 
 
 @row_policy_app.command("update")
+@covers("POST", "/api/role/row-policy/update", {"id": "ID", "predicateSql": "--predicate-sql"})
 def row_policy_update(
     ctx: typer.Context,
     policy_id: str = typer.Argument(..., metavar="ID"),
@@ -99,16 +129,31 @@ def row_policy_update(
 
 
 @row_policy_app.command("delete")
+@covers("POST", "/api/role/row-policy/delete", {"id": "ID"})
 def row_policy_delete(ctx: typer.Context, policy_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/role/row-policy/delete", body={"id": policy_id})
 
 
 @column_policy_app.command("list")
+@covers("GET", "/api/role/column-policy/list", {"roleId": "--role-id"})
 def column_policy_list(ctx: typer.Context, role_id: str = typer.Option(..., "--role-id")):
     call(ctx, "GET", "/api/role/column-policy/list", params={"roleId": role_id})
 
 
 @column_policy_app.command("create")
+@covers(
+    "POST",
+    "/api/role/column-policy/create",
+    {
+        "roleId": "--role-id",
+        "catalogName": "--catalog",
+        "schemaName": "--schema",
+        "tableName": "--table",
+        "columnName": "--column",
+        "action": "--action",
+        "transformSql": "--transform-sql",
+    },
+)
 def column_policy_create(
     ctx: typer.Context,
     role_id: str = typer.Option(..., "--role-id"),
@@ -133,6 +178,11 @@ def column_policy_create(
 
 
 @column_policy_app.command("update")
+@covers(
+    "POST",
+    "/api/role/column-policy/update",
+    {"id": "ID", "action": "--action", "transformSql": "--transform-sql"},
+)
 def column_policy_update(
     ctx: typer.Context,
     policy_id: str = typer.Argument(..., metavar="ID"),
@@ -146,5 +196,6 @@ def column_policy_update(
 
 
 @column_policy_app.command("delete")
+@covers("POST", "/api/role/column-policy/delete", {"id": "ID"})
 def column_policy_delete(ctx: typer.Context, policy_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/role/column-policy/delete", body={"id": policy_id})
