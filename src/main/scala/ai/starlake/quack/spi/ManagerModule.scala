@@ -23,5 +23,9 @@ trait ManagerModule:
   def endpoints: List[ServerEndpoint[Any, IO]]
   def publicPathPrefixes: Set[String]
   def staticMounts: List[StaticMount] = Nil
+  /** Veto hooks for structure mutations (quota policy). Read by the manager AFTER start() returns,
+    * same contract as endpoints: a module may build gates inside start().
+    */
+  def mutationGates: List[MutationGate] = Nil
   def onEvent(event: ManagerEvent): IO[Unit]
   def stop: IO[Unit]
