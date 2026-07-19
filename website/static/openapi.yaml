@@ -1,0 +1,7004 @@
+openapi: 3.1.0
+info:
+  title: Quack on Demand REST API
+  version: 0.4.5-SNAPSHOT
+paths:
+  /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}:
+    get:
+      operationId: getApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAlias
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSourceResponse'
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAlias
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}/secrets/{name}:
+    delete:
+      operationId: deleteApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAliasSecretsName
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/audit/actions:
+    get:
+      operationId: getApiAuditActions
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditActionsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/audit/list:
+    get:
+      operationId: getApiAuditList
+      parameters:
+      - name: family
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: actor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: action
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: noTenant
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditListResponse'
+        '400':
+          description: 'Invalid value for: query parameter family, Invalid value for:
+            query parameter tenant, Invalid value for: query parameter actor, Invalid
+            value for: query parameter action, Invalid value for: query parameter
+            q, Invalid value for: query parameter from, Invalid value for: query parameter
+            to, Invalid value for: query parameter limit, Invalid value for: query
+            parameter before, Invalid value for: query parameter noTenant, Invalid
+            value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/mode:
+    get:
+      operationId: getApiAuthMode
+      parameters:
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthModeResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/oidc/callback:
+    get:
+      operationId: getApiAuthOidcCallback
+      parameters:
+      - name: code
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: qod_oidc_state
+        in: cookie
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: query parameter code, Invalid value for:
+            query parameter state, Invalid value for: cookie qod_oidc_state, Invalid
+            value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/auth/oidc/logout:
+    get:
+      operationId: getApiAuthOidcLogout
+      parameters:
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: cookie qod_session, Invalid value for:
+            header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/auth/oidc/start:
+    get:
+      operationId: getApiAuthOidcStart
+      parameters:
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: returnTo
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            query parameter returnTo, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/sql-token/callback:
+    get:
+      operationId: getApiAuthSql-tokenCallback
+      parameters:
+      - name: code
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: error
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: qod_sqltoken_state
+        in: cookie
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+          content:
+            text/html:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: query parameter code, Invalid value for:
+            query parameter state, Invalid value for: query parameter error, Invalid
+            value for: cookie qod_sqltoken_state, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/auth/sql-token/start:
+    get:
+      operationId: getApiAuthSql-tokenStart
+      parameters:
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/auth/whoami:
+    get:
+      operationId: getApiAuthWhoami
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WhoamiResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/recoverable:
+    get:
+      description: Recently dropped tables of a DuckLake tenant-db that are still
+        recoverable (their last-live snapshot has not been expired), newest drop first.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbRecoverable
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoverableListResponse'
+        '400':
+          description: 'Invalid value for: query parameter limit, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas:
+    get:
+      description: List schemas in the DuckLake catalog of the (tenant, tenantDb).
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemas
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatalogSchemaEntry'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables:
+    get:
+      description: List tables in a schema of the (tenant, tenantDb)'s catalog.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTables
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatalogTableEntry'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/data-diff:
+    get:
+      description: Row-level data diff between two snapshot selectors (`from`, `to`;
+        each a snapshot id or a tag name). `changeType` filters to insert | delete
+        | update; pages via the opaque `cursor` echoed back as nextCursor.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTablesTableData-diff
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: changeType
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataDiffResponse'
+        '400':
+          description: 'Invalid value for: query parameter from, Invalid value for:
+            query parameter to, Invalid value for: query parameter limit, Invalid
+            value for: query parameter cursor, Invalid value for: query parameter
+            changeType, Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/history:
+    get:
+      description: 'Per-table DuckLake commit history, newest first (EPIC Spec 01):
+        operation, author, commit message, schema-changed flag, and row/file deltas
+        attributable to the table. Keyset pagination via limit (default 50, max 200)
+        + before=snapshotId; optional from/to (ISO-8601), operation, and author filters.'
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTablesTableHistory
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: operation
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: author
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogHistoryResponse'
+        '400':
+          description: 'Invalid value for: query parameter limit, Invalid value for:
+            query parameter before, Invalid value for: query parameter from, Invalid
+            value for: query parameter to, Invalid value for: query parameter operation,
+            Invalid value for: query parameter author, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/preview:
+    get:
+      description: Bounded preview of a table's rows, optionally as of a DuckLake
+        snapshot (asOf=<id>), a snapshot tag (asOfTag=<name>), or a timestamp (asOfTs=<ISO-8601>);
+        supplying more than one selector is a 400. `limit` clamps the row cap downward
+        (never above the server's configured max).
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTablesTablePreview
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: asOf
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: asOfTag
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: asOfTs
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          description: 'Invalid value for: query parameter asOf, Invalid value for:
+            query parameter asOfTag, Invalid value for: query parameter asOfTs, Invalid
+            value for: query parameter limit, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/schema-diff:
+    get:
+      description: Column-level schema diff between two snapshot selectors (`from`,
+        `to`; each a snapshot id or a tag name).
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTablesTableSchema-diff
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaDiffResponse'
+        '400':
+          description: 'Invalid value for: query parameter from, Invalid value for:
+            query parameter to, Invalid value for: header X-API-Key, Invalid value
+            for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}:
+    get:
+      description: Get one table's columns + parquet data files, optionally as of
+        a DuckLake snapshot (asOf=<id>), a snapshot tag (asOfTag=<name>), or a timestamp
+        (asOfTs=<ISO-8601>); supplying more than one is a 400. Returns resolvedSnapshot
+        + resolvedAt when a selector was used.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSchemasSchemaTablesTable
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: asOf
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: asOfTag
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: asOfTs
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogTableDetailResponse'
+        '400':
+          description: 'Invalid value for: query parameter asOf, Invalid value for:
+            query parameter asOfTag, Invalid value for: query parameter asOfTs, Invalid
+            value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/snapshots:
+    get:
+      description: List DuckLake snapshots of the (tenant, tenantDb), newest first;
+        keyset pagination via limit + before=snapshotId. Optional table=<schema>.<table>
+        filters to snapshots affecting that table.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbSnapshots
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: table
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatalogSnapshotEntry'
+        '400':
+          description: 'Invalid value for: query parameter limit, Invalid value for:
+            query parameter before, Invalid value for: query parameter table, Invalid
+            value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/tags:
+    get:
+      description: List snapshot tags of the (tenant, tenantDb); `exists` flags whether
+        the tagged snapshot is still in the catalog.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbTags
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatalogTagEntry'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/config/client:
+    get:
+      operationId: getApiConfigClient
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfigResponse'
+  /api/config/server:
+    get:
+      operationId: getApiConfigServer
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigListResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/database/list:
+    get:
+      operationId: getApiDatabaseList
+      parameters:
+      - name: tenant
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDbListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/group/list:
+    get:
+      operationId: getApiGroupList
+      parameters:
+      - name: tenant
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/history/statements:
+    get:
+      operationId: getApiHistoryStatements
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pool
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: user
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementSearchResponse'
+        '400':
+          description: 'Invalid value for: query parameter from, Invalid value for:
+            query parameter to, Invalid value for: query parameter tenant, Invalid
+            value for: query parameter pool, Invalid value for: query parameter user,
+            Invalid value for: query parameter status, Invalid value for: query parameter
+            q, Invalid value for: query parameter limit, Invalid value for: query
+            parameter before, Invalid value for: header X-API-Key, Invalid value for:
+            cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/history/trends:
+    get:
+      operationId: getApiHistoryTrends
+      parameters:
+      - name: granularity
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pool
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrendsResponse'
+        '400':
+          description: 'Invalid value for: query parameter granularity, Invalid value
+            for: query parameter from, Invalid value for: query parameter to, Invalid
+            value for: query parameter tenant, Invalid value for: query parameter
+            pool, Invalid value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/maintenance/policy:
+    get:
+      description: List the maintenance policy rows of (tenant, tenantDb) plus the
+        resolved effective tenantdb-scope policy.
+      operationId: getApiMaintenancePolicy
+      parameters:
+      - name: tenant
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenancePolicyListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            query parameter tenantDb, Invalid value for: header X-API-Key, Invalid
+            value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/maintenance/runs:
+    get:
+      description: List maintenance runs of (tenant, tenantDb), newest first; keyset
+        pagination via limit + before=runId.
+      operationId: getApiMaintenanceRuns
+      parameters:
+      - name: tenant
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MaintenanceRunEntry'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            query parameter tenantDb, Invalid value for: query parameter limit, Invalid
+            value for: query parameter before, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/manifest/export:
+    get:
+      operationId: getApiManifestExport
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/group-role/list:
+    get:
+      operationId: getApiMembershipGroup-roleList
+      parameters:
+      - name: groupId
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleListResponse'
+        '400':
+          description: 'Invalid value for: query parameter groupId, Invalid value
+            for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/active-statements:
+    get:
+      operationId: getApiNodeActive-statements
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActiveStatementsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/statements:
+    get:
+      operationId: getApiNodeStatements
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementHistoryResponse'
+        '400':
+          description: 'Invalid value for: query parameter limit, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/list:
+    get:
+      operationId: getApiPoolList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolListResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/permission/list:
+    get:
+      operationId: getApiPoolPermissionList
+      parameters:
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: userId
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: groupId
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolPermissionListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            query parameter userId, Invalid value for: query parameter groupId, Invalid
+            value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/{tenant}/{tenantDb}/{pool}/status:
+    get:
+      operationId: getApiPoolTenantTenantdbPoolStatus
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: pool
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/column-policy/list:
+    get:
+      operationId: getApiRoleColumn-policyList
+      parameters:
+      - name: roleId
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ColumnPolicyListResponse'
+        '400':
+          description: 'Invalid value for: query parameter roleId, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/list:
+    get:
+      operationId: getApiRoleList
+      parameters:
+      - name: tenant
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/permission/list:
+    get:
+      operationId: getApiRolePermissionList
+      parameters:
+      - name: roleId
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RolePermissionListResponse'
+        '400':
+          description: 'Invalid value for: query parameter roleId, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/row-policy/list:
+    get:
+      operationId: getApiRoleRow-policyList
+      parameters:
+      - name: roleId
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RowPolicyListResponse'
+        '400':
+          description: 'Invalid value for: query parameter roleId, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/list:
+    get:
+      operationId: getApiTenantList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantListResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources:
+    get:
+      operationId: getApiTenantsTenantTenant-dbsTenantdbFederated-sources
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSourceListResponse'
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      operationId: postApiTenantsTenantTenant-dbsTenantdbFederated-sources
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FederatedSourceCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSourceResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}/secrets:
+    get:
+      operationId: getApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAliasSecrets
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSecretListResponse'
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: putApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAliasSecrets
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FederatedSecretUpsertRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSecretResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/usage:
+    get:
+      operationId: getApiUsage
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: groupBy
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pool
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageResponse'
+        '400':
+          description: 'Invalid value for: query parameter from, Invalid value for:
+            query parameter to, Invalid value for: query parameter groupBy, Invalid
+            value for: query parameter tenant, Invalid value for: query parameter
+            pool, Invalid value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/list:
+    get:
+      operationId: getApiUserList
+      parameters:
+      - name: tenant
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+        '400':
+          description: 'Invalid value for: query parameter tenant, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/{id}/effective:
+    get:
+      operationId: getApiUserIdEffective
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectivePermissionsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        default:
+          description: ''
+  /ready:
+    get:
+      operationId: getReady
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        default:
+          description: ''
+  /api/auth/login:
+    post:
+      operationId: postApiAuthLogin
+      parameters:
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          headers:
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/logout:
+    post:
+      operationId: postApiAuthLogout
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      - name: X-Forwarded-Proto
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Set-Cookie:
+              required: false
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/restore:
+    post:
+      description: 'Restore a live table to a prior snapshot as a NEW forward snapshot
+        (non-destructive: history is preserved and the pre-restore state stays queryable;
+        the replace assigns a new table id, so the per-table history timeline restarts
+        at the restore). dryRun returns the change summary that would be undone and
+        performs no write. Requires an ALL grant, or DDL plus RO/RW, on the table.
+        409 concurrent_write when expectedCurrentSnapshot no longer matches the table''s
+        latest snapshot; 410 snapshot_expired; 422 invalid_snapshot when the table
+        does not resolve at the target.'
+      operationId: postApiCatalogRestore
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tag/create:
+    post:
+      description: Create a snapshot tag. 404 if the snapshot does not exist, 409
+        on duplicate name, 400 on invalid name.
+      operationId: postApiCatalogTagCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogTagEntry'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tag/delete:
+    post:
+      description: Delete a snapshot tag by name.
+      operationId: postApiCatalogTagDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tag/protect:
+    post:
+      description: Toggle the retention hold (protected flag) of a snapshot tag.
+      operationId: postApiCatalogTagProtect
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagProtectRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogTagEntry'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/undrop:
+    post:
+      description: Recreate a dropped table at its last-live snapshot (or an explicit
+        fromSnapshot) via CREATE TABLE AS a time-travel read, optionally under a new
+        name (asName). 409 name_conflict when the target name is live; 410 snapshot_expired
+        once expiry has reaped the source snapshot.
+      operationId: postApiCatalogUndrop
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UndropRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UndropResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/database/create:
+    post:
+      operationId: postApiDatabaseCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantDbRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDbResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/database/delete:
+    post:
+      operationId: postApiDatabaseDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantDbOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/database/update:
+    post:
+      operationId: postApiDatabaseUpdate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantDbRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateTenantDbResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/group/create:
+    post:
+      operationId: postApiGroupCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GroupResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/group/delete:
+    post:
+      operationId: postApiGroupDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/maintenance/policy/delete:
+    post:
+      description: Delete a maintenance policy row by id. 404 unknown id.
+      operationId: postApiMaintenancePolicyDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenancePolicyDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/maintenance/policy/upsert:
+    post:
+      description: Create or replace the maintenance policy row for a scope tuple.
+        404 unknown tenant/tenant-db, 400 invalid_scope/invalid_cron/invalid_value,
+        400 invalid_kind on a non-ducklake tenant-db.
+      operationId: postApiMaintenancePolicyUpsert
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenancePolicyUpsertRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenancePolicyEntry'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/maintenance/run:
+    post:
+      description: Enqueue a manual maintenance run for (tenant, tenantDb). 400 invalid_operations
+        on an unknown csv entry, 400 invalid_kind on a non-ducklake tenant-db.
+      operationId: postApiMaintenanceRun
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceRunRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceRunResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/manifest/import:
+    post:
+      operationId: postApiManifestImport
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManifestImportSummary'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/group-role/add:
+    post:
+      operationId: postApiMembershipGroup-roleAdd
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupRoleMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/group-role/remove:
+    post:
+      operationId: postApiMembershipGroup-roleRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupRoleMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/user-group/add:
+    post:
+      operationId: postApiMembershipUser-groupAdd
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserGroupMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/user-group/remove:
+    post:
+      operationId: postApiMembershipUser-groupRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserGroupMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/user-role/add:
+    post:
+      operationId: postApiMembershipUser-roleAdd
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/membership/user-role/remove:
+    post:
+      operationId: postApiMembershipUser-roleRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleMembershipRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/quarantine:
+    post:
+      operationId: postApiNodeQuarantine
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/restart:
+    post:
+      operationId: postApiNodeRestart
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/setMaxConcurrent:
+    post:
+      operationId: postApiNodeSetmaxconcurrent
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetMaxConcurrentRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/node/unquarantine:
+    post:
+      operationId: postApiNodeUnquarantine
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodeOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/create:
+    post:
+      operationId: postApiPoolCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/delete:
+    post:
+      operationId: postApiPoolDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeletePoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/permission/grant:
+    post:
+      operationId: postApiPoolPermissionGrant
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoolPermissionGrantRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolPermissionResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/permission/revoke:
+    post:
+      operationId: postApiPoolPermissionRevoke
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PoolPermissionRevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/resume:
+    post:
+      operationId: postApiPoolResume
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumePoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/scale:
+    post:
+      operationId: postApiPoolScale
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScalePoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setDisabled:
+    post:
+      operationId: postApiPoolSetdisabled
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolDisabledRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setPodTemplate:
+    post:
+      operationId: postApiPoolSetpodtemplate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolTemplateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setResources:
+    post:
+      operationId: postApiPoolSetresources
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolResourcesRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/stop:
+    post:
+      operationId: postApiPoolStop
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StopPoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/suspend:
+    post:
+      operationId: postApiPoolSuspend
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuspendPoolRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/column-policy/create:
+    post:
+      operationId: postApiRoleColumn-policyCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateColumnPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ColumnPolicyDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/column-policy/delete:
+    post:
+      operationId: postApiRoleColumn-policyDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteColumnPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/column-policy/update:
+    post:
+      operationId: postApiRoleColumn-policyUpdate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateColumnPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/create:
+    post:
+      operationId: postApiRoleCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/delete:
+    post:
+      operationId: postApiRoleDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/permission/grant:
+    post:
+      operationId: postApiRolePermissionGrant
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionGrantRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RolePermissionResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/permission/revoke:
+    post:
+      operationId: postApiRolePermissionRevoke
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionRevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/row-policy/create:
+    post:
+      operationId: postApiRoleRow-policyCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRowPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RowPolicyDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/row-policy/delete:
+    post:
+      operationId: postApiRoleRow-policyDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteRowPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/role/row-policy/update:
+    post:
+      operationId: postApiRoleRow-policyUpdate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRowPolicyRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/statement/kill:
+    post:
+      operationId: postApiStatementKill
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KillStatementRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillStatementResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/create:
+    post:
+      operationId: postApiTenantCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/delete:
+    post:
+      operationId: postApiTenantDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/setAuth:
+    post:
+      operationId: postApiTenantSetauth
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTenantAuthRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/setDisabled:
+    post:
+      operationId: postApiTenantSetdisabled
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTenantDisabledRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/create:
+    post:
+      operationId: postApiUserCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/delete:
+    post:
+      operationId: postApiUserDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/update:
+    post:
+      operationId: postApiUserUpdate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    ActiveStatementInfo:
+      title: ActiveStatementInfo
+      type: object
+      required:
+      - id
+      - user
+      - tenant
+      - pool
+      - nodeId
+      - sql
+      - startedAt
+      - elapsedMs
+      properties:
+        id:
+          type: string
+        user:
+          type: string
+        tenant:
+          type: string
+        pool:
+          type: string
+        nodeId:
+          type: string
+        sql:
+          type: string
+        startedAt:
+          type: string
+        elapsedMs:
+          type: integer
+          format: int64
+    ActiveStatementsResponse:
+      title: ActiveStatementsResponse
+      type: object
+      properties:
+        statements:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveStatementInfo'
+    AuditActionsResponse:
+      title: AuditActionsResponse
+      type: object
+      properties:
+        actions:
+          type: array
+          items:
+            type: string
+    AuditEventEntry:
+      title: AuditEventEntry
+      type: object
+      required:
+      - id
+      - ts
+      - family
+      - actor
+      - actorRealm
+      - action
+      - outcome
+      - origin
+      - detail
+      properties:
+        id:
+          type: string
+        ts:
+          type: string
+        family:
+          type: string
+        actor:
+          type: string
+        actorRealm:
+          type: string
+        tenant:
+          type: string
+        action:
+          type: string
+        target:
+          type: string
+        outcome:
+          type: string
+        origin:
+          type: string
+        detail:
+          $ref: '#/components/schemas/Map_String'
+    AuditListResponse:
+      title: AuditListResponse
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEventEntry'
+        nextBefore:
+          type: string
+    AuthModeResponse:
+      title: AuthModeResponse
+      type: object
+      required:
+      - mode
+      - ssoProviderName
+      properties:
+        mode:
+          type: string
+        ssoProviderName:
+          type: string
+    CatalogColumnEntry:
+      title: CatalogColumnEntry
+      type: object
+      required:
+      - ordinal
+      - name
+      - typeName
+      - nullable
+      - isPrimaryKey
+      properties:
+        ordinal:
+          type: integer
+          format: int32
+        name:
+          type: string
+        typeName:
+          type: string
+        nullable:
+          type: boolean
+        isPrimaryKey:
+          type: boolean
+    CatalogDataFileEntry:
+      title: CatalogDataFileEntry
+      type: object
+      required:
+      - path
+      - sizeBytes
+      - rowCount
+      - snapshotId
+      properties:
+        path:
+          type: string
+        sizeBytes:
+          type: integer
+          format: int64
+        rowCount:
+          type: integer
+          format: int64
+        snapshotId:
+          type: integer
+          format: int64
+    CatalogHistoryCommit:
+      title: CatalogHistoryCommit
+      type: object
+      required:
+      - snapshotId
+      - committedAt
+      - operation
+      - schemaChanged
+      - schemaVersion
+      - rowsAdded
+      - rowsRemoved
+      - filesAdded
+      - filesRemoved
+      properties:
+        snapshotId:
+          type: integer
+          format: int64
+        committedAt:
+          type: string
+        operation:
+          type: string
+        author:
+          type: string
+        commitMessage:
+          type: string
+        schemaChanged:
+          type: boolean
+        schemaVersion:
+          type: integer
+          format: int64
+        rowsAdded:
+          type: integer
+          format: int64
+        rowsRemoved:
+          type: integer
+          format: int64
+        filesAdded:
+          type: integer
+          format: int32
+        filesRemoved:
+          type: integer
+          format: int32
+    CatalogHistoryResponse:
+      title: CatalogHistoryResponse
+      type: object
+      required:
+      - table
+      - hasMore
+      properties:
+        table:
+          $ref: '#/components/schemas/CatalogHistoryTableRef'
+        commits:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogHistoryCommit'
+        hasMore:
+          type: boolean
+    CatalogHistoryTableRef:
+      title: CatalogHistoryTableRef
+      type: object
+      required:
+      - schema
+      - name
+      - tableId
+      properties:
+        schema:
+          type: string
+        name:
+          type: string
+        tableId:
+          type: integer
+          format: int64
+    CatalogSchemaEntry:
+      title: CatalogSchemaEntry
+      type: object
+      required:
+      - name
+      - tableCount
+      properties:
+        name:
+          type: string
+        tableCount:
+          type: integer
+          format: int32
+    CatalogSnapshotEntry:
+      title: CatalogSnapshotEntry
+      type: object
+      required:
+      - snapshotId
+      - committedAt
+      - schemaVersion
+      - changes
+      - rowsAdded
+      - filesAdded
+      - filesRemoved
+      properties:
+        snapshotId:
+          type: integer
+          format: int64
+        committedAt:
+          type: string
+        schemaVersion:
+          type: integer
+          format: int64
+        changes:
+          type: string
+        rowsAdded:
+          type: integer
+          format: int64
+        filesAdded:
+          type: integer
+          format: int32
+        filesRemoved:
+          type: integer
+          format: int32
+        affectedTables:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogTableRef'
+        author:
+          type: string
+        commitMessage:
+          type: string
+    CatalogTableDetailResponse:
+      title: CatalogTableDetailResponse
+      type: object
+      required:
+      - table
+      properties:
+        table:
+          $ref: '#/components/schemas/CatalogTableEntry'
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogColumnEntry'
+        dataFiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogDataFileEntry'
+        resolvedSnapshot:
+          type: integer
+          format: int64
+        resolvedAt:
+          type: string
+          format: date-time
+    CatalogTableEntry:
+      title: CatalogTableEntry
+      type: object
+      required:
+      - schema
+      - name
+      - rowCount
+      - dataFileCount
+      properties:
+        schema:
+          type: string
+        name:
+          type: string
+        rowCount:
+          type: integer
+          format: int64
+        dataFileCount:
+          type: integer
+          format: int32
+        folder:
+          type: string
+    CatalogTableRef:
+      title: CatalogTableRef
+      type: object
+      required:
+      - schema
+      - name
+      properties:
+        schema:
+          type: string
+        name:
+          type: string
+    CatalogTagEntry:
+      title: CatalogTagEntry
+      type: object
+      required:
+      - name
+      - snapshotId
+      - isProtected
+      - exists
+      properties:
+        name:
+          type: string
+        snapshotId:
+          type: integer
+          format: int64
+        isProtected:
+          type: boolean
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        exists:
+          type: boolean
+    ClientConfigResponse:
+      title: ClientConfigResponse
+      type: object
+      required:
+      - flightSqlHost
+      - flightSqlPort
+      - flightSqlTls
+      - authEnabled
+      - placementSupported
+      - identitySource
+      - ssoProviderName
+      - telemetryEnabled
+      properties:
+        flightSqlHost:
+          type: string
+        flightSqlPort:
+          type: integer
+          format: int32
+        flightSqlTls:
+          type: boolean
+        authEnabled:
+          type: boolean
+        placementSupported:
+          type: boolean
+        identitySource:
+          type: string
+        ssoProviderName:
+          type: string
+        telemetryEnabled:
+          type: boolean
+    ColumnPolicyDto:
+      title: ColumnPolicyDto
+      type: object
+      required:
+      - id
+      - roleId
+      - catalogName
+      - schemaName
+      - tableName
+      - columnName
+      - action
+      properties:
+        id:
+          type: string
+        roleId:
+          type: string
+        catalogName:
+          type: string
+        schemaName:
+          type: string
+        tableName:
+          type: string
+        columnName:
+          type: string
+        action:
+          type: string
+        transformSql:
+          type: string
+    ColumnPolicyListResponse:
+      title: ColumnPolicyListResponse
+      type: object
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ColumnPolicyDto'
+    ConfigEntryView:
+      title: ConfigEntryView
+      type: object
+      required:
+      - path
+      - envVar
+      - description
+      - value
+      - sensitive
+      - isSet
+      properties:
+        path:
+          type: string
+        envVar:
+          type: string
+        description:
+          type: string
+        value:
+          type: string
+        sensitive:
+          type: boolean
+        isSet:
+          type: boolean
+    ConfigListResponse:
+      title: ConfigListResponse
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConfigEntryView'
+    CreateColumnPolicyRequest:
+      title: CreateColumnPolicyRequest
+      type: object
+      required:
+      - roleId
+      - catalogName
+      - schemaName
+      - tableName
+      - columnName
+      - action
+      properties:
+        roleId:
+          type: string
+        catalogName:
+          type: string
+        schemaName:
+          type: string
+        tableName:
+          type: string
+        columnName:
+          type: string
+        action:
+          type: string
+        transformSql:
+          type: string
+    CreatePoolRequest:
+      title: CreatePoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - size
+      - roleDistribution
+      - idleTimeoutSec
+      - maxConcurrentPerNode
+      - disabled
+      - startSuspended
+      - cpu
+      - memory
+      - podTemplateYaml
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        size:
+          type: integer
+          format: int32
+        roleDistribution:
+          $ref: '#/components/schemas/RoleDistribution'
+        idleTimeoutSec:
+          type: integer
+          format: int32
+        maxConcurrentPerNode:
+          type: integer
+          format: int32
+        cohorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolCohortDto'
+        disabled:
+          type: boolean
+        startSuspended:
+          type: boolean
+        initSql:
+          type: string
+        cpu:
+          type: string
+        memory:
+          type: string
+        podTemplateYaml:
+          type: string
+    CreateRowPolicyRequest:
+      title: CreateRowPolicyRequest
+      type: object
+      required:
+      - roleId
+      - catalogName
+      - schemaName
+      - tableName
+      - predicateSql
+      properties:
+        roleId:
+          type: string
+        catalogName:
+          type: string
+        schemaName:
+          type: string
+        tableName:
+          type: string
+        predicateSql:
+          type: string
+    DataDiffEntry:
+      title: DataDiffEntry
+      type: object
+      required:
+      - changeType
+      - snapshotId
+      properties:
+        changeType:
+          type: string
+        snapshotId:
+          type: integer
+          format: int64
+        row:
+          type: array
+          items: {}
+        before:
+          type: array
+          items: {}
+        after:
+          type: array
+          items: {}
+    DataDiffResponse:
+      title: DataDiffResponse
+      type: object
+      required:
+      - schema
+      - table
+      - from
+      - to
+      - summary
+      - truncated
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        from:
+          type: integer
+          format: int64
+        to:
+          type: integer
+          format: int64
+        summary:
+          $ref: '#/components/schemas/DataDiffSummary'
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreviewColumn'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataDiffEntry'
+        nextCursor:
+          type: string
+        truncated:
+          type: boolean
+    DataDiffSummary:
+      title: DataDiffSummary
+      type: object
+      required:
+      - inserted
+      - deleted
+      - updated
+      properties:
+        inserted:
+          type: integer
+          format: int64
+        deleted:
+          type: integer
+          format: int64
+        updated:
+          type: integer
+          format: int64
+    DeleteColumnPolicyRequest:
+      title: DeleteColumnPolicyRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    DeletePoolRequest:
+      title: DeletePoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - force
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        force:
+          type: boolean
+    DeleteRowPolicyRequest:
+      title: DeleteRowPolicyRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    EffectivePermissionsResponse:
+      title: EffectivePermissionsResponse
+      type: object
+      required:
+      - user
+      properties:
+        user:
+          $ref: '#/components/schemas/UserResponse'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleResponse'
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupResponse'
+        pools:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolPermissionResponse'
+        tablePerms:
+          type: array
+          items:
+            $ref: '#/components/schemas/RolePermissionResponse'
+    ErrorResponse:
+      title: ErrorResponse
+      type: object
+      required:
+      - error
+      - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    FailedRestart:
+      title: FailedRestart
+      type: object
+      required:
+      - nodeId
+      - message
+      properties:
+        nodeId:
+          type: string
+        message:
+          type: string
+    FederatedSecretListResponse:
+      title: FederatedSecretListResponse
+      type: object
+      properties:
+        secrets:
+          type: array
+          items:
+            $ref: '#/components/schemas/FederatedSecretResponse'
+    FederatedSecretResponse:
+      title: FederatedSecretResponse
+      type: object
+      required:
+      - id
+      - federatedSourceId
+      - name
+      properties:
+        id:
+          type: string
+        federatedSourceId:
+          type: string
+        name:
+          type: string
+        value:
+          type: string
+        externalRef:
+          type: string
+    FederatedSecretUpsertRequest:
+      title: FederatedSecretUpsertRequest
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        externalRef:
+          type: string
+    FederatedSourceCreateRequest:
+      title: FederatedSourceCreateRequest
+      type: object
+      required:
+      - alias
+      - setupSql
+      - disabled
+      properties:
+        alias:
+          type: string
+        setupSql:
+          type: string
+        description:
+          type: string
+        disabled:
+          type: boolean
+    FederatedSourceListResponse:
+      title: FederatedSourceListResponse
+      type: object
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/FederatedSourceResponse'
+    FederatedSourceResponse:
+      title: FederatedSourceResponse
+      type: object
+      required:
+      - id
+      - tenantDbId
+      - alias
+      - setupSql
+      - disabled
+      properties:
+        id:
+          type: string
+        tenantDbId:
+          type: string
+        alias:
+          type: string
+        setupSql:
+          type: string
+        description:
+          type: string
+        disabled:
+          type: boolean
+    GroupCreateRequest:
+      title: GroupCreateRequest
+      type: object
+      required:
+      - tenant
+      - name
+      properties:
+        tenant:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+    GroupDeleteRequest:
+      title: GroupDeleteRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    GroupListResponse:
+      title: GroupListResponse
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupResponse'
+    GroupResponse:
+      title: GroupResponse
+      type: object
+      required:
+      - id
+      - tenantId
+      - name
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+    GroupRoleMembershipRequest:
+      title: GroupRoleMembershipRequest
+      type: object
+      required:
+      - groupId
+      - roleId
+      properties:
+        groupId:
+          type: string
+        roleId:
+          type: string
+    HealthResponse:
+      title: HealthResponse
+      type: object
+      required:
+      - status
+      - poolsCount
+      - nodesCount
+      properties:
+        status:
+          type: string
+        poolsCount:
+          type: integer
+          format: int32
+        nodesCount:
+          type: integer
+          format: int32
+    KillStatementRequest:
+      title: KillStatementRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    KillStatementResponse:
+      title: KillStatementResponse
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+    LoginRequest:
+      title: LoginRequest
+      type: object
+      required:
+      - username
+      - password
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        tenant:
+          type: string
+    LoginResponse:
+      title: LoginResponse
+      type: object
+      required:
+      - token
+      - username
+      - superuser
+      properties:
+        token:
+          type: string
+        username:
+          type: string
+        tenant:
+          type: string
+        superuser:
+          type: boolean
+        manageableTenants:
+          type: array
+          items:
+            type: string
+    MaintenanceEffectiveEntry:
+      title: MaintenanceEffectiveEntry
+      type: object
+      required:
+      - enabled
+      - retentionDays
+      - compactionEnabled
+      - targetFileSize
+      - smallFileMinCount
+      - rewriteDeleteThreshold
+      - cleanupGraceDays
+      - orphanMinAgeDays
+      - cron
+      properties:
+        enabled:
+          type: boolean
+        retentionDays:
+          type: integer
+          format: int32
+        compactionEnabled:
+          type: boolean
+        targetFileSize:
+          type: string
+        smallFileMinCount:
+          type: integer
+          format: int32
+        rewriteDeleteThreshold:
+          type: number
+          format: double
+        cleanupGraceDays:
+          type: integer
+          format: int32
+        orphanMinAgeDays:
+          type: integer
+          format: int32
+        cron:
+          type: string
+    MaintenancePolicyDeleteRequest:
+      title: MaintenancePolicyDeleteRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    MaintenancePolicyEntry:
+      title: MaintenancePolicyEntry
+      type: object
+      required:
+      - id
+      - tenant
+      - tenantDb
+      - scopeKind
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        scopeKind:
+          type: string
+        scopeSchema:
+          type: string
+        scopeTable:
+          type: string
+        enabled:
+          type: boolean
+        retentionDays:
+          type: integer
+          format: int32
+        compactionEnabled:
+          type: boolean
+        targetFileSize:
+          type: string
+        smallFileMinCount:
+          type: integer
+          format: int32
+        rewriteDeleteThreshold:
+          type: number
+          format: double
+        cleanupGraceDays:
+          type: integer
+          format: int32
+        orphanMinAgeDays:
+          type: integer
+          format: int32
+        cron:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    MaintenancePolicyListResponse:
+      title: MaintenancePolicyListResponse
+      type: object
+      required:
+      - effective
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenancePolicyEntry'
+        effective:
+          $ref: '#/components/schemas/MaintenanceEffectiveEntry'
+    MaintenancePolicyUpsertRequest:
+      title: MaintenancePolicyUpsertRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - scopeKind
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        scopeKind:
+          type: string
+        scopeSchema:
+          type: string
+        scopeTable:
+          type: string
+        enabled:
+          type: boolean
+        retentionDays:
+          type: integer
+          format: int32
+        compactionEnabled:
+          type: boolean
+        targetFileSize:
+          type: string
+        smallFileMinCount:
+          type: integer
+          format: int32
+        rewriteDeleteThreshold:
+          type: number
+          format: double
+        cleanupGraceDays:
+          type: integer
+          format: int32
+        orphanMinAgeDays:
+          type: integer
+          format: int32
+        cron:
+          type: string
+    MaintenanceRunEntry:
+      title: MaintenanceRunEntry
+      type: object
+      required:
+      - id
+      - tenant
+      - tenantDb
+      - scope
+      - trigger
+      - status
+      - queuedAt
+      - snapshotsExpired
+      - snapshotsSkippedPinned
+      - filesMerged
+      - filesRewritten
+      - filesCleaned
+      - orphansDeleted
+      - bytesReclaimed
+      properties:
+        id:
+          type: integer
+          format: int64
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        scope:
+          type: string
+        trigger:
+          type: string
+        operations:
+          type: string
+        status:
+          type: string
+        queuedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        heartbeatAt:
+          type: string
+          format: date-time
+        nodeId:
+          type: string
+        snapshotsExpired:
+          type: integer
+          format: int32
+        snapshotsSkippedPinned:
+          type: integer
+          format: int32
+        filesMerged:
+          type: integer
+          format: int32
+        filesRewritten:
+          type: integer
+          format: int32
+        filesCleaned:
+          type: integer
+          format: int32
+        orphansDeleted:
+          type: integer
+          format: int32
+        bytesReclaimed:
+          type: integer
+          format: int64
+        error:
+          type: string
+    MaintenanceRunRequest:
+      title: MaintenanceRunRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        scope:
+          type: string
+        operations:
+          type: string
+    MaintenanceRunResponse:
+      title: MaintenanceRunResponse
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: integer
+          format: int64
+    ManifestImportSummary:
+      title: ManifestImportSummary
+      type: object
+      required:
+      - tenants
+      - tenantDbs
+      - pools
+      - roles
+      - groups
+      - users
+      properties:
+        tenants:
+          type: integer
+          format: int32
+        tenantDbs:
+          type: integer
+          format: int32
+        pools:
+          type: integer
+          format: int32
+        roles:
+          type: integer
+          format: int32
+        groups:
+          type: integer
+          format: int32
+        users:
+          type: integer
+          format: int32
+    Map_String:
+      title: Map_String
+      type: object
+      additionalProperties:
+        type: string
+    NodeInfo:
+      title: NodeInfo
+      type: object
+      required:
+      - nodeId
+      - role
+      - host
+      - port
+      - maxConcurrent
+      - inFlight
+      - totalServed
+      - avgDurationMs
+      - p50Ms
+      - p95Ms
+      - p99Ms
+      - healthy
+      - draining
+      - quarantined
+      properties:
+        nodeId:
+          type: string
+        role:
+          type: string
+        host:
+          type: string
+        port:
+          type: integer
+          format: int32
+        maxConcurrent:
+          type: integer
+          format: int32
+        inFlight:
+          type: integer
+          format: int32
+        totalServed:
+          type: integer
+          format: int64
+        avgDurationMs:
+          type: number
+          format: double
+        p50Ms:
+          type: number
+          format: double
+        p95Ms:
+          type: number
+          format: double
+        p99Ms:
+          type: number
+          format: double
+        healthy:
+          type: boolean
+        draining:
+          type: boolean
+        quarantined:
+          type: boolean
+        duckdbMemoryBytes:
+          type: integer
+          format: int64
+        duckdbTempStorageBytes:
+          type: integer
+          format: int64
+        duckdbSpillFiles:
+          type: integer
+          format: int64
+        duckdbSpillBytes:
+          type: integer
+          format: int64
+    NodeOpRequest:
+      title: NodeOpRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - nodeId
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        nodeId:
+          type: string
+    NodePlacementDto:
+      title: NodePlacementDto
+      type: object
+      required:
+      - nodeSelector
+      properties:
+        nodeSelector:
+          $ref: '#/components/schemas/Map_String'
+        tolerations:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeTolerationDto'
+    NodeTolerationDto:
+      title: NodeTolerationDto
+      type: object
+      required:
+      - key
+      - operator
+      properties:
+        key:
+          type: string
+        operator:
+          type: string
+        value:
+          type: string
+        effect:
+          type: string
+    PoolCohortDto:
+      title: PoolCohortDto
+      type: object
+      required:
+      - placement
+      - distribution
+      properties:
+        placement:
+          $ref: '#/components/schemas/NodePlacementDto'
+        distribution:
+          $ref: '#/components/schemas/RoleDistribution'
+    PoolListResponse:
+      title: PoolListResponse
+      type: object
+      properties:
+        pools:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolResponse'
+    PoolPermissionGrantRequest:
+      title: PoolPermissionGrantRequest
+      type: object
+      required:
+      - tenant
+      properties:
+        tenant:
+          type: string
+        poolId:
+          type: string
+        userId:
+          type: string
+        groupId:
+          type: string
+    PoolPermissionListResponse:
+      title: PoolPermissionListResponse
+      type: object
+      properties:
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolPermissionResponse'
+    PoolPermissionResponse:
+      title: PoolPermissionResponse
+      type: object
+      required:
+      - id
+      - tenantId
+      - grantedAt
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        poolId:
+          type: string
+        userId:
+          type: string
+        groupId:
+          type: string
+        grantedAt:
+          type: string
+    PoolPermissionRevokeRequest:
+      title: PoolPermissionRevokeRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    PoolResponse:
+      title: PoolResponse
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - status
+      - metastore
+      - disabled
+      - suspended
+      - id
+      - initSql
+      - cpu
+      - memory
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeInfo'
+        status:
+          type: string
+        metastore:
+          $ref: '#/components/schemas/Map_String'
+        disabled:
+          type: boolean
+        suspended:
+          type: boolean
+        id:
+          type: string
+        cohorts:
+          type: array
+          items:
+            $ref: '#/components/schemas/PoolCohortDto'
+        initSql:
+          type: string
+        cpu:
+          type: string
+        memory:
+          type: string
+    PreviewColumn:
+      title: PreviewColumn
+      type: object
+      required:
+      - name
+      - dataType
+      properties:
+        name:
+          type: string
+        dataType:
+          type: string
+    PreviewResponse:
+      title: PreviewResponse
+      type: object
+      required:
+      - truncated
+      properties:
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreviewColumn'
+        rows:
+          type: array
+          items:
+            type: array
+            items: {}
+        snapshotId:
+          type: integer
+          format: int64
+        truncated:
+          type: boolean
+    RecoverableListResponse:
+      title: RecoverableListResponse
+      type: object
+      properties:
+        tables:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecoverableTableEntry'
+    RecoverableTableEntry:
+      title: RecoverableTableEntry
+      type: object
+      required:
+      - schema
+      - table
+      - droppedAtSnapshot
+      - lastLiveSnapshot
+      - recoverable
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        droppedAtSnapshot:
+          type: integer
+          format: int64
+        lastLiveSnapshot:
+          type: integer
+          format: int64
+        droppedAt:
+          type: string
+        recoverable:
+          type: boolean
+    RestoreRequest:
+      title: RestoreRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - schema
+      - table
+      - to
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        to:
+          type: string
+        dryRun:
+          type: boolean
+        expectedCurrentSnapshot:
+          type: integer
+          format: int64
+    RestoreResponse:
+      title: RestoreResponse
+      type: object
+      required:
+      - schema
+      - table
+      - toSnapshot
+      - currentSnapshot
+      - dryRun
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        toSnapshot:
+          type: integer
+          format: int64
+        currentSnapshot:
+          type: integer
+          format: int64
+        summary:
+          $ref: '#/components/schemas/DataDiffSummary'
+        newSnapshot:
+          type: integer
+          format: int64
+        dryRun:
+          type: boolean
+    ResumePoolRequest:
+      title: ResumePoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+    RoleCreateRequest:
+      title: RoleCreateRequest
+      type: object
+      required:
+      - tenant
+      - name
+      properties:
+        tenant:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+    RoleDeleteRequest:
+      title: RoleDeleteRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    RoleDistribution:
+      title: RoleDistribution
+      type: object
+      required:
+      - writeonly
+      - readonly
+      - dual
+      properties:
+        writeonly:
+          type: integer
+          format: int32
+        readonly:
+          type: integer
+          format: int32
+        dual:
+          type: integer
+          format: int32
+    RoleListResponse:
+      title: RoleListResponse
+      type: object
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleResponse'
+    RolePermissionGrantRequest:
+      title: RolePermissionGrantRequest
+      type: object
+      required:
+      - roleId
+      - catalog
+      - schema
+      - table
+      - verb
+      properties:
+        roleId:
+          type: string
+        catalog:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        verb:
+          type: string
+    RolePermissionListResponse:
+      title: RolePermissionListResponse
+      type: object
+      properties:
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RolePermissionResponse'
+    RolePermissionResponse:
+      title: RolePermissionResponse
+      type: object
+      required:
+      - id
+      - roleId
+      - catalogName
+      - schemaName
+      - tableName
+      - verb
+      - grantedAt
+      properties:
+        id:
+          type: string
+        roleId:
+          type: string
+        catalogName:
+          type: string
+        schemaName:
+          type: string
+        tableName:
+          type: string
+        verb:
+          type: string
+        grantedAt:
+          type: string
+    RolePermissionRevokeRequest:
+      title: RolePermissionRevokeRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    RoleResponse:
+      title: RoleResponse
+      type: object
+      required:
+      - id
+      - tenantId
+      - name
+      - createdAt
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        createdAt:
+          type: string
+    RowPolicyDto:
+      title: RowPolicyDto
+      type: object
+      required:
+      - id
+      - roleId
+      - catalogName
+      - schemaName
+      - tableName
+      - predicateSql
+      properties:
+        id:
+          type: string
+        roleId:
+          type: string
+        catalogName:
+          type: string
+        schemaName:
+          type: string
+        tableName:
+          type: string
+        predicateSql:
+          type: string
+    RowPolicyListResponse:
+      title: RowPolicyListResponse
+      type: object
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/RowPolicyDto'
+    ScalePoolRequest:
+      title: ScalePoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - targetSize
+      - roleDistribution
+      - force
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        targetSize:
+          type: integer
+          format: int32
+        roleDistribution:
+          $ref: '#/components/schemas/RoleDistribution'
+        force:
+          type: boolean
+    SchemaDiffColumnType:
+      title: SchemaDiffColumnType
+      type: object
+      required:
+      - column
+      - fromType
+      - toType
+      properties:
+        column:
+          type: string
+        fromType:
+          type: string
+        toType:
+          type: string
+    SchemaDiffNullability:
+      title: SchemaDiffNullability
+      type: object
+      required:
+      - column
+      - fromNullable
+      - toNullable
+      properties:
+        column:
+          type: string
+        fromNullable:
+          type: boolean
+        toNullable:
+          type: boolean
+    SchemaDiffResponse:
+      title: SchemaDiffResponse
+      type: object
+      required:
+      - from
+      - to
+      properties:
+        from:
+          type: integer
+          format: int64
+        to:
+          type: integer
+          format: int64
+        added:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogColumnEntry'
+        removed:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogColumnEntry'
+        typeChanged:
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaDiffColumnType'
+        nullabilityChanged:
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaDiffNullability'
+    SetMaxConcurrentRequest:
+      title: SetMaxConcurrentRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - nodeId
+      - max
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        nodeId:
+          type: string
+        max:
+          type: integer
+          format: int32
+    SetPoolDisabledRequest:
+      title: SetPoolDisabledRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - disabled
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        disabled:
+          type: boolean
+    SetPoolResourcesRequest:
+      title: SetPoolResourcesRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - cpu
+      - memory
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        cpu:
+          type: string
+        memory:
+          type: string
+    SetPoolTemplateRequest:
+      title: SetPoolTemplateRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - podTemplateYaml
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        podTemplateYaml:
+          type: string
+    SetTenantAuthRequest:
+      title: SetTenantAuthRequest
+      type: object
+      required:
+      - name
+      - authProvider
+      - authConfig
+      properties:
+        name:
+          type: string
+        authProvider:
+          type: string
+        authConfig:
+          $ref: '#/components/schemas/Map_String'
+    SetTenantDisabledRequest:
+      title: SetTenantDisabledRequest
+      type: object
+      required:
+      - name
+      - disabled
+      properties:
+        name:
+          type: string
+        disabled:
+          type: boolean
+    StatementHistoryEntry:
+      title: StatementHistoryEntry
+      type: object
+      required:
+      - ts
+      - user
+      - tenant
+      - pool
+      - nodeId
+      - sql
+      - durationMs
+      - status
+      properties:
+        ts:
+          type: string
+        user:
+          type: string
+        tenant:
+          type: string
+        pool:
+          type: string
+        nodeId:
+          type: string
+        sql:
+          type: string
+        durationMs:
+          type: integer
+          format: int64
+        status:
+          type: string
+        error:
+          type: string
+        prepareDurationMs:
+          type: integer
+          format: int64
+    StatementHistoryResponse:
+      title: StatementHistoryResponse
+      type: object
+      properties:
+        statements:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatementHistoryEntry'
+    StatementHistoryRowEntry:
+      title: StatementHistoryRowEntry
+      type: object
+      required:
+      - id
+      - ts
+      - username
+      - tenant
+      - pool
+      - nodeId
+      - sql
+      - durationMs
+      - status
+      properties:
+        id:
+          type: string
+        ts:
+          type: string
+        username:
+          type: string
+        tenant:
+          type: string
+        pool:
+          type: string
+        nodeId:
+          type: string
+        sql:
+          type: string
+        durationMs:
+          type: integer
+          format: int64
+        prepareMs:
+          type: integer
+          format: int64
+        status:
+          type: string
+        error:
+          type: string
+    StatementSearchResponse:
+      title: StatementSearchResponse
+      type: object
+      properties:
+        statements:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatementHistoryRowEntry'
+        nextBefore:
+          type: string
+    StopPoolRequest:
+      title: StopPoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - force
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        force:
+          type: boolean
+    SuspendPoolRequest:
+      title: SuspendPoolRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+    TagCreateRequest:
+      title: TagCreateRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - name
+      - snapshotId
+      - isProtected
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        name:
+          type: string
+        snapshotId:
+          type: integer
+          format: int64
+        isProtected:
+          type: boolean
+    TagDeleteRequest:
+      title: TagDeleteRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - name
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        name:
+          type: string
+    TagProtectRequest:
+      title: TagProtectRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - name
+      - isProtected
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        name:
+          type: string
+        isProtected:
+          type: boolean
+    TenantDbListResponse:
+      title: TenantDbListResponse
+      type: object
+      properties:
+        tenantDbs:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantDbResponse'
+    TenantDbOpRequest:
+      title: TenantDbOpRequest
+      type: object
+      required:
+      - tenant
+      - name
+      properties:
+        tenant:
+          type: string
+        name:
+          type: string
+    TenantDbRequest:
+      title: TenantDbRequest
+      type: object
+      required:
+      - tenant
+      - name
+      - kind
+      - metastore
+      - dataPath
+      - objectStore
+      - initSql
+      properties:
+        tenant:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        metastore:
+          $ref: '#/components/schemas/Map_String'
+        dataPath:
+          type: string
+        objectStore:
+          $ref: '#/components/schemas/Map_String'
+        defaultDatabase:
+          type: string
+        defaultSchema:
+          type: string
+        initSql:
+          type: string
+    TenantDbResponse:
+      title: TenantDbResponse
+      type: object
+      required:
+      - id
+      - tenant
+      - name
+      - kind
+      - metastore
+      - dataPath
+      - objectStore
+      - disabled
+      - federatedSourceCount
+      - initSql
+      - effectiveDataPath
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        metastore:
+          $ref: '#/components/schemas/Map_String'
+        dataPath:
+          type: string
+        objectStore:
+          $ref: '#/components/schemas/Map_String'
+        defaultDatabase:
+          type: string
+        defaultSchema:
+          type: string
+        disabled:
+          type: boolean
+        federatedSourceCount:
+          type: integer
+          format: int32
+        initSql:
+          type: string
+        effectiveDataPath:
+          type: string
+        tableCount:
+          type: integer
+          format: int32
+    TenantListResponse:
+      title: TenantListResponse
+      type: object
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantResponse'
+    TenantOpRequest:
+      title: TenantOpRequest
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+    TenantRequest:
+      title: TenantRequest
+      type: object
+      required:
+      - id
+      - displayName
+      - authProvider
+      - authConfig
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        authProvider:
+          type: string
+        authConfig:
+          $ref: '#/components/schemas/Map_String'
+    TenantResponse:
+      title: TenantResponse
+      type: object
+      required:
+      - name
+      - id
+      - displayName
+      - disabled
+      - authProvider
+      - authConfig
+      properties:
+        name:
+          type: string
+        id:
+          type: string
+        displayName:
+          type: string
+        pools:
+          type: array
+          items:
+            type: string
+        disabled:
+          type: boolean
+        authProvider:
+          type: string
+        authConfig:
+          $ref: '#/components/schemas/Map_String'
+    TrendBucketEntry:
+      title: TrendBucketEntry
+      type: object
+      required:
+      - bucketStart
+      - tenant
+      - pool
+      - username
+      - stmtCount
+      - errorCount
+      - deniedCount
+      - engineMsSum
+      properties:
+        bucketStart:
+          type: string
+        tenant:
+          type: string
+        pool:
+          type: string
+        username:
+          type: string
+        stmtCount:
+          type: integer
+          format: int64
+        errorCount:
+          type: integer
+          format: int64
+        deniedCount:
+          type: integer
+          format: int64
+        engineMsSum:
+          type: integer
+          format: int64
+        p50Ms:
+          type: number
+          format: double
+        p95Ms:
+          type: number
+          format: double
+        p99Ms:
+          type: number
+          format: double
+    TrendsResponse:
+      title: TrendsResponse
+      type: object
+      properties:
+        buckets:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrendBucketEntry'
+    UndropRequest:
+      title: UndropRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - schema
+      - table
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        asName:
+          type: string
+        fromSnapshot:
+          type: integer
+          format: int64
+    UndropResponse:
+      title: UndropResponse
+      type: object
+      required:
+      - schema
+      - table
+      - restoredAs
+      - fromSnapshot
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        restoredAs:
+          type: string
+        fromSnapshot:
+          type: integer
+          format: int64
+    UpdateColumnPolicyRequest:
+      title: UpdateColumnPolicyRequest
+      type: object
+      required:
+      - id
+      - action
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+        transformSql:
+          type: string
+    UpdateRowPolicyRequest:
+      title: UpdateRowPolicyRequest
+      type: object
+      required:
+      - id
+      - predicateSql
+      properties:
+        id:
+          type: string
+        predicateSql:
+          type: string
+    UpdateTenantDbRequest:
+      title: UpdateTenantDbRequest
+      type: object
+      required:
+      - tenant
+      - name
+      properties:
+        tenant:
+          type: string
+        name:
+          type: string
+        metastore:
+          $ref: '#/components/schemas/Map_String'
+        objectStore:
+          $ref: '#/components/schemas/Map_String'
+        defaultDatabase:
+          type: string
+        defaultSchema:
+          type: string
+        initSql:
+          type: string
+    UpdateTenantDbResponse:
+      title: UpdateTenantDbResponse
+      type: object
+      required:
+      - db
+      properties:
+        db:
+          $ref: '#/components/schemas/TenantDbResponse'
+        restartedNodes:
+          type: array
+          items:
+            type: string
+        failedRestarts:
+          type: array
+          items:
+            $ref: '#/components/schemas/FailedRestart'
+    UsageDayEntry:
+      title: UsageDayEntry
+      type: object
+      required:
+      - day
+      - statements
+      - errors
+      - engineMs
+      properties:
+        day:
+          type: string
+        statements:
+          type: integer
+          format: int64
+        errors:
+          type: integer
+          format: int64
+        engineMs:
+          type: integer
+          format: int64
+    UsageGroupEntry:
+      title: UsageGroupEntry
+      type: object
+      required:
+      - tenant
+      - statements
+      - errors
+      - denied
+      - engineMs
+      properties:
+        tenant:
+          type: string
+        pool:
+          type: string
+        username:
+          type: string
+        statements:
+          type: integer
+          format: int64
+        errors:
+          type: integer
+          format: int64
+        denied:
+          type: integer
+          format: int64
+        engineMs:
+          type: integer
+          format: int64
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageDayEntry'
+    UsageResponse:
+      title: UsageResponse
+      type: object
+      required:
+      - from
+      - to
+      - groupBy
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        groupBy:
+          type: string
+        dataStart:
+          type: string
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageGroupEntry'
+    UserCreateRequest:
+      title: UserCreateRequest
+      type: object
+      required:
+      - username
+      - password
+      - role
+      properties:
+        tenant:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        role:
+          type: string
+    UserDeleteRequest:
+      title: UserDeleteRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+    UserGroupMembershipRequest:
+      title: UserGroupMembershipRequest
+      type: object
+      required:
+      - userId
+      - groupId
+      properties:
+        userId:
+          type: string
+        groupId:
+          type: string
+    UserListResponse:
+      title: UserListResponse
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserResponse'
+    UserResponse:
+      title: UserResponse
+      type: object
+      required:
+      - id
+      - username
+      - role
+      - enabled
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        username:
+          type: string
+        role:
+          type: string
+        enabled:
+          type: boolean
+        roles:
+          type: array
+          items:
+            type: string
+        groups:
+          type: array
+          items:
+            type: string
+        poolGrants:
+          type: array
+          items:
+            type: string
+    UserRoleMembershipRequest:
+      title: UserRoleMembershipRequest
+      type: object
+      required:
+      - userId
+      - roleId
+      properties:
+        userId:
+          type: string
+        roleId:
+          type: string
+    UserUpdateRequest:
+      title: UserUpdateRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        password:
+          type: string
+        role:
+          type: string
+    WhoamiResponse:
+      title: WhoamiResponse
+      type: object
+      required:
+      - username
+      - role
+      - superuser
+      properties:
+        username:
+          type: string
+        role:
+          type: string
+        tenant:
+          type: string
+        superuser:
+          type: boolean
+        manageableTenants:
+          type: array
+          items:
+            type: string
