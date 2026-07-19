@@ -57,6 +57,12 @@
   `QOD_API_KEY`, dev-default `QOD_SESSION_JWT_SECRET`) are logged at ERROR so
   they survive the quiet default.
 
+- **Operator boot banner.** The manager always prints (stdout, regardless of
+  log level) the control-plane Postgres URL it is about to use, refuses to
+  start with a clear message when that Postgres is unreachable, and once both
+  listeners are up prints a copy-pasteable banner with the REST/UI URL, the
+  FlightSQL endpoint, and ready-made JDBC, ADBC, and ODBC connection strings.
+
 ### Fixes
 
 - The bundled demo loader script (`_load-common.sh`) is re-synced with the

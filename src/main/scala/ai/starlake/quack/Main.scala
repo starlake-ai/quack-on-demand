@@ -217,6 +217,15 @@ object Main extends IOApp with LazyLogging:
     // Apply the Liquibase changelog first: `qodstate_user` (and the rest
     // of the control plane) must exist before we upsert the admin row.
     // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+    // Operator preflight: always print the control-plane Postgres URL and refuse
+    // to start when it is unreachable, with a clear message instead of a raw
+    // JDBC stack trace from the Liquibase apply below.
+    Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
+      case Left(message) =>
+        println(message)
+        sys.exit(1)
+      case Right(()) => ()
+
     LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
@@ -1420,6 +1429,18 @@ object Main extends IOApp with LazyLogging:
             edgeIO.attempt.flatMap {
               case Right(edge) =>
                 logger.info("edge FlightSQL started")
+                // Operator banner: stdout, unconditional (default log level is
+                // ERROR); printed only once both listeners are actually up.
+                println(
+                  Banner.startup(
+                    mgrCfg.defaultMetastore.asMap,
+                    mgrCfg.host,
+                    mgrCfg.port,
+                    edgeCfg.host,
+                    edgeCfg.port,
+                    edgeCfg.tlsEnabled
+                  )
+                )
                 // Belt-and-braces JVM shutdown hook: when the JVM is told
                 // to exit (SIGTERM in containers; user Ctrl-C at the
                 // terminal) we want every spawned child Quack node killed
