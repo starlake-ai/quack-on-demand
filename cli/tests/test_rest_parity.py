@@ -1,6 +1,6 @@
 """Parity gate: every REST operation in the generated OpenAPI document must be
-reachable from the CLI with every parameter. xfail until the catch-up completes
-(remove the marker in the final parity task; it must never return)."""
+reachable from the CLI with every parameter. Gate is strict; add exclusions
+only with justification."""
 
 from pathlib import Path
 
@@ -23,7 +23,6 @@ EXCLUSIONS = {
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"
 
 
-@pytest.mark.xfail(strict=False, reason="catch-up in progress; flips strict in the final parity task")
 def test_cli_covers_every_rest_operation():
     assert OPENAPI.exists(), (
         f"{OPENAPI} missing; run "

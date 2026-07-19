@@ -300,6 +300,40 @@ for the full flag list of any command.
 | `statements` | List past statements with filters. |
 | `trends` | Aggregate statement trends over time. |
 
+## REST parity gate
+
+Every REST operation published in the generated OpenAPI specification must be
+reachable from the CLI with every parameter. A parity test (strict, no exceptions
+beyond documented exclusions) checks this after every build.
+
+**How it works:** The test loads `cli/tests/resources/openapi.yaml` (regenerated
+from the Scala manager source), extracts every HTTP method/path pair, and
+compares it against the CLI's REGISTRY (all commands with their flags). Gaps are
+reported as missing commands or missing parameters on existing commands.
+
+**How to add a command:** Mark the command verb with `@covers(...)` on the
+`Group`-level enum variant that contains it. Each nested verb gets one
+`@covers(method, path)` entry. Parameters are matched by name; descriptive
+value strings (e.g., `"(prompted)"` for the login password,
+`"(computed from the dry-run response, gated by --yes)"`) are allowed in
+`@covers` to document params whose flag value is not a plain boolean - the gate
+compares **keys only**, so these annotations don't affect the test.
+
+**How to justify an exclusion:** Some REST endpoints are not CLI-reachable by
+design (e.g., OIDC redirect targets). Add them to the `EXCLUSIONS` set in
+`cli/tests/test_rest_parity.py` with an inline comment explaining why.
+
+**Keeping the inventory current:** The OpenAPI contract copy lives at
+`cli/tests/resources/openapi.yaml`, regenerated via:
+
+```bash
+sbt "runMain ai.starlake.quack.docs.GenOpenApi cli/tests/resources/openapi.yaml <version>"
+```
+
+A Scala test (`OpenApiFreshnessSpec`) ensures this file stays in sync with the
+manager source; commit both the `@covers` markers and the regenerated YAML file
+when adding or changing commands.
+
 ## Output
 
 Human-readable Rich tables are the default. Pass `--json` (a top-level flag,
