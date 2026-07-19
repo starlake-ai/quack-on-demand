@@ -112,15 +112,13 @@ libquackwire/binaries/
 # be stale relative to the published Maven coord; ignore them.
 src/main/resources/native/
 
-# Docs site (Docusaurus). The build/dependency outputs are produced by
-# `npm run build` in CI, so they are never committed (kept in sync with the
-# code, not the tree). website/static/openapi.yaml is the exception: the
-# CLI/REST parity feature (2026-07) treats the committed file as ground
-# truth for a coverage gate, so it is regenerated via `sbt genOpenApi` and
-# pinned fresh by OpenApiFreshnessSpec instead of being ignored.
+# Docs site (Docusaurus). The build, dependency, and generated-reference
+# outputs are produced by `sbt genConfigDocs genOpenApi` + `npm run build`
+# in CI, so they are never committed (kept in sync with the code, not the tree).
 website/node_modules/
 website/build/
 website/.docusaurus/
+website/static/openapi.yaml
 src/main/scala/ai/starlake/quack/edge/.metals-scala-cli
 screens
 .venv-release/

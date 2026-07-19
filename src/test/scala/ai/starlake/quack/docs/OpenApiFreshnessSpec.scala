@@ -7,9 +7,12 @@ import java.nio.file.{Files, Paths}
 
 class OpenApiFreshnessSpec extends AnyFlatSpec with Matchers:
 
-  "website/static/openapi.yaml" should "match the current Tapir endpoint definitions" in {
-    val path = Paths.get("website/static/openapi.yaml")
-    withClue("committed OpenAPI missing; run `sbt genOpenApi` and commit: ") {
+  private val regenHint =
+    "run `sbt \"runMain ai.starlake.quack.docs.GenOpenApi cli/tests/resources/openapi.yaml <version>\"` and commit: "
+
+  "cli/tests/resources/openapi.yaml" should "match the current Tapir endpoint definitions" in {
+    val path = Paths.get("cli/tests/resources/openapi.yaml")
+    withClue(s"committed OpenAPI contract copy missing; $regenHint") {
       Files.exists(path) shouldBe true
     }
     val committed = Files.readString(path)
@@ -20,7 +23,7 @@ class OpenApiFreshnessSpec extends AnyFlatSpec with Matchers:
       }
       .getOrElse("0.0.0")
     val fresh = GenOpenApi.render(version)
-    withClue("website/static/openapi.yaml is stale; run `sbt genOpenApi` and commit: ") {
+    withClue(s"cli/tests/resources/openapi.yaml is stale; $regenHint") {
       committed shouldBe fresh
     }
   }
