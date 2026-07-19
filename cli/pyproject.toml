@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "respx>=0.21"]
+dev = ["pytest>=8.0", "respx>=0.21", "pyyaml>=6.0"]
 
 [project.scripts]
 qod = "qod_cli.main:main"
