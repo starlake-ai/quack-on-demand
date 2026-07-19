@@ -88,7 +88,10 @@ def create(
             parts = spec.split(",")
             if len(parts) != 3:
                 raise typer.BadParameter(f"expected writeonly,readonly,dual, got {spec!r}")
-            w, r, d = (int(p) for p in parts)
+            try:
+                w, r, d = (int(p) for p in parts)
+            except ValueError:
+                raise typer.BadParameter(f"cohort must be three integers: writeonly,readonly,dual (got: {spec!r})")
             cohorts.append(
                 {
                     "placement": {"nodeSelector": {}, "tolerations": []},

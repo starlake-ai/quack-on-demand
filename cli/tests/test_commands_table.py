@@ -447,3 +447,22 @@ def test_command(runner, argv, method, path, expected_params, expected_body):
         assert request.content == b""
     else:
         assert json.loads(request.content) == expected_body
+
+
+@respx.mock
+def test_pool_create_cohort_malformed(runner):
+    """Test that malformed cohort values (non-numeric) raise clean BadParameter."""
+    respx.route(method="POST", url=f"{BASE}/api/pool/create").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    result = runner.invoke(
+        app,
+        [
+            "pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+            "--size", "2", "--writeonly", "1", "--readonly", "1", "--dual", "0",
+            "--cohort", "1,x,0",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cohort must be three integers: writeonly,readonly,dual" in result.output
+    assert "1,x,0" in result.output
