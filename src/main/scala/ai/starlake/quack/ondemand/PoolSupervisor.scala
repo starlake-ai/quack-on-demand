@@ -113,6 +113,34 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
+  /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
+    * zero-module boots and in every existing test, so default behavior is unchanged.
+    */
+  @volatile private var mutationGates: List[ai.starlake.quack.spi.MutationGate] = Nil
+
+  def setMutationGates(gates: List[ai.starlake.quack.spi.MutationGate]): Unit =
+    mutationGates = gates
+
+  /** First Left wins. A throwing gate refuses (fail closed): a broken quota store must not grant
+    * unlimited provisioning. gateBypass short-circuits (superuser / static-key callers).
+    */
+  private def gateCheck(
+      m: ai.starlake.quack.spi.StructureMutation,
+      bypass: Boolean
+  ): IO[Either[String, Unit]] =
+    if bypass || mutationGates.isEmpty then IO.pure(Right(()))
+    else
+      mutationGates.foldLeft(IO.pure(Right(()): Either[String, Unit])) { (acc, g) =>
+        acc.flatMap {
+          case l @ Left(_) => IO.pure(l)
+          case Right(())   =>
+            g.check(m).attempt.map {
+              case Left(t)  => Left(s"gate error: ${t.getMessage}")
+              case Right(r) => r
+            }
+        }
+      }
+
   /** In-memory mirror of the RBAC slice of the snapshot. The REST handlers and the FlightSQL
     * handshake gates read effective sets from here without re-joining qodstate_role /
     * qodstate_group on every call. Rebuilt from the store snapshot at `restore()` and updated
@@ -868,83 +896,97 @@ final class PoolSupervisor(
       objectStore: Map[String, String] = Map.empty,
       defaultDatabase: Option[String] = None,
       defaultSchema: Option[String] = None,
-      initSql: String = ""
-  ): IO[Either[SupervisorError, TenantDb]] = IO.blocking {
-    withCacheRecovery("createTenantDb") {
-      Names.normalizeTenantDbName(tenantName, suffix) match
-        case Left(err)   => Left(SupervisorError.InvalidName(err))
-        case Right(full) =>
-          val tn = tenantName.toLowerCase
-          getTenant(tn) match
-            case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
-            case Some(t) if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
-              Left(
-                SupervisorError.AlreadyExists(s"tenant-db '$full' already exists in tenant '$tn'")
-              )
-            case Some(t) =>
-              // Per-kind config preparation. DuckLake auto-injects dbName and
-              // pre-provisions the Postgres database + DuckLake metadata tables.
-              // DuckDbFile and InMemory skip both: a file-backed catalog needs no
-              // Postgres tables, and an in-memory catalog has no persistence at
-              // all.
-              val effectiveMeta = kind match
-                case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
-                case TenantDbKind.DuckDbFile => metastore
-                case TenantDbKind.InMemory   => metastore
+      initSql: String = "",
+      gateBypass: Boolean = false
+  ): IO[Either[SupervisorError, TenantDb]] =
+    gateCheck(
+      ai.starlake.quack.spi.StructureMutation.CreateTenantDb(tenantName.toLowerCase),
+      gateBypass
+    ).flatMap {
+      case Left(reason) => IO.pure(Left(SupervisorError.QuotaExceeded(reason)))
+      case Right(())    =>
+        IO.blocking {
+          withCacheRecovery("createTenantDb") {
+            Names.normalizeTenantDbName(tenantName, suffix) match
+              case Left(err)   => Left(SupervisorError.InvalidName(err))
+              case Right(full) =>
+                val tn = tenantName.toLowerCase
+                getTenant(tn) match
+                  case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
+                  case Some(t)
+                      if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
+                    Left(
+                      SupervisorError.AlreadyExists(
+                        s"tenant-db '$full' already exists in tenant '$tn'"
+                      )
+                    )
+                  case Some(t) =>
+                    // Per-kind config preparation. DuckLake auto-injects dbName and
+                    // pre-provisions the Postgres database + DuckLake metadata tables.
+                    // DuckDbFile and InMemory skip both: a file-backed catalog needs no
+                    // Postgres tables, and an in-memory catalog has no persistence at
+                    // all.
+                    val effectiveMeta = kind match
+                      case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
+                      case TenantDbKind.DuckDbFile => metastore
+                      case TenantDbKind.InMemory   => metastore
 
-              val td = TenantDb(
-                id = newId("td"),
-                tenantId = t.id,
-                name = full,
-                kind = kind,
-                metastore = effectiveMeta,
-                dataPath = dataPath,
-                objectStore = objectStore,
-                defaultDatabase = defaultDatabase,
-                defaultSchema = defaultSchema,
-                initSql = initSql
-              )
+                    val td = TenantDb(
+                      id = newId("td"),
+                      tenantId = t.id,
+                      name = full,
+                      kind = kind,
+                      metastore = effectiveMeta,
+                      dataPath = dataPath,
+                      objectStore = objectStore,
+                      defaultDatabase = defaultDatabase,
+                      defaultSchema = defaultSchema,
+                      initSql = initSql
+                    )
 
-              TenantDb.validate(td) match
-                case Some(msg) =>
-                  Left(SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg"))
-                case None =>
-                  kind match
-                    case TenantDbKind.DuckLake =>
-                      dbAdmin.createDatabase(full) match
-                        case Left(err) =>
-                          Left(
-                            SupervisorError.Internal(
-                              s"failed to provision Postgres database '$full': $err"
-                            )
-                          )
-                        case Right(_) =>
-                          // Pre-init the ducklake_* metadata tables in the fresh
-                          // tenant-db Postgres so the first batch of pool nodes
-                          // doesn't race on `CREATE TABLE __ducklake_metadata`.
-                          try
-                            DuckLakeInitializer.initBlocking(
-                              effectiveMeta.updated("dataPath", dataPath)
-                            )
-                          catch
-                            case t: Throwable =>
-                              logger.warn(
-                                s"createTenantDb: DuckLake pre-init for '$full' failed; " +
-                                  s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
-                              )
-                          store.upsertTenantDb(td)
-                          tenantDbs.put(td.id, td)
-                          publish.topologyChanged()
-                          events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
-                          Right(td)
-                    case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
-                      store.upsertTenantDb(td)
-                      tenantDbs.put(td.id, td)
-                      publish.topologyChanged()
-                      events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
-                      Right(td)
+                    TenantDb.validate(td) match
+                      case Some(msg) =>
+                        Left(
+                          SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg")
+                        )
+                      case None =>
+                        kind match
+                          case TenantDbKind.DuckLake =>
+                            dbAdmin.createDatabase(full) match
+                              case Left(err) =>
+                                Left(
+                                  SupervisorError.Internal(
+                                    s"failed to provision Postgres database '$full': $err"
+                                  )
+                                )
+                              case Right(_) =>
+                                // Pre-init the ducklake_* metadata tables in the fresh
+                                // tenant-db Postgres so the first batch of pool nodes
+                                // doesn't race on `CREATE TABLE __ducklake_metadata`.
+                                try
+                                  DuckLakeInitializer.initBlocking(
+                                    effectiveMeta.updated("dataPath", dataPath)
+                                  )
+                                catch
+                                  case t: Throwable =>
+                                    logger.warn(
+                                      s"createTenantDb: DuckLake pre-init for '$full' failed; " +
+                                        s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
+                                    )
+                                store.upsertTenantDb(td)
+                                tenantDbs.put(td.id, td)
+                                publish.topologyChanged()
+                                events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
+                                Right(td)
+                          case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
+                            store.upsertTenantDb(td)
+                            tenantDbs.put(td.id, td)
+                            publish.topologyChanged()
+                            events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
+                            Right(td)
+          }
+        }
     }
-  }
 
   def deleteTenantDb(tenantName: String, tenantDbName: String): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
@@ -1128,151 +1170,164 @@ final class PoolSupervisor(
       initSql: String = "",
       cpu: String = "",
       memory: String = "",
-      podTemplateYaml: String = ""
-  ): IO[List[RunningNode]] = locks.withLock(key)(withCacheRecoveryIO("createPool")(IO.defer {
-    val size = dist.total
-    require(
-      dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
-      s"role distribution must be non-negative: $dist"
-    )
-    require(size > 0, s"role distribution must sum to at least 1: $dist")
-    require(dist.isValidFor(size), s"role distribution does not sum to $size")
-    // Cohorts are always persisted as authored so a pool defined on
-    // local can be exported and replayed on K8s with placement intact.
-    // The K8s backend reads `NodeSpec.placement`; local backends ignore
-    // it -- the UI already shows a warning before the operator submits.
-    if cohorts.nonEmpty && !backend.supportsPlacement then
-      logger.info(
-        s"backend ${backend.getClass.getSimpleName} does not honor node placement; " +
-          s"persisting ${cohorts.size} cohort(s) for pool $key but they will be " +
-          "ignored at runtime"
-      )
-    // When cohorts are provided, the per-cohort distributions must sum
-    // back to `dist`. Reject mismatches up-front so the persisted
-    // `qodstate_pool` row never disagrees with the spawned nodes.
-    cohorts.foreach { c =>
-      require(
-        c.distribution.writeonly >= 0 && c.distribution.readonly >= 0 && c.distribution.dual >= 0,
-        s"cohort distribution must be non-negative: ${c.distribution}"
-      )
-    }
-    if cohorts.nonEmpty then
-      val summed = cohorts.map(_.distribution).foldLeft(RoleDistribution(0, 0, 0)) { (a, b) =>
-        RoleDistribution(a.writeonly + b.writeonly, a.readonly + b.readonly, a.dual + b.dual)
-      }
-      require(summed == dist, s"cohort distributions sum to $summed but pool distribution is $dist")
-
-    findTenantDb(key.tenant, key.tenantDb) match
-      case None =>
-        IO.raiseError(
-          new IllegalStateException(
-            s"tenant-db '${key.tenant}/${key.tenantDb}' not found; create it first"
+      podTemplateYaml: String = "",
+      gateBypass: Boolean = false
+  ): IO[List[RunningNode]] =
+    gateCheck(
+      ai.starlake.quack.spi.StructureMutation.CreatePool(key.tenant, key.tenantDb, dist.total),
+      gateBypass
+    ).flatMap {
+      case Left(reason) =>
+        IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
+      case Right(()) =>
+        locks.withLock(key)(withCacheRecoveryIO("createPool")(IO.defer {
+          val size = dist.total
+          require(
+            dist.writeonly >= 0 && dist.readonly >= 0 && dist.dual >= 0,
+            s"role distribution must be non-negative: $dist"
           )
-        )
-      case Some(td)
-          if pools.keys.exists(k =>
-            k.tenant == key.tenant && k.pool == key.pool && k.tenantDb != key.tenantDb
-          ) =>
-        // Pool names are unique within a tenant (see qodstate_pool
-        // UNIQUE (tenant_id, name)). The FlightSQL edge resolves
-        // (tenant, pool) -> PoolKey at handshake time, so allowing the
-        // same pool name in two tenant-dbs under one tenant would make
-        // that lookup ambiguous.
-        IO.raiseError(
-          new IllegalStateException(
-            s"pool '${key.pool}' already exists under tenant '${key.tenant}' " +
-              "in a different tenant-db; pool names must be unique per tenant"
-          )
-        )
-      case Some(td) =>
-        val merged   = effectiveMetastoreFor(td)
-        val kindWire = td.kind.wireValue
-        federationBlobOf(td.id).flatMap { blobOpt =>
-          // initSql runs first so PRAGMAs/INSTALL land before the federation
-          // blob's ATTACHes; both get shipped via NodeSpec.extraSetupSql.
-          val fedBlob = blobOpt.getOrElse("")
-          // What the node actually gets at spawn = initSql + "\n" + federation blob.
-          // `state.extraSetupSql` keeps the federation blob ONLY so a manager
-          // restart that re-projects PoolState from persisted rows still has the
-          // operator-authored initSql available separately (and respawn can
-          // re-concatenate without double-prepending).
-          val poolEntity = Pool(
-            id = newId("p"),
-            tenantId = td.tenantId,
-            tenantDbId = td.id,
-            name = key.pool,
-            size = size,
-            distribution = dist,
-            maxConcurrentPerNode = maxConcurrentPerNode,
-            disabled = disabled,
-            suspended = startSuspended,
-            cohorts = cohorts,
-            initSql = initSql,
-            cpu = cpu,
-            memory = memory,
-            podTemplateYaml = podTemplateYaml
-          )
-          IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
-            poolRows.put(poolEntity.id, poolEntity)
-            poolIdByKey.put(key, poolEntity.id)
-          } *> {
-            // Walk cohorts in order; each role gets the cohort's placement.
-            // Empty `cohorts` falls back to a single placement-less cohort
-            // carrying `dist`, matching pre-cohort behavior exactly.
-            val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
-              poolEntity.effectiveCohorts.flatMap { c =>
-                c.distribution.asRoleList.map(role => (role, c.placement))
-              }
-            // Pool state sans nodes: the spawn specs derive from it, and the
-            // spawned nodes are folded back in below before it is published.
-            val preState = PoolState(
-              key,
-              Nil,
-              dist,
-              merged,
-              td.objectStore,
-              maxConcurrentPerNode,
-              disabled = disabled,
-              suspended = startSuspended,
-              kindWire = kindWire,
-              // Federation blob only; respawn concatenates with initSql fresh.
-              extraSetupSql = fedBlob,
-              dbInitSql = td.initSql,
-              initSql = initSql,
-              defaultDatabase = td.defaultDatabase,
-              defaultSchema = td.defaultSchema,
-              cpu = cpu,
-              memory = memory,
-              podTemplateYaml = podTemplateYaml
+          require(size > 0, s"role distribution must sum to at least 1: $dist")
+          require(dist.isValidFor(size), s"role distribution does not sum to $size")
+          // Cohorts are always persisted as authored so a pool defined on
+          // local can be exported and replayed on K8s with placement intact.
+          // The K8s backend reads `NodeSpec.placement`; local backends ignore
+          // it -- the UI already shows a warning before the operator submits.
+          if cohorts.nonEmpty && !backend.supportsPlacement then
+            logger.info(
+              s"backend ${backend.getClass.getSimpleName} does not honor node placement; " +
+                s"persisting ${cohorts.size} cohort(s) for pool $key but they will be " +
+                "ignored at runtime"
             )
-            val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
-              specFromState(
-                key,
-                preState,
-                PoolSupervisor.nodeId(key, i + 1),
-                role,
-                placement,
-                maxConcurrentPerNode
-              )
-            }
-            val spawnIO: IO[List[RunningNode]] =
-              if startSuspended then IO.pure(Nil) else spawnAll(key, specs)
-            spawnIO
-              .flatMap { running =>
-                pools.put(key, preState.copy(nodes = running))
-                running
-                  .foldLeft(IO.unit)((acc, n) =>
-                    acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
-                  )
-                  .map { _ =>
-                    publish.topologyChanged()
-                    events.emit(ManagerEvent.PoolCreated(key.tenant, key.tenantDb, key.pool))
-                  }
-                  .as(running)
-              }
+          // When cohorts are provided, the per-cohort distributions must sum
+          // back to `dist`. Reject mismatches up-front so the persisted
+          // `qodstate_pool` row never disagrees with the spawned nodes.
+          cohorts.foreach { c =>
+            require(
+              c.distribution.writeonly >= 0 && c.distribution.readonly >= 0 && c.distribution.dual >= 0,
+              s"cohort distribution must be non-negative: ${c.distribution}"
+            )
           }
-        }
-  }))
+          if cohorts.nonEmpty then
+            val summed = cohorts.map(_.distribution).foldLeft(RoleDistribution(0, 0, 0)) { (a, b) =>
+              RoleDistribution(a.writeonly + b.writeonly, a.readonly + b.readonly, a.dual + b.dual)
+            }
+            require(
+              summed == dist,
+              s"cohort distributions sum to $summed but pool distribution is $dist"
+            )
+
+          findTenantDb(key.tenant, key.tenantDb) match
+            case None =>
+              IO.raiseError(
+                new IllegalStateException(
+                  s"tenant-db '${key.tenant}/${key.tenantDb}' not found; create it first"
+                )
+              )
+            case Some(td)
+                if pools.keys.exists(k =>
+                  k.tenant == key.tenant && k.pool == key.pool && k.tenantDb != key.tenantDb
+                ) =>
+              // Pool names are unique within a tenant (see qodstate_pool
+              // UNIQUE (tenant_id, name)). The FlightSQL edge resolves
+              // (tenant, pool) -> PoolKey at handshake time, so allowing the
+              // same pool name in two tenant-dbs under one tenant would make
+              // that lookup ambiguous.
+              IO.raiseError(
+                new IllegalStateException(
+                  s"pool '${key.pool}' already exists under tenant '${key.tenant}' " +
+                    "in a different tenant-db; pool names must be unique per tenant"
+                )
+              )
+            case Some(td) =>
+              val merged   = effectiveMetastoreFor(td)
+              val kindWire = td.kind.wireValue
+              federationBlobOf(td.id).flatMap { blobOpt =>
+                // initSql runs first so PRAGMAs/INSTALL land before the federation
+                // blob's ATTACHes; both get shipped via NodeSpec.extraSetupSql.
+                val fedBlob = blobOpt.getOrElse("")
+                // What the node actually gets at spawn = initSql + "\n" + federation blob.
+                // `state.extraSetupSql` keeps the federation blob ONLY so a manager
+                // restart that re-projects PoolState from persisted rows still has the
+                // operator-authored initSql available separately (and respawn can
+                // re-concatenate without double-prepending).
+                val poolEntity = Pool(
+                  id = newId("p"),
+                  tenantId = td.tenantId,
+                  tenantDbId = td.id,
+                  name = key.pool,
+                  size = size,
+                  distribution = dist,
+                  maxConcurrentPerNode = maxConcurrentPerNode,
+                  disabled = disabled,
+                  suspended = startSuspended,
+                  cohorts = cohorts,
+                  initSql = initSql,
+                  cpu = cpu,
+                  memory = memory,
+                  podTemplateYaml = podTemplateYaml
+                )
+                IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
+                  poolRows.put(poolEntity.id, poolEntity)
+                  poolIdByKey.put(key, poolEntity.id)
+                } *> {
+                  // Walk cohorts in order; each role gets the cohort's placement.
+                  // Empty `cohorts` falls back to a single placement-less cohort
+                  // carrying `dist`, matching pre-cohort behavior exactly.
+                  val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
+                    poolEntity.effectiveCohorts.flatMap { c =>
+                      c.distribution.asRoleList.map(role => (role, c.placement))
+                    }
+                  // Pool state sans nodes: the spawn specs derive from it, and the
+                  // spawned nodes are folded back in below before it is published.
+                  val preState = PoolState(
+                    key,
+                    Nil,
+                    dist,
+                    merged,
+                    td.objectStore,
+                    maxConcurrentPerNode,
+                    disabled = disabled,
+                    suspended = startSuspended,
+                    kindWire = kindWire,
+                    // Federation blob only; respawn concatenates with initSql fresh.
+                    extraSetupSql = fedBlob,
+                    dbInitSql = td.initSql,
+                    initSql = initSql,
+                    defaultDatabase = td.defaultDatabase,
+                    defaultSchema = td.defaultSchema,
+                    cpu = cpu,
+                    memory = memory,
+                    podTemplateYaml = podTemplateYaml
+                  )
+                  val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+                    specFromState(
+                      key,
+                      preState,
+                      PoolSupervisor.nodeId(key, i + 1),
+                      role,
+                      placement,
+                      maxConcurrentPerNode
+                    )
+                  }
+                  val spawnIO: IO[List[RunningNode]] =
+                    if startSuspended then IO.pure(Nil) else spawnAll(key, specs)
+                  spawnIO
+                    .flatMap { running =>
+                      pools.put(key, preState.copy(nodes = running))
+                      running
+                        .foldLeft(IO.unit)((acc, n) =>
+                          acc *> IO.blocking(store.upsertNode(n, poolEntity.id))
+                        )
+                        .map { _ =>
+                          publish.topologyChanged()
+                          events.emit(ManagerEvent.PoolCreated(key.tenant, key.tenantDb, key.pool))
+                        }
+                        .as(running)
+                    }
+                }
+              }
+        }))
+    }
 
   def setPoolDisabled(key: PoolKey, disabled: Boolean): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
@@ -1366,11 +1421,27 @@ final class PoolSupervisor(
       key: PoolKey,
       targetSize: Int,
       newDist: RoleDistribution,
-      force: Boolean
+      force: Boolean,
+      gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
-    locks.withLock(key) {
-      withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
+    val from = get(key).map(_.distribution.total).getOrElse(0)
+    gateCheck(
+      ai.starlake.quack.spi.StructureMutation.ResizePool(
+        key.tenant,
+        key.tenantDb,
+        key.pool,
+        from,
+        targetSize
+      ),
+      gateBypass
+    ).flatMap {
+      case Left(reason) =>
+        IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
+      case Right(()) =>
+        locks.withLock(key) {
+          withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
+        }
     }
 
   private def scaleUnlocked(
