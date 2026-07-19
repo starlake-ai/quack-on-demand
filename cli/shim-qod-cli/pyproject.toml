@@ -9,12 +9,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qod-cli"
-version = "0.4.4"
+version = "0.5.0"
 description = "Compatibility alias for the qod package (the quack-on-demand CLI)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "qod==0.4.4",
+    "qod==0.5.0",
 ]
 
 [project.urls]
