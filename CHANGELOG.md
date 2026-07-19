@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.0
+
+### Scale to zero
+
+- **Pools can now hibernate.** `qodstate_pool.suspended` marks a pool scaled to
+  zero WITH its role distribution kept: suspend gracefully drains every node
+  (in-flight statements finish) while the DuckLake catalog and data stay
+  intact, and the stored distribution is the memory of what to respawn. Wake is
+  automatic: the first FlightSQL statement against a suspended pool resumes it
+  and the edge holds the query until a node is routable, bounded by
+  `PROXY_RESUME_HOLD_TIMEOUT_SEC` (default 60s), then fails retryable ("pool is
+  resuming, retry shortly"). No client changes needed; the first query after a
+  sleep just looks slow once.
+- **Suspend on demand.** `POST /api/pool/suspend` / `POST /api/pool/resume`
+  (tenant-scoped, audited as `pool.suspend` / `pool.resume`), a Hibernated
+  badge plus Suspend/Wake button in the UI, and `startSuspended` on pool
+  create: provision a pool with its catalog initialized but zero nodes until
+  first use.
+- **Guard rails.** Scaling a suspended pool is rejected with 409
+  `pool_suspended` (resume first); stopping a suspended pool zeroes the
+  distribution and clears the flag so it genuinely stays down; `disabled`
+  still wins over everything and is never auto-woken.
+- **Self-healing.** Reconcile skips suspended pools' respawn, heals a crash
+  mid-suspend by draining straggler nodes, refreshes pool state under the
+  per-pool lock so it can never drain a pool that woke mid-pass, and a failed
+  resume is retried by the next reconcile pass. Suspend/resume serialize
+  through per-pool advisory locks and propagate across HA replicas.
+- **Module events.** `PoolSuspended` / `PoolResumed` manager events (reason
+  `rest | query | module`) for hosted-service modules building idle policies
+  on the SPI.
+
+### CLI
+
+- **Full REST parity, permanently enforced.** Every manager REST operation is
+  now reachable from `qod` with every parameter, and a parity gate keeps it
+  that way: the OpenAPI document generated from the endpoint definitions is
+  committed as a contract copy (`cli/tests/resources/openapi.yaml`, pinned to
+  the code by a build-time freshness check), and the CLI test suite fails
+  whenever an operation or parameter lacks a command. Browser-redirect
+  endpoints (OIDC / SQL-token flows) are the only exclusions, each justified
+  in the test.
+- **New commands from the catch-up:** `qod pool suspend`, `qod pool resume`,
+  `qod pool status`, `qod catalog tags`, `qod ready`, `--start-suspended` and
+  repeatable `--cohort w,r,d` on `qod pool create`, and `--tenant` on
+  `qod auth mode`.
+
+### Fixes
+
+- The bundled demo loader script (`_load-common.sh`) is re-synced with the
+  canonical copy shipped in `scripts/`.
+- Malformed `--cohort` values now fail with a clean usage error instead of a
+  traceback.
+
 ## 0.4.5
 
 ### Distribution
