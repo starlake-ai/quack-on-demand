@@ -92,3 +92,14 @@ def test_auth_mode(runner, respx_mock):
     )
     assert runner.invoke(app, ["auth", "mode"]).exit_code == 0
     assert route.called
+    assert dict(route.calls.last.request.url.params) == {}
+
+
+def test_auth_mode_with_tenant(runner, respx_mock):
+    route = respx_mock.get(f"{BASE}/api/auth/mode").mock(
+        return_value=httpx.Response(200, json={"mode": "oidc"})
+    )
+    result = runner.invoke(app, ["auth", "mode", "--tenant", "acme"])
+    assert result.exit_code == 0
+    assert route.called
+    assert dict(route.calls.last.request.url.params) == {"tenant": "acme"}

@@ -13,6 +13,7 @@ from tests._parity import compute_gaps, load_operations
 
 # Browser-flow redirect targets, not operations a CLI can perform:
 EXCLUSIONS = {
+    "/api/auth/oidc/start",       # opens the provider login page in a browser (redirect dance)
     "/api/auth/oidc/callback",    # OIDC provider redirects the browser here
     "/api/auth/oidc/logout",      # browser session logout redirect
     "/api/auth/sql-token/start",  # opens the provider login page in a browser
