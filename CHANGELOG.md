@@ -46,6 +46,17 @@
   repeatable `--cohort w,r,d` on `qod pool create`, and `--tenant` on
   `qod auth mode`.
 
+### Logging
+
+- **Quiet by default.** One knob, `QOD_LOG_LEVEL` (env var or `-D` system
+  property), now drives the whole process and defaults to `ERROR`: a plain
+  `qod start` boots silently. Set `QOD_LOG_LEVEL=INFO` for the operational
+  boot log (ports, module loads, reconcile) or `DEBUG` for application
+  internals; the grpc/netty/Arrow firehoses stay clamped at WARN so DEBUG
+  remains usable. Security misconfiguration reports (open REST API without
+  `QOD_API_KEY`, dev-default `QOD_SESSION_JWT_SECRET`) are logged at ERROR so
+  they survive the quiet default.
+
 ### Fixes
 
 - The bundled demo loader script (`_load-common.sh`) is re-synced with the

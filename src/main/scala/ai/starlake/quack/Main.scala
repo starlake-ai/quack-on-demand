@@ -470,7 +470,9 @@ object Main extends IOApp with LazyLogging:
     val health = new HealthHandler(sup, dbHealthy)
 
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
-      logger.warn(
+      // ERROR (not warn): a security misconfiguration report must survive the
+      // quiet default log level (logback root defaults to ERROR).
+      logger.error(
         "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
           "sessions on this manager. Override QOD_SESSION_JWT_SECRET before exposing the " +
           "manager beyond localhost."

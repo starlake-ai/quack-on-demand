@@ -4,12 +4,20 @@
       <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
     </encoder>
   </appender>
-  <root level="INFO">
+  <!-- ONE knob: QOD_LOG_LEVEL (env var or -D system property) drives the whole
+       process. Quiet (ERROR) by default; set INFO for the operational boot log
+       (module-loaded lines, ports, reconcile chatter) or DEBUG for application
+       internals when diagnosing. Security misconfiguration reports (open API,
+       dev secrets) are logged at ERROR so they survive the quiet default. The
+       known library firehoses below stay clamped so DEBUG remains usable; edit
+       them here for the rare day a netty/grpc/Arrow bug itself is under
+       investigation. -->
+  <root level="${QOD_LOG_LEVEL:-ERROR}">
     <appender-ref ref="STDOUT" />
   </root>
-  <!-- Quiet by default; set QOD_LOG_LEVEL=DEBUG (env var or -D system property)
-       to get application-level debug logs back when diagnosing. -->
-  <logger name="ai.starlake.quack" level="${QOD_LOG_LEVEL:-INFO}" />
+  <logger name="io.grpc" level="WARN" />
+  <logger name="io.netty" level="WARN" />
+  <logger name="org.apache.arrow" level="WARN" />
   <!-- Reached via the JUL-to-slf4j bridge installed in Main. WARN here is almost always
        the benign stream-cancel race (client RST_STREAM while DATA frames sit queued),
        e.g. DBeaver abandoning a Flight result stream after its first fetch page. -->

@@ -104,7 +104,9 @@ final class ManagerServer(
     // with a key no client ever sends.
     val staticConfigured = cfg.apiKey.filter(_.nonEmpty)
     if staticConfigured.isEmpty then
-      logger.warn(
+      // ERROR (not warn): a security misconfiguration report must survive the
+      // quiet default log level (logback root defaults to ERROR).
+      logger.error(
         "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
           "UI login flow) before exposing the manager beyond localhost."
       )
