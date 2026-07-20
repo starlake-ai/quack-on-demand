@@ -29,5 +29,10 @@ final case class ManagerContext(
       * unknown tokens. Same seam core handlers use for TenantScopeCheck / SuperuserCheck. Exempt
       * from the SPI stability promise, like supervisor and users.
       */
-    scopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope]
+    scopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope],
+    /** Resolves a session JWT to the full session (identity + scope), None for static keys and
+      * unknown tokens. scopeOf is the scope-only projection; portal-style modules need the caller's
+      * username/tenant too. Exempt from the SPI stability promise.
+      */
+    sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session]
 )
