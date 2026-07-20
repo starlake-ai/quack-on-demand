@@ -123,6 +123,39 @@ pdb:
   enabled: true
   minAvailable: 1
 
+# --- NetworkPolicy (opt-in) ---------------------------------------------------
+# Off by default so existing clusters are unaffected. Flip to true to lock
+# down traffic to/from the manager and the spawned Quack node pods to just
+# what the control plane actually needs.
+networkPolicy:
+  enabled: false
+  # Ports the manager assigns to spawned Quack node pods (LocalQuackBackend /
+  # KubernetesQuackBackend). Matches manager.k8s.nodePortRange.
+  nodePortRange:
+    from: 21900
+    to: 22500
+  # External Postgres reachable from both the manager and every node pod.
+  postgres:
+    cidr: ""                # empty = allow the destination port to any address
+    port: 5432
+  # Object store (S3 / GCS / R2 / Azure Blob) DuckLake reads/writes parquet
+  # to. Empty cidrs = allow 443 everywhere (tighten in prod to your storage
+  # provider's published IP ranges).
+  objectStore:
+    cidrs: []
+  # Peers allowed to reach the manager's REST/UI (20900) and FlightSQL
+  # (31338) ports. Empty = allow from anywhere (e.g. behind an Ingress /
+  # LoadBalancer already restricting access upstream).
+  ingressFrom: []
+  # Outbound SMTP for the hosted signup/notification flow. Off by default.
+  smtp:
+    enabled: false
+    cidr: ""                # empty = allow the destination port to any address
+    port: 587
+  # Raw NetworkPolicy egress rules appended verbatim (toYaml) to the node
+  # policy, for anything the values contract above doesn't cover.
+  extraEgress: []
+
 # --- Postgres (external) -----------------------------------------------------
 # The manager and the spawned Quack nodes all talk to this Postgres for the
 # DuckLake catalog + qodstate_* control-plane tables. Production deploys

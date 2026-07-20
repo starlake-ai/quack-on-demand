@@ -1,0 +1,67 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qod.fullname" . }}-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "qod.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # REST/UI + FlightSQL edge. Empty ingressFrom = allow from anywhere
+    # (e.g. already gated by an Ingress / LoadBalancer upstream).
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.rest.port }}
+        - protocol: TCP
+          port: {{ .Values.service.flightsql.port }}
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # Spawned Quack node pods' HTTP endpoints. Tracks
+    # manager.k8s.podLabel, see the nodes NetworkPolicy for details.
+    - to:
+        - podSelector:
+            matchLabels:
+              managed-by: quack-on-demand
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.nodePortRange.from }}
+          endPort: {{ .Values.networkPolicy.nodePortRange.to }}
+    # Postgres (control plane + DuckLake catalogs)
+    - to:
+        {{- if .Values.networkPolicy.postgres.cidr }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.postgres.cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.networkPolicy.smtp.enabled }}
+    # Outbound SMTP (hosted signup / notification flow)
+    - to:
+        {{- if .Values.networkPolicy.smtp.cidr }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.smtp.cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.smtp.port }}
+    {{- end }}
+{{- end }}
