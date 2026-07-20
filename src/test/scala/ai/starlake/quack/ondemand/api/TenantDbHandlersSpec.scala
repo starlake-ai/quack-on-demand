@@ -24,6 +24,22 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     new TenantDbHandlers(sup)
 
+  /** Same fixture, plus the supervisor handle so a test can install a mutation gate. */
+  private def freshHandlersWithSupervisor(): (PoolSupervisor, TenantDbHandlers) =
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore()
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    (sup, new TenantDbHandlers(sup))
+
+  private val denyingGate = new ai.starlake.quack.spi.MutationGate:
+    def check(
+        m: ai.starlake.quack.spi.StructureMutation
+    ): cats.effect.IO[Either[String, Unit]] =
+      cats.effect.IO.pure(Left("tenant-db quota reached (2)"))
+
   "TenantDbHandlers.createTenantDb" should
     "compose `${tenant}_${name}` and return the persisted row" in:
     val h   = freshHandlers()
@@ -242,3 +258,29 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     ).unsafeRunSync().toOption.get
     td.tableCount shouldBe None
     td.effectiveDataPath shouldBe ""
+
+  "TenantDbHandlers.createTenantDb (mutation gates)" should
+    "map a gate refusal to 429 quota_exceeded for tenant sessions" in:
+    val (sup, h) = freshHandlersWithSupervisor()
+    sup.setMutationGates(List(denyingGate))
+    val tenantAdminScopeOf: String => Option[SessionScope] =
+      _ => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "gated", kind = "memory"),
+      Some("tenant-admin-key")
+    )(tenantAdminScopeOf).unsafeRunSync()
+    out match
+      case Left((code, err)) =>
+        code shouldBe StatusCode.TooManyRequests
+        err.error shouldBe "quota_exceeded"
+      case Right(r) => fail(s"expected 429, got $r")
+
+  it should "bypass gates for superuser sessions" in:
+    val (sup, h) = freshHandlersWithSupervisor()
+    sup.setMutationGates(List(denyingGate))
+    val superuserScopeOf: String => Option[SessionScope] = _ => Some(SessionScope.Superuser)
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "gated2", kind = "memory"),
+      Some("root-key")
+    )(superuserScopeOf).unsafeRunSync()
+    out.isRight shouldBe true

@@ -24,5 +24,10 @@ final case class ManagerContext(
     controlPlaneDs: javax.sql.DataSource,
     rawConfig: com.typesafe.config.Config,
     audit: AuditRecorder,
-    singleton: SingletonTasks
+    singleton: SingletonTasks,
+    /** Resolves a session JWT (cookie or X-API-Key value) to its scope; None for static keys and
+      * unknown tokens. Same seam core handlers use for TenantScopeCheck / SuperuserCheck. Exempt
+      * from the SPI stability promise, like supervisor and users.
+      */
+    scopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope]
 )

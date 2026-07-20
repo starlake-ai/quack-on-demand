@@ -84,6 +84,7 @@ final class TenantDbHandlers(
             case Left(err) =>
               IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
             case Right(kind) =>
+              val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
               sup
                 .createTenantDb(
                   tenantName = req.tenant,
@@ -94,7 +95,8 @@ final class TenantDbHandlers(
                   objectStore = req.objectStore,
                   defaultDatabase = req.defaultDatabase,
                   defaultSchema = req.defaultSchema,
-                  initSql = req.initSql
+                  initSql = req.initSql,
+                  gateBypass = gateBypass
                 )
                 .flatMap {
                   case Right(td) =>
@@ -113,6 +115,20 @@ final class TenantDbHandlers(
                   case Left(err: SupervisorError.InvalidArgument) =>
                     IO.pure(
                       Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message)))
+                    )
+                  case Left(err: SupervisorError.QuotaExceeded) =>
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.DatabaseCreate,
+                      "denied",
+                      tenant = Some(req.tenant),
+                      detail = Map("reason" -> "quota")
+                    )
+                    IO.pure(
+                      Left(
+                        (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", err.message))
+                      )
                     )
                   case Left(err) =>
                     IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))

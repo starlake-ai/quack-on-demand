@@ -20,6 +20,11 @@ class SpiDefaultsSpec extends AnyFlatSpec with Matchers:
     (new MinimalModule).staticMounts shouldBe Nil
   }
 
+  it should "default mutationGates to Nil" in {
+    val m = new MinimalModule
+    m.mutationGates shouldBe Nil
+  }
+
   "ManagerEventSink.noop" should "accept events without effect" in {
     noException should be thrownBy ManagerEventSink.noop.emit(
       ManagerEvent.TenantCreated("acme")

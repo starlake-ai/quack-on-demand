@@ -85,6 +85,7 @@ final class PoolHandlers(
         )
         IO.pure(Left(err))
       case None =>
+        val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
         if req.podTemplateYaml.nonEmpty then
           SuperuserCheck.reject(apiKey)(scopeOf) match
             case Some(err) =>
@@ -115,10 +116,14 @@ final class PoolHandlers(
                     IO.pure(
                       Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
                     )
-                  case Right(()) => createPoolInner(req, apiKey)
-        else createPoolInner(req, apiKey)
+                  case Right(()) => createPoolInner(req, apiKey, gateBypass)
+        else createPoolInner(req, apiKey, gateBypass)
 
-  private def createPoolInner(req: CreatePoolRequest, apiKey: Option[String]): Out[PoolResponse] =
+  private def createPoolInner(
+      req: CreatePoolRequest,
+      apiKey: Option[String],
+      gateBypass: Boolean
+  ): Out[PoolResponse] =
     if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
       IO.pure(
         Left(
@@ -189,7 +194,8 @@ final class PoolHandlers(
                   initSql = req.initSql.getOrElse(""),
                   cpu = req.cpu,
                   memory = req.memory,
-                  podTemplateYaml = req.podTemplateYaml
+                  podTemplateYaml = req.podTemplateYaml,
+                  gateBypass = gateBypass
                 )
                 .map(_ =>
                   audit.rest(
@@ -207,11 +213,14 @@ final class PoolHandlers(
                     )
                   )
                 )
-                .handleError(t =>
-                  Left(
-                    (StatusCode.InternalServerError, ErrorResponse("start_failed", t.getMessage))
-                  )
-                )
+                .handleError {
+                  case q: ai.starlake.quack.spi.QuotaExceededException =>
+                    Left((StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason)))
+                  case t =>
+                    Left(
+                      (StatusCode.InternalServerError, ErrorResponse("start_failed", t.getMessage))
+                    )
+                }
 
   def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -227,7 +236,8 @@ final class PoolHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+        val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+        val key        = PoolKey(req.tenant, req.tenantDb, req.pool)
         sup.get(key) match
           case None =>
             IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
@@ -255,23 +265,38 @@ final class PoolHandlers(
               )
             else
               sup
-                .scale(key, req.targetSize, req.roleDistribution, req.force)
-                .map(_ =>
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    AuditActions.PoolScale,
-                    "ok",
-                    tenant = Some(req.tenant),
-                    target = Some(key.toString),
-                    detail = Map("targetSize" -> req.targetSize.toString)
-                  )
-                  Right(
-                    respond(key).getOrElse(
-                      PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
-                    )
-                  )
+                .scale(
+                  key,
+                  req.targetSize,
+                  req.roleDistribution,
+                  req.force,
+                  gateBypass = gateBypass
                 )
+                .attempt
+                .flatMap {
+                  case Left(q: ai.starlake.quack.spi.QuotaExceededException) =>
+                    IO.pure(
+                      Left((StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason)))
+                    )
+                  case Left(t)  => IO.raiseError(t)
+                  case Right(_) =>
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.PoolScale,
+                      "ok",
+                      tenant = Some(req.tenant),
+                      target = Some(key.toString),
+                      detail = Map("targetSize" -> req.targetSize.toString)
+                    )
+                    IO.pure(
+                      Right(
+                        respond(key).getOrElse(
+                          PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+                        )
+                      )
+                    )
+                }
 
   def stopPool(req: StopPoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

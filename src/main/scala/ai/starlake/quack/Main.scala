@@ -521,7 +521,8 @@ object Main extends IOApp with LazyLogging:
       controlPlaneDs = store.jdbcDataSource,
       rawConfig = com.typesafe.config.ConfigFactory.load(),
       audit = auditRecorder,
-      singleton = singletonTasks
+      singleton = singletonTasks,
+      scopeOf = sessionTokens.scopeOf
     )
     val moduleStart: IO[Unit] =
       modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
@@ -1420,6 +1421,11 @@ object Main extends IOApp with LazyLogging:
         // surfaces and the ManagerServer are constructed here, strictly after
         // moduleStart, so a module that registers routes in start() is honored.
         moduleStart *>
+        // Modules may build their MutationGates only after start() has run (e.g.
+        // once their own config/state is loaded), so this reads modules.mutationGates
+        // strictly after moduleStart and installs them on the supervisor before the
+        // server binds.
+        IO(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
           mgr.serve.use { _ =>
             logger.info(
