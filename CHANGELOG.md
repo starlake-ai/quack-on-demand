@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1
+
+### Module SPI: mutation gates
+
+- **Modules can now veto resource growth.** The manager module SPI gains
+  `MutationGate`: a module contributes gates via
+  `ManagerModule.mutationGates`, and the supervisor consults them before
+  `createTenantDb`, `createPool`, and pool scaling. A refusing gate surfaces
+  as HTTP 429 with code `quota_exceeded` and the gate's reason string in the
+  body, so hosted-service modules can enforce per-tenant structure quotas
+  (max databases, max pools, max nodes per pool) without any policy living in
+  core. Zero-module boots are unchanged: no gates, no new behavior.
+- **Operators always pass.** Superuser sessions and static-key callers bypass
+  gates entirely, so a broken or overly strict quota policy can never lock
+  operators out of provisioning. A gate that throws refuses the mutation
+  (fail closed): a broken policy store must not grant unlimited resources.
+- **Session scope for modules.** `ManagerContext` gains `scopeOf`, the same
+  session-token-to-scope resolver core handlers use for tenant scoping, so
+  modules can gate their own endpoints with the manager's session semantics
+  instead of reinventing auth.
+
 ## 0.5.0
 
 ### Scale to zero

@@ -522,7 +522,8 @@ object Main extends IOApp with LazyLogging:
       rawConfig = com.typesafe.config.ConfigFactory.load(),
       audit = auditRecorder,
       singleton = singletonTasks,
-      scopeOf = sessionTokens.scopeOf
+      scopeOf = sessionTokens.scopeOf,
+      sessionOf = sessionTokens.get
     )
     val moduleStart: IO[Unit] =
       modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
