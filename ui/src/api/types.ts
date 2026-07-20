@@ -60,6 +60,10 @@ export interface PoolResponse {
   // pgPassword is redacted.
   metastore: Record<string, string>;
   disabled: boolean;
+  // True while the pool is hibernated (scaled to 0 by the suspend action,
+  // distinct from `disabled`). The pool's `status` string stays "ready"
+  // while suspended - key UI state off this flag, not `status`.
+  suspended?: boolean;
   // Persisted placement plan. Empty array (the default) means no
   // placement constraint - all nodes scheduled wherever the runtime puts
   // them. Only meaningful on the Kubernetes backend.
@@ -111,6 +115,12 @@ export interface StopPoolRequest {
   tenantDb: string;
   pool: string;
   force?: boolean;
+}
+
+export interface PoolRefRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
 }
 
 export interface DeletePoolRequest {
@@ -725,6 +735,28 @@ export interface UndropResponse {
   table: string;
   restoredAs: string;
   fromSnapshot: number;
+}
+
+// ----- Restore / rollback to a snapshot (Spec 04) -----
+
+export interface RestoreRequest {
+  tenant: string;
+  tenantDb: string;
+  schema: string;
+  table: string;
+  to: string;
+  dryRun?: boolean;
+  expectedCurrentSnapshot?: number;
+}
+
+export interface RestoreResponse {
+  schema: string;
+  table: string;
+  toSnapshot: number;
+  currentSnapshot: number;
+  summary?: DataDiffSummary;
+  newSnapshot?: number;
+  dryRun: boolean;
 }
 
 // ----- Managed maintenance (EPIC Spec 09) -----

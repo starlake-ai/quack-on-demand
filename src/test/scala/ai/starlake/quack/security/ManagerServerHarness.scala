@@ -104,7 +104,8 @@ object ManagerServerHarness:
     tlsEnabled = false,
     tlsCertChain = "",
     tlsPrivateKey = "",
-    sessionTtlSec = 3600L
+    sessionTtlSec = 3600L,
+    resumeHoldTimeoutSec = 60L
   )
 
   // ------------------------------------------------------------------
@@ -244,7 +245,15 @@ object ManagerServerHarness:
       // non-403 outcome once past the gate; the acl_denied spec case overrides this to return
       // Left(RouterFailure.AccessDenied(...)) instead.
       previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _, _) =>
-        IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness")))
+        IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness"))),
+      // SPI module plumbing (Task 7): defaulted so every pre-existing caller compiles
+      // unchanged. Task 10 passes real values sourced from loaded modules.
+      moduleEndpoints: List[sttp.tapir.server.ServerEndpoint[Any, IO]] = Nil,
+      modulePublicPrefixes: Set[String] = Set.empty,
+      moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
+      // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
+      // compiles unchanged; specs that want to observe emissions pass a recording sink.
+      events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -278,7 +287,8 @@ object ManagerServerHarness:
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
       ),
-      audit = audit
+      audit = audit,
+      events = events
     )
 
     val statementStore     = new StatementHistoryStore()
@@ -357,8 +367,23 @@ object ManagerServerHarness:
             schema: String,
             table: String
         ): Option[ai.starlake.quack.ondemand.catalog.DroppedTableEntry] = None
+        override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
+        override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
     val previewReader: (String, String) => DuckLakeCatalogReader =
       catalogReader.getOrElse((_, _) => noSnapshotReader)
+
+    // Restore's own reader stub (Spec 04 Task 5): unlike noSnapshotReader above, snapshotExists /
+    // maxSnapshotId must succeed so `resolveTo`'s bound-resolution step clears BEFORE the
+    // live-table lookup runs; RestoreAuthzSpec pins the 404 not_found from that lookup (the
+    // "not live" case), not from bound resolution (already pinned by DataDiffAuthzSpec /
+    // PreviewAuthzSpec against noSnapshotReader, so it must keep reporting an empty catalog).
+    val restoreReader: DuckLakeCatalogReader =
+      new DuckLakeCatalogReader(null):
+        override def snapshotExists(id: Long): Boolean = true
+        override def maxSnapshotId(): Option[Long]     = Some(1L)
+        override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
+        override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
+
     val previewHandlers = new CatalogPreviewHandlers(
       sup,
       store,
@@ -372,6 +397,16 @@ object ManagerServerHarness:
       sup,
       previewExecutor,
       previewReader,
+      CatalogConfig(),
+      sessions.get,
+      audit = audit
+    )
+    val restoreHandlers = new CatalogRestoreHandlers(
+      sup,
+      store,
+      previewExecutor,
+      previewExecutor,
+      (_, _) => restoreReader,
       CatalogConfig(),
       sessions.get,
       audit = audit
@@ -408,6 +443,7 @@ object ManagerServerHarness:
       preview = Some(previewHandlers),
       catalogHistory = catalogHistoryHandlers,
       undrop = Some(undropHandlers),
+      restore = Some(restoreHandlers),
       metricsEndpoint,
       userHandlers,
       roleHandlers,
@@ -424,7 +460,10 @@ object ManagerServerHarness:
       auditLimiter = auditLimiter,
       auditHandlers = auditHandlers,
       history = historyApiHandlers,
-      usage = usageHandlers
+      usage = usageHandlers,
+      moduleEndpoints = moduleEndpoints,
+      modulePublicPrefixes = modulePublicPrefixes,
+      moduleStaticMounts = moduleStaticMounts
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

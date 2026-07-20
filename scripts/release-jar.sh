@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Release phase 2/3: version-set, tag, publish the manager jar, cut the GitHub
-# release, then bump to the next dev snapshot and push.
+# Release phase 2/3: version-set, tag, publish to PyPI, cut the GitHub
+# release (the canonical jar channel), then bump to the next dev snapshot and
+# push. The manager is NOT published to Maven Central: nothing consumes it as
+# a Maven dependency - the qod CLI, install.sh, and brew all download the
+# GitHub Release asset (sha256-verified). Only libquackwire stays on Central
+# (it is a build-time dependency that must resolve anonymously).
 #
-# This does by hand, idempotently, what sbt-release's `releaseProcess` did
-# atomically (build.sbt: setReleaseVersion -> commit -> tag -> publishSigned ->
-# sonatypeBundleRelease -> setNextVersion -> commit -> push). Doing the steps
-# explicitly is the whole point of the split: any step that a network failure
-# interrupted can be resumed by simply re-running this script. Each step
-# no-ops the work it detects is already done:
+# Doing the steps explicitly is the whole point of the split: any step that a
+# network failure interrupted can be resumed by simply re-running this
+# script. Each step no-ops the work it detects is already done:
 #   - version.sbt already at the release version -> skip the set + commit
 #   - tag v<version> already exists              -> skip tag
-#   - manager already on Maven Central           -> skip publish
 #   - qod / qod-cli shim already on PyPI         -> skip that PyPI publish
 #   - GitHub release already exists              -> skip gh release
 #   - version.sbt already bumped to -SNAPSHOT    -> skip the finalize bumps
@@ -20,7 +20,7 @@
 # non-SNAPSHOT coord that is on Maven Central) - run release-libquackwire.sh
 # first. This mirrors sbt-release's checkSnapshotDependencies gate.
 #
-# Required env: SONATYPE_USERNAME, SONATYPE_PASSWORD, PGP_PASSPHRASE, PYPI_TOKEN.
+# Required env: PYPI_TOKEN.
 # Optional env: RELEASE_VERSION (pin the release; default = strip -SNAPSHOT),
 #               NEXT_VERSION    (pin the next snapshot; default = bump patch),
 #               QOD_DISCORD_WEBHOOK_URL (announce on Discord #news; also read
@@ -35,8 +35,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-lib.sh"
 purge_metals_scratch
 require_clean_tree
 warn_if_not_main
-require_sonatype_creds
-require_pgp
 require_cmd python3
 require_pypi_creds
 require_cmd gh
@@ -105,21 +103,14 @@ else
   git tag "v${release_version}"
 fi
 
-# ---- 3. publishSigned + sonatypeBundleRelease (idempotent) ---------------
-# Bundle the Windows classifier so the released uber-jar runs the native client
-# on Windows AND Linux/macOS (matches the snapshot workflow). Requires the
-# windows-x86_64 libquackwire classifier to already be on Maven Central -
-# release-libquackwire.sh publishes it (its CI-artifact stage now includes
-# quackwire.dll).
+# Bundle the Windows classifier so the released uber-jar (built for the GitHub
+# release in step 5) runs the native client on Windows AND Linux/macOS
+# (matches the snapshot workflow). Requires the windows-x86_64 libquackwire
+# classifier to already be on Maven Central - release-libquackwire.sh
+# publishes it (its CI-artifact stage now includes quackwire.dll).
 export QOD_WITH_WINDOWS_NATIVE=true
-if manager_on_central "$release_version"; then
-  echo "manager ${release_version} already on Maven Central; skipping publish."
-else
-  echo "sbt publishSigned + sonatypeBundleRelease (manager)..."
-  sbt_signed "publishSigned" "sonatypeBundleRelease"
-fi
 
-# ---- 3b. PyPI: qod + qod-cli shim (idempotent) -----------------------------
+# ---- 3. PyPI: qod + qod-cli shim (idempotent) ------------------------------
 if cli_on_pypi "$release_version"; then
   echo "qod ${release_version} already on PyPI; skipping."
 else
@@ -140,6 +131,20 @@ else
     "$(pypi_python)" -m build
     TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" "$(pypi_python)" -m twine upload dist/*
   )
+fi
+
+# ---- 3b. Build the release assembly (idempotent) --------------------------
+# Must happen BEFORE the next-snapshot bump below: since the Maven Central
+# publish was dropped, nothing else builds the jar while version.sbt still
+# holds the release version, and a build after the bump would produce a
+# -SNAPSHOT-versioned jar that step 5 cannot upload.
+jar_name="quack-on-demand-assembly-${release_version}.jar"
+if [[ -f "distrib/${jar_name}" ]]; then
+  echo "distrib/${jar_name} already built; skipping assembly."
+else
+  echo "building distrib/${jar_name}..."
+  sbt --no-colors assembly
+  [[ -f "distrib/${jar_name}" ]] || die "sbt assembly did not produce distrib/${jar_name}."
 fi
 
 # ---- 4. Finalize: bump to next dev snapshots + push commits + tag --------
@@ -164,17 +169,12 @@ if [[ "$(cli_version)" != "$cli_next" || "$(cli_manager_version)" != "$cli_next"
   git commit -m "next dev version: qod-cli ${cli_next}" -q
 fi
 
-# libquackwire back to its next -SNAPSHOT for the next dev cycle. Done here,
-# after the manager release, so the release build kept pinning the non-SNAPSHOT
-# coord throughout.
-if [[ "$(libquackwire_version)" != *-SNAPSHOT ]]; then
-  libq_next="$(next_libquackwire_snapshot "$(libquackwire_version)")"
-  echo "bumping libquackwire build.sbt -> $libq_next"
-  sed -i.bak -E "s|^val libquackwireVersion = \".*\"$|val libquackwireVersion = \"${libq_next}\"|" build.sbt
-  rm build.sbt.bak
-  git add build.sbt
-  git commit -m "next snapshot: libquackwire ${libq_next}" -q
-fi
+# libquackwire is deliberately NOT bumped back to -SNAPSHOT here. Its version
+# only changes when its inputs change (the DuckDB pin or the C++ under
+# native/quackwire/): bump `libquackwireVersion` in build.sbt manually then -
+# that re-arms both the CI snapshot publisher and release-libquackwire.sh.
+# Auto-bumping per manager release minted a new libquackwire coord every
+# cycle with zero native changes.
 
 echo "pushing commits + tag to origin..."
 git push origin HEAD
@@ -184,7 +184,6 @@ git push origin "v${release_version}"
 # The .sha256 companion asset is the integrity source for every downstream
 # installer (qod demo launcher, install.sh, brew formula). Content is the
 # standard "hash  basename" line so `shasum -c` works next to the download.
-jar_name="quack-on-demand-assembly-${release_version}.jar"
 if gh release view "v${release_version}" >/dev/null 2>&1; then
   echo "GitHub release v${release_version} already exists; skipping."
   # Backfill the .sha256 asset if the release predates it (or a prior run was
@@ -202,10 +201,13 @@ if gh release view "v${release_version}" >/dev/null 2>&1; then
   fi
 else
   jar="distrib/${jar_name}"
-  if [[ ! -f "$jar" ]]; then
-    echo "assembly jar missing; building $jar..."
-    sbt assembly
-  fi
+  # Do NOT rebuild here: version.sbt is already bumped to the next -SNAPSHOT,
+  # so an assembly at this point would carry the wrong version. Step 3b built
+  # the jar pre-bump; on a resumed run that lost it, rebuild from the tag:
+  #   git show "v${release_version}:version.sbt" > version.sbt
+  #   sbt assembly && git checkout version.sbt
+  [[ -f "$jar" ]] \
+    || die "$jar missing and version.sbt is already past ${release_version}; rebuild it from the tag (see comment above) and re-run."
   ( cd distrib && shasum -a 256 "$jar_name" > "${jar_name}.sha256" )
   echo "creating GitHub release v${release_version}"
   gh release create "v${release_version}" \
@@ -224,6 +226,6 @@ fi
 echo
 echo "manager release complete."
 echo "  - tag:  v${release_version}"
-echo "  - jar:  https://central.sonatype.com/artifact/ai.starlake/quack-on-demand_3/${release_version}"
+echo "  - jar:  https://github.com/starlake-ai/quack-on-demand/releases/tag/v${release_version}"
 echo "  - next: $(manager_version)"
 echo "Run ./scripts/release-docker.sh to push the Docker image."

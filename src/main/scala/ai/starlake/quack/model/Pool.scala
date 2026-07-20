@@ -17,6 +17,10 @@ final case class Pool(
     maxConcurrentPerNode: Int = 0,
     idleTimeoutSec: Option[Int] = None,
     disabled: Boolean = false,
+    // Scale-to-zero: zero running nodes but the role distribution is
+    // kept, so reconcile skips the pool and the edge wakes it (respawn
+    // to the stored distribution) on the first incoming statement.
+    suspended: Boolean = false,
     // Optional placement plan: when non-empty, the per-cohort
     // RoleDistributions must sum to `distribution` and the total node
     // count must equal `size`. When empty, the supervisor schedules

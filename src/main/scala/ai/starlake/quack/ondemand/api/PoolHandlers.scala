@@ -62,6 +62,7 @@ final class PoolHandlers(
         status = if p.disabled then "disabled" else "ready",
         metastore = redact(p.metastore),
         disabled = p.disabled,
+        suspended = p.suspended,
         id = sup.poolId(key).getOrElse(""),
         cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
         initSql = p.initSql,
@@ -181,13 +182,14 @@ final class PoolHandlers(
                 .createPool(
                   key,
                   req.roleDistribution,
-                  req.maxConcurrentPerNode,
-                  cohorts,
-                  req.disabled,
-                  req.initSql.getOrElse(""),
-                  req.cpu,
-                  req.memory,
-                  req.podTemplateYaml
+                  maxConcurrentPerNode = req.maxConcurrentPerNode,
+                  cohorts = cohorts,
+                  disabled = req.disabled,
+                  startSuspended = req.startSuspended,
+                  initSql = req.initSql.getOrElse(""),
+                  cpu = req.cpu,
+                  memory = req.memory,
+                  podTemplateYaml = req.podTemplateYaml
                 )
                 .map(_ =>
                   audit.rest(
@@ -229,6 +231,18 @@ final class PoolHandlers(
         sup.get(key) match
           case None =>
             IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(st) if st.suspended =>
+            IO.pure(
+              Left(
+                (
+                  StatusCode.Conflict,
+                  ErrorResponse(
+                    "pool_suspended",
+                    s"pool $key is suspended; resume it before scaling"
+                  )
+                )
+              )
+            )
           case Some(_) =>
             if !req.roleDistribution.isValidFor(req.targetSize) then
               IO.pure(
@@ -324,6 +338,53 @@ final class PoolHandlers(
                 )
                 Right(())
               )
+
+  def suspendPool(req: SuspendPoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    poolAction(apiKey, req.tenant, AuditActions.PoolSuspend, scopeOf)(
+      PoolKey(req.tenant, req.tenantDb, req.pool)
+    )(key => sup.suspendPool(key, "rest"))
+
+  def resumePool(req: ResumePoolRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[Unit] =
+    poolAction(apiKey, req.tenant, AuditActions.PoolResume, scopeOf)(
+      PoolKey(req.tenant, req.tenantDb, req.pool)
+    )(key => sup.resumePool(key, "rest"))
+
+  /** Shared scope-check + audit + 404 shell for the suspend/resume pair. */
+  private def poolAction(
+      apiKey: Option[String],
+      tenant: String,
+      action: String,
+      scopeOf: String => Option[SessionScope]
+  )(key: PoolKey)(
+      run: PoolKey => IO[Either[SupervisorError, ai.starlake.quack.model.Pool]]
+  ): Out[Unit] =
+    TenantScopeCheck.reject(apiKey, tenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(apiKey, "control-plane", action, "denied", tenant = Some(tenant))
+        IO.pure(Left(err))
+      case None =>
+        sup.get(key) match
+          case None =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case Some(_) =>
+            run(key).map {
+              case Left(e) =>
+                Left((StatusCode.InternalServerError, ErrorResponse("error", e.toString)))
+              case Right(_) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  action,
+                  "ok",
+                  tenant = Some(tenant),
+                  target = Some(key.toString)
+                )
+                Right(())
+            }
 
   def listPools(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]

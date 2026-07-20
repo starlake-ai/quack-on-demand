@@ -17,6 +17,16 @@ def test_health(runner):
 
 
 @respx.mock
+def test_ready(runner):
+    respx.get(f"{BASE}/ready").mock(
+        return_value=httpx.Response(200, json={"status": "ok", "pools": 0})
+    )
+    result = runner.invoke(app, ["ready"])
+    assert result.exit_code == 0
+    assert "ok" in result.output
+
+
+@respx.mock
 def test_config_client_json_mode(runner):
     respx.get(f"{BASE}/api/config/client").mock(
         return_value=httpx.Response(200, json={"flightSqlHost": "e", "flightSqlPort": 31338})

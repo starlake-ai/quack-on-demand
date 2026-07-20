@@ -37,6 +37,32 @@ def test_login_substitutes_wildcard_edge_host(runner, respx_mock):
     assert load_settings().edge_host == "localhost"
 
 
+def test_login_stores_tenant_and_pool(runner, respx_mock):
+    mock_login_routes(respx_mock)
+    result = runner.invoke(
+        app,
+        ["login", "--username", "bob", "--tenant", "acme", "--pool", "bi"],
+        input="pw\n",
+    )
+    assert result.exit_code == 0
+    st = load_settings()
+    assert st.tenant == "acme"
+    assert st.pool == "bi"
+
+
+def test_login_without_tenant_pool_leaves_profile_values(runner, respx_mock):
+    mock_login_routes(respx_mock)
+    runner.invoke(
+        app, ["login", "--username", "bob", "--tenant", "acme", "--pool", "bi"], input="pw\n"
+    )
+    # A later login omitting the flags must not clear the stored values
+    # (save_profile drops None entries).
+    runner.invoke(app, ["login", "--username", "bob"], input="pw\n")
+    st = load_settings()
+    assert st.tenant == "acme"
+    assert st.pool == "bi"
+
+
 def test_login_sends_credentials(runner, respx_mock):
     mock_login_routes(respx_mock)
     runner.invoke(app, ["login", "--username", "bob", "--tenant", "acme"], input="pw\n")
@@ -66,3 +92,14 @@ def test_auth_mode(runner, respx_mock):
     )
     assert runner.invoke(app, ["auth", "mode"]).exit_code == 0
     assert route.called
+    assert dict(route.calls.last.request.url.params) == {}
+
+
+def test_auth_mode_with_tenant(runner, respx_mock):
+    route = respx_mock.get(f"{BASE}/api/auth/mode").mock(
+        return_value=httpx.Response(200, json={"mode": "oidc"})
+    )
+    result = runner.invoke(app, ["auth", "mode", "--tenant", "acme"])
+    assert result.exit_code == 0
+    assert route.called
+    assert dict(route.calls.last.request.url.params) == {"tenant": "acme"}

@@ -98,7 +98,7 @@ def test_start_downloads_jvm_when_missing(runner, wired, monkeypatch):
     monkeypatch.setattr(launcher, "find_java", lambda: None)
     monkeypatch.setattr(launcher, "is_musl", lambda root=None: False)
     monkeypatch.setattr(launcher, "ensure_jre", lambda cache_dir=None: "/cache/jre/bin/java")
-    result = runner.invoke(app, ["start", "--jar", str(wired["jar"]), "--yes"])
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
     assert result.exit_code == 0, result.output
     assert wired["cmd"][0] == "/cache/jre/bin/java"
 

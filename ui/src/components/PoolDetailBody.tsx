@@ -31,6 +31,7 @@ export default function PoolDetailBody({
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const [suspendErr, setSuspendErr] = useState<string | null>(null);
 
   // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
   const [resCpuEnabled, setResCpuEnabled] = useState(false);
@@ -175,6 +176,27 @@ export default function PoolDetailBody({
       setActionErr(null);
     } catch (e) {
       setActionErr(errorMessage(e));
+    }
+  }
+
+  async function handleSuspendToggle() {
+    if (!data) return;
+    setSuspendErr(null);
+    const next = !data.suspended;
+    if (!window.confirm(
+      next
+        ? `Suspend pool "${tenantDb}/${pool}"?\n\n` +
+          'The pool hibernates: nodes stop, but the pool is NOT deleted. Wake it later to resume serving queries.'
+        : `Wake pool "${tenantDb}/${pool}"?\n\n` +
+          'Nodes respawn and the pool resumes serving queries.'
+    )) return;
+    try {
+      if (next) await api.suspendPool({ tenant, tenantDb, pool });
+      else await api.resumePool({ tenant, tenantDb, pool });
+      const r = await api.poolStatus(tenant, tenantDb, pool);
+      setData(r);
+    } catch (e) {
+      setSuspendErr(errorMessage(e));
     }
   }
 
@@ -523,8 +545,14 @@ export default function PoolDetailBody({
   return (
     <>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>{data.tenant} / {data.tenantDb} / {data.pool}</h2>
+        <h2 style={{ margin: 0 }}>
+          {data.tenant} / {data.tenantDb} / {data.pool}
+          {data.suspended && <span className="badge warn" style={{ marginLeft: 8 }}>Hibernated</span>}
+        </h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
+          <button type="button" onClick={() => void handleSuspendToggle()}>
+            {data.suspended ? 'Wake' : 'Suspend'}
+          </button>
           {onBack
             ? <button type="button" className="link-button" onClick={onBack}>← Back to pools</button>
             : (
@@ -534,6 +562,7 @@ export default function PoolDetailBody({
             )}
         </div>
       </header>
+      {suspendErr && <div className="login-err" style={{ marginTop: 8 }}>{suspendErr}</div>}
 
       <Tabs
         tabs={[

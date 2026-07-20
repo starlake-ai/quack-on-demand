@@ -98,12 +98,6 @@ next_manager_snapshot() {
   echo "${a}.${b}.$((c + 1))-SNAPSHOT"
 }
 
-# 1.5.4-<hash>-2 -> 1.5.4-<hash>-3-SNAPSHOT (rev+1, per build.sbt's version format).
-next_libquackwire_snapshot() {
-  local rel; rel="$(strip_snapshot "$1")"
-  local rev="${rel##*-}" prefix="${rel%-*}"
-  echo "${prefix}-$((rev + 1))-SNAPSHOT"
-}
 
 # ---- Maven Central idempotency ------------------------------------------
 # Central is immutable; re-publishing the same coord fails with an opaque 4xx.
@@ -112,7 +106,6 @@ on_central() { # <artifact> <version>
   curl -sfI "https://repo1.maven.org/maven2/ai/starlake/$1/$2/$1-$2.pom" >/dev/null 2>&1
 }
 libquackwire_on_central() { on_central libquackwire "$1"; }
-manager_on_central()      { on_central quack-on-demand_3 "$1"; }
 
 # ---- sbt with signing ----------------------------------------------------
 # Injects the PGP passphrase so sbt-pgp's signing step never blocks on the

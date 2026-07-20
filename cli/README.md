@@ -40,8 +40,9 @@ TPC-H sample, RLS/CLS showcase) without any local checkout: it downloads the
 manager jar for the latest release from GitHub Releases (falling back to the
 release stamped into the CLI build when the lookup fails and a cached jar
 exists), verifies it against the published sha256, caches it under the user
-cache dir, and launches it with the required JVM flags. If no Java 21+ is found it offers to download a cached
-Temurin 21 JRE. `--jar <path>` runs a local jar instead; `--version X.Y.Z`
+cache dir, and launches it with the required JVM flags. If no Java 21+ is
+found it downloads a cached Temurin 21 JRE (announced, never prompted).
+`--jar <path>` runs a local jar instead; `--version X.Y.Z`
 pins a different release; extra arguments are passed through to the jar's
 demo subcommand.
 
@@ -298,6 +299,43 @@ for the full flag list of any command.
 |---|---|
 | `statements` | List past statements with filters. |
 | `trends` | Aggregate statement trends over time. |
+
+## REST parity gate
+
+Every REST operation published in the generated OpenAPI specification must be
+reachable from the CLI with every parameter. A parity test (strict, no exceptions
+beyond documented exclusions) runs with the pytest suite.
+
+**How it works:** The test loads `cli/tests/resources/openapi.yaml` (regenerated
+from the Scala manager source), extracts every HTTP method/path pair, and
+compares it against the CLI's REGISTRY (all commands with their flags). Gaps are
+reported as missing commands or missing parameters on existing commands.
+
+**How to add a command:** Stack
+`@covers(method, path, {param: "--flag" or "(descriptive value)"})` directly on
+the Typer command function, one decorator per REST operation the command
+performs (see `login` in `src/qod_cli/commands/auth.py` for a stacked example).
+Always include the params dict for parameterized endpoints: a `@covers` without
+params registers zero params and fails the gate. Parameters are matched by
+name; descriptive value strings (e.g., `"(prompted)"` for the login password,
+`"(computed from the dry-run response, gated by --yes)"`) are allowed for
+params whose value is not a plain flag - the gate compares **keys only**, so
+these annotations serve as documentation without affecting the test.
+
+**How to justify an exclusion:** Some REST endpoints are not CLI-reachable by
+design (e.g., OIDC redirect targets). Add them to the `EXCLUSIONS` set in
+`cli/tests/test_rest_parity.py` with an inline comment explaining why.
+
+**Keeping the inventory current:** The OpenAPI contract copy lives at
+`cli/tests/resources/openapi.yaml`, regenerated via:
+
+```bash
+sbt "runMain ai.starlake.quack.docs.GenOpenApi cli/tests/resources/openapi.yaml <version>"
+```
+
+A Scala test (`OpenApiFreshnessSpec`) ensures this file stays in sync with the
+manager source; commit both the `@covers` markers and the regenerated YAML file
+when adding or changing commands.
 
 ## Output
 

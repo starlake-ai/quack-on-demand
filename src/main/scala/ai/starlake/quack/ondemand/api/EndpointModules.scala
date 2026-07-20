@@ -20,5 +20,6 @@ object EndpointModules:
     MaintenanceEndpoints,
     RbacEndpoints,
     TimeTravelEndpoints,
-    UndropEndpoints
+    UndropEndpoints,
+    RestoreEndpoints
   )

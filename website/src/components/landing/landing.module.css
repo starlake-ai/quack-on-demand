@@ -1,0 +1,156 @@
+/* Landing feature rows. Colors ride Docusaurus theme variables plus a few
+   custom properties so dark mode needs only the override block at the end. */
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: center;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 3.5rem 1.5rem;
+}
+.rowFlip .visual { order: 2; }
+.rowFlip .copy { order: 1; }
+.copy h3 {
+  font-size: 1.6rem;
+  margin-bottom: 0.75rem;
+}
+.copy p {
+  color: var(--ifm-color-emphasis-700);
+  line-height: 1.65;
+  margin-bottom: 0.75rem;
+}
+.visual { min-width: 0; }
+
+.terminal {
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--qod-term-bg, #0d1117);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+.termBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--qod-term-bar, #161b22);
+}
+.dot { width: 11px; height: 11px; border-radius: 50%; background: #3a3f44; }
+.dot[data-c='r'] { background: #ff5f56; }
+.dot[data-c='y'] { background: #ffbd2e; }
+.dot[data-c='g'] { background: #27c93f; }
+.termTitle {
+  margin-left: 8px;
+  font-size: 0.75rem;
+  color: #8b949e;
+  font-family: var(--ifm-font-family-monospace);
+}
+.termBody {
+  margin: 0;
+  padding: 14px 16px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #c9d1d9;
+  overflow-x: auto;
+  white-space: pre;
+  background: transparent;
+}
+.tGreen { color: #3fb950; }
+.tBlue { color: #58a6ff; }
+.tDim { color: #8b949e; }
+.tErr { color: #f85149; }
+
+.figure {
+  margin: 0;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+}
+.figure img { display: block; width: 100%; max-width: 100%; }
+.caption {
+  font-size: 0.8rem;
+  color: var(--ifm-color-emphasis-600);
+  padding: 0.5rem 0.9rem;
+  border-top: 1px solid var(--ifm-color-emphasis-200);
+}
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  color: var(--ifm-color-emphasis-500);
+  font-size: 0.9rem;
+  background: var(--ifm-color-emphasis-100);
+}
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.splitPanel {
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.splitHead {
+  padding: 0.45rem 0.8rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.78rem;
+  background: var(--ifm-color-emphasis-100);
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+}
+.splitTable { width: 100%; border-collapse: collapse; font-size: 0.74rem; }
+.splitTable th, .splitTable td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+  font-family: var(--ifm-font-family-monospace);
+  text-align: left;
+}
+.masked { color: var(--ifm-color-emphasis-500); }
+
+.diagram { width: 100%; height: auto; }
+.diagram .stageBox { fill: var(--ifm-background-surface-color); stroke: var(--ifm-color-emphasis-400); }
+.diagram .stageLabel { fill: var(--ifm-font-color-base); font-size: 13px; font-weight: 600; }
+.diagram .stageSub { fill: var(--ifm-color-emphasis-600); font-size: 11px; }
+.diagram .arrow { stroke: var(--ifm-color-emphasis-500); marker-end: url(#arrowhead); }
+.diagram .arrowHead { stroke: var(--ifm-color-emphasis-500); }
+.diagram .pod { fill: var(--ifm-color-primary); opacity: 0.85; }
+
+@media (max-width: 810px) {
+  .row { grid-template-columns: 1fr; gap: 1.5rem; padding: 2.5rem 1.25rem; }
+  .rowFlip .visual, .rowFlip .copy { order: initial; }
+  .visual { order: -1; }
+  .split { grid-template-columns: 1fr; }
+}
+
+[data-theme='dark'] .figure { box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+
+.zoomTrigger {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+.zoomTrigger img { display: block; width: 100%; }
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+  padding: 2vh 2vw;
+}
+.lightbox img {
+  max-width: 96vw;
+  max-height: 96vh;
+  width: auto;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.6);
+}

@@ -83,6 +83,8 @@ import ai.starlake.quack.ondemand.state.{
 }
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.effect.unsafe.implicits.global
+import cats.syntax.foldable.*
+import cats.syntax.traverse.*
 import com.typesafe.scalalogging.LazyLogging
 import pureconfig._
 import pureconfig.generic.ProductHint
@@ -105,6 +107,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
+  given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -125,6 +128,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[HaConfig]               = deriveReader[HaConfig]
   given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
+  given ConfigReader[CatalogConfig]          = deriveReader[CatalogConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -170,14 +174,22 @@ object Main extends IOApp with LazyLogging:
     val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
-    bootManager(mgrCfg, edgeCfg, authCfg, aclCfg, metricsCfg)
+    bootManager(
+      mgrCfg,
+      edgeCfg,
+      authCfg,
+      aclCfg,
+      metricsCfg,
+      modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover()
+    )
 
   private[quack] def bootManager(
       mgrCfg: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
       aclCfg: AclConfig,
-      metricsCfg: MetricsConfig
+      metricsCfg: MetricsConfig,
+      modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
   ): IO[ExitCode] =
     HaPreconditions
       .validate(
@@ -205,7 +217,18 @@ object Main extends IOApp with LazyLogging:
     // Apply the Liquibase changelog first: `qodstate_user` (and the rest
     // of the control plane) must exist before we upsert the admin row.
     // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
+    // Operator preflight: always print the control-plane Postgres URL and refuse
+    // to start when it is unreachable, with a clear message instead of a raw
+    // JDBC stack trace from the Liquibase apply below.
+    Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
+      case Left(message) =>
+        println(message)
+        sys.exit(1)
+      case Right(()) => ()
+
     LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+
+    ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
     // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
     // must each project (password_hash, role, enabled) -- exactly the shape
@@ -327,7 +350,7 @@ object Main extends IOApp with LazyLogging:
     val tracker            = new NodeLoadTracker
     val engineStatsTracker = new EngineStatsTracker
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
-    val store: ControlPlaneStore =
+    val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // Control-plane JDBC coordinates, derived once from the same keys
     // `fromDefaultMetastore` uses. HA leader election and cross-replica
@@ -397,7 +420,9 @@ object Main extends IOApp with LazyLogging:
       else PoolLocker.noop
     val publisher =
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
-    val sup = new PoolSupervisor(
+    val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
+    val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
+    val sup            = new PoolSupervisor(
       backend,
       tracker,
       store,
@@ -407,7 +432,8 @@ object Main extends IOApp with LazyLogging:
       onTenantDbDeleted = evictCatalogReader,
       onTenantDbChanged = evictCatalogReader,
       locks = poolLocks,
-      publish = publisher
+      publish = publisher,
+      events = moduleEventBus.sink
     )
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
@@ -453,7 +479,9 @@ object Main extends IOApp with LazyLogging:
     val health = new HealthHandler(sup, dbHealthy)
 
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
-      logger.warn(
+      // ERROR (not warn): a security misconfiguration report must survive the
+      // quiet default log level (logback root defaults to ERROR).
+      logger.error(
         "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
           "sessions on this manager. Override QOD_SESSION_JWT_SECRET before exposing the " +
           "manager beyond localhost."
@@ -480,6 +508,23 @@ object Main extends IOApp with LazyLogging:
     // auditRecorder built here so the sessionTokens.get lookup closure is ready.
     // All handlers (early and inside runWithMetrics) share this instance.
     val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
+
+    // SPI: context handed to each module at start, plus the ordered start action.
+    // Ordering guarantee: moduleStart runs m.start(ctx) for every module FIRST;
+    // only afterwards does the boot IO chain construct the ManagerServer, which
+    // reads each module's endpoints/publicPathPrefixes/staticMounts exactly once.
+    // A module that builds its routes inside start() is therefore honored, and
+    // those endpoints/staticMounts are live from the first served request.
+    val moduleCtx = ai.starlake.quack.spi.ManagerContext(
+      supervisor = sup,
+      users = userStore,
+      controlPlaneDs = store.jdbcDataSource,
+      rawConfig = com.typesafe.config.ConfigFactory.load(),
+      audit = auditRecorder,
+      singleton = singletonTasks
+    )
+    val moduleStart: IO[Unit] =
+      modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
 
     val pools = new PoolHandlers(
       sup,
@@ -745,7 +790,8 @@ object Main extends IOApp with LazyLogging:
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
       oidc = oidcSso,
       sqlToken = sqlTokenSvc,
-      audit = auditRecorder
+      audit = auditRecorder,
+      events = moduleEventBus.sink
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
@@ -755,7 +801,10 @@ object Main extends IOApp with LazyLogging:
     val arrowAllocator     = new org.apache.arrow.memory.RootAllocator()
     val client             = new QuackHttpClient(
       arrowAllocator,
-      nativeClient = mgrCfg.nativeClient,
+      // Degrades to the embedded HTTP client on platforms with no bundled
+      // libquackwire native (Windows on ARM64) instead of crashing at JNI load.
+      nativeClient = ai.starlake.quack.edge.adapter.QuackNativeSupport
+        .effectiveNativeClient(mgrCfg.nativeClient),
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter = new QuackHttpAdapter(client, tracker)
@@ -982,7 +1031,10 @@ object Main extends IOApp with LazyLogging:
         activeStatements,
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
-        attachedCatalogsOf = attachedCatalogsOf
+        attachedCatalogsOf = attachedCatalogsOf,
+        events = moduleEventBus.sink,
+        resumeHoldTimeout =
+          scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
@@ -1158,7 +1210,8 @@ object Main extends IOApp with LazyLogging:
       // the timeout fires WHILE the HTTP call itself is still in flight -- and in that case no
       // `QueryResult` was ever constructed, so there is nothing for this adapter to close.
       // `recordExecution = false` for read-only probes (preview, data diff: never stamp);
-      // `true` for undrop's CTAS so the recovery snapshot carries the author stamp.
+      // `true` for undrop's CTAS and restore's CREATE OR REPLACE so the snapshot carries the
+      // author stamp. Restore's dry-run summary rides the `false` path.
       def routedExecutor(
           recordExecution: Boolean
       ): ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
@@ -1228,7 +1281,27 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
-      val mgr = new ManagerServer(
+      val restoreHandlers: Option[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers] = Some(
+        new ai.starlake.quack.ondemand.api.CatalogRestoreHandlers(
+          sup,
+          store,
+          routedExecutor(recordExecution = false),
+          routedExecutor(recordExecution = true),
+          catalogReader,
+          mgrCfg.catalog,
+          sessionTokens.get,
+          catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+          audit = auditRecorder
+        )
+      )
+
+      // Deferred: the three module surfaces (endpoints / publicPathPrefixes /
+      // staticMounts) are read inside this constructor, so it MUST run after
+      // moduleStart (m.start(ctx)) so a module that builds its routes in
+      // start() has them registered. Called from the IO chain below, strictly
+      // after moduleStart. RouteCollisions still fails fast, now at build time
+      // inside the IO chain, which is still a boot-time abort.
+      def buildManagerServer(): ManagerServer = new ManagerServer(
         mgrCfg,
         edgeCfg,
         pools,
@@ -1246,6 +1319,7 @@ object Main extends IOApp with LazyLogging:
         previewHandlers,
         catalogHistoryHandlers,
         undropHandlers,
+        restoreHandlers,
         metricsEndpoint,
         userHandlers,
         roleHandlers,
@@ -1262,7 +1336,10 @@ object Main extends IOApp with LazyLogging:
         auditLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter(),
         auditHandlers = auditHandlers,
         history = historyApiHandlers,
-        usage = usageHandlers
+        usage = usageHandlers,
+        moduleEndpoints = modules.flatMap(_.endpoints),
+        modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
+        moduleStaticMounts = modules.flatMap(_.staticMounts)
       )
       // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
       // calls DuckLakeInitializer.initBlocking once the tenant-db's own
@@ -1338,360 +1415,441 @@ object Main extends IOApp with LazyLogging:
         // do a one-shot purge at boot (unconditional) to keep expired denylist
         // rows from accumulating.
         IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
-        mgr.serve.use { _ =>
-          logger.info(
-            s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
-              s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
-          )
-          edgeIO.attempt.flatMap {
-            case Right(edge) =>
-              logger.info("edge FlightSQL started")
-              // Belt-and-braces JVM shutdown hook: when the JVM is told
-              // to exit (SIGTERM in containers; user Ctrl-C at the
-              // terminal) we want every spawned child Quack node killed
-              // before we let the process die, even if cats-effect's own
-              // cancellation finalizer below has not had time to run.
-              // `cleanup()` is idempotent so running it from both places
-              // is safe.
-              val shutdownHook = new Thread(
-                { () =>
-                  try edge.stop()
-                  catch case _: Throwable => ()
-                  try backend.cleanup().unsafeRunSync()
-                  catch case _: Throwable => ()
-                    // Release the leader lock + LISTEN connection. Terminal +
-                    // idempotent; safe to run before the pools are drained.
-                  try coordinator.foreach(_.close())
-                  catch case _: Throwable => ()
-                    // Drain the audit event journal and close the telemetry store
-                    // before the control-plane pool shuts down.
-                  try eventJournal.drainNow()
-                  catch case _: Throwable => ()
-                  try telemetryStore.close()
-                  catch case _: Throwable => ()
-                    // Drain the JDBC connection pools. Both close()s are
-                    // idempotent + no-op if already closed.
-                  try store.close()
-                  catch case _: Throwable => ()
-                  try userStore.close()
-                  catch case _: Throwable => ()
-                    // Close every cached catalog reader's Hikari pool. The
-                    // map shouldn't see new entries past this point because
-                    // serve() has already returned, but iterate defensively.
-                  val it = catalogReaderCache.values.iterator()
-                  while it.hasNext do
-                    val r = it.next()
-                    try r.close()
-                    catch case _: Throwable => ()
-                  catalogReaderCache.clear()
-                },
-                "qod-shutdown-hook"
-              )
-              Runtime.getRuntime.addShutdownHook(shutdownHook)
-
-              // Graceful drain on cancellation: stop accepting new
-              // FlightSQL sessions, poll the load tracker until no node
-              // reports in-flight work (or `drainTimeoutSec` elapses),
-              // then SIGTERM child Quack nodes via `backend.cleanup()`.
-              def waitForDrain: IO[Unit] =
-                val deadlineNs =
-                  System.nanoTime() +
-                    scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
-                def tick: IO[Unit] = IO
-                  .delay {
-                    tracker.snapshotAll.values.map(_.inFlight).sum
-                  }
-                  .flatMap { inflight =>
-                    if inflight <= 0 then IO.unit
-                    else if System.nanoTime() >= deadlineNs then
-                      IO.delay(
-                        logger.warn(
-                          s"graceful shutdown: $inflight statement(s) still in-flight " +
-                            s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
-                        )
-                      )
-                    else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
-                  }
-                tick
-
-              val gracefulShutdown: IO[Unit] =
-                IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
-                  IO.delay(edge.stop()) *>
-                  IO.delay(
-                    logger.info(
-                      s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
-                    )
-                  ) *>
-                  waitForDrain *>
-                  IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
-                  backend.cleanup() *>
-                  IO.delay(logger.info("graceful shutdown: complete"))
-
-              // Periodic reconcile: respawn nodes that die while the manager is
-              // up (boot only ran reconcile once). Disabled when the interval is
-              // 0, in which case the fiber is a no-op we still cancel uniformly.
-              // Under HA only the leader reconciles; the gate is `true` when HA
-              // is off (coordinator None), so single-manager mode is unchanged.
-              val reconcileGate: () => Boolean = () => coordinator.forall(_.isLeader)
-              val reconcileFiber               =
-                if mgrCfg.reconcileIntervalSec > 0 then
-                  logger.info(s"periodic reconcile every ${mgrCfg.reconcileIntervalSec}s")
-                  sup
-                    .reconcileLoop(
-                      scala.concurrent.duration.DurationInt(mgrCfg.reconcileIntervalSec).seconds,
-                      reconcileGate
-                    )
-                    .start
-                else
-                  logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
-                  IO.unit.start
-
-              // Managed maintenance (EPIC Spec 09): leader-gated cadence/threshold enqueue
-              // (scheduler) + the drain loop that claims queued runs and executes them under a
-              // per-tenant-db advisory lock (runner). Both are no-ops when the config flag is off.
-              val maintenanceScheduler =
-                new ai.starlake.quack.ondemand.maintenance.MaintenanceScheduler(
-                  store = store,
-                  smallFileCountsOf = (t, td, bytes) =>
-                    try catalogReader(t, td).smallFileCounts(bytes)
-                    catch
-                      case e: Exception =>
-                        logger.warn(
-                          s"maintenance: small-file count read failed for $t/$td, " +
-                            s"treating as no hot tables this tick: ${e.getMessage}"
-                        )
-                        Map.empty,
-                  minIntervalMinutes = mgrCfg.maintenance.minIntervalMin,
-                  runTimeoutMinutes = mgrCfg.maintenance.runTimeoutMin,
-                  staggerOf = ai.starlake.quack.ondemand.maintenance.PolicyMath.staggerMinutes,
-                  tickSeconds = mgrCfg.maintenance.tickSec,
-                  isLeader = () => coordinator.forall(_.isLeader)
+        // Start SPI modules before the server binds so their endpoints and
+        // static mounts are live from the first served request. The module
+        // surfaces and the ManagerServer are constructed here, strictly after
+        // moduleStart, so a module that registers routes in start() is honored.
+        moduleStart *>
+        IO.delay(buildManagerServer()).flatMap { mgr =>
+          mgr.serve.use { _ =>
+            logger.info(
+              s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
+                s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
+            )
+            edgeIO.attempt.flatMap {
+              case Right(edge) =>
+                logger.info("edge FlightSQL started")
+                // Operator banner: stdout, unconditional (default log level is
+                // ERROR); printed only once both listeners are actually up.
+                println(
+                  Banner.startup(
+                    mgrCfg.defaultMetastore.asMap,
+                    mgrCfg.host,
+                    mgrCfg.port,
+                    edgeCfg.host,
+                    edgeCfg.port,
+                    edgeCfg.tlsEnabled
+                  )
                 )
-              val pinnedSetResolver =
-                new ai.starlake.quack.ondemand.catalog.PinnedSetResolver(store, catalogReader)
-              val maintenanceRunner = new ai.starlake.quack.ondemand.maintenance.MaintenanceRunner(
-                store = store,
-                spawn = (t, td) =>
-                  sup.maintenanceNodeSpec(t, td) match
-                    case Some(spec) =>
-                      backend
-                        .start(spec)
-                        .flatMap { node =>
-                          // start() returns at fork time (local backend); the node only listens
-                          // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
-                          // first statement dies with ConnectException.
-                          ai.starlake.quack.ondemand.runtime.NodeReadiness
-                            .awaitReachable(
-                              node.host,
-                              node.port,
-                              timeout = scala.concurrent.duration
-                                .DurationInt(mgrCfg.maintenance.nodeReadyTimeoutSec)
-                                .seconds,
-                              isAlive = () => backend.isAlive(node.nodeId)
-                            )
-                            .flatMap { ready =>
-                              if ready then IO.pure(Some(node))
-                              else
-                                IO.delay(
-                                  logger.warn(
-                                    s"maintenance: node ${node.nodeId} for $t/$td did not " +
-                                      "accept connections within " +
-                                      s"${mgrCfg.maintenance.nodeReadyTimeoutSec}s; stopping it"
-                                  )
-                                ) *> backend
-                                  .stop(node.nodeId)
-                                  .handleErrorWith(_ => IO.unit)
-                                  .as(None)
-                            }
-                        }
-                        .handleErrorWith { e =>
-                          IO.delay(
-                            logger.warn(
-                              s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
-                            )
-                          ).as(None)
-                        }
-                    case None => IO.pure(None),
-                stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
-                exec = (node, sql) =>
-                  adapter.send(node, sql, session = None, recordLoad = false).map {
-                    case ai.starlake.quack.edge.adapter.QuackResponse.Ok(r, _, close) =>
-                      close(); Right(())
-                    case ai.starlake.quack.edge.adapter.QuackResponse.Failed(e, _) =>
-                      Left(e.toString)
+                // Belt-and-braces JVM shutdown hook: when the JVM is told
+                // to exit (SIGTERM in containers; user Ctrl-C at the
+                // terminal) we want every spawned child Quack node killed
+                // before we let the process die, even if cats-effect's own
+                // cancellation finalizer below never runs.
+                //
+                // The hook is a FALLBACK, not a parallel teardown: it first
+                // waits for `gracefulShutdown` (the finalizer chain below) to
+                // terminate. Running both concurrently killed nodes and closed
+                // the control-plane pools mid-drain, and let the
+                // not-yet-cancelled reconcile fiber respawn "dead" nodes after
+                // the hook's cleanup - orphaning them past JVM exit. The latch
+                // fires on any termination of the graceful chain (success,
+                // error, or cancellation); the bounded wait keeps the hook a
+                // real backstop when the runtime is wedged. `cleanup()` is
+                // idempotent so the hook's own pass stays safe either way.
+                val gracefulDone = new java.util.concurrent.CountDownLatch(1)
+                val shutdownHook = new Thread(
+                  { () =>
+                    val finished =
+                      try
+                        gracefulDone.await(
+                          mgrCfg.drainTimeoutSec.toLong + 15L,
+                          java.util.concurrent.TimeUnit.SECONDS
+                        )
+                      catch case _: InterruptedException => false
+                    if !finished then
+                      logger.warn(
+                        "shutdown hook: graceful shutdown did not finish in time; forcing teardown"
+                      )
+                    try edge.stop()
+                    catch case _: Throwable => ()
+                    try backend.cleanup().unsafeRunSync()
+                    catch case _: Throwable => ()
+                      // Release the leader lock + LISTEN connection. Terminal +
+                      // idempotent; safe to run before the pools are drained.
+                    try coordinator.foreach(_.close())
+                    catch case _: Throwable => ()
+                      // Drain the audit event journal and close the telemetry store
+                      // before the control-plane pool shuts down.
+                    try eventJournal.drainNow()
+                    catch case _: Throwable => ()
+                    try telemetryStore.close()
+                    catch case _: Throwable => ()
+                      // Drain the JDBC connection pools. Both close()s are
+                      // idempotent + no-op if already closed.
+                    try store.close()
+                    catch case _: Throwable => ()
+                    try userStore.close()
+                    catch case _: Throwable => ()
+                      // Close every cached catalog reader's Hikari pool. The
+                      // map shouldn't see new entries past this point because
+                      // serve() has already returned, but iterate defensively.
+                    val it = catalogReaderCache.values.iterator()
+                    while it.hasNext do
+                      val r = it.next()
+                      try r.close()
+                      catch case _: Throwable => ()
+                    catalogReaderCache.clear()
                   },
-                snapshotsOlderThan =
-                  (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
-                pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
-                pinnedFilesOf = pinnedSetResolver.pinnedFiles,
-                scheduledForDeletion = (t, td) => catalogReader(t, td).filesScheduledForDeletion(),
-                totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
-                effectivePolicyOf = (t, td, s, tb) =>
-                  ai.starlake.quack.ondemand.maintenance.PolicyMath
-                    .effective(store.listMaintenancePolicies(t, td), s, tb),
-                catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
-                audit = auditRecorder,
-                metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
-              )
+                  "qod-shutdown-hook"
+                )
+                Runtime.getRuntime.addShutdownHook(shutdownHook)
 
-              val maintenanceSchedulerFiber =
-                if mgrCfg.maintenance.enabled then maintenanceScheduler.start
-                else IO.unit.start
-
-              // Drain loop: while leader and below maxConcurrent in-flight, claim queued runs
-              // and fork each execution under the tenant-db's __maint advisory lock so two
-              // replicas (or a replica and a stray retry) never run the same lake at once.
-              // The tick keeps claiming until the queue is empty or capacity is reached, so
-              // tickSec only spaces empty polls.
-              val maintenanceInFlight            = new java.util.concurrent.atomic.AtomicInteger(0)
-              def maintenanceDrainTick: IO[Unit] =
-                if !coordinator.forall(_.isLeader) then IO.unit
-                else if maintenanceInFlight.get() >= mgrCfg.maintenance.maxConcurrent then IO.unit
-                else
-                  IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
-                    case None      => IO.unit
-                    case Some(run) =>
-                      maintenanceInFlight.incrementAndGet()
-                      poolLocks
-                        .withLock(
-                          ai.starlake.quack.model.PoolKey(run.tenant, run.tenantDb, "__maint")
-                        ) {
-                          maintenanceRunner.executeRun(run)
-                        }
-                        .guarantee(IO.delay(maintenanceInFlight.decrementAndGet()).void)
-                        .handleErrorWith(t =>
-                          IO.delay(
-                            logger.error(
-                              s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
-                            )
+                // Graceful drain on cancellation: stop accepting new
+                // FlightSQL sessions, poll the load tracker until no node
+                // reports in-flight work (or `drainTimeoutSec` elapses),
+                // then SIGTERM child Quack nodes via `backend.cleanup()`.
+                def waitForDrain: IO[Unit] =
+                  val deadlineNs =
+                    System.nanoTime() +
+                      scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
+                  def tick: IO[Unit] = IO
+                    .delay {
+                      tracker.snapshotAll.values.map(_.inFlight).sum
+                    }
+                    .flatMap { inflight =>
+                      if inflight <= 0 then IO.unit
+                      else if System.nanoTime() >= deadlineNs then
+                        IO.delay(
+                          logger.warn(
+                            s"graceful shutdown: $inflight statement(s) still in-flight " +
+                              s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
                           )
                         )
-                        .start *> maintenanceDrainTick
-                  }
-              val maintenanceDrainFiber =
-                if mgrCfg.maintenance.enabled then
-                  (maintenanceDrainTick
-                    .handleErrorWith(e =>
-                      IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
-                    )
-                    *> IO.sleep(
-                      scala.concurrent.duration.DurationInt(mgrCfg.maintenance.tickSec).seconds
-                    )).foreverM.void.start
-                else IO.unit.start
+                      else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
+                    }
+                  tick
 
-              // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
-              val coordinatorFiber = coordinator match
-                case Some(c) => c.loop.start
-                case None    => IO.unit.start
+                val gracefulShutdown: IO[Unit] =
+                  (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
+                    IO.delay(edge.stop()) *>
+                    IO.delay(
+                      logger.info(
+                        s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
+                      )
+                    ) *>
+                    waitForDrain *>
+                    // Stop SPI modules after the edge has drained but before the
+                    // control-plane pools close, so a module's stop can still reach
+                    // its qodhosted_* tables. A stop failure is logged, not fatal.
+                    IO.delay(logger.info("graceful shutdown: stopping modules")) *>
+                    modules.traverse_(m =>
+                      m.stop.handleErrorWith(t =>
+                        IO(logger.warn(s"module ${m.name}: stop failed: ${t.getMessage}"))
+                      )
+                    ) *>
+                    IO.delay(moduleEventBus.shutdown()) *>
+                    IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
+                    backend.cleanup() *>
+                    IO.delay(logger.info("graceful shutdown: complete")))
+                    // Release the JVM shutdown hook whichever way the WHOLE chain
+                    // ends (success, error, cancellation); otherwise the hook's
+                    // fallback wait runs its full timeout before forcing teardown.
+                    .guaranteeCase(_ => IO.delay(gracefulDone.countDown()))
 
-              // Follower/leader convergence loop: periodically re-restore the
-              // supervisor cache and reseed the denylist (a safety net beyond
-              // the NOTIFY handlers); the leader also purges expired jtis.
-              val haRefreshFiber = coordinator match
-                case Some(c) =>
-                  val period =
-                    scala.concurrent.duration.DurationInt(mgrCfg.ha.topologyRefreshSec).seconds
-                  // On promotion (this replica became leader after booting a
-                  // follower), run the leader duties exactly once. Guarded by its
-                  // own handleErrorWith so a duty failure neither sets the flag
-                  // (retried next tick) nor aborts the rest of this tick's refresh.
-                  val promoteDuties: IO[Unit] =
-                    if c.isLeader && !leaderDutiesDone.get then
-                      (leaderDuties *> IO.delay(leaderDutiesDone.set(true)))
-                        .handleErrorWith(t =>
-                          IO.delay(
-                            logger.warn(
-                              s"ha promotion: leader duties failed, will retry next tick: ${t.getMessage}"
+                // Periodic reconcile: respawn nodes that die while the manager is
+                // up (boot only ran reconcile once). Disabled when the interval is
+                // 0, in which case the fiber is a no-op we still cancel uniformly.
+                // Under HA only the leader reconciles; the gate is `true` when HA
+                // is off (coordinator None), so single-manager mode is unchanged.
+                val reconcileGate: () => Boolean = () => coordinator.forall(_.isLeader)
+                val reconcileFiber               =
+                  if mgrCfg.reconcileIntervalSec > 0 then
+                    logger.info(s"periodic reconcile every ${mgrCfg.reconcileIntervalSec}s")
+                    sup
+                      .reconcileLoop(
+                        scala.concurrent.duration.DurationInt(mgrCfg.reconcileIntervalSec).seconds,
+                        reconcileGate
+                      )
+                      .start
+                  else
+                    logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
+                    IO.unit.start
+
+                // Managed maintenance (EPIC Spec 09): leader-gated cadence/threshold enqueue
+                // (scheduler) + the drain loop that claims queued runs and executes them under a
+                // per-tenant-db advisory lock (runner). Both are no-ops when the config flag is off.
+                val maintenanceScheduler =
+                  new ai.starlake.quack.ondemand.maintenance.MaintenanceScheduler(
+                    store = store,
+                    smallFileCountsOf = (t, td, bytes) =>
+                      try catalogReader(t, td).smallFileCounts(bytes)
+                      catch
+                        case e: Exception =>
+                          logger.warn(
+                            s"maintenance: small-file count read failed for $t/$td, " +
+                              s"treating as no hot tables this tick: ${e.getMessage}"
+                          )
+                          Map.empty,
+                    minIntervalMinutes = mgrCfg.maintenance.minIntervalMin,
+                    runTimeoutMinutes = mgrCfg.maintenance.runTimeoutMin,
+                    staggerOf = ai.starlake.quack.ondemand.maintenance.PolicyMath.staggerMinutes,
+                    tickSeconds = mgrCfg.maintenance.tickSec,
+                    isLeader = () => coordinator.forall(_.isLeader)
+                  )
+                val pinnedSetResolver =
+                  new ai.starlake.quack.ondemand.catalog.PinnedSetResolver(store, catalogReader)
+                val maintenanceRunner =
+                  new ai.starlake.quack.ondemand.maintenance.MaintenanceRunner(
+                    store = store,
+                    spawn = (t, td) =>
+                      sup.maintenanceNodeSpec(t, td) match
+                        case Some(spec) =>
+                          backend
+                            .start(spec)
+                            .flatMap { node =>
+                              // start() returns at fork time (local backend); the node only listens
+                              // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
+                              // first statement dies with ConnectException.
+                              ai.starlake.quack.ondemand.runtime.NodeReadiness
+                                .awaitReachable(
+                                  node.host,
+                                  node.port,
+                                  timeout = scala.concurrent.duration
+                                    .DurationInt(mgrCfg.maintenance.nodeReadyTimeoutSec)
+                                    .seconds,
+                                  isAlive = () => backend.isAlive(node.nodeId)
+                                )
+                                .flatMap { ready =>
+                                  if ready then IO.pure(Some(node))
+                                  else
+                                    IO.delay(
+                                      logger.warn(
+                                        s"maintenance: node ${node.nodeId} for $t/$td did not " +
+                                          "accept connections within " +
+                                          s"${mgrCfg.maintenance.nodeReadyTimeoutSec}s; stopping it"
+                                      )
+                                    ) *> backend
+                                      .stop(node.nodeId)
+                                      .handleErrorWith(_ => IO.unit)
+                                      .as(None)
+                                }
+                            }
+                            .handleErrorWith { e =>
+                              IO.delay(
+                                logger.warn(
+                                  s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
+                                )
+                              ).as(None)
+                            }
+                        case None => IO.pure(None),
+                    stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
+                    exec = (node, sql) =>
+                      adapter.send(node, sql, session = None, recordLoad = false).map {
+                        case ai.starlake.quack.edge.adapter.QuackResponse.Ok(r, _, close) =>
+                          close(); Right(())
+                        case ai.starlake.quack.edge.adapter.QuackResponse.Failed(e, _) =>
+                          Left(e.toString)
+                      },
+                    snapshotsOlderThan =
+                      (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
+                    pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
+                    pinnedFilesOf = pinnedSetResolver.pinnedFiles,
+                    scheduledForDeletion =
+                      (t, td) => catalogReader(t, td).filesScheduledForDeletion(),
+                    totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
+                    effectivePolicyOf = (t, td, s, tb) =>
+                      ai.starlake.quack.ondemand.maintenance.PolicyMath
+                        .effective(store.listMaintenancePolicies(t, td), s, tb),
+                    catalogAlias =
+                      (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+                    audit = auditRecorder,
+                    metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
+                  )
+
+                val maintenanceSchedulerFiber =
+                  if mgrCfg.maintenance.enabled then maintenanceScheduler.start
+                  else IO.unit.start
+
+                // Drain loop: while leader and below maxConcurrent in-flight, claim queued runs
+                // and fork each execution under the tenant-db's __maint advisory lock so two
+                // replicas (or a replica and a stray retry) never run the same lake at once.
+                // The tick keeps claiming until the queue is empty or capacity is reached, so
+                // tickSec only spaces empty polls.
+                val maintenanceInFlight = new java.util.concurrent.atomic.AtomicInteger(0)
+                def maintenanceDrainTick: IO[Unit] =
+                  if !coordinator.forall(_.isLeader) then IO.unit
+                  else if maintenanceInFlight.get() >= mgrCfg.maintenance.maxConcurrent then IO.unit
+                  else
+                    IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
+                      case None      => IO.unit
+                      case Some(run) =>
+                        maintenanceInFlight.incrementAndGet()
+                        poolLocks
+                          .withLock(
+                            ai.starlake.quack.model.PoolKey(run.tenant, run.tenantDb, "__maint")
+                          ) {
+                            maintenanceRunner.executeRun(run)
+                          }
+                          .guarantee(IO.delay(maintenanceInFlight.decrementAndGet()).void)
+                          .handleErrorWith(t =>
+                            IO.delay(
+                              logger.error(
+                                s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
+                              )
                             )
                           )
+                          .start *> maintenanceDrainTick
+                    }
+                val maintenanceDrainFiber =
+                  if mgrCfg.maintenance.enabled then
+                    (maintenanceDrainTick
+                      .handleErrorWith(e =>
+                        IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
+                      )
+                      *> IO.sleep(
+                        scala.concurrent.duration.DurationInt(mgrCfg.maintenance.tickSec).seconds
+                      )).foreverM.void.start
+                  else IO.unit.start
+
+                // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
+                val coordinatorFiber = coordinator match
+                  case Some(c) => c.loop.start
+                  case None    => IO.unit.start
+
+                // Follower/leader convergence loop: periodically re-restore the
+                // supervisor cache and reseed the denylist (a safety net beyond
+                // the NOTIFY handlers); the leader also purges expired jtis.
+                val haRefreshFiber = coordinator match
+                  case Some(c) =>
+                    val period =
+                      scala.concurrent.duration.DurationInt(mgrCfg.ha.topologyRefreshSec).seconds
+                    // On promotion (this replica became leader after booting a
+                    // follower), run the leader duties exactly once. Guarded by its
+                    // own handleErrorWith so a duty failure neither sets the flag
+                    // (retried next tick) nor aborts the rest of this tick's refresh.
+                    val promoteDuties: IO[Unit] =
+                      if c.isLeader && !leaderDutiesDone.get then
+                        (leaderDuties *> IO.delay(leaderDutiesDone.set(true)))
+                          .handleErrorWith(t =>
+                            IO.delay(
+                              logger.warn(
+                                s"ha promotion: leader duties failed, will retry next tick: ${t.getMessage}"
+                              )
+                            )
+                          )
+                      else IO.unit
+                    (promoteDuties *> IO
+                      .blocking {
+                        sup.restore()
+                        sessionTokens.seedRevoked(store.listRevokedJti())
+                        if c.isLeader then store.purgeExpiredRevokedJti(java.time.Instant.now())
+                      }
+                      .handleErrorWith(t =>
+                        IO.delay(
+                          logger.warn(s"ha refresh: pass failed, continuing: ${t.getMessage}")
                         )
-                    else IO.unit
-                  (promoteDuties *> IO
-                    .blocking {
-                      sup.restore()
-                      sessionTokens.seedRevoked(store.listRevokedJti())
-                      if c.isLeader then store.purgeExpiredRevokedJti(java.time.Instant.now())
-                    }
-                    .handleErrorWith(t =>
-                      IO.delay(logger.warn(s"ha refresh: pass failed, continuing: ${t.getMessage}"))
-                    ) *> IO.sleep(period)).foreverM.void.start
-                case None => IO.unit.start
+                      ) *> IO.sleep(period)).foreverM.void.start
+                  case None => IO.unit.start
 
-              val journalFiber =
-                if telemetryStore.enabled then eventJournal.start else IO.unit.start
-              val auditPurgeFiber =
-                if telemetryStore.enabled then
-                  (IO
-                    .blocking {
-                      if coordinator.forall(_.isLeader) then
-                        val now = java.time.Instant.now()
-                        TelemetryPurge.cutoffFor(mgrCfg.telemetry.auditRetentionDays, now) match
-                          case Some(cutoff) =>
-                            val n = telemetryStore.purgeAudit(cutoff)
-                            if n > 0 then
-                              logger.info(s"audit purge: deleted $n events older than $cutoff")
-                          case None => ()
-                        // raw retention must cover the rollup watermark's full day
-                        // (recompute rebuilds it); keep >= 2 days
-                        TelemetryPurge
-                          .cutoffFor(mgrCfg.telemetry.stmtHistoryRetentionDays, now)
-                          .foreach { c =>
-                            val n = telemetryStore.purgeStatements(c)
-                            if n > 0 then
-                              logger.info(s"stmt-history purge: deleted $n rows older than $c")
-                          }
-                        TelemetryPurge
-                          .cutoffFor(mgrCfg.telemetry.hourlyRollupRetentionDays, now)
-                          .foreach { c =>
-                            val n = telemetryStore.purgeRollups("hour", c)
-                            if n > 0 then
-                              logger.info(s"hourly-rollup purge: deleted $n buckets older than $c")
-                          }
-                        TelemetryPurge
-                          .cutoffFor(mgrCfg.telemetry.usageRetentionDays, now)
-                          .foreach { c =>
-                            val n = telemetryStore.purgeRollups("day", c)
-                            if n > 0 then
-                              logger.info(s"daily-rollup purge: deleted $n buckets older than $c")
-                          }
-                    }
-                    .handleErrorWith(e => IO(logger.error(s"audit purge failed: ${e.getMessage}")))
-                    *> IO.sleep(scala.concurrent.duration.DurationInt(1).hours)).foreverM.void.start
-                else IO.unit.start
+                val journalFiber =
+                  if telemetryStore.enabled then eventJournal.start else IO.unit.start
+                val auditPurgeFiber =
+                  if telemetryStore.enabled then
+                    (IO
+                      .blocking {
+                        if coordinator.forall(_.isLeader) then
+                          val now = java.time.Instant.now()
+                          TelemetryPurge.cutoffFor(mgrCfg.telemetry.auditRetentionDays, now) match
+                            case Some(cutoff) =>
+                              val n = telemetryStore.purgeAudit(cutoff)
+                              if n > 0 then
+                                logger.info(s"audit purge: deleted $n events older than $cutoff")
+                            case None => ()
+                          // raw retention must cover the rollup watermark's full day
+                          // (recompute rebuilds it); keep >= 2 days
+                          TelemetryPurge
+                            .cutoffFor(mgrCfg.telemetry.stmtHistoryRetentionDays, now)
+                            .foreach { c =>
+                              val n = telemetryStore.purgeStatements(c)
+                              if n > 0 then
+                                logger.info(s"stmt-history purge: deleted $n rows older than $c")
+                            }
+                          TelemetryPurge
+                            .cutoffFor(mgrCfg.telemetry.hourlyRollupRetentionDays, now)
+                            .foreach { c =>
+                              val n = telemetryStore.purgeRollups("hour", c)
+                              if n > 0 then
+                                logger.info(
+                                  s"hourly-rollup purge: deleted $n buckets older than $c"
+                                )
+                            }
+                          TelemetryPurge
+                            .cutoffFor(mgrCfg.telemetry.usageRetentionDays, now)
+                            .foreach { c =>
+                              val n = telemetryStore.purgeRollups("day", c)
+                              if n > 0 then
+                                logger.info(s"daily-rollup purge: deleted $n buckets older than $c")
+                            }
+                      }
+                      .handleErrorWith(e =>
+                        IO(logger.error(s"audit purge failed: ${e.getMessage}"))
+                      )
+                      *> IO.sleep(
+                        scala.concurrent.duration.DurationInt(1).hours
+                      )).foreverM.void.start
+                  else IO.unit.start
 
-              val rollupFiber =
-                if telemetryStore.enabled then
-                  (IO
-                    .blocking {
-                      if coordinator.forall(_.isLeader) then
-                        val to = java.time.Instant.now().minusSeconds(60)
-                        telemetryStore.recomputeRollups(telemetryStore.rollupWatermark(), to)
-                        telemetryStore.advanceRollupWatermark(to)
-                    }
-                    .handleErrorWith(e => IO(logger.error(s"rollup pass failed: ${e.getMessage}")))
-                    *> IO.sleep(
-                      scala.concurrent.duration
-                        .DurationInt(mgrCfg.telemetry.rollupIntervalSec)
-                        .seconds
-                    )).foreverM.void.start
-                else IO.unit.start
+                val rollupFiber =
+                  if telemetryStore.enabled then
+                    (IO
+                      .blocking {
+                        if coordinator.forall(_.isLeader) then
+                          val to = java.time.Instant.now().minusSeconds(60)
+                          telemetryStore.recomputeRollups(telemetryStore.rollupWatermark(), to)
+                          telemetryStore.advanceRollupWatermark(to)
+                      }
+                      .handleErrorWith(e =>
+                        IO(logger.error(s"rollup pass failed: ${e.getMessage}"))
+                      )
+                      *> IO.sleep(
+                        scala.concurrent.duration
+                          .DurationInt(mgrCfg.telemetry.rollupIntervalSec)
+                          .seconds
+                      )).foreverM.void.start
+                  else IO.unit.start
 
-              healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
-                reconcileFiber.flatMap { rcFiber =>
-                  coordinatorFiber.flatMap { coFiber =>
-                    haRefreshFiber.flatMap { hrFiber =>
-                      journalFiber.flatMap { jFiber =>
-                        auditPurgeFiber.flatMap { pFiber =>
-                          rollupFiber.flatMap { rlFiber =>
-                            maintenanceSchedulerFiber.flatMap { msFiber =>
-                              maintenanceDrainFiber.flatMap { mdFiber =>
-                                IO.never[Unit]
-                                  .guarantee(
-                                    fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                      hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                      rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
-                                      gracefulShutdown
-                                  )
+                // SPI module fibers: one per-event dispatch loop, plus the singleton
+                // task loops (leader-gated under HA). `dispatchers` builds fresh loop
+                // closures on each call, so it is evaluated exactly once here.
+                val moduleDispatcherFibers =
+                  moduleEventBus.dispatchers.traverse(_.start)
+                val moduleSingletonFibers =
+                  singletonTasks.loops(() => coordinator.forall(_.isLeader)).traverse(_.start)
+
+                healthProbe.start(() => sup.list().flatMap(_.nodes)).flatMap { fiber =>
+                  reconcileFiber.flatMap { rcFiber =>
+                    coordinatorFiber.flatMap { coFiber =>
+                      haRefreshFiber.flatMap { hrFiber =>
+                        journalFiber.flatMap { jFiber =>
+                          auditPurgeFiber.flatMap { pFiber =>
+                            rollupFiber.flatMap { rlFiber =>
+                              maintenanceSchedulerFiber.flatMap { msFiber =>
+                                maintenanceDrainFiber.flatMap { mdFiber =>
+                                  moduleDispatcherFibers.flatMap { modDispFibers =>
+                                    moduleSingletonFibers.flatMap { modSingFibers =>
+                                      IO.never[Unit]
+                                        .guarantee(
+                                          fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                            hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                            rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
+                                            modDispFibers.traverse_(_.cancel) *>
+                                            modSingFibers.traverse_(_.cancel) *>
+                                            gracefulShutdown
+                                        )
+                                    }
+                                  }
+                                }
                               }
                             }
                           }
@@ -1700,10 +1858,10 @@ object Main extends IOApp with LazyLogging:
                     }
                   }
                 }
-              }
-            case Left(t) =>
-              logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
-              IO.never[Unit]
+              case Left(t) =>
+                logger.error(s"edge FlightSQL failed to start: ${t.getMessage}", t)
+                IO.never[Unit]
+            }
           }
         }
 

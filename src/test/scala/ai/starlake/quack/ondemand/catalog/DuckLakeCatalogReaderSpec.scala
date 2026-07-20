@@ -197,3 +197,27 @@ class DuckLakeCatalogReaderSpec extends AnyFlatSpec with Matchers with PostgresF
         .snapshotId
       reader.filesReferencedAt(s).size should be > reader.filesReferencedAt(sBeforeDelete).size
     }
+
+  "currentTableInfo" should "return the live table's id and creation snapshot" in
+    withCatalog("tpch") { (reader, _) =>
+      val (tableId, begin) = reader.currentTableInfo("tpch1", "region").value
+      tableId should be >= 0L
+      begin should be <= reader.maxSnapshotId().value
+      reader.currentTableInfo("tpch1", "missing") shouldBe None
+    }
+
+  it should "report the replace snapshot as begin_snapshot after CREATE OR REPLACE" in
+    withCatalog(
+      "tpch",
+      "CREATE OR REPLACE TABLE lake.tpch1.region AS SELECT * FROM lake.tpch1.region;\n"
+    ) { (reader, _) =>
+      val (_, begin) = reader.currentTableInfo("tpch1", "region").value
+      begin shouldBe reader.maxSnapshotId().value
+    }
+
+  "latestTableSnapshot" should "track the newest commit touching the table" in
+    withCatalog("tpch", evolutionSql) { (reader, _) =>
+      val head = reader.listTableHistory("tpch1", "region").value.commits.head.snapshotId
+      reader.latestTableSnapshot("tpch1", "region").value shouldBe head
+      reader.latestTableSnapshot("tpch1", "missing") shouldBe None
+    }

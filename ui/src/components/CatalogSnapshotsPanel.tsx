@@ -2,14 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import type { CatalogSnapshotEntry, CatalogTagEntry } from '../api/types';
-import { Modal } from './Modal';
 
 const PAGE = 200;
-
-const chipBtn: React.CSSProperties = {
-  background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-  font: 'inherit', fontSize: '0.9em', color: 'inherit', textDecoration: 'underline',
-};
 
 export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken = 0 }: {
   tenant: string; tenantDb: string;
@@ -28,17 +22,9 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
   const [tableFilter, setTableFilter] = useState('');
   const [tableFilterInput, setTableFilterInput] = useState('');
 
+  // Tags are DISPLAY-ONLY here (name + hold status per snapshot row); add/remove/protect
+  // lives in the table page's Summary section against the picker-selected snapshot.
   const [tags, setTags] = useState<CatalogTagEntry[]>([]);
-  const [tagError, setTagError] = useState<string | null>(null);
-  // Snapshot targeted by the create-tag modal; null = modal closed.
-  const [tagging, setTagging] = useState<CatalogSnapshotEntry | null>(null);
-  const [tagName, setTagName] = useState('');
-  const [tagProtect, setTagProtect] = useState(false);
-  const [modalError, setModalError] = useState<string | null>(null);
-
-  function reloadTags() {
-    api.listCatalogTags(tenant, tenantDb).then(setTags).catch(() => setTags([]));
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -49,8 +35,6 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
     // An in-flight loadMore's .finally is gen-gated and will skip its own
     // reset after the switch, so clear the flag here or it sticks true.
     setLoadingMore(false);
-    setTagError(null);
-    setTagging(null);
     api.listCatalogSnapshots(tenant, tenantDb, PAGE, undefined, tableFilter || undefined)
       .then(r => {
         if (!cancelled) {
@@ -104,39 +88,6 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
     setTableFilter(tableFilterInput.trim());
   }
 
-  function openTagModal(s: CatalogSnapshotEntry) {
-    setTagName('');
-    setTagProtect(false);
-    setModalError(null);
-    setTagging(s);
-  }
-
-  function handleCreateTag(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (!tagging) return;
-    api.createCatalogTag({
-      tenant, tenantDb, name: tagName.trim(),
-      snapshotId: tagging.snapshotId, protected: tagProtect,
-    })
-      .then(() => { setTagging(null); reloadTags(); })
-      .catch(e => setModalError(String(e)));
-  }
-
-  function removeTag(t: CatalogTagEntry) {
-    if (t.protected && !window.confirm(`Remove retention hold '${t.name}'?`)) return;
-    setTagError(null);
-    api.deleteCatalogTag({ tenant, tenantDb, name: t.name })
-      .then(reloadTags)
-      .catch(e => setTagError(String(e)));
-  }
-
-  function toggleProtect(t: CatalogTagEntry) {
-    setTagError(null);
-    api.protectCatalogTag({ tenant, tenantDb, name: t.name, protected: !t.protected })
-      .then(reloadTags)
-      .catch(e => setTagError(String(e)));
-  }
-
   if (error) return <p style={{ color: 'red' }}>Error: {error}</p>;
   if (!snaps) return <p>Loading snapshots...</p>;
 
@@ -166,7 +117,6 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
           by {pinned.length} protected tag{pinned.length === 1 ? '' : 's'}
         </p>
       )}
-      {tagError && <p style={{ color: 'red' }}>Tag error: {tagError}</p>}
       {snaps.length === 0
         ? <em style={{ color: '#888' }}>no snapshots</em>
         : (
@@ -247,29 +197,8 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
                             {!t.exists && (
                               <span style={{ color: '#888', fontSize: '0.9em' }}>missing</span>
                             )}
-                            <button
-                              type="button"
-                              style={chipBtn}
-                              title={t.protected
-                                ? 'Remove the retention hold (snapshot becomes expirable)'
-                                : 'Protect: pin this snapshot against expiry'}
-                              onClick={() => toggleProtect(t)}
-                            >
-                              {t.protected ? 'unprotect' : 'protect'}
-                            </button>
-                            <button
-                              type="button"
-                              style={chipBtn}
-                              title={`Delete tag '${t.name}'`}
-                              onClick={() => removeTag(t)}
-                            >
-                              &times;
-                            </button>
                           </span>
                         ))}
-                        <button type="button" style={chipBtn} onClick={() => openTagModal(s)}>
-                          + tag
-                        </button>
                       </td>
                     </tr>
                   );
@@ -286,41 +215,6 @@ export default function CatalogSnapshotsPanel({ tenant, tenantDb, refreshToken =
           </>
         )}
 
-      {tagging && (
-        <Modal maxWidth={420} onClose={() => setTagging(null)}>
-            <div className="card-title">Tag snapshot {tagging.snapshotId}</div>
-            <p className="subtle" style={{ marginTop: 0 }}>
-              Tag names are per-database handles for this snapshot; a protected
-              tag also pins the snapshot (and every file it references) against
-              expiry. Names cannot be all digits.
-            </p>
-            <form onSubmit={handleCreateTag}>
-              <label>
-                Tag name
-                <input
-                  value={tagName}
-                  onChange={ev => setTagName(ev.target.value)}
-                  placeholder="pre-migration"
-                  autoFocus
-                  required
-                />
-              </label>
-              <label style={{ display: 'block', marginTop: '0.5rem' }}>
-                <input
-                  type="checkbox"
-                  checked={tagProtect}
-                  onChange={ev => setTagProtect(ev.target.checked)}
-                />{' '}
-                protect this snapshot (retention hold)
-              </label>
-              {modalError && <p style={{ color: 'red' }}>{modalError}</p>}
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: '1rem' }}>
-                <button type="button" onClick={() => setTagging(null)}>Cancel</button>
-                <button type="submit">Create</button>
-              </div>
-            </form>
-        </Modal>
-      )}
     </section>
   );
 }

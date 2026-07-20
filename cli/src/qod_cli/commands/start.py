@@ -129,9 +129,6 @@ def start(
         help="Manager release to run (default: the latest release).",
     ),
     jar: Path = typer.Option(None, "--jar", help="Run this local jar instead of downloading."),
-    yes: bool = typer.Option(
-        False, "--yes", "-y", help="Do not prompt before downloading a Java runtime."
-    ),
     demo: bool = typer.Option(
         False,
         "--demo",
@@ -147,9 +144,9 @@ def start(
     if demo:
         from .demo import run_demo
 
-        run_demo(ctx, version, jar, yes)
+        run_demo(ctx, version, jar)
         return
-    java = resolve_java(yes)
+    java = resolve_java()
     # Absolute before the chdir below, or a relative --jar breaks at exec.
     jar_path = jar.resolve() if jar is not None else resolve_jar(version)
 

@@ -1,6 +1,10 @@
 import json
 
-import pyarrow as pa
+import pytest
+
+# pyarrow ships no wheel for Windows on ARM64, where pyproject markers skip it;
+# render_table's output shape is platform-independent, so skip there.
+pa = pytest.importorskip("pyarrow")
 
 from qod_cli.sql import render_table
 

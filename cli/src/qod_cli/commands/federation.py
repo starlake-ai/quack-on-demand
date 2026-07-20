@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Federated sources per (tenant, tenant-db).")
@@ -16,16 +17,38 @@ def _base(tenant: str, db: str) -> str:
 
 
 @app.command("list")
+@covers(
+    "GET",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources",
+    {"tenant": "TENANT", "tenantDb": "DB"},
+)
 def list_(ctx: typer.Context, tenant: str = TENANT, db: str = DB):
     call(ctx, "GET", _base(tenant, db))
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}",
+    {"tenant": "TENANT", "tenantDb": "DB", "alias": "ALIAS"},
+)
 def get(ctx: typer.Context, tenant: str = TENANT, db: str = DB, alias: str = ALIAS):
     call(ctx, "GET", f"{_base(tenant, db)}/{alias}")
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "alias": "--alias",
+        "setupSql": "--setup-sql",
+        "description": "--description",
+        "disabled": "--disabled",
+    },
+)
 def create(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -42,16 +65,38 @@ def create(
 
 
 @app.command()
+@covers(
+    "DELETE",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}",
+    {"tenant": "TENANT", "tenantDb": "DB", "alias": "ALIAS"},
+)
 def delete(ctx: typer.Context, tenant: str = TENANT, db: str = DB, alias: str = ALIAS):
     call(ctx, "DELETE", f"{_base(tenant, db)}/{alias}")
 
 
 @secret_app.command("list")
+@covers(
+    "GET",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}/secrets",
+    {"tenant": "TENANT", "tenantDb": "DB", "alias": "ALIAS"},
+)
 def secret_list(ctx: typer.Context, tenant: str = TENANT, db: str = DB, alias: str = ALIAS):
     call(ctx, "GET", f"{_base(tenant, db)}/{alias}/secrets")
 
 
 @secret_app.command("set")
+@covers(
+    "PUT",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}/secrets",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "alias": "ALIAS",
+        "name": "--name",
+        "value": "--value",
+        "externalRef": "--external-ref",
+    },
+)
 def secret_set(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -72,6 +117,11 @@ def secret_set(
 
 
 @secret_app.command("delete")
+@covers(
+    "DELETE",
+    "/api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}/secrets/{name}",
+    {"tenant": "TENANT", "tenantDb": "DB", "alias": "ALIAS", "name": "NAME"},
+)
 def secret_delete(
     ctx: typer.Context,
     tenant: str = TENANT,

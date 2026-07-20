@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Managed maintenance policies and runs.")
@@ -9,11 +10,32 @@ DB = typer.Option(..., "--db")
 
 
 @app.command()
+@covers("GET", "/api/maintenance/policy", {"tenant": "--tenant", "tenantDb": "--db"})
 def policy(ctx: typer.Context, tenant: str = TENANT, db: str = DB):
     call(ctx, "GET", "/api/maintenance/policy", params={"tenant": tenant, "tenantDb": db})
 
 
 @app.command("policy-upsert")
+@covers(
+    "POST",
+    "/api/maintenance/policy/upsert",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "scopeKind": "--scope-kind",
+        "scopeSchema": "--scope-schema",
+        "scopeTable": "--scope-table",
+        "enabled": "--enabled/--disabled",
+        "retentionDays": "--retention-days",
+        "compactionEnabled": "--compaction-enabled/--compaction-disabled",
+        "targetFileSize": "--target-file-size",
+        "smallFileMinCount": "--small-file-min-count",
+        "rewriteDeleteThreshold": "--rewrite-delete-threshold",
+        "cleanupGraceDays": "--cleanup-grace-days",
+        "orphanMinAgeDays": "--orphan-min-age-days",
+        "cron": "--cron",
+    },
+)
 def policy_upsert(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -50,11 +72,17 @@ def policy_upsert(
 
 
 @app.command("policy-delete")
+@covers("POST", "/api/maintenance/policy/delete", {"id": "ID"})
 def policy_delete(ctx: typer.Context, policy_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/maintenance/policy/delete", body={"id": policy_id})
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/maintenance/run",
+    {"tenant": "--tenant", "tenantDb": "--db", "scope": "--scope", "operations": "--operations"},
+)
 def run(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -71,6 +99,11 @@ def run(
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/maintenance/runs",
+    {"tenant": "--tenant", "tenantDb": "--db", "limit": "--limit", "before": "--before"},
+)
 def runs(
     ctx: typer.Context,
     tenant: str = TENANT,

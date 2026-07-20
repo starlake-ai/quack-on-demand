@@ -84,8 +84,41 @@ CASES = [
             "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
             "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
-            "cpu": "", "memory": "", "podTemplateYaml": "",
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
         },
+    ),
+    (
+        [
+            "pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+            "--size", "2", "--writeonly", "1", "--readonly", "1", "--dual", "0",
+            "--start-suspended", "--cohort", "1,1,0",
+        ],
+        "POST",
+        "/api/pool/create",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
+            "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
+            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": True,
+            "cohorts": [
+                {"placement": {"nodeSelector": {}, "tolerations": []}, "distribution": {"writeonly": 1, "readonly": 1, "dual": 0}},
+            ],
+        },
+    ),
+    (
+        ["pool", "suspend", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/suspend", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
+    ),
+    (
+        ["pool", "resume", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/resume", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
+    ),
+    (
+        ["pool", "status", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "GET", "/api/pool/acme/tpch1/bi/status", {}, None,
     ),
     (
         ["pool", "scale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--target-size", "3", "--writeonly", "1", "--readonly", "2", "--dual", "0", "--force"],
@@ -292,6 +325,10 @@ CASES = [
         {"from": "10", "to": "20"}, None,
     ),
     (
+        ["catalog", "tags", "acme", "tpch1"],
+        "GET", "/api/catalog/tenant/acme/database/tpch1/tags", {}, None,
+    ),
+    (
         ["catalog", "recoverable", "acme", "tpch1", "--limit", "10"],
         "GET", "/api/catalog/tenant/acme/database/tpch1/recoverable", {"limit": "10"}, None,
     ),
@@ -410,3 +447,22 @@ def test_command(runner, argv, method, path, expected_params, expected_body):
         assert request.content == b""
     else:
         assert json.loads(request.content) == expected_body
+
+
+@respx.mock
+def test_pool_create_cohort_malformed(runner):
+    """Test that malformed cohort values (non-numeric) raise clean BadParameter."""
+    respx.route(method="POST", url=f"{BASE}/api/pool/create").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    result = runner.invoke(
+        app,
+        [
+            "pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+            "--size", "2", "--writeonly", "1", "--readonly", "1", "--dual", "0",
+            "--cohort", "1,x,0",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cohort must be three integers: writeonly,readonly,dual" in result.output
+    assert "1,x,0" in result.output

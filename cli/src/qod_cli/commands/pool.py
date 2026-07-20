@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="Pool lifecycle and pool-level access grants.")
@@ -16,11 +17,32 @@ def _key(tenant: str, db: str, pool: str) -> dict:
 
 
 @app.command("list")
+@covers("GET", "/api/pool/list")
 def list_(ctx: typer.Context):
     call(ctx, "GET", "/api/pool/list")
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/pool/create",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "pool": "--pool",
+        "size": "--size",
+        "roleDistribution": "--writeonly/--readonly/--dual",
+        "idleTimeoutSec": "--idle-timeout-sec",
+        "maxConcurrentPerNode": "--max-concurrent-per-node",
+        "disabled": "--disabled",
+        "cpu": "--cpu",
+        "memory": "--memory",
+        "podTemplateYaml": "--pod-template-file",
+        "initSql": "--init-sql",
+        "startSuspended": "--start-suspended",
+        "cohorts": "--cohort",
+    },
+)
 def create(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -37,6 +59,14 @@ def create(
     cpu: str = typer.Option("", "--cpu"),
     memory: str = typer.Option("", "--memory"),
     pod_template_file: typer.FileText = typer.Option(None, "--pod-template-file"),
+    start_suspended: bool = typer.Option(False, "--start-suspended", help="Persist suspended; no nodes spawned until the first statement or `pool resume`."),
+    cohort: list[str] = typer.Option(
+        None,
+        "--cohort",
+        help="Repeatable placement cohort as writeonly,readonly,dual (e.g. 1,0,0). "
+        "When supplied, cohort counts must sum to --size and roles must sum to "
+        "--writeonly/--readonly/--dual.",
+    ),
 ):
     body = {
         **_key(tenant, db, pool),
@@ -48,13 +78,43 @@ def create(
         "cpu": cpu,
         "memory": memory,
         "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
+        "startSuspended": start_suspended,
     }
     if init_sql is not None:
         body["initSql"] = init_sql
+    if cohort:
+        cohorts = []
+        for spec in cohort:
+            parts = spec.split(",")
+            if len(parts) != 3:
+                raise typer.BadParameter(f"expected writeonly,readonly,dual, got {spec!r}")
+            try:
+                w, r, d = (int(p) for p in parts)
+            except ValueError:
+                raise typer.BadParameter(f"cohort must be three integers: writeonly,readonly,dual (got: {spec!r})")
+            cohorts.append(
+                {
+                    "placement": {"nodeSelector": {}, "tolerations": []},
+                    "distribution": {"writeonly": w, "readonly": r, "dual": d},
+                }
+            )
+        body["cohorts"] = cohorts
     call(ctx, "POST", "/api/pool/create", body=body)
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/pool/scale",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "pool": "--pool",
+        "targetSize": "--target-size",
+        "roleDistribution": "--writeonly/--readonly/--dual",
+        "force": "--force",
+    },
+)
 def scale(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -80,31 +140,78 @@ def scale(
 
 
 @app.command()
+@covers("POST", "/api/pool/stop", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "force": "--force"})
 def stop(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
     call(ctx, "POST", "/api/pool/stop", body={**_key(tenant, db, pool), "force": force})
 
 
 @app.command()
+@covers("POST", "/api/pool/delete", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "force": "--force"})
 def delete(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, force: bool = typer.Option(False, "--force")):
     call(ctx, "POST", "/api/pool/delete", body={**_key(tenant, db, pool), "force": force})
 
 
 @app.command("set-disabled")
+@covers(
+    "POST",
+    "/api/pool/setDisabled",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "disabled": "--disabled/--enabled"},
+)
 def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, disabled: bool = typer.Option(..., "--disabled/--enabled")):
     call(ctx, "POST", "/api/pool/setDisabled", body={**_key(tenant, db, pool), "disabled": disabled})
 
 
 @app.command("set-resources")
+@covers(
+    "POST",
+    "/api/pool/setResources",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "cpu": "--cpu", "memory": "--memory"},
+)
 def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, cpu: str = typer.Option(..., "--cpu"), memory: str = typer.Option(..., "--memory")):
     call(ctx, "POST", "/api/pool/setResources", body={**_key(tenant, db, pool), "cpu": cpu, "memory": memory})
 
 
 @app.command("set-pod-template")
+@covers(
+    "POST",
+    "/api/pool/setPodTemplate",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "podTemplateYaml": "--file"},
+)
 def set_pod_template(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, file: typer.FileText = typer.Option(..., "--file")):
     call(ctx, "POST", "/api/pool/setPodTemplate", body={**_key(tenant, db, pool), "podTemplateYaml": file.read()})
 
 
+@app.command()
+@covers("POST", "/api/pool/suspend", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"})
+def suspend(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Scale the pool to zero, keeping its distribution; wakes on the next query."""
+    call(ctx, "POST", "/api/pool/suspend", body=_key(tenant, db, pool))
+
+
+@app.command()
+@covers("POST", "/api/pool/resume", {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"})
+def resume(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Wake a suspended pool (respawn to its stored distribution)."""
+    call(ctx, "POST", "/api/pool/resume", body=_key(tenant, db, pool))
+
+
+@app.command()
+@covers(
+    "GET",
+    "/api/pool/{tenant}/{tenantDb}/{pool}/status",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool"},
+)
+def status(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL):
+    """Fetch a single pool's live status (nodes, suspended/disabled flags, resources)."""
+    call(ctx, "GET", f"/api/pool/{tenant}/{db}/{pool}/status")
+
+
 @permission_app.command("list")
+@covers(
+    "GET",
+    "/api/pool/permission/list",
+    {"tenant": "--tenant", "userId": "--user-id", "groupId": "--group-id"},
+)
 def permission_list(
     ctx: typer.Context,
     tenant: str = typer.Option(None, "--tenant"),
@@ -115,6 +222,11 @@ def permission_list(
 
 
 @permission_app.command("grant")
+@covers(
+    "POST",
+    "/api/pool/permission/grant",
+    {"tenant": "--tenant", "poolId": "--pool-id", "userId": "--user-id", "groupId": "--group-id"},
+)
 def permission_grant(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -133,5 +245,6 @@ def permission_grant(
 
 
 @permission_app.command("revoke")
+@covers("POST", "/api/pool/permission/revoke", {"id": "ID"})
 def permission_revoke(ctx: typer.Context, grant_id: str = typer.Argument(..., metavar="ID")):
     call(ctx, "POST", "/api/pool/permission/revoke", body={"id": grant_id})

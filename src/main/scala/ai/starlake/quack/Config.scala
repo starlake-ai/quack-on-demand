@@ -296,7 +296,14 @@ final case class CatalogConfig(
           "because it is a mutation over potentially large tables; on timeout the handler " +
           "probes whether the table was created anyway and reports accordingly."
     )
-    undropTimeoutSec: Int = 300
+    undropTimeoutSec: Int = 300,
+    @field @ConfigField(
+      envVar = "QOD_CATALOG_RESTORE_TIMEOUT_SEC",
+      description =
+        "Seconds before a restore CREATE OR REPLACE is abandoned. On timeout the handler probes " +
+          "whether the replace committed anyway and reports accordingly."
+    )
+    restoreTimeoutSec: Int = 300
 )
 
 final case class TelemetryConfig(
@@ -488,5 +495,10 @@ final case class FlightConfig(
       envVar = "QOD_SESSION_TTL_SEC",
       description = "Edge session TTL in seconds before a fresh handshake is forced."
     )
-    sessionTtlSec: Long
+    sessionTtlSec: Long,
+    @field @ConfigField(
+      envVar = "PROXY_RESUME_HOLD_TIMEOUT_SEC",
+      description = "Max seconds the edge holds a statement while a suspended pool cold-starts."
+    )
+    resumeHoldTimeoutSec: Long
 )

@@ -21,6 +21,7 @@ import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -30,6 +31,7 @@ import org.scalatest.matchers.should.Matchers
 import java.nio.file.Files
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.*
 
 class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
@@ -43,7 +45,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     */
   private def defaultStub: () => QuackResponse = () => TestArrow.okResponse()
 
-  private def setup(stub: () => QuackResponse = defaultStub) =
+  private def setup(
+      stub: () => QuackResponse = defaultStub,
+      events: ManagerEventSink = ManagerEventSink.noop
+  ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -89,7 +94,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
 
     val sessions = new SessionRegistry
-    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    val router   =
+      new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si, events = events)
     (router, sessions, node)
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
@@ -1081,3 +1087,179 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     result shouldBe a[Right[?, ?]]
     calls.size shouldBe 2
     calls.map(_._1).forall(_.isDefined) shouldBe true
+
+  // ---------- SPI module events ----------
+
+  "module events" should "emit SessionOpened then StatementExecuted with ok=true on success" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val out = router.execute("evt-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+
+    val seen             = received.toArray.toList.map(_.asInstanceOf[ManagerEvent])
+    val sessionOpenedIdx = seen.indexWhere {
+      case ManagerEvent.SessionOpened(t, u, via) =>
+        t == poolKey.tenant && u == "alice" && via == "flightsql"
+      case _ => false
+    }
+    sessionOpenedIdx should be >= 0
+
+    val executedIdx = seen.indexWhere {
+      case _: ManagerEvent.StatementExecuted => true
+      case _                                 => false
+    }
+    executedIdx should be > sessionOpenedIdx
+
+    seen(executedIdx) match
+      case se: ManagerEvent.StatementExecuted =>
+        se.ok shouldBe true
+        se.kind shouldBe "Select"
+        se.tenant shouldBe poolKey.tenant
+        se.tenantDb shouldBe poolKey.tenantDb
+        se.pool shouldBe poolKey.pool
+      case other => fail(s"expected StatementExecuted, got $other")
+
+  it should "emit StatementExecuted with ok=false when execution fails" in:
+    val denying = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult = Denied("you can't read this")
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (base, _, _)           = setup()
+    val router                 = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      validator = denying,
+      stmtInstruments = si,
+      events = sink
+    )
+    val out = router.execute("evt-2", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Left[_, _]]
+
+    val executed = received.toArray.toList.collect { case e: ManagerEvent.StatementExecuted => e }
+    executed should not be empty
+    executed.head.ok shouldBe false
+
+  it should "emit no module events when recordExecution=false (probe-style call)" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    val out                    = router
+      .execute("evt-3", "alice", poolKey, "SELECT 1", recordExecution = false)
+      .unsafeRunSync()
+    out shouldBe a[Right[_, _]]
+    received.toArray.toList shouldBe Nil
+
+  // ---------- Suspend / resume: edge wake-and-hold ----------
+
+  /** Like setup() but exposes the supervisor and lets tests tune the wake-and-hold knobs. The
+    * backend's start can be flipped to fail AFTER pool creation (`failResumeStarts`), so a resume
+    * clears the suspended flag but never produces a node - exercising the hold-timeout arm.
+    */
+  private def setupWithSupervisor(
+      failResumeStarts: Boolean = false,
+      resumeHoldTimeout: FiniteDuration = 60.seconds,
+      resumePollInterval: FiniteDuration = 250.millis
+  ) =
+    val failStart = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val backend   = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) =
+        if failStart.get() then IO.raiseError(new RuntimeException("spawn refused (test)"))
+        else
+          IO {
+            val r = RunningNode(
+              s.nodeId,
+              s.poolKey,
+              s.role,
+              "127.0.0.1",
+              28000 + n.size,
+              "tok",
+              Some(1L),
+              None,
+              Instant.EPOCH,
+              maxConcurrent = s.maxConcurrent
+            )
+            n.put(s.nodeId, r); r
+          }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    if failResumeStarts then failStart.set(true)
+
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      resumeHoldTimeout = resumeHoldTimeout,
+      resumePollInterval = resumePollInterval
+    )
+    (router, sup)
+
+  "execute on a suspended pool" should "wake the pool and run the statement" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    sup.get(poolKey).get.suspended shouldBe true
+    val r = router
+      .execute("wake-1", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isRight shouldBe true
+    sup.get(poolKey).get.suspended shouldBe false
+    sup.get(poolKey).get.nodes should not be empty
+
+  it should "time out with a retryable error when no node comes up" in:
+    val (router, sup) = setupWithSupervisor(
+      failResumeStarts = true,
+      resumeHoldTimeout = 500.millis,
+      resumePollInterval = 50.millis
+    )
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    val r = router
+      .execute("wake-2", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r match
+      case Left(RouterFailure.Unavailable(msg)) => msg should include("resuming")
+      case other => fail(s"expected Unavailable('pool is resuming...'), got $other")
+
+  it should "not wake a disabled pool" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.suspendPool(poolKey, "rest").unsafeRunSync()
+    sup.setPoolDisabled(poolKey, disabled = true).unsafeRunSync()
+    val r = router
+      .execute("wake-3", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isLeft shouldBe true
+    // Untouched: a disabled pool is never auto-woken by traffic.
+    sup.get(poolKey).get.suspended shouldBe true
+
+  "execute on a stopPool'ed pool" should "fail immediately without waking" in:
+    val (router, sup) = setupWithSupervisor()
+    sup.stopPool(poolKey, force = true).unsafeRunSync()
+    val t0 = System.nanoTime()
+    val r  = router
+      .execute("wake-4", "alice", poolKey, "SELECT 1", recordExecution = true)
+      .unsafeRunSync()
+    r.isLeft shouldBe true
+    // The existing "pool is empty" error must surface immediately - no 60s hold.
+    (System.nanoTime() - t0) should be < 2_000_000_000L

@@ -7,11 +7,14 @@ import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
-import ai.starlake.quack.route.{Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import ai.starlake.sql.SqlCommentStripper
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
+
+import scala.concurrent.duration.*
 
 /** Carries a streaming result back through the router. The caller MUST invoke `close()` once all
   * batches have been consumed. `nodeId` is the Quack node that produced the stream, exposed so the
@@ -48,7 +51,10 @@ final class FlightSqlRouter(
     val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
-    val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty
+    val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
+    val events: ManagerEventSink = ManagerEventSink.noop,
+    val resumeHoldTimeout: FiniteDuration = 60.seconds,
+    val resumePollInterval: FiniteDuration = 250.millis
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -211,7 +217,15 @@ final class FlightSqlRouter(
       recordExecution: Boolean = true,
       prepareDurationMs: Option[Long] = None
   ): IO[Either[RouterFailure, QueryResult]] =
-    val s    = sessions.get(connectionId).getOrElse(sessions.open(connectionId, user, poolKey))
+    val s = sessions.get(connectionId).getOrElse {
+      val opened = sessions.open(connectionId, user, poolKey)
+      // Gate module telemetry on recordExecution: internal probes and prepare-time
+      // probes pass recordExecution=false and must not emit, matching every other
+      // telemetry surface in execute.
+      if recordExecution then
+        events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, "flightsql"))
+      opened
+    }
     val kind = classifier.classify(sql)
     // ACL / SQL validation gate. Runs before routing so denied
     // statements never touch a Quack node and don't burn capacity.
@@ -362,113 +376,156 @@ final class FlightSqlRouter(
 
     // ACL -> CLS -> RLS pipeline: each stage runs only when the previous one allowed,
     // and every denial arm has already journaled + instrumented itself.
-    aclCheck.flatMap(_ => clsRewritten()).flatMap(rlsRewritten) match
-      case Left(f)         => IO.pure(Left(f))
-      case Right(finalSql) =>
-        supervisor.snapshot(poolKey) match
-          case None =>
-            if s.txOpen then sessions.invalidatePin(connectionId)
-            maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
-            IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
-          case Some(snap) =>
-            // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
-            // current snapshot; otherwise None lets Router.pick run its load-aware choice.
-            val txPin  = s.pinnedNodeId.filter(_ => s.txOpen)
-            val pinned = txPin.orElse(preferredNode.filter(id => snap.nodes.exists(_.nodeId == id)))
-            // Each quack_query lands in a fresh DuckDB session on the remote, so
-            // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
-            // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
-            // initial schema) when the pool's metastore advertises a dbName.
-            val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
-            // Internal probes (recordExecution=false) never stamp: they must not open
-            // transactions on the node even if a future probe shape classifies as a write.
-            val prelude =
-              if recordExecution then
-                stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
-              else None
-            Router.pick(snap, kind, pinned) match
-              case RoutingDecision.Unavailable(reason) =>
-                maybeRecord(nodeId = "-", durationMs = 0, status = "no-node", error = Some(reason))
-                IO.pure(Left(RouterFailure.Unavailable(reason)))
+    // Bound to resultIO (rather than being the tail expression of execute) so a single
+    // flatTap below can emit exactly one StatementExecuted event on every exit path,
+    // including the validation-denial arms above whose IO.pure(Left(...)) already flows
+    // through this same match.
+    val resultIO: IO[Either[RouterFailure, QueryResult]] =
+      aclCheck.flatMap(_ => clsRewritten()).flatMap(rlsRewritten) match
+        case Left(f)         => IO.pure(Left(f))
+        case Right(finalSql) =>
+          resolveSnapshot(poolKey).flatMap {
+            case Left(f: RouterFailure.NotFound) =>
+              if s.txOpen then sessions.invalidatePin(connectionId)
+              maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
+              IO.pure(Left(f))
+            case Left(f) =>
+              maybeRecord(
+                nodeId = "-",
+                durationMs = 0,
+                status = "resume-timeout",
+                error = Some("pool is resuming")
+              )
+              IO.pure(Left(f))
+            case Right(snap) =>
+              // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
+              // current snapshot; otherwise None lets Router.pick run its load-aware choice.
+              val txPin  = s.pinnedNodeId.filter(_ => s.txOpen)
+              val pinned =
+                txPin.orElse(preferredNode.filter(id => snap.nodes.exists(_.nodeId == id)))
+              // Each quack_query lands in a fresh DuckDB session on the remote, so
+              // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
+              // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
+              // initial schema) when the pool's metastore advertises a dbName.
+              val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
+              // Internal probes (recordExecution=false) never stamp: they must not open
+              // transactions on the node even if a future probe shape classifies as a write.
+              val prelude =
+                if recordExecution then
+                  stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
+                else None
+              Router.pick(snap, kind, pinned) match
+                case RoutingDecision.Unavailable(reason) =>
+                  maybeRecord(
+                    nodeId = "-",
+                    durationMs = 0,
+                    status = "no-node",
+                    error = Some(reason)
+                  )
+                  IO.pure(Left(RouterFailure.Unavailable(reason)))
 
-              case RoutingDecision.PinnedNodeGone(_) =>
-                sessions.invalidatePin(connectionId)
-                maybeRecord(nodeId = "-", durationMs = 0, status = "pin-lost", error = None)
-                IO.pure(
-                  Left(RouterFailure.Unavailable("pinned node disappeared; transaction lost"))
-                )
+                case RoutingDecision.PinnedNodeGone(_) =>
+                  sessions.invalidatePin(connectionId)
+                  maybeRecord(nodeId = "-", durationMs = 0, status = "pin-lost", error = None)
+                  IO.pure(
+                    Left(RouterFailure.Unavailable("pinned node disappeared; transaction lost"))
+                  )
 
-              case RoutingDecision.Use(nodeId) =>
-                snap.nodes.find(_.nodeId == nodeId) match
-                  case None =>
-                    IO.pure(Left(RouterFailure.Internal(s"node $nodeId not in snapshot")))
-                  case Some(node) =>
-                    // Register just before the send so the statement appears in the operator's
-                    // active-statement view from the first byte on the wire. Only when
-                    // recordExecution is true; the Prepare-time probe is ephemeral and should
-                    // not appear in the active-statement list.
-                    // Known race: a kill arriving between register and attachCancel fires the
-                    // noop handle seeded by register, which evicts the entry from the registry
-                    // but does not interrupt the stream. Accepted best-effort semantics.
-                    val stmtId =
-                      if recordExecution then
-                        Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
-                      else None
-                    adapter
-                      .send(
-                        node,
-                        wrappedSql,
-                        session = None,
-                        recordLoad = recordExecution,
-                        stampPrelude = prelude
-                      )
-                      .flatMap {
-                        case QuackResponse.Ok(reader, latency, close) =>
-                          // Idempotent close: an admin kill fires the same close the Flight
-                          // producer will fire later; the second invocation must be a no-op.
-                          val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
-                          val closeOnce: () => Unit =
-                            () => if closedOnce.compareAndSet(false, true) then close()
-                          stmtId.foreach(registry.attachCancel(_, closeOnce))
-                          val closeAndDeregister: () => Unit = () => {
+                case RoutingDecision.Use(nodeId) =>
+                  snap.nodes.find(_.nodeId == nodeId) match
+                    case None =>
+                      IO.pure(Left(RouterFailure.Internal(s"node $nodeId not in snapshot")))
+                    case Some(node) =>
+                      // Register just before the send so the statement appears in the operator's
+                      // active-statement view from the first byte on the wire. Only when
+                      // recordExecution is true; the Prepare-time probe is ephemeral and should
+                      // not appear in the active-statement list.
+                      // Known race: a kill arriving between register and attachCancel fires the
+                      // noop handle seeded by register, which evicts the entry from the registry
+                      // but does not interrupt the stream. Accepted best-effort semantics.
+                      val stmtId =
+                        if recordExecution then
+                          Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
+                        else None
+                      adapter
+                        .send(
+                          node,
+                          wrappedSql,
+                          session = None,
+                          recordLoad = recordExecution,
+                          stampPrelude = prelude
+                        )
+                        .flatMap {
+                          case QuackResponse.Ok(reader, latency, close) =>
+                            // Idempotent close: an admin kill fires the same close the Flight
+                            // producer will fire later; the second invocation must be a no-op.
+                            val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
+                            val closeOnce: () => Unit =
+                              () => if closedOnce.compareAndSet(false, true) then close()
+                            stmtId.foreach(registry.attachCancel(_, closeOnce))
+                            val closeAndDeregister: () => Unit = () => {
+                              stmtId.foreach(registry.deregister)
+                              closeOnce()
+                            }
+                            sessions.onStatement(connectionId, kind, nodeId)
+                            maybeRecord(nodeId, latency, "ok", None)
+                            IO.pure(Right(QueryResult(reader, closeAndDeregister, nodeId, latency)))
+
+                          case QuackResponse.Failed(QuackError.Transient(m), latency) =>
                             stmtId.foreach(registry.deregister)
-                            closeOnce()
-                          }
-                          sessions.onStatement(connectionId, kind, nodeId)
-                          maybeRecord(nodeId, latency, "ok", None)
-                          IO.pure(Right(QueryResult(reader, closeAndDeregister, nodeId, latency)))
-
-                        case QuackResponse.Failed(QuackError.Transient(m), latency) =>
-                          stmtId.foreach(registry.deregister)
-                          maybeRecord(nodeId, latency, "transient", Some(m))
-                          if s.txOpen then
-                            sessions.invalidatePin(connectionId)
-                            IO.pure(
-                              Left(
-                                RouterFailure
-                                  .Unavailable(s"transient failure inside transaction: $m")
+                            maybeRecord(nodeId, latency, "transient", Some(m))
+                            if s.txOpen then
+                              sessions.invalidatePin(connectionId)
+                              IO.pure(
+                                Left(
+                                  RouterFailure
+                                    .Unavailable(s"transient failure inside transaction: $m")
+                                )
                               )
-                            )
-                          else
-                            // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT rewrittenSql
-                            // (CLS only, pre-RLS) -- otherwise a retried query returns rows the row
-                            // policy should have filtered. See security-audit-2026-07-02 #5b.
-                            retryOnce(
-                              connectionId,
-                              user,
-                              poolKey,
-                              kind,
-                              finalSql,
-                              exclude = nodeId,
-                              recordLoad = recordExecution,
-                              prelude = prelude
-                            )
+                            else
+                              // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT
+                              // rewrittenSql (CLS only, pre-RLS) -- otherwise a retried query
+                              // returns rows the row policy should have filtered. See
+                              // security-audit-2026-07-02 #5b.
+                              retryOnce(
+                                connectionId,
+                                user,
+                                poolKey,
+                                kind,
+                                finalSql,
+                                exclude = nodeId,
+                                recordLoad = recordExecution,
+                                prelude = prelude
+                              )
 
-                        case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
-                          stmtId.foreach(registry.deregister)
-                          maybeRecord(nodeId, latency, "permanent", Some(m))
-                          IO.pure(Left(classifyPermanent(m)))
-                      }
+                          case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
+                            stmtId.foreach(registry.deregister)
+                            maybeRecord(nodeId, latency, "permanent", Some(m))
+                            IO.pure(Left(classifyPermanent(m)))
+                        }
+          }
+
+    val startedAtNanos = System.nanoTime()
+    // Gate the module StatementExecuted event on recordExecution: internal probes and
+    // prepare-time probes pass recordExecution=false and must not emit, matching every
+    // other telemetry surface in execute.
+    if recordExecution then
+      resultIO.flatTap { r =>
+        IO(
+          events.emit(
+            ManagerEvent.StatementExecuted(
+              tenant = poolKey.tenant,
+              tenantDb = poolKey.tenantDb,
+              pool = poolKey.pool,
+              kind = kind.toString,
+              user = user,
+              durationMs = (System.nanoTime() - startedAtNanos) / 1000000L,
+              ok = r.isRight
+            )
+          )
+        )
+      }
+    else resultIO
 
   /** Prepend `USE <dbName>.<schemaName>;` so the remote DuckDB session lands in the pool's
     * catalog+schema, letting unqualified table names AND 2-part `"schema"."table"` paths resolve.
@@ -501,6 +558,35 @@ final class FlightSqlRouter(
             s"USE $db.$schema; $sql"
           case None => sql
       case _ => sql
+
+  /** Resolve the routing snapshot, waking a suspended pool first. On a suspended (and not disabled)
+    * pool this fires resumePool(reason="query") and polls until a routable node appears, bounded by
+    * resumeHoldTimeout; expiry yields the retryable "pool is resuming" UNAVAILABLE. Disabled pools
+    * are never auto-woken. resumePool errors are swallowed here (.attempt): the flag is already
+    * cleared, so reconcile retries the spawn and the poll either sees a node or times out.
+    */
+  private def resolveSnapshot(poolKey: PoolKey): IO[Either[RouterFailure, PoolSnapshot]] =
+    supervisor.get(poolKey) match
+      case None => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
+      case Some(st) if st.suspended && !st.disabled =>
+        // IO.defer is load-bearing: without it the snapshot check (and the recursive
+        // poll construction) would run eagerly, BEFORE resumePool executes, and the
+        // whole chain would pre-resolve to the timeout against the still-empty pool.
+        def poll(remaining: FiniteDuration): IO[Either[RouterFailure, PoolSnapshot]] =
+          IO.defer {
+            supervisor.snapshot(poolKey) match
+              case Some(snap) if snap.nodes.exists(n => snap.loadOf(n.nodeId).routable) =>
+                IO.pure(Right(snap))
+              case _ if remaining <= Duration.Zero =>
+                IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
+              case _ =>
+                IO.sleep(resumePollInterval) *> poll(remaining - resumePollInterval)
+          }
+        supervisor.resumePool(poolKey, "query").attempt *> poll(resumeHoldTimeout)
+      case Some(_) =>
+        supervisor.snapshot(poolKey) match
+          case None       => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
+          case Some(snap) => IO.pure(Right(snap))
 
   private def retryOnce(
       connectionId: String,

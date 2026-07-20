@@ -144,6 +144,28 @@ final class LocalQuackBackend(
         )
       then LocalQuackBackend.terminate(p.pid(), force = true)
     }
+    // Adopt-only nodes carry no Process handle, only a pid; without this
+    // pass a node inherited from a previous manager generation survives
+    // SIGTERM deterministically. Same TERM -> bounded wait -> KILL idiom as
+    // `stop(nodeId)`'s adopted branch.
+    val adopted = adoptedPids.toList
+    adopted.foreach { case (_, pid) => LocalQuackBackend.terminate(pid, force = false) }
+    adopted.foreach { case (_, pid) =>
+      val handle = Option(java.lang.ProcessHandle.of(pid))
+        .flatMap(o => if o.isPresent then Some(o.get()) else None)
+      val exited = handle match
+        case Some(h) =>
+          try
+            h.onExit()
+              .get(
+                LocalQuackBackend.ShutdownGracePerProcessSec,
+                java.util.concurrent.TimeUnit.SECONDS
+              )
+            true
+          catch case _: Throwable => false
+        case None => true // already gone
+      if !exited then LocalQuackBackend.terminate(pid, force = true)
+    }
     processes.clear()
     tokens.clear()
     nodePorts.clear()
@@ -235,7 +257,20 @@ object LocalQuackBackend:
     else
       Option(java.lang.ProcessHandle.of(pid))
         .flatMap(o => if o.isPresent then Some(o.get()) else None)
-        .foreach(h => if force then h.destroyForcibly() else h.destroy())
+        .foreach { h =>
+          if force then
+            // SIGKILL bypasses the wrapper's trap, which is what normally
+            // forwards TERM to the duckdb grandchild; sweep the descendants
+            // first so the tree cannot outlive its wrapper.
+            h.descendants().forEach { (d: java.lang.ProcessHandle) =>
+              d.destroyForcibly(); ()
+            }
+            h.destroyForcibly()
+            ()
+          else
+            h.destroy()
+            ()
+        }
 
   private val rnd           = new SecureRandom()
   def randomToken(): String =

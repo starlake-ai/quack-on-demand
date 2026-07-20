@@ -1,6 +1,153 @@
 # Changelog
 
-## 0.3.11
+## 0.5.0
+
+### Scale to zero
+
+- **Pools can now hibernate.** `qodstate_pool.suspended` marks a pool scaled to
+  zero WITH its role distribution kept: suspend gracefully drains every node
+  (in-flight statements finish) while the DuckLake catalog and data stay
+  intact, and the stored distribution is the memory of what to respawn. Wake is
+  automatic: the first FlightSQL statement against a suspended pool resumes it
+  and the edge holds the query until a node is routable, bounded by
+  `PROXY_RESUME_HOLD_TIMEOUT_SEC` (default 60s), then fails retryable ("pool is
+  resuming, retry shortly"). No client changes needed; the first query after a
+  sleep just looks slow once.
+- **Suspend on demand.** `POST /api/pool/suspend` / `POST /api/pool/resume`
+  (tenant-scoped, audited as `pool.suspend` / `pool.resume`), a Hibernated
+  badge plus Suspend/Wake button in the UI, and `startSuspended` on pool
+  create: provision a pool with its catalog initialized but zero nodes until
+  first use.
+- **Guard rails.** Scaling a suspended pool is rejected with 409
+  `pool_suspended` (resume first); stopping a suspended pool zeroes the
+  distribution and clears the flag so it genuinely stays down; `disabled`
+  still wins over everything and is never auto-woken.
+- **Self-healing.** Reconcile skips suspended pools' respawn, heals a crash
+  mid-suspend by draining straggler nodes, refreshes pool state under the
+  per-pool lock so it can never drain a pool that woke mid-pass, and a failed
+  resume is retried by the next reconcile pass. Suspend/resume serialize
+  through per-pool advisory locks and propagate across HA replicas.
+- **Module events.** `PoolSuspended` / `PoolResumed` manager events (reason
+  `rest | query | module`) for hosted-service modules building idle policies
+  on the SPI.
+
+### CLI
+
+- **Full REST parity, permanently enforced.** Every manager REST operation is
+  now reachable from `qod` with every parameter, and a parity gate keeps it
+  that way: the OpenAPI document generated from the endpoint definitions is
+  committed as a contract copy (`cli/tests/resources/openapi.yaml`, pinned to
+  the code by a build-time freshness check), and the CLI test suite fails
+  whenever an operation or parameter lacks a command. Browser-redirect
+  endpoints (OIDC / SQL-token flows) are the only exclusions, each justified
+  in the test.
+- **New commands from the catch-up:** `qod pool suspend`, `qod pool resume`,
+  `qod pool status`, `qod catalog tags`, `qod ready`, `--start-suspended` and
+  repeatable `--cohort w,r,d` on `qod pool create`, and `--tenant` on
+  `qod auth mode`.
+
+### Logging
+
+- **Quiet by default.** One knob, `QOD_LOG_LEVEL` (env var or `-D` system
+  property), now drives the whole process and defaults to `ERROR`: a plain
+  `qod start` boots silently. Set `QOD_LOG_LEVEL=INFO` for the operational
+  boot log (ports, module loads, reconcile) or `DEBUG` for application
+  internals; the grpc/netty/Arrow firehoses stay clamped at WARN so DEBUG
+  remains usable. Security misconfiguration reports (open REST API without
+  `QOD_API_KEY`, dev-default `QOD_SESSION_JWT_SECRET`) are logged at ERROR so
+  they survive the quiet default.
+
+- **Operator boot banner.** The manager always prints (stdout, regardless of
+  log level) the control-plane Postgres URL it is about to use, refuses to
+  start with a clear message when that Postgres is unreachable, and once both
+  listeners are up prints a copy-pasteable banner with the REST/UI URL, the
+  FlightSQL endpoint, and ready-made JDBC, ADBC, and ODBC connection strings.
+
+### Fixes
+
+- The bundled demo loader script (`_load-common.sh`) is re-synced with the
+  canonical copy shipped in `scripts/`.
+- Malformed `--cohort` values now fail with a clean usage error instead of a
+  traceback.
+
+## 0.4.5
+
+### Distribution
+
+- **The native client degrades gracefully where no libquackwire is bundled.**
+  On platforms with no native binary for the running JVM (Windows on ARM64:
+  `quackwire.dll` is x86_64-only), the manager now logs a warning and falls
+  back to the embedded HTTP client instead of crashing at JNI load. Setting
+  `QOD_NATIVE_CLIENT=false` by hand on ARM Windows is no longer needed.
+
+### Catalog
+
+- **Restore / rollback to a snapshot (Spec 04).** `POST /api/catalog/restore` rolls a live
+  table back to a prior snapshot (id or tag) as a new forward snapshot: history is preserved
+  and the pre-restore state stays queryable. Dry-run returns the exact change summary that
+  will be undone; `expectedCurrentSnapshot` turns a concurrent write into a 409 instead of a
+  silent overwrite. Surfaced as a Restore action in the snapshot browser and the table
+  history timeline, and as `qod catalog restore`. Requires an ALL grant, or DDL plus RO/RW,
+  on the table. Time-travel `AT (VERSION => n)` clauses are now stripped before ACL parsing,
+  so grant-holding (non-superuser) principals can run time-travel statements at all surfaces.
+
+---
+
+## 0.4.4
+
+### Distribution
+
+- **`qod` installs on Windows on ARM.** `adbc-driver-flightsql` and `pyarrow`
+  ship no Windows ARM64 wheels, and their sdist builds fail, which broke
+  `uvx qod` entirely on that platform. The dependencies are now skipped there
+  via environment markers; the launcher, REST commands, and `qod start
+  --demo` are unaffected, and `qod sql` explains the limitation instead of
+  crashing.
+
+---
+
+## 0.4.3
+
+### Distribution
+
+- **Windows on ARM: DuckDB provisioning works.** The launcher now maps
+  `(win32, arm64)` to DuckDB's native `windows-arm64` CLI and libduckdb
+  assets; previously `qod start` on ARM Windows (e.g. Parallels on Apple
+  Silicon) failed with "could not provision the duckdb CLI". Note the native
+  `quackwire.dll` remains x86_64-only: set `QOD_NATIVE_CLIENT=false` for
+  `qod start` on ARM Windows (the demo already forces it).
+
+---
+
+## 0.4.2
+
+### Distribution
+
+- **TLS cert auto-generation no longer requires `openssl`.** The edge now
+  generates its self-signed certificate with the JRE's own `keytool` (present
+  in every runtime the manager boots on), extracting the key in-process, so
+  `qod start` and `qod start --demo` work on stock Windows where `openssl` is
+  not on PATH. `openssl` remains as a fallback for JREs without keytool.
+
+---
+
+## 0.4.1
+
+### Release tooling
+
+- **The manager is no longer published to Maven Central.** GitHub Releases is
+  the canonical jar channel (sha256-verified by the qod launcher); PyPI and
+  Docker Hub are unchanged. libquackwire stays on Maven Central since it is a
+  build-time dependency that must resolve anonymously.
+- **libquackwire no longer version-bumps on every manager release.** Its
+  version now only moves when its inputs change (the DuckDB pin or the native
+  source); between changes build.sbt keeps pinning the last released coord,
+  and the CI snapshot publisher fails fast if a native change lands without a
+  version bump.
+
+---
+
+## 0.4.0
 
 ### Distribution
 
@@ -12,6 +159,9 @@
 - **The demo banner prints when the manager is ready, not before boot.** It
   now lands at the end of the boot output with the admin UI logins and
   copy-pastable JDBC / ADBC / ODBC configurations for every seeded credential.
+- **The Java runtime download no longer prompts.** When no Java 21+ is found,
+  `qod start` announces the Temurin JRE download and proceeds; the now
+  purposeless `--yes` / `-y` flag is removed.
 
 ---
 

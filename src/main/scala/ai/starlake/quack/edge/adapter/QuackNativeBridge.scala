@@ -111,6 +111,43 @@ object QuackNativeBridge:
     NativeLoader.loadFromResources(s"/native/$osArch/$libName")
     true
 
+/** Classpath probe for the bundled libquackwire native. Deliberately separate from
+  * [[QuackNativeBridge]]: touching that object triggers the JNI load at init, which is exactly what
+  * must NOT happen on a platform with no bundled binary (Windows on ARM64 - quackwire.dll is built
+  * x86_64-only). Main consults [[effectiveNativeClient]] before constructing the client so such
+  * platforms degrade to the embedded HTTP path instead of crashing.
+  */
+object QuackNativeSupport extends com.typesafe.scalalogging.LazyLogging:
+
+  def available(platform: String, libFile: String = System.mapLibraryName("quackwire")): Boolean =
+    val stream = getClass.getResourceAsStream(s"/native/$platform/$libFile")
+    if stream == null then false
+    else
+      stream.close()
+      true
+
+  /** True when a native for the RUNNING platform is bundled. False also for platforms
+    * [[NativeLoader.platformDir]] does not know about.
+    */
+  def availableForThisPlatform: Boolean =
+    scala.util.Try(NativeLoader.platformDir()).toOption.exists(available(_))
+
+  /** The native-client setting Main should actually use: the configured value, forced to `false`
+    * (with a warning) when no native is bundled for this platform.
+    */
+  def effectiveNativeClient(
+      configured: Boolean,
+      nativeBundled: Boolean = availableForThisPlatform
+  ): Boolean =
+    if configured && !nativeBundled then
+      logger.warn(
+        "nativeClient=true but no libquackwire native is bundled for this platform " +
+          "(e.g. Windows on ARM64, where quackwire.dll is x86_64-only); " +
+          "falling back to the embedded HTTP client."
+      )
+      false
+    else configured
+
 private object NativeLoader:
   def platformDir(): String =
     val os    = sys.props("os.name").toLowerCase

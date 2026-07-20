@@ -9,8 +9,6 @@ import org.apache.arrow.flight.auth2.CallHeaderAuthenticator
 import org.apache.arrow.memory.RootAllocator
 
 import java.io.File
-import java.nio.file.{Files, Path}
-import java.security.MessageDigest
 import java.util.UUID
 
 final class FlightEdgeServer(
@@ -60,7 +58,7 @@ final class FlightEdgeServer(
       .headerAuthenticator(headerAuth)
 
     if cfg.tlsEnabled then
-      ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
+      CertGen.ensureCertFiles(cfg.tlsCertChain, cfg.tlsPrivateKey)
       builder.useTls(new File(cfg.tlsCertChain), new File(cfg.tlsPrivateKey))
 
     server = builder.build()
@@ -71,58 +69,6 @@ final class FlightEdgeServer(
     logger.info(
       s"FlightSQL edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}, auth: $authMode)"
     )
-
-  /** Auto-generate a self-signed cert/key pair at the configured paths when either file is missing.
-    * Dev convenience so `useEncryption=true` works out of the box; production deploys should supply
-    * CA-signed material. Uses the system `openssl` (no JVM crypto deps, no JPMS reflection
-    * headaches under Java 17+). CN + SAN are bound to `localhost`.
-    */
-  private def ensureCertFiles(certPath: String, keyPath: String): Unit =
-    val certFile = Path.of(certPath)
-    val keyFile  = Path.of(keyPath)
-    if Files.exists(certFile) && Files.exists(keyFile) then
-      logger.info(s"TLS: reusing existing cert at $certPath")
-    else
-      Option(certFile.getParent).foreach(Files.createDirectories(_))
-      Option(keyFile.getParent).foreach(Files.createDirectories(_))
-      val cmd = List(
-        "openssl",
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-days",
-        "3650",
-        "-keyout",
-        keyPath,
-        "-out",
-        certPath,
-        "-subj",
-        "/CN=localhost",
-        "-addext",
-        "subjectAltName=DNS:localhost,IP:127.0.0.1"
-      )
-      val pb     = new java.lang.ProcessBuilder(cmd*).redirectErrorStream(true)
-      val proc   = pb.start()
-      val output = new String(proc.getInputStream.readAllBytes())
-      val rc     = proc.waitFor()
-      if rc != 0 then
-        throw new RuntimeException(
-          s"openssl failed to generate cert (rc=$rc): $output. " +
-            "Install openssl or supply your own cert/key at the configured paths."
-        )
-      val fp = sha256Fingerprint(Files.readAllBytes(certFile))
-      logger.warn(
-        s"TLS: generated self-signed cert (CN=localhost) at $certPath / $keyPath. " +
-          s"SHA-256 fingerprint: $fp. " +
-          "JDBC clients: jdbc:arrow-flight-sql://localhost:PORT?useEncryption=true&disableCertificateVerification=true " +
-          "(or import the cert into a trust store for verified TLS)."
-      )
-
-  private def sha256Fingerprint(certBytes: Array[Byte]): String =
-    val md = MessageDigest.getInstance("SHA-256")
-    md.digest(certBytes).map(b => f"$b%02X").mkString(":")
 
   /** Resolve credentials to a peerIdentity and bind the pool context.
     *

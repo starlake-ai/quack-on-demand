@@ -63,6 +63,28 @@ object PoolEndpoints:
       .in(jsonBody[DeletePoolRequest])
       .in(authToken)
 
+  val suspendPool: PublicEndpoint[
+    (SuspendPoolRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("pool" / "suspend")
+      .in(jsonBody[SuspendPoolRequest])
+      .in(authToken)
+
+  val resumePool: PublicEndpoint[
+    (ResumePoolRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("pool" / "resume")
+      .in(jsonBody[ResumePoolRequest])
+      .in(authToken)
+
   val listPools: PublicEndpoint[
     Option[String],
     (sttp.model.StatusCode, ErrorResponse),

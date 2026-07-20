@@ -3,6 +3,7 @@ import type {
   CreatePoolRequest,
   ScalePoolRequest,
   StopPoolRequest,
+  PoolRefRequest,
   DeletePoolRequest,
   SetMaxConcurrentRequest,
   NodeOpRequest,
@@ -41,6 +42,8 @@ import type {
   RecoverableListResponse,
   UndropRequest,
   UndropResponse,
+  RestoreRequest,
+  RestoreResponse,
   SchemaDiffResponse,
   // Managed maintenance
   MaintenancePolicyUpsertRequest,
@@ -196,6 +199,8 @@ export const api = {
   createPool:  (req: CreatePoolRequest) => post<PoolResponse>('/pool/create', req),
   scalePool:   (req: ScalePoolRequest) => post<PoolResponse>('/pool/scale', req),
   stopPool:    (req: StopPoolRequest) => post<void>('/pool/stop', req),
+  suspendPool: (req: PoolRefRequest) => post<void>('/pool/suspend', req),
+  resumePool:  (req: PoolRefRequest) => post<void>('/pool/resume', req),
   deletePool:  (req: DeletePoolRequest) => post<void>('/pool/delete', req),
   setMaxConcurrent:  (req: SetMaxConcurrentRequest) => post<void>('/node/setMaxConcurrent', req),
   quarantineNode:    (req: NodeOpRequest) => post<void>('/node/quarantine', req),
@@ -430,6 +435,7 @@ export const api = {
     );
   },
   undropTable: (req: UndropRequest) => post<UndropResponse>('/catalog/undrop', req),
+  restoreTable: (req: RestoreRequest) => post<RestoreResponse>('/catalog/restore', req),
   catalogDataDiff: (
     tenant: string, tenantDb: string, schema: string, table: string, from: string, to: string,
     opts?: { limit?: number; cursor?: string; changeType?: string }

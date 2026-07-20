@@ -204,6 +204,11 @@ load_print_banner() {
 # DuckLake ATTACH.
 load_preamble_sql() {
   cat <<SQL
+-- The seed loaders run in the BACKGROUND while run-jar.sh's manager owns the
+-- terminal; duckdb's carriage-return progress bar (on by default when stdout
+-- is a tty) overprints the manager's log lines and leaves the display
+-- misaligned. Plain line output interleaves cleanly.
+SET enable_progress_bar = false;
 INSTALL ducklake; LOAD ducklake;
 INSTALL postgres; LOAD postgres;
 ${1:-}

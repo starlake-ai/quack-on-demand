@@ -113,6 +113,28 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
+  it should "return 409 pool_suspended on a suspended pool" in:
+    val h = freshHandlers
+    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), None)(_ => None)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val out = h
+      .scalePool(
+        ScalePoolRequest(
+          "acme",
+          "acme_default",
+          "sales",
+          3,
+          RoleDistribution(0, 2, 1),
+          force = false
+        ),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Conflict)
+    out.left.toOption.map(_._2.error) shouldBe Some("pool_suspended")
+
   "stopPool" should "stop a known pool but keep it (scaled to 0)" in:
     val h = freshHandlers
     h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
@@ -367,3 +389,52 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
+
+  // Task 5: pool suspend / resume REST surface
+
+  private def tenantScope(tenant: String): SessionScope =
+    SessionScope(superuser = false, manageableTenants = Set(tenant))
+
+  "suspendPool / resumePool" should "round-trip through the handlers" in:
+    val h = freshHandlers
+    h.createPool(req(), None)(_ => None).unsafeRunSync()
+    val sReq = SuspendPoolRequest("acme", "acme_default", "sales")
+    h.suspendPool(sReq, None)(_ => None).unsafeRunSync().isRight shouldBe true
+    val afterSuspend = h.listPools(None)(_ => None).unsafeRunSync().toOption.get
+    afterSuspend.pools.find(_.pool == "sales").get.suspended shouldBe true
+    val rReq = ResumePoolRequest("acme", "acme_default", "sales")
+    h.resumePool(rReq, None)(_ => None).unsafeRunSync().isRight shouldBe true
+    h.listPools(None)(_ => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .pools
+      .find(_.pool == "sales")
+      .get
+      .suspended shouldBe false
+
+  it should "404 on an unknown pool" in:
+    val h = freshHandlers
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "nope"), None)(_ => None)
+      .unsafeRunSync()
+      .left
+      .exists(_._1 == StatusCode.NotFound) shouldBe true
+
+  it should "403 for a foreign-tenant session" in:
+    val h = freshHandlers
+    h.createPool(req(), None)(_ => None).unsafeRunSync()
+    val foreignScope: String => Option[SessionScope] = _ => Some(tenantScope("globex"))
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), Some("tok"))(foreignScope)
+      .unsafeRunSync()
+      .left
+      .exists(_._1 == StatusCode.Forbidden) shouldBe true
+
+  "createPool with startSuspended" should "return a suspended pool with no nodes" in:
+    val h    = freshHandlers
+    val resp = h
+      .createPool(req().copy(startSuspended = true), None)(_ => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+    resp.suspended shouldBe true
+    resp.nodes shouldBe empty

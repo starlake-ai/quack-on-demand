@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 app = typer.Typer(help="DuckLake catalog browsing, time travel, and recovery.")
@@ -21,16 +22,39 @@ def _at_most_one(**selectors) -> None:
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas",
+    {"tenant": "TENANT", "tenantDb": "DB"},
+)
 def schemas(ctx: typer.Context, tenant: str = TENANT, db: str = DB):
     call(ctx, "GET", f"{_base(tenant, db)}/schemas")
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
+    {"tenant": "TENANT", "tenantDb": "DB", "schema": "SCHEMA"},
+)
 def tables(ctx: typer.Context, tenant: str = TENANT, db: str = DB, schema: str = SCHEMA):
     call(ctx, "GET", f"{_base(tenant, db)}/schemas/{schema}/tables")
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "schema": "SCHEMA",
+        "table": "TABLE",
+        "asOf": "--as-of",
+        "asOfTag": "--as-of-tag",
+        "asOfTs": "--as-of-ts",
+    },
+)
 def describe(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -51,6 +75,11 @@ def describe(
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/snapshots",
+    {"tenant": "TENANT", "tenantDb": "DB", "limit": "--limit", "before": "--before", "table": "--table"},
+)
 def snapshots(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -63,6 +92,22 @@ def snapshots(
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/history",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "schema": "SCHEMA",
+        "table": "TABLE",
+        "limit": "--limit",
+        "before": "--before",
+        "from": "--from",
+        "to": "--to",
+        "operation": "--operation",
+        "author": "--author",
+    },
+)
 def history(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -85,6 +130,20 @@ def history(
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/preview",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "schema": "SCHEMA",
+        "table": "TABLE",
+        "asOf": "--as-of",
+        "asOfTag": "--as-of-tag",
+        "asOfTs": "--as-of-ts",
+        "limit": "--limit",
+    },
+)
 def preview(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -106,6 +165,21 @@ def preview(
 
 
 @app.command("data-diff")
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/data-diff",
+    {
+        "tenant": "TENANT",
+        "tenantDb": "DB",
+        "schema": "SCHEMA",
+        "table": "TABLE",
+        "from": "--from",
+        "to": "--to",
+        "limit": "--limit",
+        "cursor": "--cursor",
+        "changeType": "--change-type",
+    },
+)
 def data_diff(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -127,6 +201,11 @@ def data_diff(
 
 
 @app.command("schema-diff")
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/schema-diff",
+    {"tenant": "TENANT", "tenantDb": "DB", "schema": "SCHEMA", "table": "TABLE", "from": "--from", "to": "--to"},
+)
 def schema_diff(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -145,6 +224,22 @@ def schema_diff(
 
 
 @app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/tags",
+    {"tenant": "TENANT", "tenantDb": "DB"},
+)
+def tags(ctx: typer.Context, tenant: str = TENANT, db: str = DB):
+    """List snapshot tags of the tenant-db (see `tag create`/`delete`/`protect` to manage them)."""
+    call(ctx, "GET", f"{_base(tenant, db)}/tags")
+
+
+@app.command()
+@covers(
+    "GET",
+    "/api/catalog/tenant/{tenant}/database/{tenantDb}/recoverable",
+    {"tenant": "TENANT", "tenantDb": "DB", "limit": "--limit"},
+)
 def recoverable(
     ctx: typer.Context,
     tenant: str = TENANT,
@@ -156,6 +251,18 @@ def recoverable(
 
 
 @app.command()
+@covers(
+    "POST",
+    "/api/catalog/undrop",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "schema": "--schema",
+        "table": "--table",
+        "asName": "--as-name",
+        "fromSnapshot": "--from-snapshot",
+    },
+)
 def undrop(
     ctx: typer.Context,
     tenant: str = typer.Option(..., "--tenant"),
@@ -171,3 +278,59 @@ def undrop(
     if from_snapshot is not None:
         body["fromSnapshot"] = from_snapshot
     call(ctx, "POST", "/api/catalog/undrop", body=body)
+
+
+@app.command()
+@covers(
+    "POST",
+    "/api/catalog/restore",
+    {"tenant": "--tenant", "tenantDb": "--db", "schema": "--schema", "table": "--table", "to": "--to", "dryRun": "--dry-run"},
+)
+@covers(
+    "POST",
+    "/api/catalog/restore",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "schema": "--schema",
+        "table": "--table",
+        "to": "--to",
+        "expectedCurrentSnapshot": "(computed from the dry-run response, gated by --yes)",
+    },
+)
+def restore(
+    ctx: typer.Context,
+    tenant: str = typer.Option(..., "--tenant"),
+    db: str = typer.Option(..., "--db"),
+    schema: str = typer.Option(..., "--schema"),
+    table: str = typer.Option(..., "--table"),
+    to: str = typer.Option(..., "--to", help="Target snapshot id or tag name."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview the change summary; no write."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the interactive confirmation."),
+):
+    """Restore a live table to a prior snapshot (non-destructive: writes a new snapshot).
+
+    Runs the dry run first and shows how many rows will be reverted; requires an ALL grant,
+    or DDL plus RO/RW, on the table. For dropped tables use undrop instead.
+    """
+    body = {"tenant": tenant, "tenantDb": db, "schema": schema, "table": table, "to": to}
+    preview = call(
+        ctx,
+        "POST",
+        "/api/catalog/restore",
+        body={**body, "dryRun": True},
+        quiet=ctx.obj.json_output and not dry_run,
+    )
+    if dry_run:
+        return
+    if not yes and not typer.confirm(
+        f"Restore {schema}.{table} to snapshot {preview['toSnapshot']}"
+        f" (current {preview['currentSnapshot']})?"
+    ):
+        raise typer.Exit(1)
+    call(
+        ctx,
+        "POST",
+        "/api/catalog/restore",
+        body={**body, "expectedCurrentSnapshot": preview["currentSnapshot"]},
+    )

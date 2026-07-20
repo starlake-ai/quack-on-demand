@@ -121,6 +121,20 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
   -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
 
+# Suspend a pool (scale-to-zero, keeps the role distribution for resume)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/suspend \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
+
+# Resume a suspended pool
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/resume \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
+
+# A suspended pool also wakes automatically on the first FlightSQL statement
+# (bounded by PROXY_RESUME_HOLD_TIMEOUT_SEC, default 60s). A stopped pool
+# (pool/stop) stays down; a disabled pool is never auto-woken.
+
 # Delete a pool: stops nodes AND removes the pool from the registry
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \

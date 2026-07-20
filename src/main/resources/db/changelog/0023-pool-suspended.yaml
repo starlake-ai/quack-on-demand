@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0023-qodstate-pool-suspended
+      author: quack-on-demand
+      changes:
+        # Scale-to-zero state. When true the pool runs zero nodes but
+        # keeps its role distribution: reconcile skips it, and the
+        # FlightSQL edge wakes it on the first incoming statement.
+        # Distinct from `disabled` (kill switch, never auto-woken) and
+        # from a stopPool'ed pool (distribution zeroed, stays down).
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: suspended
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }

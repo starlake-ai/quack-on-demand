@@ -25,6 +25,8 @@ object AuditActions:
   val PoolScale            = "pool.scale"
   val PoolStop             = "pool.stop"
   val PoolDelete           = "pool.delete"
+  val PoolSuspend          = "pool.suspend"
+  val PoolResume           = "pool.resume"
   val PoolSetDisabled      = "pool.setDisabled"
   val PoolSetResources     = "pool.setResources"
   val PoolSetPodTemplate   = "pool.setPodTemplate"
@@ -76,6 +78,8 @@ object AuditActions:
   val CatalogRecoverableRead = "catalog.recoverable.read"
   // undrop is a mutation (routed CTAS), not a read; audited unconditionally
   val CatalogUndrop = "catalog.undrop"
+  // restore is a mutation (routed CREATE OR REPLACE), not a read; audited unconditionally
+  val CatalogRestore = "catalog.restore"
   // managed maintenance (Spec 09)
   val MaintenanceRun          = "maintenance.run"
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
@@ -104,6 +108,8 @@ object AuditActions:
     PoolScale,
     PoolStop,
     PoolDelete,
+    PoolSuspend,
+    PoolResume,
     PoolSetDisabled,
     PoolSetResources,
     PoolSetPodTemplate,
@@ -151,6 +157,7 @@ object AuditActions:
     CatalogDataDiffRead,
     CatalogRecoverableRead,
     CatalogUndrop,
+    CatalogRestore,
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,

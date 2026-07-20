@@ -58,6 +58,9 @@ final case class CreatePoolRequest(
     // still spawned (the pool is "warm but not serving"); this matches
     // the semantics of `setPoolDisabled` applied after the fact.
     disabled: Boolean = false,
+    // When true, the pool is persisted suspended and NO nodes are spawned;
+    // the first statement (or POST /api/pool/resume) cold-starts it.
+    startSuspended: Boolean = false,
     /** Free-form per-pool SQL prepended to the resolved federation blob and shipped to
       * spawn-quack-node.sh via the node's `$extraSetupSql` env var. PRAGMAs / SET / INSTALL / LOAD
       * live here ("SET memory_limit='8GB'", "INSTALL httpfs", etc.); ATTACH aliases live on
@@ -107,7 +110,8 @@ final case class PoolResponse(
     status: String,
     metastore: Map[String, String] =
       Map.empty, // effective metastore inherited from the tenant-db, password redacted
-    disabled: Boolean = false, // when true, the edge rejects fresh handshakes targeting this pool
+    disabled: Boolean = false,  // when true, the edge rejects fresh handshakes targeting this pool
+    suspended: Boolean = false, // scale-to-zero state; wakes on first statement
     id: String = "", // qodstate_pool.id; needed by RBAC pool-grant UI to map (tenant, pool) -> id
     cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
     initSql: String = "",               // operator-authored init SQL; empty when none was supplied
@@ -152,6 +156,9 @@ final case class DeletePoolRequest(
     pool: String,
     force: Boolean = false
 )
+
+final case class SuspendPoolRequest(tenant: String, tenantDb: String, pool: String)
+final case class ResumePoolRequest(tenant: String, tenantDb: String, pool: String)
 
 final case class PoolListResponse(pools: List[PoolResponse])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
@@ -948,6 +955,36 @@ final case class UndropResponse(
     fromSnapshot: Long
 )
 
+// ----- Restore (Spec 04) -----
+/** `to` is a snapshot id (all digits) or a tag name, the same bound grammar as the data diff.
+  * `dryRun` defaults to false when absent; `expectedCurrentSnapshot` is the optional concurrency
+  * guard: when present and the table's latest snapshot differs, the handler replies 409 before
+  * executing.
+  */
+final case class RestoreRequest(
+    tenant: String,
+    tenantDb: String,
+    schema: String,
+    table: String,
+    to: String,
+    dryRun: Option[Boolean] = None,
+    expectedCurrentSnapshot: Option[Long] = None
+)
+
+/** `summary` is set on dry-runs only: the Spec 02 aggregate over `(toSnapshot, currentSnapshot]`,
+  * i.e. exactly the changes the restore will undo. `newSnapshot` is set on executes only: the
+  * replace snapshot (the new table record's begin_snapshot).
+  */
+final case class RestoreResponse(
+    schema: String,
+    table: String,
+    toSnapshot: Long,
+    currentSnapshot: Long,
+    summary: Option[DataDiffSummary] = None,
+    newSnapshot: Option[Long] = None,
+    dryRun: Boolean
+)
+
 /** One column whose declared type differs between the `from` and `to` snapshots of a two-snapshot
   * schema diff (Spec 00 Task 6). Only columns present at BOTH ends are considered here; an added or
   * removed column shows up in `SchemaDiffResponse.added` / `.removed` instead.
@@ -988,6 +1025,8 @@ object Dtos:
   given Codec[ScalePoolRequest]         = ConfiguredCodec.derived
   given Codec[StopPoolRequest]          = ConfiguredCodec.derived
   given Codec[DeletePoolRequest]        = ConfiguredCodec.derived
+  given Codec[SuspendPoolRequest]       = deriveCodec
+  given Codec[ResumePoolRequest]        = deriveCodec
   given Codec[NodeInfo]                 = ConfiguredCodec.derived
   given Codec[PoolResponse]             = deriveCodec
   given Codec[SetPoolResourcesRequest]  = deriveCodec
@@ -1199,6 +1238,8 @@ object Dtos:
   given Codec[RecoverableListResponse] = deriveCodec
   given Codec[UndropRequest]           = deriveCodec
   given Codec[UndropResponse]          = deriveCodec
+  given Codec[RestoreRequest]          = deriveCodec
+  given Codec[RestoreResponse]         = deriveCodec
 
   // Schema diff (Task 6)
   given Codec[SchemaDiffColumnType]  = deriveCodec

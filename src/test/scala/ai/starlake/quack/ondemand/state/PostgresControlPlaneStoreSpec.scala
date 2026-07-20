@@ -180,6 +180,13 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listPools("tdb-1") shouldBe List(pool)
   }
 
+  it should "round-trip pool suspended" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool.copy(suspended = true))
+    store.listPools(pool.tenantDbId).find(_.id == pool.id).get.suspended shouldBe true
+  }
+
   it should "preserve idleTimeoutSec as a populated Option" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

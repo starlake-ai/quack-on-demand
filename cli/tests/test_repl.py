@@ -1,6 +1,14 @@
+import importlib.util
+
 import pytest
 
 from qod_cli.commands.sql_cmd import repl
+
+# pyarrow ships no wheel for Windows on ARM64, where pyproject markers skip it;
+# tests whose FakeClient materializes an Arrow table can't run there.
+requires_pyarrow = pytest.mark.skipif(
+    importlib.util.find_spec("pyarrow") is None, reason="pyarrow unavailable on this platform"
+)
 
 
 class FakeClient:
@@ -28,12 +36,14 @@ def scripted(lines):
     return fake_input
 
 
+@requires_pyarrow
 def test_multiline_until_semicolon(capsys):
     client = FakeClient()
     repl(client, "csv", input_fn=scripted(["SELECT", "1 AS n;", "\\q"]))
     assert client.executed == ["SELECT\n1 AS n;"]
 
 
+@requires_pyarrow
 def test_error_does_not_exit_loop(capsys):
     client = FakeClient()
     repl(client, "csv", input_fn=scripted(["SELECT boom;", "SELECT 1 AS n;"]))

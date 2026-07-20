@@ -59,6 +59,22 @@ The control plane lives in a dedicated Postgres database (`qod` by default) hold
 
 The legacy `file` mode (single JSON blob) was dropped 2026-06-12 along with the `stateStorage` and `statePath` config keys -- `PostgresControlPlaneStore` is always wired. Connections come from a HikariCP pool (size 20 on the control-plane store, 10 on `UserStore`); `close()` on the trait is called from the manager's shutdown hook.
 
+### Pool suspend/resume (scale-to-zero)
+
+`qodstate_pool.suspended` marks a pool scaled to zero WITH its role
+distribution kept (unlike `stopPool`, which zeroes it, and `disabled`, the
+never-auto-woken kill switch). Reconcile skips suspended pools. Reconcile
+also heals a crash mid-suspend by draining any still-live nodes of a
+suspended pool. The FlightSQL edge wakes a suspended pool on the first
+statement: `resumePool(key, "query")` then a bounded poll
+(`resumeHoldTimeoutSec`, env `PROXY_RESUME_HOLD_TIMEOUT_SEC`, default 60s)
+until a routable node appears, else a retryable "pool is resuming"
+UNAVAILABLE. REST: `POST /api/pool/suspend`, `POST /api/pool/resume`,
+`startSuspended` on create. SPI: `PoolSuspended` / `PoolResumed` events with
+reason `rest | query | module`; idle-detection policy lives in the hosted
+module, never in core. See
+docs/superpowers/specs/2026-07-18-pool-suspend-resume-design.md.
+
 ### HA mode (opt-in, Kubernetes only)
 
 `QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N active-active managers.
@@ -107,6 +123,17 @@ Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOK
 - **Per-pool federation Secret** `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenantDb hyphenized for RFC-1123). Holds the resolved federation SQL when `spec.extraSetupSql` is non-empty; all pods of the pool reference the same Secret via `env.valueFrom.secretKeyRef`. GC'd when the last pod of the pool stops; rotation = update the Secret once, restart pods.
 
 Both Secrets must exist BEFORE pod create (kubelet rejects pods referencing missing Secrets), so `start(spec)` runs `ensureTokenSecret` and `ensureFederationSecret` first, then creates the pod.
+
+### Manager module SPI (hosted-service plug-in)
+
+`ai.starlake.quack.spi` defines `ManagerModule`: jars on the classpath declaring
+`META-INF/services/ai.starlake.quack.spi.ManagerModule` are loaded at boot
+(`ModuleLoader` in `ondemand/module/`), get their Liquibase changelog applied
+(`qodhosted_*` tables on the control-plane DB), contribute Tapir endpoints /
+public path prefixes / static SPA mounts to `ManagerServer`, receive async
+`ManagerEvent`s (bounded lossy queues - freshness signals, not ledgers), and can
+register HA-leader-gated recurring tasks. Zero-module boot is unchanged OSS
+behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
 
 ## Configuration
 

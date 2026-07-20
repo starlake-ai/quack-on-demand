@@ -1,5 +1,6 @@
 import typer
 
+from ..registry import covers
 from ._run import call
 
 audit_app = typer.Typer(help="Audit log.")
@@ -7,6 +8,22 @@ history_app = typer.Typer(help="Statement history and trends.")
 
 
 @audit_app.command("list")
+@covers(
+    "GET",
+    "/api/audit/list",
+    {
+        "family": "--family",
+        "tenant": "--tenant",
+        "actor": "--actor",
+        "action": "--action",
+        "q": "--q",
+        "from": "--from",
+        "to": "--to",
+        "limit": "--limit",
+        "before": "--before",
+        "noTenant": "--no-tenant",
+    },
+)
 def audit_list(
     ctx: typer.Context,
     family: str = typer.Option(None, "--family"),
@@ -32,11 +49,17 @@ def audit_list(
 
 
 @audit_app.command()
+@covers("GET", "/api/audit/actions")
 def actions(ctx: typer.Context):
     """Distinct audit action names, for filter values."""
     call(ctx, "GET", "/api/audit/actions")
 
 
+@covers(
+    "GET",
+    "/api/usage",
+    {"from": "--from", "to": "--to", "groupBy": "--group-by", "tenant": "--tenant", "pool": "--pool"},
+)
 def usage(
     ctx: typer.Context,
     from_: str = typer.Option(None, "--from"),
@@ -55,6 +78,21 @@ def usage(
 
 
 @history_app.command()
+@covers(
+    "GET",
+    "/api/history/statements",
+    {
+        "from": "--from",
+        "to": "--to",
+        "tenant": "--tenant",
+        "pool": "--pool",
+        "user": "--user",
+        "status": "--status",
+        "q": "--q",
+        "limit": "--limit",
+        "before": "--before",
+    },
+)
 def statements(
     ctx: typer.Context,
     from_: str = typer.Option(None, "--from"),
@@ -79,6 +117,11 @@ def statements(
 
 
 @history_app.command()
+@covers(
+    "GET",
+    "/api/history/trends",
+    {"granularity": "--granularity", "from": "--from", "to": "--to", "tenant": "--tenant", "pool": "--pool"},
+)
 def trends(
     ctx: typer.Context,
     granularity: str = typer.Option(None, "--granularity"),
