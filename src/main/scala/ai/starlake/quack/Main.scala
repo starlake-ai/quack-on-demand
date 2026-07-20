@@ -62,6 +62,7 @@ import ai.starlake.quack.ondemand.auth.{
   ManagementIdentitySource
 }
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.ondemand.catalog.ReaderCacheSweeper
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
   AzureSecretsManagerResolver,
@@ -408,12 +409,43 @@ object Main extends IOApp with LazyLogging:
     // rotate Postgres credentials -- the new reader picks up the new
     // metastore on the next call.
     val catalogReaderCache =
-      new java.util.concurrent.ConcurrentHashMap[(String, String), DuckLakeCatalogReader]()
+      new java.util.concurrent.ConcurrentHashMap[
+        (String, String),
+        ReaderCacheSweeper.Entry[DuckLakeCatalogReader]
+      ]()
     def evictCatalogReader(tenant: String, tenantDb: String): Unit =
       val removed = catalogReaderCache.remove((tenant, tenantDb))
       if removed != null then
-        try removed.close()
+        try removed.reader.close()
         catch case _: Throwable => ()
+
+    // Idle-eviction backstop for the cache above: thousands of self-serve
+    // tenant-dbs would otherwise pin one HikariCP pool each forever. Runs
+    // process-local on every replica (not HA-singleton-gated) since the
+    // cache itself is process-local. `catalogReader.sweepIntervalMin` /
+    // `catalogReader.idleEvictMin` (QOD_CATALOG_READER_SWEEP_MIN /
+    // QOD_CATALOG_READER_IDLE_EVICT_MIN) tune the cadence and threshold.
+    val catalogReaderCfg =
+      com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.catalogReader")
+    val catalogReaderSweeper =
+      new ReaderCacheSweeper[(String, String), DuckLakeCatalogReader](
+        catalogReaderCache,
+        closeReader = _.close(),
+        idleEvict = java.time.Duration.ofMinutes(catalogReaderCfg.getInt("idleEvictMin").toLong)
+      )
+    val catalogReaderSweeperExecutor =
+      java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
+        val t = new Thread(r, "qod-catalog-reader-sweeper")
+        t.setDaemon(true)
+        t
+      }
+    val catalogReaderSweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
+    catalogReaderSweeperExecutor.scheduleAtFixedRate(
+      () => catalogReaderSweeper.sweep(): Unit,
+      catalogReaderSweepIntervalMin,
+      catalogReaderSweepIntervalMin,
+      java.util.concurrent.TimeUnit.MINUTES
+    )
 
     // HA collaborators are wired only when ha.enabled=true. With HA off they
     // stay at their process-local no-op defaults: no advisory locks are taken
@@ -465,10 +497,14 @@ object Main extends IOApp with LazyLogging:
     // spawn-node. The CatalogHandlers themselves are constructed further
     // down, after the audit recorder and the tag handlers they depend on.
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
-      catalogReaderCache.computeIfAbsent(
+      val entry = catalogReaderCache.computeIfAbsent(
         (tenant, tenantDb),
-        { case (t, td) => DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)) }
+        { case (t, td) =>
+          new ReaderCacheSweeper.Entry(DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)))
+        }
       )
+      entry.lastAccess = java.time.Instant.now()
+      entry.reader
 
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
@@ -945,13 +981,16 @@ object Main extends IOApp with LazyLogging:
                   sup.getTenantById(td.tenantId) match
                     case None    => Nil
                     case Some(t) =>
-                      val reader = catalogReaderCache.computeIfAbsent(
+                      val entry = catalogReaderCache.computeIfAbsent(
                         (t.id, td.name),
                         { case (tn, dn) =>
-                          DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
+                          new ReaderCacheSweeper.Entry(
+                            DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
+                          )
                         }
                       )
-                      reader.columnNames(sch, tab)
+                      entry.lastAccess = java.time.Instant.now()
+                      entry.reader.columnNames(sch, tab)
             },
           instruments = Some(stmtInstruments)
         )
@@ -1507,13 +1546,17 @@ object Main extends IOApp with LazyLogging:
                     catch case _: Throwable => ()
                     try userStore.close()
                     catch case _: Throwable => ()
+                      // Stop the idle-eviction sweeper before tearing down the
+                      // cache it sweeps.
+                    try catalogReaderSweeperExecutor.shutdownNow()
+                    catch case _: Throwable => ()
                       // Close every cached catalog reader's Hikari pool. The
                       // map shouldn't see new entries past this point because
                       // serve() has already returned, but iterate defensively.
                     val it = catalogReaderCache.values.iterator()
                     while it.hasNext do
                       val r = it.next()
-                      try r.close()
+                      try r.reader.close()
                       catch case _: Throwable => ()
                     catalogReaderCache.clear()
                   },

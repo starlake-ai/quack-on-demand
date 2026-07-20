@@ -1005,6 +1005,11 @@ object DuckLakeCatalogReader:
     cfg.setUsername(meta("pgUser"))
     cfg.setPassword(meta("pgPassword"))
     cfg.setMaximumPoolSize(2)
+    // Idle connections give themselves up after a minute rather than pinning
+    // the underlying socket for the lifetime of the (now sweeper-evictable)
+    // cache entry; see ReaderCacheSweeper for the entry-level eviction.
+    cfg.setMinimumIdle(0)
+    cfg.setIdleTimeout(60000)
     cfg.setPoolName(s"ducklake-cat-${meta("dbName")}")
     // catalog Postgres may be down; tableCount/browse degrade instead of stalling list calls for the 30s default
     cfg.setConnectionTimeout(5000)
