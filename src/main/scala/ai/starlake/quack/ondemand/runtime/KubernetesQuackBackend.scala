@@ -107,6 +107,14 @@ final class KubernetesQuackBackend(
       dbInitEnv.setName("dbInitSql")
       dbInitEnv.setValue(spec.dbInitSql)
       envs.add(dbInitEnv)
+    // Engine lockdown block (NodeLockdown.sql). Inlined like dbInitSql (not
+    // credential-bearing): spawn-quack-node.sh appends it last, right before
+    // quack_serve, so lock_configuration freezes a fully-initialized engine.
+    if spec.lockdownSql.nonEmpty then
+      val lockdownEnv = new EnvVar()
+      lockdownEnv.setName("lockdownSql")
+      lockdownEnv.setValue(spec.lockdownSql)
+      envs.add(lockdownEnv)
     // Federation: when the pool has any extraSetupSql, point the pod's
     // `extraSetupSql` env var at the per-pool Secret instead of inlining
     // the value. Same env var name as LocalQuackBackend's

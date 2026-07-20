@@ -437,7 +437,8 @@ object Main extends IOApp with LazyLogging:
       onTenantDbChanged = evictCatalogReader,
       locks = poolLocks,
       publish = publisher,
-      events = moduleEventBus.sink
+      events = moduleEventBus.sink,
+      lockdownEnabled = lockdownCfg.enabled
     )
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a

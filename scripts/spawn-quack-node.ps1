@@ -18,6 +18,7 @@
     dataPath                           (DuckLake data files directory)
     kind                               (ducklake | duckdb-file | memory)
     dbInitSql extraSetupSql            (optional per-db / per-pool init SQL)
+    lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs LAST)
 
   Unlike the bash version there is no FIFO: DuckDB is fed its init SQL over a
   redirected stdin that this script leaves OPEN, so the background quack
@@ -147,6 +148,7 @@ if (-not [string]::IsNullOrEmpty($proxyUrl)) {
 
 $dbInitSql    = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql = [Environment]::GetEnvironmentVariable('extraSetupSql')
+$lockdownSql  = [Environment]::GetEnvironmentVariable('lockdownSql')
 
 # Build init SQL piecemeal based on $kind so memory / duckdb-file skip the
 # DuckLake-specific setup entirely. Mirrors spawn-quack-node.sh.
@@ -182,6 +184,10 @@ switch ($kind) {
 }
 
 if (-not [string]::IsNullOrEmpty($extraSetupSql)) { [void]$sb.AppendLine($extraSetupSql) }
+
+# Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala).
+# MUST be last: lock_configuration freezes every setting for the process.
+if (-not [string]::IsNullOrEmpty($lockdownSql)) { [void]$sb.AppendLine($lockdownSql) }
 
 [void]$sb.AppendLine("CALL quack_serve('quack:0.0.0.0:$Port', token := '$Token', allow_other_hostname := true);")
 
