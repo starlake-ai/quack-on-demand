@@ -37,7 +37,10 @@ final class KubernetesQuackBackend(
     podTemplateEnabled: Boolean = false,
     // k8s.serviceAccount / k8s.serviceType (QOD_K8S_SERVICE_ACCOUNT / QOD_K8S_SERVICE_TYPE).
     serviceAccount: Option[String] = None,
-    serviceType: String = "ClusterIP"
+    serviceType: String = "ClusterIP",
+    // Pod-level runAsUser/fsGroup for the default security posture (see buildPod). A pod template's
+    // own securityContext.runAsUser (if set) wins over this default.
+    runAsUser: Long = 1000L
 ) extends QuackBackend:
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -214,12 +217,90 @@ final class KubernetesQuackBackend(
       }
       podSpec.setTolerations(tols)
 
+    // Default security posture: runAsNonRoot pod identity + seccomp RuntimeDefault at the pod
+    // level, no privilege escalation + all capabilities dropped + read-only rootfs on the quack
+    // container. A pod template's own securityContext fields win field-by-field -- only the
+    // fields the template left null are filled in with the default, so an operator's
+    // stricter/looser override on a specific field survives untouched.
+    podSpec.setSecurityContext(mergedPodSecurityContext(Option(podSpec.getSecurityContext)))
+    quack.setSecurityContext(mergedContainerSecurityContext(Option(quack.getSecurityContext)))
+
+    // /tmp and /duckdb-tmp as emptyDir volumes -- readOnlyRootFilesystem above means DuckDB's
+    // scratch space and any incidental /tmp usage need a writable mount. Skipped when the
+    // template already declares a volume/mount of the same name/path.
+    ensureEmptyDirVolumes(podSpec)
+    ensureEmptyDirMounts(quack)
+
     // Identity metadata overlay (always ours).
     val meta = Option(pod.getMetadata).getOrElse(new ObjectMeta())
     meta.setName(spec.nodeId)
     meta.setLabels(buildLabels(spec))
     pod.setMetadata(meta)
     pod
+
+  /** Fill in the default pod-level security posture, but let any field the (possibly
+    * template-provided) `existing` context already set win. Mutates and returns `existing` when
+    * present so unrelated fields the template set (e.g. `supplementalGroups`) survive untouched.
+    */
+  private def mergedPodSecurityContext(existing: Option[PodSecurityContext]): PodSecurityContext =
+    val psc = existing.getOrElse(new PodSecurityContext())
+    if psc.getRunAsNonRoot == null then psc.setRunAsNonRoot(true)
+    if psc.getRunAsUser == null then psc.setRunAsUser(runAsUser)
+    if psc.getFsGroup == null then psc.setFsGroup(runAsUser)
+    if psc.getSeccompProfile == null then
+      val seccomp = new SeccompProfile()
+      seccomp.setType("RuntimeDefault")
+      psc.setSeccompProfile(seccomp)
+    psc
+
+  /** Same field-by-field merge as [[mergedPodSecurityContext]], for the quack container. */
+  private def mergedContainerSecurityContext(existing: Option[SecurityContext]): SecurityContext =
+    val sc = existing.getOrElse(new SecurityContext())
+    if sc.getAllowPrivilegeEscalation == null then sc.setAllowPrivilegeEscalation(false)
+    if sc.getReadOnlyRootFilesystem == null then sc.setReadOnlyRootFilesystem(true)
+    if sc.getCapabilities == null then
+      val caps = new Capabilities()
+      caps.setDrop(java.util.List.of("ALL"))
+      sc.setCapabilities(caps)
+    sc
+
+  /** Add the `tmp` / `duckdb-tmp` emptyDir volumes to the pod spec, skipping any name the template
+    * already declares.
+    */
+  private def ensureEmptyDirVolumes(podSpec: PodSpec): Unit =
+    val existingVolumes = Option(podSpec.getVolumes).map(_.asScala.toList).getOrElse(Nil)
+    val existingNames   = existingVolumes.map(_.getName).toSet
+    val toAdd           = KubernetesQuackBackend.emptyDirVolumes.filterNot { case (name, _) =>
+      existingNames.contains(name)
+    }
+    if toAdd.nonEmpty then
+      val vols = new java.util.ArrayList[Volume](existingVolumes.asJava)
+      toAdd.foreach { case (name, _) =>
+        val v = new Volume()
+        v.setName(name)
+        v.setEmptyDir(new EmptyDirVolumeSource())
+        vols.add(v)
+      }
+      podSpec.setVolumes(vols)
+
+  /** Mount the `tmp` / `duckdb-tmp` emptyDir volumes on the quack container, skipping any mount
+    * path the template already declares.
+    */
+  private def ensureEmptyDirMounts(quack: Container): Unit =
+    val existingMounts = Option(quack.getVolumeMounts).map(_.asScala.toList).getOrElse(Nil)
+    val existingPaths  = existingMounts.map(_.getMountPath).toSet
+    val toAdd          = KubernetesQuackBackend.emptyDirVolumes.filterNot { case (_, path) =>
+      existingPaths.contains(path)
+    }
+    if toAdd.nonEmpty then
+      val mounts = new java.util.ArrayList[VolumeMount](existingMounts.asJava)
+      toAdd.foreach { case (name, path) =>
+        val vm = new VolumeMount()
+        vm.setName(name)
+        vm.setMountPath(path)
+        mounts.add(vm)
+      }
+      quack.setVolumeMounts(mounts)
 
   private def buildService(spec: NodeSpec): Service =
     val svcPort = new ServicePort()
@@ -569,4 +650,13 @@ object KubernetesQuackBackend:
     "QOD_AZURE_CONNECTION_STRING",
     "QOD_GCS_KEY_ID",
     "QOD_GCS_SECRET"
+  )
+
+  /** (volume name, mount path) pairs for the emptyDir scratch volumes every node pod carries.
+    * `readOnlyRootFilesystem` on the quack container's default security posture means DuckDB's own
+    * temp directory and any incidental `/tmp` usage need a writable volume mounted in.
+    */
+  val emptyDirVolumes: Seq[(String, String)] = Seq(
+    "tmp"        -> "/tmp",
+    "duckdb-tmp" -> "/duckdb-tmp"
   )
