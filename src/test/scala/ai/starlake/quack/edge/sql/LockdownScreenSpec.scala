@@ -83,6 +83,30 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("PRAGMA table_info('t')") shouldBe false
   }
 
+  "bare-path FROM" should "deny local replacement scans, admit remote and non-path literals" in {
+    denied("SELECT * FROM '/etc/passwd.parquet'") shouldBe true
+    denied("SELECT * FROM'/etc/passwd.parquet'") shouldBe true
+    denied("CREATE TABLE t AS SELECT * FROM '/etc/x.parquet'") shouldBe true
+    denied("SELECT * FROM 's3://b/x.parquet'") shouldBe false
+    denied("SELECT * FROM t WHERE path = '/etc/passwd'") shouldBe false
+    denied("SELECT * FROM customer") shouldBe false
+    denied("SELECT trim(leading '/' from '/a/b.csv')") shouldBe false
+  }
+
+  "COPY" should "deny local paths, admit remote copies with options and pure table copies" in {
+    denied("COPY t FROM '/etc/x.csv'") shouldBe true
+    denied("COPY t TO '/tmp/x'") shouldBe true
+    denied("COPY t FROM '/etc/x.csv' (DELIMITER ',')") shouldBe true
+    denied("COPY t FROM 's3://b/x.csv'") shouldBe false
+    denied("COPY t TO 's3://b/x.csv' (DELIMITER '|')") shouldBe false
+    denied("COPY a FROM b") shouldBe false
+  }
+
+  "read_text/read_blob" should "honor the URL exemption" in {
+    denied("SELECT read_text('https://x/f.txt')") shouldBe false
+    denied("SELECT read_text('/etc/passwd')") shouldBe true
+  }
+
   "reasons" should "name the blocked construct" in {
     LockdownScreen.screen("ATTACH 'x' AS y").get should include("ATTACH")
     LockdownScreen.screen("SET lock_configuration=false").get should include("lock_configuration")

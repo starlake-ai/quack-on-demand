@@ -45,7 +45,13 @@ final case class K8sConfig(
       description =
         "Allow superusers to supply a full Pod-manifest YAML template for a pool's node pods. Off by default; raw manifests are cluster-level power."
     )
-    podTemplateEnabled: Boolean
+    podTemplateEnabled: Boolean,
+    @field @ConfigField(
+      envVar = "QOD_K8S_RUN_AS_USER",
+      description =
+        "Pod-level runAsUser/fsGroup applied to spawned node pods. A pod template's own securityContext.runAsUser (if set) wins over this default."
+    )
+    runAsUser: Long = 1000L
 )
 
 final case class AdminConfig(

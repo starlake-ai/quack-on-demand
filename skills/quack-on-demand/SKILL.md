@@ -666,10 +666,16 @@ opt-in except pod security:
     tenant-db dataPath is an object store), then `lock_configuration = true`
     which freezes every setting for the process lifetime - even a statement
     that slips past the edge arm cannot re-enable anything.
-  - With a LOCAL dataPath the filesystem must stay enabled (DuckLake data
-    lives there), so the edge denylist is the only guard in that mode.
-    Production hosted deploys should use an object-store dataPath so both
-    layers hold.
+  - LOCAL-dataPath lockdown is best-effort: the engine
+    `disabled_filesystems = 'LocalFileSystem'` restriction is NOT applied for
+    a local dataPath (DuckLake data lives there, so the filesystem must stay
+    enabled). The edge screen also denies COPY over local paths and bare
+    filesystem-path FROM (replacement scans), but this protection is
+    best-effort: dollar-quoted (`$$...$$`) and identifier-quoted path forms
+    remain unhandled and may still read local files in LOCAL mode. Production
+    hosted deploys MUST use an object-store dataPath, where the engine
+    `disabled_filesystems` layer is the hard guard; the edge screen alone is
+    not a hard guard for LOCAL mode.
   - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
     `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
     lock_configuration=false` is denied, and ordinary TPCH queries still

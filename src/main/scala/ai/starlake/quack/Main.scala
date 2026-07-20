@@ -310,7 +310,8 @@ object Main extends IOApp with LazyLogging:
           mgrCfg.defaultMetastore.asMap,
           podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
           serviceAccount = mgrCfg.k8s.serviceAccount,
-          serviceType = mgrCfg.k8s.serviceType
+          serviceType = mgrCfg.k8s.serviceType,
+          runAsUser = mgrCfg.k8s.runAsUser
         )
       case other => sys.error(s"unknown runtime: $other")
 

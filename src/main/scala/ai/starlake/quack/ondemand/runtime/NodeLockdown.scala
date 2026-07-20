@@ -8,6 +8,10 @@ package ai.starlake.quack.ondemand.runtime
   * guard in that mode.
   */
 object NodeLockdown:
+  // Intentional divergence from the edge LockdownScreen's RemoteSchemes (which also exempts
+  // r2:// / http(s)://): only s3 / gs / az dataPaths trigger the LocalFileSystem restriction,
+  // because those are the only object-store schemes DuckLake writes a dataPath to. r2 and http(s)
+  // are read-only federation URL forms, never a dataPath, so they must not gate disabled_filesystems.
   private val ObjectStoreSchemes = List("s3://", "gs://", "az://")
 
   def sql(dataPath: String, enabled: Boolean): String =
