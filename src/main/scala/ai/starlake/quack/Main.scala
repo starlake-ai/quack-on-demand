@@ -21,7 +21,8 @@ import ai.starlake.quack.edge.config.{
   DatabaseAuthConfig,
   GoogleAuthConfig,
   JwtAuthConfig,
-  KeycloakAuthConfig
+  KeycloakAuthConfig,
+  NodeLockdownConfig
 }
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.model.Names
@@ -168,18 +169,20 @@ object Main extends IOApp with LazyLogging:
         normalManagerRun
 
   private def normalManagerRun: IO[ExitCode] =
-    val source     = ConfigSource.default
-    val mgrCfg     = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
-    val edgeCfg    = source.at("quack-flightsql").loadOrThrow[FlightConfig]
-    val authCfg    = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg     = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
-    val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+    val source      = ConfigSource.default
+    val mgrCfg      = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
+    val edgeCfg     = source.at("quack-flightsql").loadOrThrow[FlightConfig]
+    val authCfg     = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
+    val aclCfg      = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
+    val lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
+    val metricsCfg  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     bootManager(
       mgrCfg,
       edgeCfg,
       authCfg,
       aclCfg,
       metricsCfg,
+      lockdownCfg = lockdownCfg,
       modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover()
     )
 
@@ -189,6 +192,7 @@ object Main extends IOApp with LazyLogging:
       authCfg: AuthenticationConfig,
       aclCfg: AclConfig,
       metricsCfg: MetricsConfig,
+      lockdownCfg: NodeLockdownConfig = NodeLockdownConfig(enabled = false),
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
   ): IO[ExitCode] =
     HaPreconditions
@@ -842,6 +846,9 @@ object Main extends IOApp with LazyLogging:
               .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
               .getOrElse(Set.empty)
         )
+    logger.info(
+      s"node lockdown: ${if lockdownCfg.enabled then "enabled" else "disabled"}"
+    )
 
     // Background health probe so transient failures don't permanently mark
     // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
@@ -1036,7 +1043,8 @@ object Main extends IOApp with LazyLogging:
         attachedCatalogsOf = attachedCatalogsOf,
         events = moduleEventBus.sink,
         resumeHoldTimeout =
-          scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds
+          scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
+        lockdownEnabled = lockdownCfg.enabled
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

@@ -1263,3 +1263,78 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     r.isLeft shouldBe true
     // The existing "pool is empty" error must surface immediately - no 60s hold.
     (System.nanoTime() - t0) should be < 2_000_000_000L
+
+  // ---- node lockdown (QOD_NODE_LOCKDOWN) ----
+
+  "lockdown" should "deny ATTACH for a tenant caller when enabled" in:
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      lockdownEnabled = true
+    )
+    val out = router
+      .execute(
+        "lockdown-1",
+        "alice",
+        poolKey,
+        "ATTACH 'x.db' AS y",
+        effectiveSet = Some(effWithPolicies(Nil))
+      )
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    out.swap.toOption.get.reason should startWith("access denied: lockdown:")
+
+  it should "admit ATTACH for a superuser caller" in:
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      lockdownEnabled = true
+    )
+    // Quarantine the only node so a statement that clears the lockdown screen
+    // proceeds to routing and fails there (Unavailable) rather than being
+    // denied by the screen -- proof the screen was never consulted.
+    val nodeId = router.supervisor.list().head.nodes.head.nodeId
+    router.tracker.setHealthy(nodeId, false)
+    val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      tenantUser.copy(tenant = None),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    val out = router
+      .execute(
+        "lockdown-2",
+        "root",
+        poolKey,
+        "ATTACH 'x.db' AS y",
+        effectiveSet = Some(superuserEff)
+      )
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
+
+  it should "not consult the screen when disabled" in:
+    val (router, _, _) = setup() // lockdownEnabled defaults to false
+    val out            = router
+      .execute(
+        "lockdown-3",
+        "alice",
+        poolKey,
+        "ATTACH 'x.db' AS y",
+        effectiveSet = Some(effWithPolicies(Nil))
+      )
+      .unsafeRunSync()
+    // ATTACH isn't a real DuckDB statement against the stub node, but the point of
+    // this test is only that it is NOT denied by the lockdown screen: today's
+    // behavior (routes to the stub node and gets an Ok/whatever the stub returns)
+    // is unchanged.
+    out.swap.toOption.foreach(_ shouldNot be(a[RouterFailure.AccessDenied]))
