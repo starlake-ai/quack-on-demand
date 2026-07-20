@@ -443,14 +443,23 @@ def runtime_env(
 ) -> dict:
     """Environment for a launched manager JVM: spawn scripts resolved
     absolutely, the pinned duckdb CLI first on PATH (spawned nodes and the demo
-    seeder inherit it), QOD_APP_HOME so LocalQuackBackend prefixes node PATHs
-    the same way, and (when the native client's libduckdb is provisioned) the
-    platform dynamic-loader path."""
+    seeder inherit it), DUCKDB_BIN as an absolute pointer to that same exe,
+    QOD_APP_HOME so LocalQuackBackend prefixes node PATHs the same way, and
+    (when the native client's libduckdb is provisioned) the platform
+    dynamic-loader path."""
     env = dict(base_env)
     env["QOD_SPAWN_SCRIPT"] = str(spawn_sh)
     env["QOD_SPAWN_SCRIPT_WINDOWS"] = str(spawn_ps1)
     env["QOD_APP_HOME"] = str(app_home)
     env["PATH"] = str(duckdb_bin) + os.pathsep + env.get("PATH", "")
+    # Pin the provisioned duckdb by absolute path, not just on PATH. spawn-quack-node.ps1
+    # prefers $env:DUCKDB_BIN over a PATH `Get-Command duckdb.exe` lookup: on Windows the
+    # prepended PATH dir does not always reach the spawned PowerShell node, leaving the node
+    # unable to find duckdb (health-probe reports it unhealthy) even though the JVM found it.
+    # An absolute pointer removes the dependency on PATH inheritance. spawn-quack-node.sh
+    # honours it too (Unix PATH inheritance already works, so this is belt-and-suspenders there).
+    exe = "duckdb.exe" if os_name == "win32" else "duckdb"
+    env["DUCKDB_BIN"] = str(duckdb_bin / exe)
     if libduckdb_lib is not None:
         # On Windows the DLL resolves through PATH, already prefixed above.
         var = {"darwin": "DYLD_LIBRARY_PATH", "linux": "LD_LIBRARY_PATH"}.get(os_name)

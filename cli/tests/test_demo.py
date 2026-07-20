@@ -466,6 +466,24 @@ def test_demo_env_wires_spawn_script_duckdb_and_app_home(tmp_path):
     assert env["QOD_APP_HOME"] == str(tmp_path)
     assert env["PATH"].startswith(str(tmp_path / "duckdb" / "bin"))
     assert env["PATH"].endswith("/usr/bin")
+    # DUCKDB_BIN pins the provisioned exe by absolute path so the spawn scripts
+    # do not depend on PATH inheritance reaching the spawned node.
+    assert env["DUCKDB_BIN"] == str(tmp_path / "duckdb" / "bin" / "duckdb")
+
+
+def test_runtime_env_pins_duckdb_bin_windows(tmp_path):
+    # Windows regression: the prepended PATH dir does not reliably reach the
+    # spawned PowerShell node, so DUCKDB_BIN (which spawn-quack-node.ps1 reads
+    # directly) must point at duckdb.exe by absolute path.
+    env = launcher.runtime_env(
+        {"PATH": "C:\\Windows\\System32"},
+        app_home=tmp_path,
+        duckdb_bin=tmp_path / "duckdb" / "bin",
+        spawn_sh=tmp_path / "s.sh",
+        spawn_ps1=tmp_path / "s.ps1",
+        os_name="win32",
+    )
+    assert env["DUCKDB_BIN"] == str(tmp_path / "duckdb" / "bin" / "duckdb.exe")
 
 
 def test_demo_provisions_app_home_and_passes_env(runner, monkeypatch, tmp_path):

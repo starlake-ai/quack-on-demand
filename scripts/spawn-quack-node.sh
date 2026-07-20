@@ -94,8 +94,13 @@ if [[ "$kind" != "memory" && "$IS_REMOTE" == "0" ]]; then
   mkdir -p "$dataPath"
 fi
 
-command -v duckdb >/dev/null 2>&1 || {
-  echo "ERROR: duckdb not on PATH" >&2
+# Resolve the duckdb CLI. $DUCKDB_BIN wins (an absolute path the launcher sets to
+# the provisioned exe); otherwise the first `duckdb` on PATH. Mirrors
+# spawn-quack-node.ps1 so the manager can pin duckdb without relying on PATH
+# inheritance reaching this spawned process.
+DUCKDB="${DUCKDB_BIN:-duckdb}"
+command -v "$DUCKDB" >/dev/null 2>&1 || {
+  echo "ERROR: duckdb not found (DUCKDB_BIN='${DUCKDB_BIN:-}', 'duckdb' not on PATH)" >&2
   exit 1
 }
 
@@ -123,7 +128,7 @@ FIFO="$FIFO_DIR/in"
 mkfifo "$FIFO"
 
 # Start duckdb first - open() on FIFO blocks until the writer side appears.
-duckdb < "$FIFO" &
+"$DUCKDB" < "$FIFO" &
 DUCK_PID=$!
 
 # Open the writer end; this unblocks duckdb's open().

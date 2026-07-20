@@ -126,3 +126,4 @@ cli/dist
 cli/shim-qod-cli/dist
 /.bloop
 /docs
+__pycache__/
