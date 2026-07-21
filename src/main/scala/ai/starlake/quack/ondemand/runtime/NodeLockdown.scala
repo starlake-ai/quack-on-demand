@@ -1,9 +1,19 @@
 package ai.starlake.quack.ondemand.runtime
 
 /** Engine-side lockdown block, authored here as the single source of truth and shipped to both
-  * spawn scripts via NodeSpec.lockdownSql / the `lockdownSql` env var. Runs LAST at node init,
-  * after every legitimate INSTALL/LOAD/ATTACH, so lock_configuration freezes a fully-initialized
-  * engine. The LocalFileSystem restriction applies only when the tenant-db data lives in an object
+  * spawn scripts via NodeSpec.lockdownSql + NodeSpec.lockdownFreezeSql / the `lockdownSql` +
+  * `lockdownFreezeSql` env vars. The block is split in two because the two halves run on
+  * opposite sides of `CALL quack_serve(...)`:
+  *
+  *   - `sql` (the value restrictions) runs BEFORE quack_serve, after every legitimate
+  *     INSTALL/LOAD/ATTACH, so the restrictions are in effect before the node ever serves a
+  *     tenant statement.
+  *   - `freezeSql` (`SET lock_configuration = true;`) runs AFTER quack_serve returns.
+  *     quack_serve itself needs to configure the server (it sets its own DuckDB options while
+  *     spawning its listener thread), so freezing configuration before it runs would block the
+  *     node from ever starting to serve.
+  *
+  * The LocalFileSystem restriction applies only when the tenant-db data lives in an object
   * store; a local dataPath needs the filesystem, and the edge LockdownScreen carries the local-file
   * guard in that mode.
   */
@@ -24,5 +34,7 @@ object NodeLockdown:
       "SET autoinstall_known_extensions = false;\n" +
         "SET autoload_known_extensions = false;\n" +
         "SET allow_community_extensions = false;\n" +
-        fsLine +
-        "SET lock_configuration = true;"
+        fsLine
+
+  def freezeSql(enabled: Boolean): String =
+    if !enabled then "" else "SET lock_configuration = true;"

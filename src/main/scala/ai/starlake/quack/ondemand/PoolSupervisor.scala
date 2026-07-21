@@ -101,8 +101,9 @@ final class PoolSupervisor(
       ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
     /** Engine lockdown gate (QOD_NODE_LOCKDOWN). Wired from Main via `lockdownCfg.enabled`; every
       * NodeSpec build site (specFromState / maintenanceNodeSpec) stamps
-      * `NodeLockdown.sql(dataPath, lockdownEnabled)` into `lockdownSql` so the query path and the
-      * maintenance path can never drift.
+      * `NodeLockdown.sql(dataPath, lockdownEnabled)` into `lockdownSql` and
+      * `NodeLockdown.freezeSql(lockdownEnabled)` into `lockdownFreezeSql` so the query path and
+      * the maintenance path can never drift.
       */
     lockdownEnabled: Boolean = false
 ):
@@ -465,6 +466,7 @@ final class PoolSupervisor(
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
       lockdownSql = NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), lockdownEnabled),
+      lockdownFreezeSql = NodeLockdown.freezeSql(lockdownEnabled),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -530,7 +532,8 @@ final class PoolSupervisor(
           .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
           .getOrElse(""),
         dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
-        lockdownSql = NodeLockdown.sql(metastore.getOrElse("dataPath", ""), lockdownEnabled)
+        lockdownSql = NodeLockdown.sql(metastore.getOrElse("dataPath", ""), lockdownEnabled),
+        lockdownFreezeSql = NodeLockdown.freezeSql(lockdownEnabled)
       )
     }
 

@@ -215,12 +215,21 @@ if [[ -n "${extraSetupSql:-}" ]]; then
 fi
 
 # Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala).
-# MUST be last: lock_configuration freezes every setting for the process.
+# MUST run before quack_serve so the restrictions are in effect before the
+# node serves any tenant statement.
 if [[ -n "${lockdownSql:-}" ]]; then
   INIT_SQL+="$lockdownSql"$'\n'
 fi
 
 INIT_SQL+="CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
+
+# Deployment lockdown freeze (lockdownFreezeSql, authored by NodeLockdown.scala).
+# MUST run AFTER quack_serve: lock_configuration freezes all settings, and
+# quack_serve needs to configure the server, so freezing before it would
+# stop the node from serving.
+if [[ -n "${lockdownFreezeSql:-}" ]]; then
+  INIT_SQL+="$lockdownFreezeSql"$'\n'
+fi
 
 printf '%s' "$INIT_SQL" >&9
 
