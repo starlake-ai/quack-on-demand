@@ -56,6 +56,9 @@ final class LocalQuackBackend(
     // after extraSetupSql, right before quack_serve, so the value
     // restrictions are in effect before the node serves any tenant statement.
     if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)
+    // Per-database object-store secret (ObjectStoreSecret.sql). spawn-quack-node.sh runs it
+    // alongside the global STORAGE_SQL block, before the DuckLake catalog ATTACH.
+    if spec.objectStoreSql.nonEmpty then env.put("objectStoreSql", spec.objectStoreSql)
     val proc = pb.start()
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)
