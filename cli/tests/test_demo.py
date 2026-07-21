@@ -1,5 +1,6 @@
 import pathlib
 import hashlib
+import sys
 
 import httpx
 import respx
@@ -71,11 +72,18 @@ def test_find_java_rejects_too_old(tmp_path, monkeypatch):
     assert launcher.find_java() is None
 
 
-def test_find_java_falls_back_to_path(monkeypatch):
+def test_find_java_falls_back_to_path(tmp_path, monkeypatch):
+    # A real file, not a hardcoded POSIX literal: find_java() re-checks
+    # candidate.is_file() against the real filesystem, and "/usr/bin/java"
+    # only happens to exist on the ubuntu-latest GH runner image (not on
+    # Windows), so pin an actual on-disk stand-in instead.
+    java = tmp_path / "java"
+    java.write_text("")
+    java.chmod(0o755)
     monkeypatch.delenv("JAVA_HOME", raising=False)
-    monkeypatch.setattr(launcher, "_which_java", lambda: "/usr/bin/java")
+    monkeypatch.setattr(launcher, "_which_java", lambda: str(java))
     monkeypatch.setattr(launcher, "java_major", lambda p: 21)
-    assert launcher.find_java() == "/usr/bin/java"
+    assert launcher.find_java() == str(java)
 
 
 def test_find_java_floor_is_21(tmp_path, monkeypatch):
@@ -203,8 +211,12 @@ def test_ensure_jre_downloads_verifies_and_extracts(tmp_path, monkeypatch):
     )
     respx.get(pkg_url).mock(return_value=httpx.Response(200, content=tarball))
     java = launcher.ensure_jre(cache_dir=tmp_path / "jre", os_name="linux", arch="x86_64")
-    assert java.endswith("bin/java")
-    assert (tmp_path / "jre").as_posix() in java
+    # _find_extracted_java returns str(Path); on Windows that renders with
+    # backslashes even though os_name="linux" only steers the download URL,
+    # so compare path components rather than a POSIX "bin/java" literal.
+    java_path = pathlib.Path(java)
+    assert java_path.name == "java" and java_path.parent.name == "bin"
+    assert (tmp_path / "jre").as_posix() in java_path.as_posix()
 
 
 @respx.mock
@@ -437,6 +449,10 @@ def _duckdb_zip():
     return buf.getvalue()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="NTFS has no POSIX exec bit; duckdb.chmod(0o755) is a no-op on Windows",
+)
 @respx.mock
 def test_ensure_duckdb_cli_downloads_and_extracts(tmp_path):
     respx.get(launcher.duckdb_cli_url("linux", "x86_64")).mock(
@@ -467,6 +483,10 @@ def test_bundled_spawn_scripts_match_the_canonical_ones():
         )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="NTFS has no POSIX exec bit; materialize's chmod(0o755) is a no-op on Windows",
+)
 def test_materialize_spawn_scripts_are_executable(tmp_path):
     sh, ps1 = launcher.materialize_spawn_scripts(tmp_path)
     assert sh.name == "spawn-quack-node.sh" and sh.stat().st_mode & 0o111
@@ -487,8 +507,11 @@ def test_demo_env_wires_spawn_script_duckdb_and_app_home(tmp_path):
     assert env["PATH"].startswith(str(tmp_path / "duckdb" / "bin"))
     assert env["PATH"].endswith("/usr/bin")
     # DUCKDB_BIN pins the provisioned exe by absolute path so the spawn scripts
-    # do not depend on PATH inheritance reaching the spawned node.
-    assert env["DUCKDB_BIN"] == str(tmp_path / "duckdb" / "bin" / "duckdb")
+    # do not depend on PATH inheritance reaching the spawned node. runtime_env
+    # defaults os_name to sys.platform, so the exe name is whatever this test
+    # actually runs under (duckdb.exe on Windows).
+    exe = "duckdb.exe" if sys.platform == "win32" else "duckdb"
+    assert env["DUCKDB_BIN"] == str(tmp_path / "duckdb" / "bin" / exe)
 
 
 def test_runtime_env_pins_duckdb_bin_windows(tmp_path):
@@ -612,6 +635,12 @@ def test_runtime_env_adds_library_path_darwin(tmp_path):
     assert env["DYLD_LIBRARY_PATH"].startswith(str(tmp_path / "duckdb" / "lib"))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="simulates linux's os_name mapping while joining with the host's real "
+    "os.pathsep (';' on Windows, not the literal ':' this test pins); Windows has "
+    "no LD_LIBRARY_PATH equivalent, see runtime_env's os_name-to-var mapping",
+)
 def test_runtime_env_adds_library_path_linux(tmp_path):
     env = launcher.runtime_env(
         {"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/opt/lib"},
