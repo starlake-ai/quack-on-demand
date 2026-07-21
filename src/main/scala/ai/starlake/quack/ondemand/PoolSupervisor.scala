@@ -16,7 +16,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.rbac.RbacResolver
-import ai.starlake.quack.ondemand.runtime.{NodeLockdown, QuackBackend}
+import ai.starlake.quack.ondemand.runtime.{NodeLockdown, ObjectStoreSecret, QuackBackend}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   DbAdmin,
@@ -465,6 +465,7 @@ final class PoolSupervisor(
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
       lockdownSql = NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), lockdownEnabled),
+      objectStoreSql = ObjectStoreSecret.sql(state.s3, state.metastore.getOrElse("dataPath", "")),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -518,19 +519,22 @@ final class PoolSupervisor(
       // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
       val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
+      val s3        = donor.map(_.s3).getOrElse(Map.empty)
+      val dataPath  = metastore.getOrElse("dataPath", "")
       NodeSpec(
         poolKey = key,
         nodeId = nodeId,
         role = Role.Dual,
         metastore = metastore,
-        s3 = donor.map(_.s3).getOrElse(Map.empty),
+        s3 = s3,
         maxConcurrent = 1,
         kindWire = donor.map(_.kindWire).getOrElse("ducklake"),
         extraSetupSql = donor
           .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
           .getOrElse(""),
         dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
-        lockdownSql = NodeLockdown.sql(metastore.getOrElse("dataPath", ""), lockdownEnabled)
+        lockdownSql = NodeLockdown.sql(dataPath, lockdownEnabled),
+        objectStoreSql = ObjectStoreSecret.sql(s3, dataPath)
       )
     }
 

@@ -512,6 +512,36 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createTenantDb("legacy", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.effectiveMetastoreFor("legacy", "legacy_default")("dataPath") shouldBe "/data/global"
 
+  // ---------- NodeSpec.objectStoreSql (per-db object-store CREATE SECRET) ----------
+
+  "PoolSupervisor.createPool" should
+    "produce a node spec with objectStoreSql for a tenant-db with objectStore + s3 dataPath" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "objstore",
+      TenantDbKind.DuckDbFile,
+      Map("dataPath" -> "s3://bucket/db", "dbName" -> "acme_objstore", "schemaName" -> "main"),
+      dataPath = "s3://bucket/db",
+      objectStore = Map(
+        "s3_access_key_id" -> "k",
+        "s3_secret_access_key" -> "s",
+        "s3_region" -> "us-east-1"
+      )
+    ).unsafeRunSync()
+    val objKey = PoolKey("acme", "acme_objstore", "sales")
+    sup.createPool(objKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val spec = backend.specs.head
+    spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
+    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+
+  it should "produce an empty objectStoreSql for a tenant-db with no objectStore" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    backend.specs.head.objectStoreSql shouldBe ""
+
   // ---------- effectiveSetForUser: column policies ----------
 
   "effectiveSetForUser" should "include column policies attached to the user's roles" in:
