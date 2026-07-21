@@ -214,6 +214,13 @@ if [[ -n "${extraSetupSql:-}" ]]; then
   INIT_SQL+="$extraSetupSql"$'\n'
 fi
 
+# Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala).
+# MUST run before quack_serve so the restrictions are in effect before the
+# node serves any tenant statement.
+if [[ -n "${lockdownSql:-}" ]]; then
+  INIT_SQL+="$lockdownSql"$'\n'
+fi
+
 INIT_SQL+="CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
 
 printf '%s' "$INIT_SQL" >&9

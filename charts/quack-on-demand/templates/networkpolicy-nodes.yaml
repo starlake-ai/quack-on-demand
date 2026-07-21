@@ -1,0 +1,60 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qod.fullname" . }}-nodes
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+spec:
+  # Spawned Quack node pods. This tracks manager.k8s.podLabel
+  # ("managed-by=quack-on-demand"), not the chart's app.kubernetes.io/*
+  # selector labels - node pods don't carry those.
+  podSelector:
+    matchLabels:
+      managed-by: quack-on-demand
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the manager talks to a node's /quack HTTP endpoint.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "qod.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.nodePortRange.from }}
+          endPort: {{ .Values.networkPolicy.nodePortRange.to }}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Postgres (DuckLake catalog + qodstate_* control-plane tables)
+    - to:
+        {{- if .Values.networkPolicy.postgres.cidr }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.postgres.cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.postgres.port }}
+    # Object store (parquet reads/writes). Empty cidrs = allow 443
+    # everywhere - tighten in prod to your storage provider's ranges.
+    - to:
+        {{- range .Values.networkPolicy.objectStore.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

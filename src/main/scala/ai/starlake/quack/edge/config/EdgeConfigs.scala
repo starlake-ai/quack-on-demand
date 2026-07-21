@@ -30,6 +30,24 @@ object AclConfig:
     "dialect"
   )(AclConfig.apply)
 
+/** Node-lockdown knob (QOD_NODE_LOCKDOWN). When enabled, every statement from a non-superuser
+  * caller is screened by [[ai.starlake.quack.edge.sql.LockdownScreen]] before the ACL validation
+  * gate, denying ATTACH/DETACH/INSTALL/LOAD, protected settings, and local-path file functions.
+  */
+case class NodeLockdownConfig(
+    @field @ConfigField(
+      envVar = "QOD_NODE_LOCKDOWN",
+      description =
+        "Deny ATTACH/DETACH/INSTALL/LOAD and other node-escape statements for non-superuser callers."
+    )
+    enabled: Boolean
+)
+
+object NodeLockdownConfig:
+  given ConfigReader[NodeLockdownConfig] = ConfigReader.forProduct1(
+    "enabled"
+  )(NodeLockdownConfig.apply)
+
 /** Pre-statement SQL validation knobs. Loaded reflectively by the config-page registry; not wired
   * to runtime today. Kept as a typed class so the configurable env-var contract stays visible in
   * the admin UI.

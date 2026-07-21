@@ -17,6 +17,10 @@ final case class NodeSpec(
     // spawn-quack-node.sh as the `dbInitSql` env var; NOT part of
     // extraSetupSql, which runs after LOAD quack.
     dbInitSql: String = "",
+    // Engine lockdown block (NodeLockdown.sql). Runs BEFORE quack_serve, after
+    // extraSetupSql, so the value restrictions are in effect before the node
+    // serves any tenant statement. Empty string = no lockdown.
+    lockdownSql: String = "",
     // K8s scheduling hint inherited from the node's cohort. None / empty
     // = no placement constraint (default scheduler decides). Backends
     // other than KubernetesQuackBackend ignore this field.

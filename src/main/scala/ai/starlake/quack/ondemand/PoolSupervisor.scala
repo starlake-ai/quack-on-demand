@@ -16,7 +16,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.rbac.RbacResolver
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.{NodeLockdown, QuackBackend}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   DbAdmin,
@@ -98,7 +98,13 @@ final class PoolSupervisor(
       */
     locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop,
     publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
-      ai.starlake.quack.ondemand.ha.StateChangePublisher.noop
+      ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+    /** Engine lockdown gate (QOD_NODE_LOCKDOWN). Wired from Main via `lockdownCfg.enabled`; every
+      * NodeSpec build site (specFromState / maintenanceNodeSpec) stamps
+      * `NodeLockdown.sql(dataPath, lockdownEnabled)` into `lockdownSql` so the query path and the
+      * maintenance path can never drift.
+      */
+    lockdownEnabled: Boolean = false
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -458,6 +464,7 @@ final class PoolSupervisor(
       kindWire = state.kindWire,
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
+      lockdownSql = NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), lockdownEnabled),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -510,18 +517,20 @@ final class PoolSupervisor(
       val nodeId = s"maint-${td.name}-${System.nanoTime()}"
       // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
       val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
+      val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
       NodeSpec(
         poolKey = key,
         nodeId = nodeId,
         role = Role.Dual,
-        metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name)),
+        metastore = metastore,
         s3 = donor.map(_.s3).getOrElse(Map.empty),
         maxConcurrent = 1,
         kindWire = donor.map(_.kindWire).getOrElse("ducklake"),
         extraSetupSql = donor
           .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
           .getOrElse(""),
-        dbInitSql = donor.map(_.dbInitSql).getOrElse("")
+        dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
+        lockdownSql = NodeLockdown.sql(metastore.getOrElse("dataPath", ""), lockdownEnabled)
       )
     }
 

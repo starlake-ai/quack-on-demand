@@ -52,6 +52,10 @@ final class LocalQuackBackend(
     // and before `INSTALL quack; LOAD quack;`, unlike extraSetupSql which runs
     // after the catalog ATTACH.
     if spec.dbInitSql.nonEmpty then env.put("dbInitSql", spec.dbInitSql)
+    // Engine lockdown block (NodeLockdown.sql). spawn-quack-node.sh appends it
+    // after extraSetupSql, right before quack_serve, so the value
+    // restrictions are in effect before the node serves any tenant statement.
+    if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)
     val proc = pb.start()
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)

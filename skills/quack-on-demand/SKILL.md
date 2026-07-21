@@ -636,6 +636,96 @@ Override `--schema` (or `$LT_SCHEMA`) when the target tenant-db was seeded at a 
 
 The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager pyarrow`. The auto-install on first run prints the right command if anything is missing.
 
+## Hardening (lockdown, pod security, network policy, reader eviction)
+
+Self-serve / hosted deployments need a tighter isolation posture than the OSS
+default (single trusted-operator assumption). Four independent knobs, all
+opt-in except pod security:
+
+- **Node lockdown** - `QOD_NODE_LOCKDOWN=true` (config
+  `quack-on-demand.nodeLockdown.enabled`, default false). Two layers, both
+  gated by the same flag:
+  - Edge denial (first line): for non-superuser sessions, denies `ATTACH` /
+    `DETACH`, `INSTALL` / `LOAD`, `SET`/`RESET`/`PRAGMA` against a
+    protected-settings list (`disabled_filesystems`, `allow_*_extensions`,
+    `autoinstall_known_extensions`, `autoload_known_extensions`,
+    `enable_external_access`, `lock_configuration`, `temp_directory`,
+    `extension_directory`, `secret_directory`), and local-machine read
+    functions (`read_text`, `read_blob`, `glob`, `read_csv[_auto]`,
+    `read_parquet`, `read_json[_auto]`, `read_ndjson[_auto]`, `parquet_scan`,
+    `getenv`) unless every path argument is an object-store URL literal
+    (`s3://`, `gs://`, `az://`, `r2://`, `http(s)://`). Denials use the same
+    wire shape as ACL denials ("lockdown: ... is disabled on this
+    deployment") and go through the existing audit path. Superuser sessions
+    bypass the edge arm (operator escape hatch).
+  - Engine lockdown (second line, value-sets only): a lockdown SQL block
+    runs BEFORE `CALL quack_serve(...)` in node init (after catalog ATTACH,
+    pool initSql, and the federation blob) setting `autoinstall_known_extensions
+    = false`, `allow_community_extensions = false`, `allow_unsigned_extensions
+    = false`, and `disabled_filesystems = 'LocalFileSystem'` (only when the
+    tenant-db dataPath is an object store). `autoload_known_extensions` is left
+    ON: quack_serve itself lazily autoloads signed built-in extensions to
+    handle incoming connections, and disabling autoload marks every node
+    unhealthy (the SELECT 1 probe fails). `SET lock_configuration = true` was
+    tried and dropped: it freezes DuckDB's global config outright and is
+    incompatible with quack_serve regardless of which side of quack_serve it
+    runs on, so nodes never come up healthy. It is also redundant - the edge
+    LockdownScreen already denies every protected-setting SET/RESET/PRAGMA for
+    tenant sessions, so nothing short of a superuser bypass could change these
+    values anyway. The real threats (autoinstall fetching arbitrary extensions
+    over the network, community/unsigned extensions) stay blocked; autoloading
+    a signed built-in already on disk is benign.
+  - LOCAL-dataPath lockdown is best-effort: the engine
+    `disabled_filesystems = 'LocalFileSystem'` restriction is NOT applied for
+    a local dataPath (DuckLake data lives there, so the filesystem must stay
+    enabled). The edge screen also denies COPY over local paths and bare
+    filesystem-path FROM (replacement scans), but this protection is
+    best-effort: dollar-quoted (`$$...$$`) and identifier-quoted path forms
+    remain unhandled and may still read local files in LOCAL mode. Production
+    hosted deploys MUST use an object-store dataPath, where the engine
+    `disabled_filesystems` layer is the hard guard; the edge screen alone is
+    not a hard guard for LOCAL mode.
+  - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
+    `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
+    autoinstall_known_extensions=true` is denied, nodes come up healthy, and
+    ordinary TPCH queries still work. With the flag off, behavior is
+    unchanged from pre-lockdown.
+
+- **Pod security defaults** (K8s backend only, no flag, always on) - spawned
+  node pods get `runAsNonRoot: true`, `runAsUser`/`fsGroup` from
+  `k8s.runAsUser` (default 1000), `seccompProfile: RuntimeDefault` on the pod,
+  and `allowPrivilegeEscalation: false`, `capabilities: drop [ALL]`,
+  `readOnlyRootFilesystem: true` on the quack container, with writable
+  `emptyDir` mounts for `/tmp` and the DuckDB temp directory. A pod-template
+  override merges field-by-field rather than clobbering, so an operator
+  template can relax individual fields if a workload needs it.
+
+- **NetworkPolicy** (helm, opt-in) - `--set networkPolicy.enabled=true`
+  (default false) renders `networkpolicy-nodes.yaml` (default-deny; ingress
+  from manager pods only on the node port range, egress to DNS, Postgres,
+  and the object store) and `networkpolicy-manager.yaml` (ingress on
+  `:20900`/`:31338` from `networkPolicy.ingressFrom`, egress to node pods,
+  Postgres, DNS, optional SMTP). Tune `networkPolicy.postgres.cidr`,
+  `networkPolicy.objectStore.cidrs`, and `networkPolicy.nodePortRange` in
+  `charts/quack-on-demand/values.yaml`. Sanity-check a rendered policy with
+  `helm template --set networkPolicy.enabled=true` before applying.
+
+- **Catalog-reader idle eviction** - each cached `DuckLakeCatalogReader`
+  (one per browsed tenant-db, in `Main`'s `catalogReaderCache`) owns a small
+  HikariCP pool; without bounding, thousands of self-serve tenant-dbs would
+  each pin a pool forever. A daemon sweeper (process-local - every manager
+  replica sweeps its own cache, no HA coordination) runs every
+  `QOD_CATALOG_READER_SWEEP_MIN` minutes (config
+  `quack-on-demand.catalogReader.sweepIntervalMin`, default 10) and closes +
+  evicts any reader idle past `QOD_CATALOG_READER_IDLE_EVICT_MIN` minutes
+  (config `catalogReader.idleEvictMin`, default 30). Each reader's Hikari
+  pool also sets `minimumIdle=0` / `idleTimeout=60s`, so an idle-but-not-yet-
+  evicted reader already holds zero live Postgres connections. Delete/rotate
+  of a tenant-db still evicts immediately regardless of the sweep cadence.
+  To watch it fire without waiting 30 minutes, set
+  `QOD_CATALOG_READER_IDLE_EVICT_MIN=1`, browse a tenant-db's catalog, wait a
+  couple minutes, and grep the manager log for `reader-cache sweep: evicted`.
+
 ## Typical failure modes
 
 | Symptom | Cause | Fix |

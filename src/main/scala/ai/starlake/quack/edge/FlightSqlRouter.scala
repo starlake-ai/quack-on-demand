@@ -2,7 +2,13 @@ package ai.starlake.quack.edge
 
 import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Allowed, Denied, StatementValidator, ValidationContext}
+import ai.starlake.quack.edge.sql.{
+  Allowed,
+  Denied,
+  LockdownScreen,
+  StatementValidator,
+  ValidationContext
+}
 import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -54,7 +60,8 @@ final class FlightSqlRouter(
     val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
-    val resumePollInterval: FiniteDuration = 250.millis
+    val resumePollInterval: FiniteDuration = 250.millis,
+    val lockdownEnabled: Boolean = false
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -284,17 +291,35 @@ final class FlightSqlRouter(
           prepMs
         )
 
-    val aclCheck: Either[RouterFailure, Unit] = validator.validate(ctx) match
-      case Denied(reason, deniedRefs) =>
+    // Node lockdown: consulted only when the flag is on and the caller is not a superuser.
+    // Runs BEFORE the ACL validator gate so a denied statement never reaches the SQL parser.
+    // effectiveSet = None (no handshake state attached) screens as non-superuser -- fail closed.
+    val lockdownDenial =
+      if lockdownEnabled && !effectiveSet.exists(_.user.tenant.isEmpty) then
+        LockdownScreen.screen(sql)
+      else None
+
+    val aclCheck: Either[RouterFailure, Unit] = lockdownDenial match
+      case Some(reason) =>
         maybeRecord(
           nodeId = "-",
           durationMs = 0,
           status = "denied",
-          error = Some(reason),
-          deniedRefs = deniedRefs
+          error = Some("lockdown: " + reason)
         )
-        Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-      case Allowed => Right(())
+        Left(RouterFailure.AccessDenied(s"access denied: lockdown: $reason"))
+      case None =>
+        validator.validate(ctx) match
+          case Denied(reason, deniedRefs) =>
+            maybeRecord(
+              nodeId = "-",
+              durationMs = 0,
+              status = "denied",
+              error = Some(reason),
+              deniedRefs = deniedRefs
+            )
+            Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+          case Allowed => Right(())
 
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(

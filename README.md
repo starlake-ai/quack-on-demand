@@ -195,6 +195,8 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 
 Full reference: [Configuration](https://qod.starlake.ai/reference/configuration).
 
+Hosted / self-serve deployments should also flip `QOD_NODE_LOCKDOWN=true`, which denies `ATTACH`, extension `INSTALL`/`LOAD`, protected `SET`/`PRAGMA`s, and local-file read functions for non-superuser sessions and freezes the DuckDB engine's settings for the process lifetime; enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress; and tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting. See `skills/quack-on-demand/SKILL.md` for the full hardening runbook.
+
 ---
 
 ## License
