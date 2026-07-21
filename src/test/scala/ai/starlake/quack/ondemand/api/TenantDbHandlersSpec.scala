@@ -251,6 +251,30 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     out2.db.metastore.contains("pgPassword") shouldBe false
     // supervisor-level preservation is pinned by PoolSupervisorSpec; here we pin non-echo
 
+  it should "never echo s3_secret_access_key while keeping s3_access_key_id" in:
+    val h = freshHandlers()
+    val created = h.createTenantDb(
+      TenantDbRequest(
+        tenant      = "acme",
+        name        = "os1",
+        kind        = "memory",
+        objectStore = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "sk")
+      ),
+      None
+    )((_: String) => None).unsafeRunSync().toOption.get
+    created.objectStore.get("s3_access_key_id") shouldBe Some("k")
+    created.objectStore.contains("s3_secret_access_key") shouldBe false
+    created.metastore.contains("pgPassword") shouldBe false
+    val listed = h.listTenantDbs("acme", None)((_: String) => None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .tenantDbs
+      .find(_.name == "acme_os1")
+      .get
+    listed.objectStore.get("s3_access_key_id") shouldBe Some("k")
+    listed.objectStore.contains("s3_secret_access_key") shouldBe false
+
   it should "report effectiveDataPath and a None tableCount for memory kind" in:
     val h = freshHandlers()
     val td = h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem6", kind = "memory"), None)(

@@ -21,8 +21,15 @@ object HandlerResolvers:
       .map(_.id)
       .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
 
-  /** Hide secret-like keys (today: just `pgPassword`) from a metastore/objectStore map before it
-    * goes out on the wire.
+  /** Keys that must never round-trip in an API response: the metastore `pgPassword` plus the
+    * object-store secret keys authored by `ObjectStoreSecret` (`s3_secret_access_key`,
+    * `azure_account_key`, `gcs_hmac_secret`).
+    */
+  private val redactedKeys: Set[String] =
+    Set("pgPassword", "s3_secret_access_key", "azure_account_key", "gcs_hmac_secret")
+
+  /** Hide secret-like keys (pgPassword plus the object-store secret keys) from a
+    * metastore/objectStore map before it goes out on the wire.
     */
   def redactPassword(m: Map[String, String]): Map[String, String] =
-    m.filterNot(_._1.equalsIgnoreCase("pgPassword"))
+    m.filterNot { case (k, _) => redactedKeys.exists(_.equalsIgnoreCase(k)) }
