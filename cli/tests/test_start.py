@@ -1,4 +1,5 @@
 import pathlib
+import sys
 
 import pytest
 
@@ -83,6 +84,11 @@ def test_start_respects_existing_data_path(runner, wired, monkeypatch):
     assert wired["env"]["QOD_DUCKLAKE_DATA_PATH"] == "/mnt/lake"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows resolves the native duckdb DLL through PATH, not DYLD/LD_LIBRARY_PATH "
+    "(runtime_env's os_name-to-var mapping has no 'win32' entry)",
+)
 def test_start_wires_native_client_library_path(runner, wired):
     from qod_cli.main import app
 
@@ -111,6 +117,12 @@ def test_start_refuses_pre_launcher_releases(runner, wired, monkeypatch):
     assert "0.3.8" in result.output
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="loaders are bash scripts; _spawn_loaders returns early on win32 without "
+    "spawning or setting QOD_BOOTSTRAP_YAML (see start.py::_spawn_loaders), matching "
+    "the dedicated test_start_load_flags_warn_and_skip_on_windows behavior",
+)
 def test_start_load_tpch_spawns_loader_and_sets_bootstrap(runner, wired, monkeypatch, tmp_path):
     from qod_cli.commands import start as start_cmd
     from qod_cli.main import app
@@ -138,6 +150,11 @@ def test_start_load_tpch_spawns_loader_and_sets_bootstrap(runner, wired, monkeyp
     assert loader_env["DATA_PATH"].endswith("acme_tpch")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="loaders are bash scripts; _spawn_loaders returns early on win32 without "
+    "spawning or setting QOD_BOOTSTRAP_YAML (see start.py::_spawn_loaders)",
+)
 def test_start_demo_minimal_picks_minimal_manifest(runner, wired, monkeypatch, tmp_path):
     from qod_cli.commands import start as start_cmd
     from qod_cli.main import app
@@ -155,6 +172,11 @@ def test_start_demo_minimal_picks_minimal_manifest(runner, wired, monkeypatch, t
     assert wired["env"]["QOD_BOOTSTRAP_YAML"] == "classpath:bootstrap-demo-minimal.yaml"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="loaders are bash scripts; _spawn_loaders returns early on win32 without "
+    "spawning any of them (see start.py::_spawn_loaders)",
+)
 def test_start_load_tpc_legacy_spawns_all_three(runner, wired, monkeypatch, tmp_path):
     from qod_cli.commands import start as start_cmd
     from qod_cli.main import app

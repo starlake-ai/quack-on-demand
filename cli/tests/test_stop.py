@@ -1,6 +1,18 @@
 import signal
+import sys
 
 import pytest
+
+# stop.py's stop() explicitly raises typer.Exit(1) at the top of the function
+# on win32 ("qod stop is not supported on Windows yet; use scripts/stop-jar.ps1
+# (or taskkill /T on the java process)") before any of the lsof/pgrep/os.kill
+# seams this module exercises ever run. The feature is unimplemented on
+# Windows, not merely untested, so the whole suite is skipped there.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="qod stop is not implemented on Windows yet (stop.py raises typer.Exit(1) "
+    "unconditionally on win32); use scripts/stop-jar.ps1 or taskkill /T",
+)
 
 
 @pytest.fixture
