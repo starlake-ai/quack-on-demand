@@ -110,6 +110,18 @@ object TenantDb {
       )
     else None
 
+  /** Rejects a semicolon in any `objectStore` VALUE (keys are unrestricted: they come from a fixed
+    * UI vocabulary, not free-form user input). `ObjectStoreSecret.azureSecret` concatenates
+    * `azure_account` / `azure_account_key` unescaped into a semicolon-delimited Azure connection
+    * string before the whole string is wrapped in a single-quoted literal, so a semicolon smuggled
+    * into a value injects extra connection-string fields (e.g. overriding `AccountName`) even
+    * though the literal-quoting itself is safe.
+    */
+  private def objectStoreError(objectStore: Map[String, String]): Option[String] =
+    objectStore.find { case (_, v) => v.contains(";") }.map { case (k, _) =>
+      s"invalid objectStore value for '$k': must not contain a semicolon"
+    }
+
   /** Injection-safety checks only: reject any script-interpolated value that carries a
     * SQL-literal-breaking or identifier-breaking metacharacter, validating each field only when it
     * is present. This is the security-critical subset of [[validate]] and is safe to run on paths
@@ -124,6 +136,7 @@ object TenantDb {
       .orElse(connParamError(td.metastore, "pgPassword"))
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
+      .orElse(objectStoreError(td.objectStore))
 
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)

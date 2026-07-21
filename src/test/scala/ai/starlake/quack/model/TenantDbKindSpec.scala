@@ -275,4 +275,32 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
     )
     TenantDb.validate(td) shouldBe None
   }
+
+  // --- objectStore values feed ObjectStoreSecret's Azure connection-string concatenation ---
+
+  it should "reject an objectStore value containing a semicolon, naming the offending key" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta,
+      "/tmp/d",
+      objectStore = Map("azure_account_key" -> "key;BlobEndpoint=https://evil")
+    )
+    TenantDb.validate(td).get should include("azure_account_key")
+  }
+
+  it should "accept an objectStore map with no literal-breaking characters" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      pgMeta,
+      "/tmp/d",
+      objectStore = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "sk")
+    )
+    TenantDb.validate(td) shouldBe None
+  }
 }
