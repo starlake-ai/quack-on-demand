@@ -1,11 +1,11 @@
 package ai.starlake.quack.ondemand.runtime
 
-/** Authors the per-database object-store CREATE SECRET, single source of truth (like
-  * NodeLockdown). Reads the tenant-db `objectStore` map (keys per the UI's DataPathEditor:
-  * s3_*, azure_*, gcs_*) and emits a SCOPE'd DuckDB secret named `qod_db_store`, distinct from
-  * the global `quack_s3`/`quack_azure` so both coexist (DuckDB picks the longest matching scope,
-  * so the scoped per-db secret wins for its bucket while the global stays the default). Empty
-  * map or a non-object-store dataPath yields "" (the global-env path is used, unchanged).
+/** Authors the per-database object-store CREATE SECRET, single source of truth (like NodeLockdown).
+  * Reads the tenant-db `objectStore` map (keys per the UI's DataPathEditor: s3_*, azure_*, gcs_*)
+  * and emits a SCOPE'd DuckDB secret named `qod_db_store`, distinct from the global
+  * `quack_s3`/`quack_azure` so both coexist (DuckDB picks the longest matching scope, so the scoped
+  * per-db secret wins for its bucket while the global stays the default). Empty map or a
+  * non-object-store dataPath yields "" (the global-env path is used, unchanged).
   */
 object ObjectStoreSecret:
   private val SecretName = "qod_db_store"
@@ -20,18 +20,24 @@ object ObjectStoreSecret:
     if objectStore.isEmpty then ""
     else
       scheme(dataPath) match
-        case "s3" | "s3a" | "r2" => s3Secret(objectStore, dataPath)
-        case "gs"                => gcsSecret(objectStore, dataPath)
+        case "s3" | "s3a" | "r2"      => s3Secret(objectStore, dataPath)
+        case "gs"                     => gcsSecret(objectStore, dataPath)
         case "az" | "azure" | "abfss" => azureSecret(objectStore, dataPath)
-        case _                   => ""
+        case _                        => ""
 
   private def s3Secret(m: Map[String, String], scope: String): String =
-    val region   = m.getOrElse("s3_region", "us-east-1")
-    val urlStyle = m.getOrElse("s3_url_style", "path")
-    val endpoint = m.get("s3_endpoint").map(_.trim).filter(_.nonEmpty).map { e =>
-      val stripped = e.stripPrefix("https://").stripPrefix("http://").stripSuffix("/")
-      s"  ENDPOINT ${lit(stripped)},\n"
-    }.getOrElse("")
+    val region      = m.getOrElse("s3_region", "us-east-1")
+    val urlStyle    = m.getOrElse("s3_url_style", "path")
+    val rawEndpoint = m.get("s3_endpoint").map(_.trim).filter(_.nonEmpty)
+    // http:// (e.g. a local MinIO) means TLS is off; https:// or no endpoint at all keeps the
+    // secure default. No separate s3_use_ssl key: the endpoint scheme is the one signal.
+    val useSsl   = !rawEndpoint.exists(_.startsWith("http://"))
+    val endpoint = rawEndpoint
+      .map { e =>
+        val stripped = e.stripPrefix("https://").stripPrefix("http://").stripSuffix("/")
+        s"  ENDPOINT ${lit(stripped)},\n"
+      }
+      .getOrElse("")
     "INSTALL httpfs; LOAD httpfs;\n" +
       s"CREATE OR REPLACE SECRET $SecretName (\n" +
       "  TYPE s3,\n" +
@@ -40,7 +46,7 @@ object ObjectStoreSecret:
       s"  REGION ${lit(region)},\n" +
       endpoint +
       s"  URL_STYLE ${lit(urlStyle)},\n" +
-      "  USE_SSL true,\n" +
+      s"  USE_SSL $useSsl,\n" +
       s"  SCOPE ${lit(scope)}\n" +
       ");"
 
@@ -56,7 +62,7 @@ object ObjectStoreSecret:
   private def azureSecret(m: Map[String, String], scope: String): String =
     val account = m.getOrElse("azure_account", "")
     val key     = m.getOrElse("azure_account_key", "")
-    val conn =
+    val conn    =
       s"DefaultEndpointsProtocol=https;AccountName=$account;AccountKey=$key;EndpointSuffix=core.windows.net"
     "INSTALL azure; LOAD azure;\n" +
       s"CREATE OR REPLACE SECRET $SecretName (\n" +

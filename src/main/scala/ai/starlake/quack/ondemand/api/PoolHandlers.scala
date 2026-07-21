@@ -22,7 +22,10 @@ final class PoolHandlers(
     */
   def supportsPlacement: Boolean = sup.supportsPlacement
 
-  /** Hide secret-like keys from the API response. Today: just `pgPassword`. */
+  /** Hide secret-like keys from the API response: see
+    * [[ai.starlake.quack.model.TenantDb.SecretKeys]] (`pgPassword` plus the object-store secret
+    * keys).
+    */
   private def redact(metastore: Map[String, String]): Map[String, String] =
     HandlerResolvers.redactPassword(metastore)
 

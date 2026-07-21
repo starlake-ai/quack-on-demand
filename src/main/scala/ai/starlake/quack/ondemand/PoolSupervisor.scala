@@ -37,9 +37,9 @@ import scala.collection.concurrent.TrieMap
 
 /** Patch applied to an existing tenant-db by [[PoolSupervisor.updateTenantDb]]. Absent fields are
   * unchanged; present fields replace their stored counterpart. For map fields the replace-and-carry
-  * semantics in [[PoolSupervisor.mergeSecretKeys]] preserve response-redacted keys (pgPassword)
-  * when the incoming map omits them. An empty string value for a scalar Option field clears it
-  * (sets to None).
+  * semantics in [[PoolSupervisor.mergeSecretKeys]] preserve response-redacted keys
+  * ([[TenantDb.SecretKeys]]) when the incoming map omits them. An empty string value for a scalar
+  * Option field clears it (sets to None).
   */
 final case class TenantDbPatch(
     metastore: Option[Map[String, String]] = None,
@@ -508,9 +508,11 @@ final class PoolSupervisor(
     * NodeLoadTracker; the caller owns the full lifecycle (start -> chain -> stop). Borrows the
     * resolved config (metastore, s3, kindWire, init SQL) of any existing serving pool of the
     * tenant-db so the maintenance node ATTACHes the same catalog the same way; falls back to the
-    * effective metastore with empty s3/federation when the tenant-db has no pool yet. The pool
-    * key's pool segment is the reserved name `__maint` so node ids can never collide with a serving
-    * pool's ids.
+    * effective metastore plus the tenant-db's own per-db `objectStore` (same fallback [[restore]]
+    * and `createPool` use for `PoolState.s3`) when the tenant-db has no pool yet, so a
+    * per-db-credentialed bucket still authors its `CREATE SECRET` on a donor-less maintenance run.
+    * The pool key's pool segment is the reserved name `__maint` so node ids can never collide with
+    * a serving pool's ids.
     */
   def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
     findTenantDb(tenantName, tenantDbName).map { td =>
@@ -519,7 +521,7 @@ final class PoolSupervisor(
       // Borrow a serving pool's resolved config when one exists (s3 creds, kindWire, initSql).
       val donor = pools.values.find(s => s.key.tenant == key.tenant && s.key.tenantDb == td.name)
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
-      val s3        = donor.map(_.s3).getOrElse(Map.empty)
+      val s3        = donor.map(_.s3).getOrElse(td.objectStore)
       val dataPath  = metastore.getOrElse("dataPath", "")
       NodeSpec(
         poolKey = key,
@@ -1042,8 +1044,8 @@ final class PoolSupervisor(
   /** Merge a patch into an existing tenant-db, persist it, refresh caches, and restart every node
     * of the database's pools when node-affecting fields (metastore, objectStore, initSql) changed.
     * Restart is all-at-once via the same per-node path restartNode uses; per-node failures are
-    * collected, not thrown (reconcile heals). Response-redacted keys (pgPassword) are preserved
-    * when an incoming map lacks them; an explicit empty value removes the key.
+    * collected, not thrown (reconcile heals). Response-redacted keys ([[TenantDb.SecretKeys]]) are
+    * preserved when an incoming map lacks them; an explicit empty value removes the key.
     */
   def updateTenantDb(
       tenantName: String,
@@ -1137,20 +1139,22 @@ final class PoolSupervisor(
     val t = s.trim
     if t.isEmpty then None else Some(t)
 
-  /** Replace-the-map semantics with one exception: keys redacted from API responses (pgPassword)
-    * are carried over from the stored map when the incoming map lacks them, because no client can
-    * round-trip a value it never sees. An incoming redacted key with an EMPTY value removes it.
+  /** Replace-the-map semantics with one exception: keys redacted from API responses
+    * ([[TenantDb.SecretKeys]]: `pgPassword` plus the object-store secret keys) are carried over
+    * from the stored map when the incoming map lacks them, because no client can round-trip a value
+    * it never sees. An incoming redacted key with an EMPTY value removes it.
     */
   private def mergeSecretKeys(
       stored: Map[String, String],
       incoming: Map[String, String]
   ): Map[String, String] =
-    val secretKeys = stored.keys.filter(_.equalsIgnoreCase("pgPassword")).toList
-    val carried    = secretKeys.collect {
+    val secretKeys =
+      stored.keys.filter(k => TenantDb.SecretKeys.exists(_.equalsIgnoreCase(k))).toList
+    val carried = secretKeys.collect {
       case k if !incoming.keys.exists(_.equalsIgnoreCase(k)) => k -> stored(k)
     }
     val explicit = incoming.filter { case (k, v) =>
-      !(k.equalsIgnoreCase("pgPassword") && v.isEmpty)
+      !(TenantDb.SecretKeys.exists(_.equalsIgnoreCase(k)) && v.isEmpty)
     }
     explicit ++ carried
 

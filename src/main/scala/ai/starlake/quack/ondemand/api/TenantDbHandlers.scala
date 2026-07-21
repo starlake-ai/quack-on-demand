@@ -26,17 +26,13 @@ final class TenantDbHandlers(
   private def redact(m: Map[String, String]): Map[String, String] =
     HandlerResolvers.redactPassword(m)
 
-  /** Rejects any objectStore VALUE containing ';': it is authored raw into a connection-string
-    * literal before that literal is escaped by `ObjectStoreSecret.lit`, so a semicolon in a value
-    * (e.g. Azure's `azure_account` / `azure_account_key`) injects extra fields into the underlying
-    * secret's connection string. No supported key (s3/gcs/azure creds, regions, endpoints)
-    * legitimately contains one. Keys are not validated: they come from a fixed UI vocabulary, not
-    * free-form user input.
+  /** Rejects any objectStore VALUE containing ';'; delegates the rule and message to
+    * [[TenantDb.objectStoreError]] (the model-level check `updateTenantDb`/`validateSafety` also
+    * run) so it is authored once. Kept as a thin wrapper here purely so this handler's 400 shape is
+    * built at the call sites below.
     */
   private def validateObjectStore(objectStore: Map[String, String]): Option[String] =
-    objectStore.find { case (_, v) => v.contains(";") }.map { case (k, _) =>
-      s"objectStore value for '$k' must not contain ';'"
-    }
+    TenantDb.objectStoreError(objectStore)
 
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)

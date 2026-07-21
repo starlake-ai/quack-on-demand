@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.model.TenantDb
 import ai.starlake.quack.ondemand.PoolSupervisor
 
 /** Small helpers shared verbatim across several `api` handler classes. Kept as free functions
@@ -21,12 +22,10 @@ object HandlerResolvers:
       .map(_.id)
       .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
 
-  /** Keys that must never round-trip in an API response: the metastore `pgPassword` plus the
-    * object-store secret keys authored by `ObjectStoreSecret` (`s3_secret_access_key`,
-    * `azure_account_key`, `gcs_hmac_secret`).
+  /** Keys that must never round-trip in an API response: see [[TenantDb.SecretKeys]], the single
+    * source of truth shared with `PoolSupervisor.mergeSecretKeys` so the two sites cannot drift.
     */
-  private val redactedKeys: Set[String] =
-    Set("pgPassword", "s3_secret_access_key", "azure_account_key", "gcs_hmac_secret")
+  private val redactedKeys: Set[String] = TenantDb.SecretKeys
 
   /** Hide secret-like keys (pgPassword plus the object-store secret keys) from a
     * metastore/objectStore map before it goes out on the wire.

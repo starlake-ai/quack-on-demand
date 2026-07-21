@@ -74,3 +74,25 @@ class ObjectStoreSecretSpec extends AnyFlatSpec with Matchers:
     val s = ObjectStoreSecret.sql(s3Map + ("s3_secret_access_key" -> "a'b"), "s3://b/d")
     s should include("SECRET 'a''b'")
   }
+
+  it should "emit USE_SSL false for an http:// endpoint (e.g. a local MinIO)" in {
+    val s = ObjectStoreSecret.sql(
+      s3Map + ("s3_endpoint" -> "http://minio.local:9000"),
+      "s3://b/d"
+    )
+    s should include("USE_SSL false")
+    s should include("ENDPOINT 'minio.local:9000'")
+  }
+
+  it should "emit USE_SSL true for an https:// endpoint" in {
+    val s = ObjectStoreSecret.sql(
+      s3Map + ("s3_endpoint" -> "https://minio.local:9000"),
+      "s3://b/d"
+    )
+    s should include("USE_SSL true")
+  }
+
+  it should "emit USE_SSL true when no s3_endpoint is present at all" in {
+    val s = ObjectStoreSecret.sql(s3Map, "s3://bucket-a/db")
+    s should include("USE_SSL true")
+  }
