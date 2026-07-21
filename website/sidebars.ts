@@ -46,6 +46,7 @@ const sidebars: SidebarsConfig = {
             'operating/deploy-docker',
             'operating/deploy-kubernetes',
             'operating/tls',
+            'operating/hardening',
             'operating/resilience',
           ],
         },
