@@ -308,6 +308,114 @@ class KubernetesQuackBackendSpec
 
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
 
+  // ---------- per-node object-store Secret ----------
+
+  private def objectStoreSecretName(nodeId: String) = s"qod-store-$nodeId"
+
+  /** Same shape as the real per-db object-store CREATE SECRET authored by ObjectStoreSecret.scala.
+    */
+  private val ObjectStoreSql =
+    "CREATE OR REPLACE SECRET objstore_acme_default (TYPE s3, KEY_ID 'k', SECRET 's', SCOPE 's3://bucket/acme_default');\n"
+
+  "object-store Secret wiring" should "create a per-node Secret and reference it from the pod" in:
+    val backend = fedBackend
+    val node    = backend
+      .start(
+        NodeSpec(
+          FedKey,
+          "quack-store-1",
+          Role.Dual,
+          metastore = Map.empty,
+          s3 = Map.empty,
+          objectStoreSql = ObjectStoreSql
+        )
+      )
+      .unsafeRunSync()
+
+    // The Secret exists with the resolved SQL on the expected key.
+    val secret = server.getClient.secrets
+      .inNamespace("default")
+      .withName(objectStoreSecretName("quack-store-1"))
+      .get()
+    secret should not be null
+    val payload = Option(secret.getStringData)
+      .map(_.asScala.toMap)
+      .getOrElse(Map.empty)
+      .getOrElse(
+        KubernetesQuackBackend.ObjectStoreSecretKey, {
+          val b64 = secret.getData.get(KubernetesQuackBackend.ObjectStoreSecretKey)
+          new String(
+            java.util.Base64.getDecoder.decode(b64),
+            java.nio.charset.StandardCharsets.UTF_8
+          )
+        }
+      )
+    payload shouldBe ObjectStoreSql
+
+    // The pod has an `objectStoreSql` env entry whose value comes from a
+    // SecretKeyRef pointing at the same Secret + same key (not inlined).
+    val container = server.getClient.pods
+      .inNamespace("default")
+      .withName(node.podName.get)
+      .get()
+      .getSpec
+      .getContainers
+      .get(0)
+    val storeEnv = container.getEnv.asScala.find(_.getName == "objectStoreSql").value
+    storeEnv.getValue shouldBe null // value-from, not value
+    val ref = storeEnv.getValueFrom.getSecretKeyRef
+    ref.getName shouldBe objectStoreSecretName("quack-store-1")
+    ref.getKey shouldBe KubernetesQuackBackend.ObjectStoreSecretKey
+
+  it should "skip the Secret + env entry entirely when objectStoreSql is empty" in:
+    val backend = fedBackend
+    val node    = backend
+      .start(
+        NodeSpec(FedKey, "quack-nostore-1", Role.Dual, metastore = Map.empty, s3 = Map.empty)
+        // objectStoreSql defaulted to ""
+      )
+      .unsafeRunSync()
+
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName(objectStoreSecretName("quack-nostore-1"))
+      .get() shouldBe null
+    val container = server.getClient.pods
+      .inNamespace("default")
+      .withName(node.podName.get)
+      .get()
+      .getSpec
+      .getContainers
+      .get(0)
+    container.getEnv.asScala.map(_.getName) should not contain "objectStoreSql"
+
+  it should "delete the object-store Secret on stop()" in:
+    val backend = fedBackend
+    backend
+      .start(
+        NodeSpec(
+          FedKey,
+          "quack-store-2",
+          Role.Dual,
+          metastore = Map.empty,
+          s3 = Map.empty,
+          objectStoreSql = ObjectStoreSql
+        )
+      )
+      .unsafeRunSync()
+
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName(objectStoreSecretName("quack-store-2"))
+      .get() should not be null
+
+    backend.stop("quack-store-2").unsafeRunSync()
+
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName(objectStoreSecretName("quack-store-2"))
+      .get() shouldBe null
+
   // ---------- per-pod token Secret + restart adoption ----------
 
   private def tokenSecretName(nodeId: String) = s"qod-token-$nodeId"
