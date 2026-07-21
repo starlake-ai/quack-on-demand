@@ -119,14 +119,6 @@ final class KubernetesQuackBackend(
       lockdownEnv.setName("lockdownSql")
       lockdownEnv.setValue(spec.lockdownSql)
       envs.add(lockdownEnv)
-    // Engine lockdown freeze (NodeLockdown.freezeSql). spawn-quack-node.sh
-    // appends it AFTER quack_serve returns: quack_serve itself needs to
-    // configure the server, so lock_configuration must not run before it.
-    if spec.lockdownFreezeSql.nonEmpty then
-      val lockdownFreezeEnv = new EnvVar()
-      lockdownFreezeEnv.setName("lockdownFreezeSql")
-      lockdownFreezeEnv.setValue(spec.lockdownFreezeSql)
-      envs.add(lockdownFreezeEnv)
     // Federation: when the pool has any extraSetupSql, point the pod's
     // `extraSetupSql` env var at the per-pool Secret instead of inlining
     // the value. Same env var name as LocalQuackBackend's

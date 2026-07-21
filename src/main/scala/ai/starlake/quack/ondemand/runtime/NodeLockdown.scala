@@ -1,21 +1,29 @@
 package ai.starlake.quack.ondemand.runtime
 
 /** Engine-side lockdown block, authored here as the single source of truth and shipped to both
-  * spawn scripts via NodeSpec.lockdownSql + NodeSpec.lockdownFreezeSql / the `lockdownSql` +
-  * `lockdownFreezeSql` env vars. The block is split in two because the two halves run on
-  * opposite sides of `CALL quack_serve(...)`:
+  * spawn scripts via NodeSpec.lockdownSql / the `lockdownSql` env var. Runs BEFORE quack_serve,
+  * after every legitimate INSTALL/LOAD/ATTACH, so the restrictions are in effect before the node
+  * ever serves a tenant statement.
   *
-  *   - `sql` (the value restrictions) runs BEFORE quack_serve, after every legitimate
-  *     INSTALL/LOAD/ATTACH, so the restrictions are in effect before the node ever serves a
-  *     tenant statement.
-  *   - `freezeSql` (`SET lock_configuration = true;`) runs AFTER quack_serve returns.
-  *     quack_serve itself needs to configure the server (it sets its own DuckDB options while
-  *     spawning its listener thread), so freezing configuration before it runs would block the
-  *     node from ever starting to serve.
+  * Value-sets only, no config freeze. A live smoke test showed two things break node serving:
+  *   - `SET lock_configuration = true` freezes DuckDB's global config outright and is incompatible
+  *     with quack_serve regardless of which side of `CALL quack_serve(...)` it runs on -- nodes
+  *     come up unhealthy (the SELECT 1 probe fails). It is also redundant: the edge LockdownScreen
+  *     already denies every protected-setting SET/RESET/PRAGMA for tenant sessions, so nothing
+  *     short of a superuser bypass could change these values anyway. Dropped entirely.
+  *   - `SET autoload_known_extensions = false` blocks quack_serve from lazily autoloading the
+  *     signed built-in extensions it needs to handle incoming connections, which also marks nodes
+  *     unhealthy. Autoloading a signed built-in that is already present on disk is benign, so it is
+  *     left ON.
   *
-  * The LocalFileSystem restriction applies only when the tenant-db data lives in an object
-  * store; a local dataPath needs the filesystem, and the edge LockdownScreen carries the local-file
-  * guard in that mode.
+  * What stays blocked: `autoinstall_known_extensions` (fetching arbitrary extensions over the
+  * network), `allow_community_extensions` and `allow_unsigned_extensions` (unvetted code), and, for
+  * object-store dataPaths, the local filesystem. Those are the real threats; autoloading a signed
+  * built-in is not one of them.
+  *
+  * The LocalFileSystem restriction applies only when the tenant-db data lives in an object store; a
+  * local dataPath needs the filesystem, and the edge LockdownScreen carries the local-file guard in
+  * that mode.
   */
 object NodeLockdown:
   // Intentional divergence from the edge LockdownScreen's RemoteSchemes (which also exempts
@@ -32,9 +40,6 @@ object NodeLockdown:
           "SET disabled_filesystems = 'LocalFileSystem';\n"
         else ""
       "SET autoinstall_known_extensions = false;\n" +
-        "SET autoload_known_extensions = false;\n" +
         "SET allow_community_extensions = false;\n" +
+        "SET allow_unsigned_extensions = false;\n" +
         fsLine
-
-  def freezeSql(enabled: Boolean): String =
-    if !enabled then "" else "SET lock_configuration = true;"

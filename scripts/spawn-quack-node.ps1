@@ -20,8 +20,6 @@
     dbInitSql extraSetupSql            (optional per-db / per-pool init SQL)
     lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs
                                         before quack_serve)
-    lockdownFreezeSql                  (optional engine lockdown freeze, NodeLockdown.scala; runs
-                                        after quack_serve returns)
 
   Unlike the bash version there is no FIFO: DuckDB is fed its init SQL over a
   redirected stdin that this script leaves OPEN, so the background quack
@@ -152,7 +150,6 @@ if (-not [string]::IsNullOrEmpty($proxyUrl)) {
 $dbInitSql    = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql = [Environment]::GetEnvironmentVariable('extraSetupSql')
 $lockdownSql  = [Environment]::GetEnvironmentVariable('lockdownSql')
-$lockdownFreezeSql = [Environment]::GetEnvironmentVariable('lockdownFreezeSql')
 
 # Build init SQL piecemeal based on $kind so memory / duckdb-file skip the
 # DuckLake-specific setup entirely. Mirrors spawn-quack-node.sh.
@@ -195,12 +192,6 @@ if (-not [string]::IsNullOrEmpty($extraSetupSql)) { [void]$sb.AppendLine($extraS
 if (-not [string]::IsNullOrEmpty($lockdownSql)) { [void]$sb.AppendLine($lockdownSql) }
 
 [void]$sb.AppendLine("CALL quack_serve('quack:0.0.0.0:$Port', token := '$Token', allow_other_hostname := true);")
-
-# Deployment lockdown freeze (lockdownFreezeSql, authored by NodeLockdown.scala).
-# MUST run AFTER quack_serve: lock_configuration freezes all settings, and
-# quack_serve needs to configure the server, so freezing before it would
-# stop the node from serving.
-if (-not [string]::IsNullOrEmpty($lockdownFreezeSql)) { [void]$sb.AppendLine($lockdownFreezeSql) }
 
 $initSql = $sb.ToString()
 

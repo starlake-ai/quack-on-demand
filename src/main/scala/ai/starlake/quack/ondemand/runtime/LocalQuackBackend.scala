@@ -56,10 +56,6 @@ final class LocalQuackBackend(
     // after extraSetupSql, right before quack_serve, so the value
     // restrictions are in effect before the node serves any tenant statement.
     if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)
-    // Engine lockdown freeze (NodeLockdown.freezeSql). spawn-quack-node.sh
-    // appends it AFTER quack_serve returns: quack_serve itself needs to
-    // configure the server, so lock_configuration must not run before it.
-    if spec.lockdownFreezeSql.nonEmpty then env.put("lockdownFreezeSql", spec.lockdownFreezeSql)
     val proc = pb.start()
     processes.put(spec.nodeId, proc)
     tokens.put(spec.nodeId, token)

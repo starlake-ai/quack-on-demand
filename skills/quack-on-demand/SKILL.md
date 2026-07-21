@@ -658,14 +658,23 @@ opt-in except pod security:
     wire shape as ACL denials ("lockdown: ... is disabled on this
     deployment") and go through the existing audit path. Superuser sessions
     bypass the edge arm (operator escape hatch).
-  - Engine lockdown (second line, cannot be undone): a lockdown SQL block
-    runs LAST in node init (after catalog ATTACH, pool initSql, and the
-    federation blob) setting `autoinstall_known_extensions = false`,
-    `autoload_known_extensions = false`, `allow_community_extensions =
-    false`, `disabled_filesystems = 'LocalFileSystem'` (only when the
-    tenant-db dataPath is an object store), then `lock_configuration = true`
-    which freezes every setting for the process lifetime - even a statement
-    that slips past the edge arm cannot re-enable anything.
+  - Engine lockdown (second line, value-sets only): a lockdown SQL block
+    runs BEFORE `CALL quack_serve(...)` in node init (after catalog ATTACH,
+    pool initSql, and the federation blob) setting `autoinstall_known_extensions
+    = false`, `allow_community_extensions = false`, `allow_unsigned_extensions
+    = false`, and `disabled_filesystems = 'LocalFileSystem'` (only when the
+    tenant-db dataPath is an object store). `autoload_known_extensions` is left
+    ON: quack_serve itself lazily autoloads signed built-in extensions to
+    handle incoming connections, and disabling autoload marks every node
+    unhealthy (the SELECT 1 probe fails). `SET lock_configuration = true` was
+    tried and dropped: it freezes DuckDB's global config outright and is
+    incompatible with quack_serve regardless of which side of quack_serve it
+    runs on, so nodes never come up healthy. It is also redundant - the edge
+    LockdownScreen already denies every protected-setting SET/RESET/PRAGMA for
+    tenant sessions, so nothing short of a superuser bypass could change these
+    values anyway. The real threats (autoinstall fetching arbitrary extensions
+    over the network, community/unsigned extensions) stay blocked; autoloading
+    a signed built-in already on disk is benign.
   - LOCAL-dataPath lockdown is best-effort: the engine
     `disabled_filesystems = 'LocalFileSystem'` restriction is NOT applied for
     a local dataPath (DuckLake data lives there, so the filesystem must stay
@@ -678,8 +687,9 @@ opt-in except pod security:
     not a hard guard for LOCAL mode.
   - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
     `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
-    lock_configuration=false` is denied, and ordinary TPCH queries still
-    work. With the flag off, behavior is unchanged from pre-lockdown.
+    autoinstall_known_extensions=true` is denied, nodes come up healthy, and
+    ordinary TPCH queries still work. With the flag off, behavior is
+    unchanged from pre-lockdown.
 
 - **Pod security defaults** (K8s backend only, no flag, always on) - spawned
   node pods get `runAsNonRoot: true`, `runAsUser`/`fsGroup` from
