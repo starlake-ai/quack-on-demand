@@ -21,6 +21,11 @@ final case class NodeSpec(
     // extraSetupSql, so the value restrictions are in effect before the node
     // serves any tenant statement. Empty string = no lockdown.
     lockdownSql: String = "",
+    // Per-database object-store CREATE SECRET (ObjectStoreSecret.sql), scoped to the db's
+    // dataPath. Runs before the DuckLake ATTACH so the bucket is authenticated. Empty when the
+    // tenant-db has no objectStore config (the global-env secret path is used instead). Shipped
+    // via the `objectStoreSql` node env var; in K8s the value rides in a per-node Secret.
+    objectStoreSql: String = "",
     // K8s scheduling hint inherited from the node's cohort. None / empty
     // = no placement constraint (default scheduler decides). Backends
     // other than KubernetesQuackBackend ignore this field.

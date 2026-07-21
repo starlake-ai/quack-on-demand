@@ -71,6 +71,47 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       out should include("dbName=specdb")        // spec-only key
     finally backend.stop("node-env").unsafeRunSync()
 
+  it should "emit objectStoreSql as an env var when the spec carries one, and omit it when empty" in:
+    val capture = java.io.File.createTempFile("env-capture-objsql-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23090,
+      max = 23091,
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val spec = NodeSpec(
+      PoolKey("t", "t_default", "p"),
+      "node-objsql",
+      Role.Dual,
+      metastore = Map.empty,
+      s3 = Map.empty,
+      objectStoreSql = "CREATE OR REPLACE SECRET qod_db_store (TYPE s3, SCOPE 's3://bucket/db');"
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      out should include("objectStoreSql=CREATE OR REPLACE SECRET qod_db_store")
+    finally backend.stop("node-objsql").unsafeRunSync()
+
+    val capture2 = java.io.File.createTempFile("env-capture-objsql-empty-", ".txt")
+    capture2.deleteOnExit()
+    val backend2 = new LocalQuackBackend(
+      min = 23092,
+      max = 23093,
+      commandFor = (_, _, _) => envDumpCmd(capture2.getAbsolutePath, 5)
+    )
+    val emptySpec =
+      NodeSpec(PoolKey("t", "t_default", "p"), "node-noobjsql", Role.Dual, Map.empty, Map.empty)
+    backend2.start(emptySpec).unsafeRunSync()
+    try
+      val deadline2 = System.currentTimeMillis() + 3000
+      while capture2.length() == 0 && System.currentTimeMillis() < deadline2 do Thread.sleep(50)
+      val out2 = java.nio.file.Files.readString(capture2.toPath)
+      out2 should not include "objectStoreSql="
+    finally backend2.stop("node-noobjsql").unsafeRunSync()
+
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling
   // back to SIGKILL on stragglers), then clear its registry maps so a

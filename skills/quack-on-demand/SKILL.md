@@ -306,6 +306,47 @@ curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TO
   -d '{"tenant":"acme","name":"acme_tpch","metastore":{"dbName":"acme_tpch","pgHost":"localhost","pgPort":"5432","pgUser":"postgres","schemaName":"main","pgPassword":"newpass"}}'
 ```
 
+### Per-database object-store credentials
+
+`objectStore` on a database takes effect at node spawn: it authors a DuckDB
+secret scoped to that database's `dataPath`, so this database authenticates
+its own bucket with its own keys, coexisting with the process-global
+`QOD_S3_*` / `QOD_AZURE_*` / `QOD_GCS_*` default secret (DuckDB picks the most
+specific scope per path). Keys, by `dataPath` scheme:
+
+- `s3://` / `s3a://` / `r2://`: `s3_region`, `s3_access_key_id`,
+  `s3_secret_access_key`, `s3_endpoint`, `s3_url_style`.
+- `gs://`: `gcs_hmac_key_id`, `gcs_hmac_secret`.
+- `az://` / `azure://` / `abfss://`: `azure_account`, `azure_account_key`.
+
+```bash
+# Create a database that authenticates its own bucket, distinct from the
+# manager-wide default credentials.
+curl -sS -X POST "http://localhost:20900/api/database/create" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+    "tenant": "acme",
+    "name": "coldstore",
+    "kind": "ducklake",
+    "dataPath": "s3://acme-coldstore/ducklake",
+    "objectStore": {"s3_region": "us-east-1", "s3_access_key_id": "AKIA...", "s3_secret_access_key": "..."}
+  }'
+```
+
+An empty (or absent) `objectStore` falls back to the global env credentials -
+exact back-compat for every deployment that only ever used one set of keys.
+On Kubernetes the resolved SQL is never inlined in the pod spec: it lands in a
+per-node Secret `qod-store-${nodeId}` injected via `env.valueFrom.secretKeyRef`
+(same pattern as the per-pod token and per-pool federation secrets); `kubectl
+describe pod` shows the ref, not the values. On the local backend it rides the
+node's process env like the other spawn-time SQL blocks. GET/list responses
+redact `s3_secret_access_key`, `azure_account_key`, and `gcs_hmac_secret`
+(alongside `pgPassword`). The secret is authored only for `kind=ducklake`
+databases - a `duckdb-file` database on a remote `dataPath` gets no per-db
+object-store secret today (that spawn arm doesn't install `httpfs`/`azure` at
+all, a separate pre-existing gap). Editing `objectStore` restarts the
+database's nodes so the new secret takes effect immediately; there is no
+in-place rotation on an already-running node.
+
 ### Register a federated source
 
 ```bash

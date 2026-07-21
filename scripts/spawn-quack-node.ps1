@@ -20,6 +20,8 @@
     dbInitSql extraSetupSql            (optional per-db / per-pool init SQL)
     lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs
                                         before quack_serve)
+    objectStoreSql                     (optional per-db object-store CREATE SECRET SQL,
+                                        ObjectStoreSecret.scala; runs before the DuckLake ATTACH)
 
   Unlike the bash version there is no FIFO: DuckDB is fed its init SQL over a
   redirected stdin that this script leaves OPEN, so the background quack
@@ -150,6 +152,7 @@ if (-not [string]::IsNullOrEmpty($proxyUrl)) {
 $dbInitSql    = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql = [Environment]::GetEnvironmentVariable('extraSetupSql')
 $lockdownSql  = [Environment]::GetEnvironmentVariable('lockdownSql')
+$objectStoreSql = [Environment]::GetEnvironmentVariable('objectStoreSql')
 
 # Build init SQL piecemeal based on $kind so memory / duckdb-file skip the
 # DuckLake-specific setup entirely. Mirrors spawn-quack-node.sh.
@@ -163,6 +166,10 @@ switch ($kind) {
     [void]$sb.AppendLine("INSTALL ducklake; LOAD ducklake;")
     [void]$sb.AppendLine("INSTALL postgres; LOAD postgres;")
     if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
+    # Per-database object-store secret (objectStoreSql env, authored by ObjectStoreSecret.scala).
+    # A scoped CREATE SECRET for this database's own bucket/credentials. Runs alongside the global
+    # storageSql above (DuckDB picks the longest matching scope), before the catalog ATTACH.
+    if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
     [void]$sb.AppendLine("ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);")
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');")
     [void]$sb.AppendLine("ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS ""$dbName""")

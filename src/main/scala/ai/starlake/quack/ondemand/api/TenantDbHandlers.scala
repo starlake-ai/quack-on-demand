@@ -26,6 +26,14 @@ final class TenantDbHandlers(
   private def redact(m: Map[String, String]): Map[String, String] =
     HandlerResolvers.redactPassword(m)
 
+  /** Rejects any objectStore VALUE containing ';'; delegates the rule and message to
+    * [[TenantDb.objectStoreError]] (the model-level check `updateTenantDb`/`validateSafety` also
+    * run) so it is authored once. Kept as a thin wrapper here purely so this handler's 400 shape is
+    * built at the call sites below.
+    */
+  private def validateObjectStore(objectStore: Map[String, String]): Option[String] =
+    TenantDb.objectStoreError(objectStore)
+
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)
 
@@ -80,59 +88,70 @@ final class TenantDbHandlers(
             )
           )
         else
-          TenantDbKind.fromWire(req.kind) match
-            case Left(err) =>
-              IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
-            case Right(kind) =>
-              val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
-              sup
-                .createTenantDb(
-                  tenantName = req.tenant,
-                  suffix = req.name,
-                  kind = kind,
-                  metastore = req.metastore,
-                  dataPath = req.dataPath,
-                  objectStore = req.objectStore,
-                  defaultDatabase = req.defaultDatabase,
-                  defaultSchema = req.defaultSchema,
-                  initSql = req.initSql,
-                  gateBypass = gateBypass
-                )
-                .flatMap {
-                  case Right(td) =>
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      AuditActions.DatabaseCreate,
-                      "ok",
-                      tenant = Some(req.tenant),
-                      target = Some(td.name),
-                      detail = Map("kind" -> kind.wireValue)
+          validateObjectStore(req.objectStore) match
+            case Some(msg) =>
+              IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
+            case None =>
+              TenantDbKind.fromWire(req.kind) match
+                case Left(err) =>
+                  IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
+                case Right(kind) =>
+                  val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+                  sup
+                    .createTenantDb(
+                      tenantName = req.tenant,
+                      suffix = req.name,
+                      kind = kind,
+                      metastore = req.metastore,
+                      dataPath = req.dataPath,
+                      objectStore = req.objectStore,
+                      defaultDatabase = req.defaultDatabase,
+                      defaultSchema = req.defaultSchema,
+                      initSql = req.initSql,
+                      gateBypass = gateBypass
                     )
-                    IO.blocking(Right(toResponse(req.tenant, td)))
-                  case Left(err: SupervisorError.NotFound) =>
-                    IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
-                  case Left(err: SupervisorError.InvalidArgument) =>
-                    IO.pure(
-                      Left((StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message)))
-                    )
-                  case Left(err: SupervisorError.QuotaExceeded) =>
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      AuditActions.DatabaseCreate,
-                      "denied",
-                      tenant = Some(req.tenant),
-                      detail = Map("reason" -> "quota")
-                    )
-                    IO.pure(
-                      Left(
-                        (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", err.message))
-                      )
-                    )
-                  case Left(err) =>
-                    IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
-                }
+                    .flatMap {
+                      case Right(td) =>
+                        audit.rest(
+                          apiKey,
+                          "control-plane",
+                          AuditActions.DatabaseCreate,
+                          "ok",
+                          tenant = Some(req.tenant),
+                          target = Some(td.name),
+                          detail = Map("kind" -> kind.wireValue)
+                        )
+                        IO.blocking(Right(toResponse(req.tenant, td)))
+                      case Left(err: SupervisorError.NotFound) =>
+                        IO.pure(
+                          Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                        )
+                      case Left(err: SupervisorError.InvalidArgument) =>
+                        IO.pure(
+                          Left(
+                            (StatusCode.BadRequest, ErrorResponse("invalid_contract", err.message))
+                          )
+                        )
+                      case Left(err: SupervisorError.QuotaExceeded) =>
+                        audit.rest(
+                          apiKey,
+                          "control-plane",
+                          AuditActions.DatabaseCreate,
+                          "denied",
+                          tenant = Some(req.tenant),
+                          detail = Map("reason" -> "quota")
+                        )
+                        IO.pure(
+                          Left(
+                            (
+                              StatusCode.TooManyRequests,
+                              ErrorResponse("quota_exceeded", err.message)
+                            )
+                          )
+                        )
+                      case Left(err) =>
+                        IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
+                    }
 
   def listTenantDbs(tenant: String, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -199,44 +218,48 @@ final class TenantDbHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        val patch = TenantDbPatch(
-          metastore = req.metastore,
-          objectStore = req.objectStore,
-          defaultDatabase = req.defaultDatabase,
-          defaultSchema = req.defaultSchema,
-          initSql = req.initSql
-        )
-        sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
-          case Right(r) =>
-            // Record field names ONLY (never values - metastore / objectStore may contain credentials).
-            val editedFields = List(
-              req.metastore.map(_ => "metastore"),
-              req.objectStore.map(_ => "objectStore"),
-              req.defaultDatabase.map(_ => "defaultDatabase"),
-              req.defaultSchema.map(_ => "defaultSchema"),
-              req.initSql.map(_ => "initSql")
-            ).flatten.mkString(",")
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.DatabaseUpdate,
-              "ok",
-              tenant = Some(req.tenant),
-              target = Some(req.name),
-              detail =
-                if editedFields.nonEmpty then Map("editedFields" -> editedFields) else Map.empty
+        req.objectStore.flatMap(validateObjectStore) match
+          case Some(msg) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
+          case None =>
+            val patch = TenantDbPatch(
+              metastore = req.metastore,
+              objectStore = req.objectStore,
+              defaultDatabase = req.defaultDatabase,
+              defaultSchema = req.defaultSchema,
+              initSql = req.initSql
             )
-            IO.blocking(
-              Right(
-                UpdateTenantDbResponse(
-                  db = toResponse(req.tenant, r.td),
-                  restartedNodes = r.restartedNodes,
-                  failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
+            sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
+              case Right(r) =>
+                // Record field names ONLY (never values - metastore / objectStore may contain credentials).
+                val editedFields = List(
+                  req.metastore.map(_ => "metastore"),
+                  req.objectStore.map(_ => "objectStore"),
+                  req.defaultDatabase.map(_ => "defaultDatabase"),
+                  req.defaultSchema.map(_ => "defaultSchema"),
+                  req.initSql.map(_ => "initSql")
+                ).flatten.mkString(",")
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.DatabaseUpdate,
+                  "ok",
+                  tenant = Some(req.tenant),
+                  target = Some(req.name),
+                  detail =
+                    if editedFields.nonEmpty then Map("editedFields" -> editedFields) else Map.empty
                 )
-              )
-            )
-          case Left(err: SupervisorError.InvalidArgument) =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", err.message))))
-          case Left(err) =>
-            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
-        }
+                IO.blocking(
+                  Right(
+                    UpdateTenantDbResponse(
+                      db = toResponse(req.tenant, r.td),
+                      restartedNodes = r.restartedNodes,
+                      failedRestarts = r.failedRestarts.map(FailedRestart.apply.tupled)
+                    )
+                  )
+                )
+              case Left(err: SupervisorError.InvalidArgument) =>
+                IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", err.message))))
+              case Left(err) =>
+                IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
+            }

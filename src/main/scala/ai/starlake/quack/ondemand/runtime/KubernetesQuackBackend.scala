@@ -16,13 +16,16 @@ import scala.jdk.CollectionConverters._
   * orphan-discovery pass can reconstruct [[ai.starlake.quack.model.RunningNode]] after a manager
   * restart.
   *
-  * Two Secrets accompany each pod:
+  * Three Secrets accompany each pod:
   *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
   *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
   *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
   *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads it
   *     back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing after a
   *     restart.
+  *   - per-pod `qod-store-${nodeId}` holds the scoped per-database object-store `CREATE SECRET` SQL
+  *     (authored by `ObjectStoreSecret.sql`, [[ai.starlake.quack.model.NodeSpec.objectStoreSql]])
+  *     when non-empty; only that one node's pod references it.
   */
 final class KubernetesQuackBackend(
     client: KubernetesClient,
@@ -137,6 +140,22 @@ final class KubernetesQuackBackend(
       source.setSecretKeyRef(ref)
       fedEnv.setValueFrom(source)
       envs.add(fedEnv)
+    // Per-database object-store secret (ObjectStoreSecret.sql): scoped CREATE
+    // SECRET for this node's own bucket/credentials. Materialised from the
+    // per-pod Secret instead of inlined so `kubectl describe pod` doesn't
+    // expose the credential-bearing SQL. ensureObjectStoreSecret() must have
+    // created the Secret BEFORE pod create, same ordering requirement as the
+    // token Secret below.
+    if spec.objectStoreSql.nonEmpty then
+      val storeEnv = new EnvVar()
+      storeEnv.setName("objectStoreSql")
+      val storeSource = new EnvVarSource()
+      val storeRef    = new SecretKeySelector()
+      storeRef.setName(objectStoreSecretNameFor(spec.nodeId))
+      storeRef.setKey(KubernetesQuackBackend.ObjectStoreSecretKey)
+      storeSource.setSecretKeyRef(storeRef)
+      storeEnv.setValueFrom(storeSource)
+      envs.add(storeEnv)
     // Token is materialised from the per-pod Secret instead of inlined, so
     // (a) kubectl describe pod doesn't expose the bearer string and
     // (b) the value is recoverable after a manager restart via
@@ -341,11 +360,13 @@ final class KubernetesQuackBackend(
       val token = LocalQuackBackend.randomToken()
       tokens.put(spec.nodeId, token)
 
-      // Both Secrets must exist before pod create -- kubelet rejects a pod
-      // whose env.valueFrom references a missing Secret. ensureTokenSecret
-      // also makes the bearer string recoverable after manager restart.
+      // All referenced Secrets must exist before pod create -- kubelet
+      // rejects a pod whose env.valueFrom references a missing Secret.
+      // ensureTokenSecret also makes the bearer string recoverable after
+      // manager restart.
       ensureTokenSecret(spec.nodeId, token)
       if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+      if spec.objectStoreSql.nonEmpty then ensureObjectStoreSecret(spec.nodeId, spec.objectStoreSql)
 
       val pod     = buildPod(spec, token)
       val created = client.pods.inNamespace(namespace).resource(pod).create()
@@ -397,11 +418,12 @@ final class KubernetesQuackBackend(
 
   /** Best-effort rollback of the per-node resources a failed [[start]] created for `spec`.
     *
-    * Deletes the Service, the Pod and the per-pod token Secret by the exact names this call created
-    * (all derived from `spec.nodeId`, matching [[buildService]] / [[buildPod]] /
-    * [[tokenSecretNameFor]]), so a subsequent reconcile respawns cleanly instead of colliding with
-    * an orphaned pod on the deterministic nodeId. Every delete is swallowed and logged so cleanup
-    * can never mask the original spawn failure.
+    * Deletes the Service, the Pod, the per-pod token Secret and the per-pod object-store Secret by
+    * the exact names this call created (all derived from `spec.nodeId`, matching [[buildService]] /
+    * [[buildPod]] / [[tokenSecretNameFor]] / [[objectStoreSecretNameFor]]), so a subsequent
+    * reconcile respawns cleanly instead of colliding with an orphaned pod on the deterministic
+    * nodeId. Every delete is swallowed and logged so cleanup can never mask the original spawn
+    * failure.
     *
     * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left in place: it is shared
     * by every pod of the pool, so deleting it on one node's failure could break sibling pods that
@@ -409,7 +431,7 @@ final class KubernetesQuackBackend(
     */
   private def cleanupPartialStart(spec: NodeSpec, reason: String): IO[Unit] = IO.blocking {
     logger.warn(
-      s"start() for pod ${spec.nodeId} failed ($reason); rolling back pod/service/token secret"
+      s"start() for pod ${spec.nodeId} failed ($reason); rolling back pod/service/token secret/object-store secret"
     )
     deleteQuietly("service", spec.nodeId) {
       client.services.inNamespace(namespace).withName(spec.nodeId).delete()
@@ -419,6 +441,9 @@ final class KubernetesQuackBackend(
     }
     deleteQuietly("token secret", tokenSecretNameFor(spec.nodeId)) {
       client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(spec.nodeId)).delete()
+    }
+    deleteQuietly("object-store secret", objectStoreSecretNameFor(spec.nodeId)) {
+      client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(spec.nodeId)).delete()
     }
     tokens.remove(spec.nodeId)
     ()
@@ -440,10 +465,12 @@ final class KubernetesQuackBackend(
 
     client.services.inNamespace(namespace).withName(nodeId).delete()
     client.pods.inNamespace(namespace).withName(nodeId).delete()
-    // Token Secret tracks the pod 1:1, so we can drop it right away.
-    // Idempotent on missing (e.g. an externally-stopped pod whose
-    // token Secret a previous reconcile already cleaned up).
+    // Token and object-store Secrets both track the pod 1:1, so we can drop
+    // them right away. Idempotent on missing (e.g. an externally-stopped pod
+    // whose Secrets a previous reconcile already cleaned up, or a pool with
+    // no per-db object-store credentials at all).
     client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(nodeId)).delete()
+    client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(nodeId)).delete()
     tokens.remove(nodeId)
 
     // If this was the last live pod for the pool, GC the federation
@@ -504,6 +531,11 @@ final class KubernetesQuackBackend(
     */
   private def tokenSecretNameFor(nodeId: String): String = s"qod-token-$nodeId"
 
+  /** K8s Secret name for a node's per-database object-store `CREATE SECRET` SQL. Same RFC-1123
+    * reasoning as [[tokenSecretNameFor]].
+    */
+  private def objectStoreSecretNameFor(nodeId: String): String = s"qod-store-$nodeId"
+
   /** Create-or-replace the per-pod token Secret. Same pattern as [[ensureFederationSecret]] -- must
     * run before pod create so kubelet sees the Secret when validating the pod's
     * `env.valueFrom.secretKeyRef`. Idempotent across spawn retries.
@@ -519,6 +551,27 @@ final class KubernetesQuackBackend(
     secret.setMetadata(meta)
     val data = new java.util.HashMap[String, String]()
     data.put(KubernetesQuackBackend.TokenSecretKey, token)
+    secret.setStringData(data)
+    client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
+    ()
+
+  /** Create-or-replace the per-pod object-store Secret. Same pattern as [[ensureTokenSecret]] --
+    * must run before pod create so kubelet sees the Secret when validating the pod's
+    * `env.valueFrom.secretKeyRef`. Idempotent across spawn retries. Called only when
+    * `spec.objectStoreSql` is non-empty (a tenant-db with no per-db object-store credentials never
+    * gets this Secret).
+    */
+  private def ensureObjectStoreSecret(nodeId: String, sql: String): Unit =
+    val meta = new ObjectMeta()
+    meta.setName(objectStoreSecretNameFor(nodeId))
+    val labels = new java.util.HashMap[String, String]()
+    labels.put(labelKey, labelValue)
+    labels.put("quack-node-id", nodeId)
+    meta.setLabels(labels)
+    val secret = new Secret()
+    secret.setMetadata(meta)
+    val data = new java.util.HashMap[String, String]()
+    data.put(KubernetesQuackBackend.ObjectStoreSecretKey, sql)
     secret.setStringData(data)
     client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
     ()
@@ -577,6 +630,23 @@ final class KubernetesQuackBackend(
       recoveredToken match
         case Some(t) => tokens.put(nodeId, t)
         case None    => () // keep the existing in-memory entry if any, leave empty otherwise
+      // Unlike the token there is no in-memory field to repopulate for the
+      // object-store Secret -- its SQL only matters to the node's own DuckDB
+      // boot sequence, not to calls the manager makes. Still, verify the ref
+      // this pod's env points at is intact: a pod that references
+      // `qod-store-$nodeId` but finds the Secret gone would fail to
+      // reschedule (CreateContainerConfigError) on its next restart, so warn
+      // the operator now instead of at that later, harder-to-diagnose crash.
+      if podReferencesObjectStoreSecret(p) then
+        val secretExists =
+          Option(
+            client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(nodeId)).get()
+          ).isDefined
+        if !secretExists then
+          logger.warn(
+            s"pod $nodeId references object-store Secret ${objectStoreSecretNameFor(nodeId)}" +
+              " which no longer exists; it will fail to reschedule until the node is respawned"
+          )
       for
         tenant   <- labels.get("quack-tenant")
         tenantDb <- labels.get("quack-tenant-db")
@@ -619,6 +689,17 @@ final class KubernetesQuackBackend(
       }
       .filter(_.nonEmpty)
 
+  /** True when the pod's `quack` container has an `objectStoreSql` env entry (always Secret-backed
+    * -- [[buildPod]] never inlines it), i.e. this node was spawned with per-db object-store
+    * credentials.
+    */
+  private def podReferencesObjectStoreSecret(p: Pod): Boolean =
+    Option(p.getSpec)
+      .flatMap(ps => Option(ps.getContainers))
+      .exists(_.asScala.exists { c =>
+        Option(c.getEnv).exists(_.asScala.exists(_.getName == "objectStoreSql"))
+      })
+
   def cleanup(): IO[Unit] = IO.unit
 
 end KubernetesQuackBackend
@@ -636,6 +717,12 @@ object KubernetesQuackBackend:
     * `spawn-quack-node.sh` expects.
     */
   val TokenSecretKey: String = "QOD_NODE_TOKEN"
+
+  /** Key inside the per-pod object-store Secret holding the scoped `CREATE SECRET` SQL. Same string
+    * as the env var name [[buildPod]] sets on the pod (matches the `objectStoreSql` env var
+    * `scripts/spawn-quack-node.sh` reads), mirroring [[FederationSecretKey]] / [[TokenSecretKey]].
+    */
+  val ObjectStoreSecretKey: String = "objectStoreSql"
 
   /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
     * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.

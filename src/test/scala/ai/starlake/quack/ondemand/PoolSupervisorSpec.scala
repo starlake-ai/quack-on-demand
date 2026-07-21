@@ -512,6 +512,60 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createTenantDb("legacy", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.effectiveMetastoreFor("legacy", "legacy_default")("dataPath") shouldBe "/data/global"
 
+  // ---------- NodeSpec.objectStoreSql (per-db object-store CREATE SECRET) ----------
+
+  "PoolSupervisor.createPool" should
+    "produce a node spec with objectStoreSql for a tenant-db with objectStore + s3 dataPath" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "objstore",
+      TenantDbKind.DuckDbFile,
+      Map("dataPath" -> "s3://bucket/db", "dbName" -> "acme_objstore", "schemaName" -> "main"),
+      dataPath = "s3://bucket/db",
+      objectStore = Map(
+        "s3_access_key_id" -> "k",
+        "s3_secret_access_key" -> "s",
+        "s3_region" -> "us-east-1"
+      )
+    ).unsafeRunSync()
+    val objKey = PoolKey("acme", "acme_objstore", "sales")
+    sup.createPool(objKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val spec = backend.specs.head
+    spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
+    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+
+  it should "produce an empty objectStoreSql for a tenant-db with no objectStore" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    backend.specs.head.objectStoreSql shouldBe ""
+
+  // ---------- maintenanceNodeSpec: no-donor s3 fallback ----------
+
+  "PoolSupervisor.maintenanceNodeSpec" should
+    "author objectStoreSql from the tenant-db's own objectStore when no serving pool exists (no donor)" in:
+    val (sup, _) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      "acme", "objmaint",
+      TenantDbKind.DuckDbFile,
+      Map("dataPath" -> "s3://bucket/db", "dbName" -> "acme_objmaint", "schemaName" -> "main"),
+      dataPath = "s3://bucket/db",
+      objectStore = Map(
+        "s3_access_key_id"     -> "k",
+        "s3_secret_access_key" -> "s",
+        "s3_region"            -> "us-east-1"
+      )
+    ).unsafeRunSync()
+    // No createPool call: no serving pool of this tenant-db exists, so maintenanceNodeSpec must
+    // fall back to td.objectStore (not Map.empty) for its s3 field.
+    val spec = sup.maintenanceNodeSpec("acme", "acme_objmaint").get
+    spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
+    spec.objectStoreSql should include("SECRET 's'")
+    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+
   // ---------- effectiveSetForUser: column policies ----------
 
   "effectiveSetForUser" should "include column policies attached to the user's roles" in:
@@ -927,6 +981,47 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     out.isRight shouldBe true
     out.toOption.get.td.metastore.get("appName") shouldBe None
     out.toOption.get.td.metastore("schemaName")  shouldBe "s2"
+  }
+
+  it should
+    "replace an edited objectStore map but preserve s3_secret_access_key when the incoming map " +
+    "lacks it (redacted round-trip), and re-author objectStoreSql with the preserved secret" in {
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName  = "acme",
+      suffix      = "objstore2",
+      kind        = TenantDbKind.DuckDbFile,
+      metastore   = Map(
+        "dataPath" -> "s3://bucket/db", "dbName" -> "acme_objstore2", "schemaName" -> "main"
+      ),
+      dataPath    = "s3://bucket/db",
+      objectStore = Map(
+        "s3_access_key_id"     -> "k",
+        "s3_secret_access_key" -> "topsecret",
+        "s3_region"            -> "us-east-1"
+      )
+    ).unsafeRunSync()
+    val dbPoolKey = PoolKey("acme", "acme_objstore2", "bi")
+    sup.createPool(dbPoolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    // Simulate a GET (redacted: no s3_secret_access_key) round-tripped back on an edit that only
+    // means to change s3_region, the way the UI's edit form does (DatabaseSection.tsx).
+    val out = sup.updateTenantDb(
+      "acme",
+      "acme_objstore2",
+      TenantDbPatch(
+        objectStore = Some(Map("s3_access_key_id" -> "k", "s3_region" -> "eu-west-1"))
+      )
+    ).unsafeRunSync().toOption.get
+
+    out.td.objectStore.get("s3_secret_access_key") shouldBe Some("topsecret") // carried, not lost
+    out.td.objectStore.get("s3_region") shouldBe Some("eu-west-1")            // explicit edit applied
+    out.restartedNodes.size shouldBe 1 // objectStore change is node-affecting
+
+    val respawned = b.specs.last
+    respawned.objectStoreSql should include("SECRET 'topsecret'")
   }
 
   // ---------- setPoolResources / setPoolTemplate ----------

@@ -24,6 +24,18 @@ final case class TenantDb(
 
 object TenantDb {
 
+  /** Keys that must never round-trip in an API response, and that
+    * [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] carries over from the stored map
+    * when an update's incoming map omits them (no client can round-trip a value it was never
+    * shown): the metastore `pgPassword` plus the object-store secret keys authored by
+    * [[ai.starlake.quack.ondemand.runtime.ObjectStoreSecret]] (`s3_secret_access_key`,
+    * `azure_account_key`, `gcs_hmac_secret`). Single source of truth shared by
+    * `HandlerResolvers.redactPassword` (response redaction) and `PoolSupervisor.mergeSecretKeys`
+    * (update merge) so the two sites cannot drift out of sync.
+    */
+  val SecretKeys: Set[String] =
+    Set("pgPassword", "s3_secret_access_key", "azure_account_key", "gcs_hmac_secret")
+
   private val DuckLakeRequiredKeys: Set[String] =
     Set("pgHost", "pgPort", "pgUser", "pgPassword", "dbName", "schemaName")
 
@@ -110,6 +122,20 @@ object TenantDb {
       )
     else None
 
+  /** Rejects a semicolon in any `objectStore` VALUE (keys are unrestricted: they come from a fixed
+    * UI vocabulary, not free-form user input). `ObjectStoreSecret.azureSecret` concatenates
+    * `azure_account` / `azure_account_key` unescaped into a semicolon-delimited Azure connection
+    * string before the whole string is wrapped in a single-quoted literal, so a semicolon smuggled
+    * into a value injects extra connection-string fields (e.g. overriding `AccountName`) even
+    * though the literal-quoting itself is safe. Public: this is the one place the rule and its
+    * message are authored; `ondemand.api.TenantDbHandlers.validateObjectStore` delegates here
+    * instead of re-implementing the check.
+    */
+  def objectStoreError(objectStore: Map[String, String]): Option[String] =
+    objectStore.find { case (_, v) => v.contains(";") }.map { case (k, _) =>
+      s"invalid objectStore value for '$k': must not contain ';'"
+    }
+
   /** Injection-safety checks only: reject any script-interpolated value that carries a
     * SQL-literal-breaking or identifier-breaking metacharacter, validating each field only when it
     * is present. This is the security-critical subset of [[validate]] and is safe to run on paths
@@ -124,6 +150,7 @@ object TenantDb {
       .orElse(connParamError(td.metastore, "pgPassword"))
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
+      .orElse(objectStoreError(td.objectStore))
 
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)

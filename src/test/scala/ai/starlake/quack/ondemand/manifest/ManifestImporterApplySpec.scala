@@ -165,3 +165,27 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include("dataPath")
   }
+
+  it should "reject a tenant-db carrying a semicolon in an objectStore value via TenantDb.validateSafety" in {
+    val s   = new InMemoryControlPlaneStore()
+    val mtd = ManifestTenantDb(
+      name = "acme_bi",
+      kind = "ducklake",
+      metastore = Map(
+        "pgHost"     -> "localhost",
+        "pgPort"     -> "5432",
+        "pgUser"     -> "u",
+        "pgPassword" -> "p",
+        "dbName"     -> "acme_bi",
+        "schemaName" -> "main"
+      ),
+      dataPath = "/tmp/d",
+      objectStore = Map("azure_account_key" -> "key;BlobEndpoint=https://evil")
+    )
+    val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    val res = ManifestImporter.apply(m, s)
+    res.isLeft shouldBe true
+    res.swap.getOrElse(Nil).mkString("\n") should include("azure_account_key")
+    // The offending row was NOT persisted.
+    s.listTenantDbs("acme") shouldBe empty
+  }
