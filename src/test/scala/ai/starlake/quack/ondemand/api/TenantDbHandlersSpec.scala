@@ -251,6 +251,24 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     out2.db.metastore.contains("pgPassword") shouldBe false
     // supervisor-level preservation is pinned by PoolSupervisorSpec; here we pin non-echo
 
+  it should "reject an update whose objectStore value contains ';' (400, names the key)" in:
+    val h = freshHandlers()
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "os3", kind = "memory"), None)(
+      (_: String) => None
+    ).unsafeRunSync()
+    val out = h.update(
+      UpdateTenantDbRequest(
+        "acme",
+        "acme_os3",
+        objectStore = Some(Map("azure_account_key" -> "key;BlobEndpoint=https://evil"))
+      ),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.message should include("azure_account_key")
+
   it should "never echo s3_secret_access_key while keeping s3_access_key_id" in:
     val h = freshHandlers()
     val created = h.createTenantDb(
@@ -274,6 +292,23 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       .get
     listed.objectStore.get("s3_access_key_id") shouldBe Some("k")
     listed.objectStore.contains("s3_secret_access_key") shouldBe false
+
+  it should "reject an objectStore value containing ';' (400, names the key)" in:
+    val h = freshHandlers()
+    val out = h.createTenantDb(
+      TenantDbRequest(
+        tenant      = "acme",
+        name        = "os2",
+        kind        = "memory",
+        objectStore = Map("azure_account" -> "acct;BlobEndpoint=https://evil")
+      ),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.message should include("azure_account")
+    err.message should include(";")
 
   it should "report effectiveDataPath and a None tableCount for memory kind" in:
     val h = freshHandlers()
