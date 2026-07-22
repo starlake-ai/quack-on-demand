@@ -22,12 +22,12 @@ it to a temp file and `System.load`s it.
 
 `<duckdb-abi-version>-<duckdb-quack-short-sha>`
 
-For example, `1.5.4-40de7badae41` says:
+For example, `1.5.5-7e80f7ffcc98` says:
 
-- Built against DuckDB v1.5.4's C++ ABI (link-compatible with
+- Built against DuckDB v1.5.5's C++ ABI (link-compatible with
   `libduckdb.so` / `libduckdb.dylib` from
-  https://github.com/duckdb/duckdb/releases/tag/v1.5.4).
-- Pinned at `duckdb/duckdb-quack` commit `40de7badae41`.
+  https://github.com/duckdb/duckdb/releases/tag/v1.5.5).
+- Pinned at `duckdb/duckdb-quack` commit `7e80f7ffcc98`.
 
 Bumping either pin bumps the version. There is no truncation - the
 short SHA is the integrity check.
