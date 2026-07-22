@@ -134,8 +134,10 @@ JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 #
 # Air-gapped / CI: pre-populate $DUCKDB_CACHE_DIR/$DUCKDB_VERSION/{bin,lib}
 # with the right binaries; the fast-path check will see them and skip the
-# network fetch. Override the pinned version with DUCKDB_VERSION (defaults
-# to libquackwireVersion's first 3 segments).
+# network fetch. The QOD_VERSION=BUILD path additionally needs
+# $DUCKDB_CACHE_DIR/$DUCKDB_VERSION/include (see ensure_duckdb_headers
+# below). Override the pinned version with DUCKDB_VERSION (defaults to
+# libquackwireVersion's first 3 segments).
 DUCKDB_CACHE_DIR="${DUCKDB_CACHE_DIR:-$REPO_DIR/.duckdb}"
 
 ensure_duckdb() {
@@ -228,6 +230,51 @@ ensure_duckdb() {
   echo "duckdb: ready -> $bin_dir/duckdb (v$version)"
 }
 ensure_duckdb
+
+# Stage the pinned DuckDB headers at $2/include for the local libquackwire
+# cmake rebuild (BUILD path only, lazy): duckdb.{h,hpp} come from the
+# libduckdb zip ensure_duckdb already unpacked into lib/, and the FULL
+# internal duckdb/ header tree comes from the v$1 source tarball - the
+# duckdb-quack message layer includes internals such as
+# duckdb/common/serializer/binary_serializer.hpp that the release zip does
+# not ship. One-time per version; the presence check makes reruns free.
+# Air-gapped: pre-populate $2/include with duckdb.{h,hpp} plus the
+# src/include/duckdb tree (same staging CI does in quackwire.yml) and this
+# becomes a no-op.
+ensure_duckdb_headers() {
+  local version="$1" home="$2"
+  local inc="$home/include"
+  if [[ -f "$inc/duckdb.hpp" && -f "$inc/duckdb/common/serializer/binary_serializer.hpp" ]]; then
+    return 0
+  fi
+  mkdir -p "$inc"
+  if [[ ! -f "$inc/duckdb.hpp" ]]; then
+    if [[ -f "$home/lib/duckdb.hpp" ]]; then
+      cp "$home/lib/duckdb.h" "$home/lib/duckdb.hpp" "$inc/"
+    else
+      echo "ERROR: duckdb.hpp not found in $home/lib (expected from the libduckdb zip)." >&2
+      echo "       Delete $home and re-run so ensure_duckdb refetches libduckdb v$version." >&2
+      exit 1
+    fi
+  fi
+  echo "duckdb: staging v$version internal headers into $inc (one-time per version)"
+  local tmp
+  tmp="$(mktemp -d -t qod-duckdb-src.XXXXXX)"
+  if ! curl -fsSL -o "$tmp/src.tar.gz" \
+      "https://github.com/duckdb/duckdb/archive/refs/tags/v$version.tar.gz"; then
+    rm -rf "$tmp"
+    echo "ERROR: failed to download the duckdb v$version source tarball (internal headers)." >&2
+    echo "       Air-gapped? Pre-populate $inc/duckdb with duckdb-src/src/include/duckdb." >&2
+    exit 1
+  fi
+  tar -xzf "$tmp/src.tar.gz" -C "$tmp" "duckdb-$version/src/include/duckdb"
+  rm -rf "$inc/duckdb"
+  mv "$tmp/duckdb-$version/src/include/duckdb" "$inc/duckdb"
+  rm -rf "$tmp"
+  [[ -f "$inc/duckdb/common/serializer/binary_serializer.hpp" ]] || {
+    echo "ERROR: header staging incomplete: binary_serializer.hpp missing under $inc/duckdb." >&2
+    exit 1; }
+}
 
 # Demo seed controls. LOAD_TPC=N is the legacy shortcut that seeds ALL
 # benchmarks at the same scale factor; LOAD_TPCH / LOAD_TPCDS / LOAD_SSB
@@ -356,10 +403,24 @@ rebuild_libquackwire_locally() {
   [[ -n "$libq_version" ]] || {
     echo "ERROR: could not parse libquackwireVersion from build.sbt" >&2; exit 1; }
 
-  # 3. CMake build for the host platform.
-  echo "rebuilding libquackwire for $host_platform via cmake..."
+  # 3. CMake build for the host platform, linked against the PINNED
+  # libduckdb from the .duckdb cache (populated by ensure_duckdb above),
+  # never the operator's system install: a Homebrew/apt libduckdb at
+  # another version links cleanly and mismatches at runtime. The build dir
+  # is wiped first because CMake caches the resolved find_path/find_library
+  # results - a stale cache would keep pointing at whatever a previous
+  # configure found, DUCKDB_HOME notwithstanding. The build is 5 files;
+  # losing incrementality costs seconds.
+  local duckdb_version duckdb_home
+  duckdb_version="${DUCKDB_VERSION:-${libq_version%%-*}}"
+  duckdb_home="$DUCKDB_CACHE_DIR/$duckdb_version"
+  ensure_duckdb_headers "$duckdb_version" "$duckdb_home"
+  # The cache lays libduckdb in lib/ and headers in include/ - exactly the
+  # DUCKDB_HOME layout CMakeLists probes first.
+  echo "rebuilding libquackwire for $host_platform via cmake (DUCKDB_HOME=$duckdb_home)..."
   ( cd "$REPO_DIR/native/quackwire" \
-    && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf build \
+    && DUCKDB_HOME="$duckdb_home" cmake -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build --config Release )
   local host_built="$REPO_DIR/native/quackwire/build/libquackwire.$host_ext"
   [[ -f "$host_built" ]] || {
