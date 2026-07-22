@@ -3,8 +3,10 @@
 // ============================================================================
 //  !! VERSION-PINNED FILE - REVISIT ON EVERY DUCKDB / duckdb-quack BUMP !!
 //
-//  Pinned to: duckdb @ 14eca11bd9  (libduckdb v1.5.4, build.sbt
-//             libquackwireVersion "1.5.4-40de7badae41-*").
+//  Pinned to: duckdb @ d8cdaa33fd  (libduckdb v1.5.5, build.sbt
+//             libquackwireVersion "1.5.5-7e80f7ffcc98-*").
+//  Re-verified 2026-07-22 at v1.5.5: Default() still FromString("v0.10.2"),
+//  storage_info.cpp still maps {"v0.10.2", 64}; no constant changes needed.
 //
 //  The values below are COPIED from that exact DuckDB source. When you bump the
 //  duckdb-quack submodule / libduckdb ABI in build.sbt, re-derive them or the

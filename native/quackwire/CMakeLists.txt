@@ -38,21 +38,22 @@ target_include_directories(quackwire PRIVATE
   ${DUCKDB_QUACK_DIR}/src/include
 )
 
-# libduckdb v1.5.4 link target.
+# libduckdb v1.5.5 link target (duckdb-quack pin: 7e80f7ffcc98, branch
+# v1.5-variegata).
 #
-# Path 1 (chosen): system install via Homebrew on macOS / apt on Linux.
-# On this developer machine `brew info duckdb` reports stable 1.5.4 - an
-# exact match for the version duckdb-quack at 40de7badae41 was built against.
-# Task 8 (CI matrix) will likely switch CI to FetchContent on the v1.5.4
-# release artifact for reproducibility, but for local dev the system
-# package is the fastest path to a working link.
+# CI assembles DUCKDB_HOME from the official v1.5.5 release zips on ALL
+# platforms (see .github/workflows/quackwire.yml). The system-package hints
+# below remain for local dev, but verify the installed version first: a
+# libduckdb ABI mismatch (e.g. Homebrew still shipping 1.5.4) can link
+# cleanly and fail at runtime. Prefer pointing DUCKDB_HOME at an unpacked
+# v1.5.5 release zip plus the internal-header tree.
 # DUCKDB_HOME (env var or -DDUCKDB_HOME=) points at an unpacked libduckdb dir.
 # It is required on Windows (there is no system package): unzip
 # libduckdb-windows-amd64.zip and populate it with duckdb.lib + the FULL duckdb/
 # include tree. The release zip ships only the amalgamated duckdb.{h,hpp}; the
 # duckdb-quack message layer also pulls internal headers such as
 # duckdb/common/serializer/binary_serializer.hpp, so a shallow `git clone
-# --branch v1.5.4` of duckdb/src/include/duckdb must be copied alongside them
+# --branch v1.5.5` of duckdb/src/include/duckdb must be copied alongside them
 # (see .github/workflows/quackwire.yml for the exact staging). On macOS/Linux the
 # system package hints below still apply, so DUCKDB_HOME is optional there.
 find_path(DUCKDB_INCLUDE_DIR duckdb.hpp
