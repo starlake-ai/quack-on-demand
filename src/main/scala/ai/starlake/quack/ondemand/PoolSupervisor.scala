@@ -1386,28 +1386,38 @@ final class PoolSupervisor(
   def effectiveLockdown(key: PoolKey): Boolean =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
 
+  /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn pass
+    * (`reconcilePool` takes the same lock): either the persist lands before reconcile builds a
+    * respawn NodeSpec off `effectiveLockdown(key)`, so the new node picks up the fresh value, or it
+    * lands after, so reconcile finishes registering the old-value node first and the caller's
+    * subsequent restart loop (run by [[ai.starlake.quack.ondemand.api.PoolHandlers.setLockdown]]
+    * AFTER this IO completes, never nested inside it) catches it up. Either way no node is ever
+    * registered mid-write on a half-applied flag.
+    */
   def setPoolLockdown(
       key: PoolKey,
       lockdown: Option[Boolean]
   ): IO[Either[SupervisorError, Pool]] =
-    IO.blocking {
-      withCacheRecovery("setPoolLockdown") {
-        pools.get(key) match
-          case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
-          case Some(_) =>
-            poolIdByKey.get(key).flatMap(poolRows.get) match
-              case None =>
-                Left(
-                  SupervisorError.Internal(
-                    s"pool entity missing for $key (control-plane out of sync)"
+    locks.withLock(key) {
+      IO.blocking {
+        withCacheRecovery("setPoolLockdown") {
+          pools.get(key) match
+            case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
+            case Some(_) =>
+              poolIdByKey.get(key).flatMap(poolRows.get) match
+                case None =>
+                  Left(
+                    SupervisorError.Internal(
+                      s"pool entity missing for $key (control-plane out of sync)"
+                    )
                   )
-                )
-              case Some(p) =>
-                val updated = p.copy(lockdown = lockdown)
-                store.upsertPool(updated)
-                poolRows.put(updated.id, updated)
-                publish.topologyChanged()
-                Right(updated)
+                case Some(p) =>
+                  val updated = p.copy(lockdown = lockdown)
+                  store.upsertPool(updated)
+                  poolRows.put(updated.id, updated)
+                  publish.topologyChanged()
+                  Right(updated)
+        }
       }
     }
 

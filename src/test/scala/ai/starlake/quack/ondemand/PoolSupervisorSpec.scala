@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
+import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
 import cats.effect.IO
@@ -143,6 +144,39 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     supOff.effectiveLockdown(key) shouldBe true   // on override beats global off
     // Unknown pool falls back to the global flag (maintenance-node path).
     supOn.effectiveLockdown(PoolKey("acme", "acme_default", "nope")) shouldBe true
+
+  it should "persist under the per-pool advisory lock so it serializes with reconcile's respawn" in:
+    // Regression: setPoolLockdown used to call store.upsertPool directly,
+    // never going through `locks.withLock`. A real PgPoolLocker never
+    // serialized that write against reconcile's respawn pass (which reads
+    // effectiveLockdown while building the fresh NodeSpec under the SAME
+    // lock), so a respawn racing the REST call could register a node off the
+    // pre-update value. A true cross-process race needs a real Postgres
+    // PgPoolLocker (see TwoSupervisorConcurrencySpec for that pattern) --
+    // here we only assert the write now routes through whichever PoolLocker
+    // the supervisor is wired with, and that it still returns the updated
+    // Pool.
+    var lockCalls = 0
+    val locker = new PoolLocker:
+      def withLock[A](k: PoolKey)(io: IO[A]): IO[A] =
+        IO.delay { lockCalls += 1 } *> io
+    val sup = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      locks = locker
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    val before = lockCalls
+    val result = sup.setPoolLockdown(key, Some(true)).unsafeRunSync()
+    result.isRight shouldBe true
+    result.toOption.get.lockdown shouldBe Some(true)
+    (lockCalls - before) shouldBe 1
+    sup.effectiveLockdown(key) shouldBe true
 
   it should "stamp the per-pool effective value into spawned lockdownSql" in:
     val (sup, backend) = freshSupervisorWithBackend(lockdownEnabled = false)
