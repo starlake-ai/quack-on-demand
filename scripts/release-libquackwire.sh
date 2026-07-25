@@ -78,9 +78,22 @@ case "$(uname -m)" in
 esac
 host_platform="$host_os-$host_arch"
 
-echo "cmake build [$host_platform]..."
+# Link against the PINNED libduckdb from the .duckdb cache, never the
+# operator's system install: a Homebrew/apt libduckdb at another version
+# links cleanly and mismatches at runtime (same fix as run-jar.sh's BUILD
+# path, which is also the easiest way to populate the cache: one
+# `QOD_VERSION=BUILD ./scripts/run-jar.sh` boot stages bin/, lib/, and the
+# internal-header include/ tree for the pinned version). The build dir is
+# wiped because CMake caches resolved find results.
+duckdb_abi="${libq_release%%-*}"
+duckdb_home="$REPO_DIR/.duckdb/$duckdb_abi"
+[[ -f "$duckdb_home/include/duckdb/common/serializer/binary_serializer.hpp" \
+   && -e "$duckdb_home/lib" ]] \
+  || die "pinned libduckdb cache missing at $duckdb_home (need lib/ + include/ with the internal header tree). Run 'QOD_VERSION=BUILD ./scripts/run-jar.sh' once to populate it, then re-run."
+echo "cmake build [$host_platform] (DUCKDB_HOME=$duckdb_home)..."
 ( cd native/quackwire \
-  && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  && rm -rf build \
+  && DUCKDB_HOME="$duckdb_home" cmake -B build -DCMAKE_BUILD_TYPE=Release \
   && cmake --build build --config Release )
 mkdir -p "libquackwire/binaries/$host_platform"
 cp "native/quackwire/build/libquackwire.$host_ext" \

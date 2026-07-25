@@ -2,6 +2,22 @@
 
 ## 0.5.3
 
+- **Per-database object-store credentials take effect at runtime.** A tenant-db's
+  `objectStore` map now authors a DuckDB secret scoped to that database's
+  `dataPath` at node spawn, so each database authenticates its own bucket with
+  its own keys alongside the process-global `QOD_S3_*`/`QOD_AZURE_*`/`QOD_GCS_*`
+  defaults (DuckDB picks the most specific scope). On Kubernetes the resolved
+  SQL lands in a per-node Secret injected via `secretKeyRef`, never inlined in
+  the pod spec; REST responses redact the secret keys; semicolons are rejected
+  in credential values; editing `objectStore` restarts the database's nodes so
+  rotation applies immediately.
+- **Operator security hardening.** `QOD_NODE_LOCKDOWN=true` adds a two-layer
+  lockdown (edge denial of ATTACH/INSTALL/protected SET/local-file read
+  functions for tenant sessions + engine value-sets before `quack_serve`);
+  spawned K8s node pods get non-root / seccomp / read-only-rootfs security
+  defaults; an opt-in helm NetworkPolicy (default-deny node + manager
+  policies); and cached catalog readers are evicted after idle to bound
+  Postgres connections. See the new operator hardening guide.
 - **DuckDB upgraded 1.5.4 -> 1.5.5** across every pinned layer: libquackwire
   rebuilt against libduckdb 1.5.5 (`1.5.5-7e80f7ffcc98-1`, duckdb-quack
   submodule at the v1.5-variegata head - brings fetch-batch pushdown fixes,
@@ -14,6 +30,21 @@
 - **`QOD_VERSION=BUILD` links the local libquackwire rebuild against the
   pinned libduckdb** from the `.duckdb/<version>` cache (staging the internal
   header tree once per version) instead of the operator's system install.
+- **CLI-bundled spawn scripts re-synced** with the canonical ones (they were
+  missing the per-db object-store and lockdown blocks, so `qod start` nodes
+  silently lacked both).
+- **Pin-bump checklist partially automated**: engine verb renames, sched-join
+  drift, and launcher-pin drift now fail the suite instead of silently
+  misclassifying history.
+
+## 0.5.2
+
+- **`ManagerContext.sessionOf`** module SPI hook for portal-style modules
+  (resolve the session behind a request without re-implementing cookie/token
+  parsing).
+- **`qod start` fixed on Windows.**
+
+(Released 2026-07-20 without a changelog section; reconstructed retroactively.)
 
 ## 0.5.1
 
