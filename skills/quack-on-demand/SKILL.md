@@ -742,6 +742,11 @@ opt-in except pod security:
     autoinstall_known_extensions=true` is denied, nodes come up healthy, and
     ordinary TPCH queries still work. With the flag off, behavior is
     unchanged from pre-lockdown.
+  - `POST /api/pool/create`'s `lockdown` field is gated the same
+    superuser-only way; a tenant admin sending ANY non-`"inherit"` value
+    (including an invalid one like `"banana"`) gets `403 superuser_required`
+    rather than `400 invalid`, because the gate compares the raw string
+    before it is parsed - deliberate fail-closed behavior, not a bug.
 
 - **Pod security defaults** (K8s backend only, no flag, always on) - spawned
   node pods get `runAsNonRoot: true`, `runAsUser`/`fsGroup` from

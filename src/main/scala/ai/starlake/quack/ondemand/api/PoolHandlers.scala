@@ -100,6 +100,11 @@ final class PoolHandlers(
         // POST /api/pool/setLockdown). Gate it at create time BEFORE any state
         // change so a tenant admin cannot slip "lockdown": "on"|"off" past the
         // TenantScopeCheck. "inherit" (the default) stays open to tenant admins.
+        // Deliberate quirk: this compares the raw string, before
+        // LockdownTriState.parse runs in createPoolInner, so a tenant admin
+        // sending an INVALID value (e.g. "banana") also gets 403
+        // superuser_required rather than 400 invalid -- fail-closed on any
+        // non-"inherit" string, not just the two valid overrides.
         val lockdownGate =
           if req.lockdown != "inherit" then SuperuserCheck.reject(apiKey)(scopeOf) else None
         lockdownGate match
