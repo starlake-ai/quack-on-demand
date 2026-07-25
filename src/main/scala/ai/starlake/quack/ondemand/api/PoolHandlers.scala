@@ -93,38 +93,55 @@ final class PoolHandlers(
         IO.pure(Left(err))
       case None =>
         val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
-        if req.podTemplateYaml.nonEmpty then
-          SuperuserCheck.reject(apiKey)(scopeOf) match
-            case Some(err) =>
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.PoolCreate,
-                "denied",
-                tenant = Some(req.tenant)
-              )
-              IO.pure(Left(err))
-            case None =>
-              if !podTemplateEnabled then
-                IO.pure(
-                  Left(
-                    (
-                      StatusCode.BadRequest,
-                      ErrorResponse(
-                        "feature_disabled",
-                        "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
+        // Per-pool lockdown override is a superuser-only mutation (same rule as
+        // POST /api/pool/setLockdown). Gate it at create time BEFORE any state
+        // change so a tenant admin cannot slip "lockdown": "on"|"off" past the
+        // TenantScopeCheck. "inherit" (the default) stays open to tenant admins.
+        val lockdownGate =
+          if req.lockdown != "inherit" then SuperuserCheck.reject(apiKey)(scopeOf) else None
+        lockdownGate match
+          case Some(err) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.PoolCreate,
+              "denied",
+              tenant = Some(req.tenant)
+            )
+            IO.pure(Left(err))
+          case None =>
+            if req.podTemplateYaml.nonEmpty then
+              SuperuserCheck.reject(apiKey)(scopeOf) match
+                case Some(err) =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.PoolCreate,
+                    "denied",
+                    tenant = Some(req.tenant)
+                  )
+                  IO.pure(Left(err))
+                case None =>
+                  if !podTemplateEnabled then
+                    IO.pure(
+                      Left(
+                        (
+                          StatusCode.BadRequest,
+                          ErrorResponse(
+                            "feature_disabled",
+                            "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
+                          )
+                        )
                       )
                     )
-                  )
-                )
-              else
-                QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
-                  case Left(msg) =>
-                    IO.pure(
-                      Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
-                    )
-                  case Right(()) => createPoolInner(req, apiKey, gateBypass)
-        else createPoolInner(req, apiKey, gateBypass)
+                  else
+                    QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+                      case Left(msg) =>
+                        IO.pure(
+                          Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
+                        )
+                      case Right(()) => createPoolInner(req, apiKey, gateBypass)
+            else createPoolInner(req, apiKey, gateBypass)
 
   private def createPoolInner(
       req: CreatePoolRequest,
@@ -642,8 +659,12 @@ final class PoolHandlers(
               case Right(_) =>
                 // Restart every node so the spawn-time engine layer catches up
                 // immediately (same posture as database/update metastore edits).
-                // Per-node failures are tolerated: the flag is persisted and
-                // reconcile heals stragglers on its next pass.
+                // Per-node failures are tolerated: the flag is persisted and the
+                // edge LockdownScreen still enforces the restriction per
+                // statement. Reconcile heals DEAD nodes, not a live straggler
+                // that failed to restart -- such a node keeps its stale engine
+                // SQL until it next respawns (scale, crash-recovery, or a manual
+                // restart).
                 val nodeIds = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
                 import cats.syntax.all.*
                 nodeIds

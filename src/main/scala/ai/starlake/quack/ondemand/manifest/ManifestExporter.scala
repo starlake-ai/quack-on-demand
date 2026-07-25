@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.manifest
 
 import ai.starlake.quack.model.FederatedSecret
+import ai.starlake.quack.ondemand.api.LockdownTriState
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 
 import java.time.Instant
@@ -138,7 +139,8 @@ object ManifestExporter:
           initSql = p.initSql,
           cpu = p.cpu,
           memory = p.memory,
-          podTemplateYaml = p.podTemplateYaml
+          podTemplateYaml = p.podTemplateYaml,
+          lockdown = LockdownTriState.render(p.lockdown)
         )
       }
 

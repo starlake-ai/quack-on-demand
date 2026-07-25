@@ -14,6 +14,7 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.api.LockdownTriState
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   FederatedSourceStore,
@@ -100,6 +101,12 @@ object ManifestImporter:
       t.pools.foreach { p =>
         if !dbNames.contains(p.tenantDb) then
           errs += s"tenant '${t.name}' pool '${p.name}': tenantDb '${p.tenantDb}' not declared under tenant"
+        // Reject an invalid lockdown tri-state the same way other enum-ish
+        // manifest fields are rejected: accumulate a validation error rather
+        // than throwing at apply time.
+        LockdownTriState.parse(p.lockdown).left.foreach { msg =>
+          errs += s"tenant '${t.name}' pool '${p.name}': $msg"
+        }
         // Per-cohort sums must match the pool's roleDistribution and total.
         if p.cohorts.nonEmpty then
           val sumW = p.cohorts.map(_.distribution.writeonly).sum
@@ -337,7 +344,10 @@ object ManifestImporter:
               initSql = mp.initSql,
               cpu = mp.cpu,
               memory = mp.memory,
-              podTemplateYaml = mp.podTemplateYaml
+              podTemplateYaml = mp.podTemplateYaml,
+              // validate() already rejected any non-tri-state value, so this
+              // parse cannot fail here; None (inherit) on the impossible miss.
+              lockdown = LockdownTriState.parse(mp.lockdown).getOrElse(None)
             )
             store.upsertPool(upserted)
             localPools.put(mp.name, upserted)

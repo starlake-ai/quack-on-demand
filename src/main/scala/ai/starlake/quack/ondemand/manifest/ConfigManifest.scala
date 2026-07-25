@@ -73,7 +73,12 @@ final case class ManifestPool(
     // Non-secret operator config; empty by default. Kubernetes-only, ignored by the local backend.
     cpu: String = "",
     memory: String = "",
-    podTemplateYaml: String = ""
+    podTemplateYaml: String = "",
+    // Per-pool node-lockdown override, tri-state STRING encoding: "inherit"
+    // (default) | "on" | "off". Decoded to Pool.lockdown (Option[Boolean]) via
+    // LockdownTriState.parse on import. Defaulted so pre-lockdown YAMLs decode
+    // unchanged as "inherit" (= no override).
+    lockdown: String = "inherit"
 )
 
 final case class ManifestTenant(
