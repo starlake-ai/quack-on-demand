@@ -19,6 +19,7 @@ object EndpointSchemas:
   given Schema[CreatePoolRequest]        = Schema.derived
   given Schema[SetPoolResourcesRequest]  = Schema.derived
   given Schema[SetPoolTemplateRequest]   = Schema.derived
+  given Schema[SetPoolLockdownRequest]   = Schema.derived
   given Schema[ActiveStatementInfo]      = Schema.derived
   given Schema[ActiveStatementsResponse] = Schema.derived
   given Schema[KillStatementRequest]     = Schema.derived

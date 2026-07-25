@@ -70,7 +70,11 @@ final class PoolHandlers(
         cohorts = poolEntityCohorts.map(PoolCohortDto.fromModel),
         initSql = p.initSql,
         cpu = p.cpu,
-        memory = p.memory
+        memory = p.memory,
+        lockdown = LockdownTriState.render(
+          sup.poolId(key).flatMap(sup.poolEntity).flatMap(_.lockdown)
+        ),
+        lockdownEffective = sup.effectiveLockdown(key)
       )
     }
 
@@ -127,103 +131,115 @@ final class PoolHandlers(
       apiKey: Option[String],
       gateBypass: Boolean
   ): Out[PoolResponse] =
-    if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
-          )
-        )
-      )
-    else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
-          )
-        )
-      )
-    else if !req.roleDistribution.isValidFor(req.size) then
-      IO.pure(
-        Left(
-          (
-            StatusCode.BadRequest,
-            ErrorResponse("invalid_distribution", "role counts do not sum to size")
-          )
-        )
-      )
-    else
-      val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-      sup.getTenant(req.tenant) match
-        case None =>
+    LockdownTriState.parse(req.lockdown) match
+      case Left(msg) =>
+        IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
+      case Right(lockdownValue) =>
+        if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
           IO.pure(
             Left(
               (
-                StatusCode.NotFound,
-                ErrorResponse("tenant_not_found", s"tenant '${req.tenant}' is not registered")
+                StatusCode.BadRequest,
+                ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
               )
             )
           )
-        case Some(_) if sup.findTenantDb(req.tenant, req.tenantDb).isEmpty =>
+        else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
           IO.pure(
             Left(
               (
-                StatusCode.NotFound,
-                ErrorResponse(
-                  "tenant_db_not_found",
-                  s"tenant-db '${req.tenant}/${req.tenantDb}' is not registered"
-                )
+                StatusCode.BadRequest,
+                ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
               )
             )
           )
-        case Some(_) =>
-          sup.get(key) match
-            case Some(_) =>
-              IO.pure(
-                Left((StatusCode.Conflict, ErrorResponse("exists", s"pool $key already exists")))
+        else if !req.roleDistribution.isValidFor(req.size) then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid_distribution", "role counts do not sum to size")
               )
+            )
+          )
+        else
+          val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+          sup.getTenant(req.tenant) match
             case None =>
-              val cohorts = req.cohorts.map(PoolCohortDto.toModel)
-              sup
-                .createPool(
-                  key,
-                  req.roleDistribution,
-                  maxConcurrentPerNode = req.maxConcurrentPerNode,
-                  cohorts = cohorts,
-                  disabled = req.disabled,
-                  startSuspended = req.startSuspended,
-                  initSql = req.initSql.getOrElse(""),
-                  cpu = req.cpu,
-                  memory = req.memory,
-                  podTemplateYaml = req.podTemplateYaml,
-                  gateBypass = gateBypass
-                )
-                .map(_ =>
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    AuditActions.PoolCreate,
-                    "ok",
-                    tenant = Some(req.tenant),
-                    target = Some(key.toString),
-                    detail = Map("size" -> req.size.toString)
+              IO.pure(
+                Left(
+                  (
+                    StatusCode.NotFound,
+                    ErrorResponse("tenant_not_found", s"tenant '${req.tenant}' is not registered")
                   )
-                  Right(
-                    respond(key).getOrElse(
-                      PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+                )
+              )
+            case Some(_) if sup.findTenantDb(req.tenant, req.tenantDb).isEmpty =>
+              IO.pure(
+                Left(
+                  (
+                    StatusCode.NotFound,
+                    ErrorResponse(
+                      "tenant_db_not_found",
+                      s"tenant-db '${req.tenant}/${req.tenantDb}' is not registered"
                     )
                   )
                 )
-                .handleError {
-                  case q: ai.starlake.quack.spi.QuotaExceededException =>
-                    Left((StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason)))
-                  case t =>
+              )
+            case Some(_) =>
+              sup.get(key) match
+                case Some(_) =>
+                  IO.pure(
                     Left(
-                      (StatusCode.InternalServerError, ErrorResponse("start_failed", t.getMessage))
+                      (StatusCode.Conflict, ErrorResponse("exists", s"pool $key already exists"))
                     )
-                }
+                  )
+                case None =>
+                  val cohorts = req.cohorts.map(PoolCohortDto.toModel)
+                  sup
+                    .createPool(
+                      key,
+                      req.roleDistribution,
+                      maxConcurrentPerNode = req.maxConcurrentPerNode,
+                      cohorts = cohorts,
+                      disabled = req.disabled,
+                      startSuspended = req.startSuspended,
+                      initSql = req.initSql.getOrElse(""),
+                      cpu = req.cpu,
+                      memory = req.memory,
+                      podTemplateYaml = req.podTemplateYaml,
+                      lockdown = lockdownValue,
+                      gateBypass = gateBypass
+                    )
+                    .map(_ =>
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.PoolCreate,
+                        "ok",
+                        tenant = Some(req.tenant),
+                        target = Some(key.toString),
+                        detail = Map("size" -> req.size.toString)
+                      )
+                      Right(
+                        respond(key).getOrElse(
+                          PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+                        )
+                      )
+                    )
+                    .handleError {
+                      case q: ai.starlake.quack.spi.QuotaExceededException =>
+                        Left(
+                          (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason))
+                        )
+                      case t =>
+                        Left(
+                          (
+                            StatusCode.InternalServerError,
+                            ErrorResponse("start_failed", t.getMessage)
+                          )
+                        )
+                    }
 
   def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -598,3 +614,58 @@ final class PoolHandlers(
                         )
                       )
               }
+
+  def setLockdown(req: SetPoolLockdownRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    SuperuserCheck.reject(apiKey)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.PoolSetLockdown,
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
+        LockdownTriState.parse(req.lockdown) match
+          case Left(msg) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
+          case Right(value) =>
+            val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+            sup.setPoolLockdown(key, value).flatMap {
+              case Left(err: SupervisorError.NotFound) =>
+                IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
+              case Left(err) =>
+                IO.pure(Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message))))
+              case Right(_) =>
+                // Restart every node so the spawn-time engine layer catches up
+                // immediately (same posture as database/update metastore edits).
+                // Per-node failures are tolerated: the flag is persisted and
+                // reconcile heals stragglers on its next pass.
+                val nodeIds = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
+                import cats.syntax.all.*
+                nodeIds
+                  .traverse_(id => sup.restartNode(key, id).void.handleError(_ => ()))
+                  .map { _ =>
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.PoolSetLockdown,
+                      "ok",
+                      tenant = Some(req.tenant),
+                      target = Some(key.toString),
+                      detail = Map("lockdown" -> req.lockdown)
+                    )
+                    respond(key) match
+                      case Some(r) => Right(r)
+                      case None    =>
+                        Left(
+                          (
+                            StatusCode.NotFound,
+                            ErrorResponse("not_found", s"pool $key disappeared after update")
+                          )
+                        )
+                  }
+            }

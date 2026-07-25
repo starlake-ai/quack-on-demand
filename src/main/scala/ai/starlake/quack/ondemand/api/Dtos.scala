@@ -70,7 +70,9 @@ final case class CreatePoolRequest(
     initSql: Option[String] = None,
     cpu: String = "",
     memory: String = "",
-    podTemplateYaml: String = ""
+    podTemplateYaml: String = "",
+    // Per-pool node-lockdown override: "inherit" (default) | "on" | "off". See LockdownTriState.
+    lockdown: String = "inherit"
 )
 
 final case class NodeInfo(
@@ -116,7 +118,9 @@ final case class PoolResponse(
     cohorts: List[PoolCohortDto] = Nil, // persisted placement plan, empty when none was supplied
     initSql: String = "",               // operator-authored init SQL; empty when none was supplied
     cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
-    memory: String = ""                 // Kubernetes memory request=limit; empty when unset
+    memory: String = "",                // Kubernetes memory request=limit; empty when unset
+    lockdown: String = "inherit",       // stored tri-state override
+    lockdownEffective: Boolean = false  // tri-state resolved against the global flag
 )
 
 final case class SetPoolResourcesRequest(
@@ -133,6 +137,26 @@ final case class SetPoolTemplateRequest(
     pool: String,
     podTemplateYaml: String
 )
+
+final case class SetPoolLockdownRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    // "inherit" | "on" | "off"
+    lockdown: String
+)
+
+object LockdownTriState:
+  def parse(s: String): Either[String, Option[Boolean]] = s match
+    case "inherit" => Right(None)
+    case "on"      => Right(Some(true))
+    case "off"     => Right(Some(false))
+    case other     => Left(s"invalid lockdown value: '$other' (expected inherit | on | off)")
+
+  def render(v: Option[Boolean]): String = v match
+    case None        => "inherit"
+    case Some(true)  => "on"
+    case Some(false) => "off"
 
 final case class ScalePoolRequest(
     tenant: String,
@@ -1031,6 +1055,7 @@ object Dtos:
   given Codec[PoolResponse]             = deriveCodec
   given Codec[SetPoolResourcesRequest]  = deriveCodec
   given Codec[SetPoolTemplateRequest]   = deriveCodec
+  given Codec[SetPoolLockdownRequest]   = deriveCodec
   given Codec[PoolListResponse]         = deriveCodec
   given Codec[HealthResponse]           = deriveCodec
   given Codec[SetMaxConcurrentRequest]  = deriveCodec
