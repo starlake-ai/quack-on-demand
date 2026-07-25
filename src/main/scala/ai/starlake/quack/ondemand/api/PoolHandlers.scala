@@ -6,6 +6,7 @@ import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
+import org.slf4j.LoggerFactory
 import sttp.model.StatusCode
 
 final class PoolHandlers(
@@ -15,6 +16,8 @@ final class PoolHandlers(
     podTemplateEnabled: Boolean = false,
     audit: AuditRecorder = AuditRecorder.noop
 ):
+
+  private val logger = LoggerFactory.getLogger(getClass)
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -664,11 +667,31 @@ final class PoolHandlers(
                 // statement. Reconcile heals DEAD nodes, not a live straggler
                 // that failed to restart -- such a node keeps its stale engine
                 // SQL until it next respawns (scale, crash-recovery, or a manual
-                // restart).
+                // restart). A failed restart is logged (not just swallowed) so an
+                // operator can spot the straggler instead of discovering the stale
+                // SQL later; the request itself must still succeed either way.
                 val nodeIds = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
                 import cats.syntax.all.*
                 nodeIds
-                  .traverse_(id => sup.restartNode(key, id).void.handleError(_ => ()))
+                  .traverse_ { id =>
+                    sup.restartNode(key, id).attempt.flatMap {
+                      case Right(Right(_))  => IO.unit
+                      case Right(Left(err)) =>
+                        IO.delay(
+                          logger.warn(
+                            s"setLockdown: restart of $key/$id failed, node keeps its stale " +
+                              s"engine SQL until it next respawns: ${err.message}"
+                          )
+                        )
+                      case Left(t) =>
+                        IO.delay(
+                          logger.warn(
+                            s"setLockdown: restart of $key/$id raised ${t.getClass.getSimpleName}, " +
+                              s"node keeps its stale engine SQL until it next respawns: ${t.getMessage}"
+                          )
+                        )
+                    }
+                  }
                   .map { _ =>
                     audit.rest(
                       apiKey,
