@@ -72,6 +72,10 @@ export interface PoolResponse {
   // no explicit limit is set for that dimension.
   cpu: string;
   memory: string;
+  // Per-pool node-lockdown override, stored tri-state: "inherit" | "on" | "off".
+  lockdown?: string;
+  // The tri-state resolved against the global nodeLockdown.enabled flag.
+  lockdownEffective?: boolean;
 }
 
 export interface SetPoolDisabledRequest {
@@ -136,6 +140,14 @@ export interface SetPoolResourcesRequest {
   pool: string;
   cpu: string;
   memory: string;
+}
+
+export interface SetPoolLockdownRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  // "inherit" | "on" | "off"
+  lockdown: string;
 }
 
 export interface SetMaxConcurrentRequest {

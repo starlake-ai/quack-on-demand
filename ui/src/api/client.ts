@@ -9,6 +9,7 @@ import type {
   NodeOpRequest,
   SetPoolDisabledRequest,
   SetPoolResourcesRequest,
+  SetPoolLockdownRequest,
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
   PoolResponse,
@@ -208,6 +209,7 @@ export const api = {
   restartNode:       (req: NodeOpRequest) => post<void>('/node/restart', req),
   setPoolDisabled:   (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
   setPoolResources:  (req: SetPoolResourcesRequest) => post<PoolResponse>('/pool/setResources', req),
+  setPoolLockdown:   (req: SetPoolLockdownRequest)  => post<PoolResponse>('/pool/setLockdown', req),
 
   // Tenants
   listTenants:      () => get<TenantListResponse>('/tenant/list'),
