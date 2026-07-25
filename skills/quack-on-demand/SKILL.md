@@ -726,6 +726,17 @@ opt-in except pod security:
     hosted deploys MUST use an object-store dataPath, where the engine
     `disabled_filesystems` layer is the hard guard; the edge screen alone is
     not a hard guard for LOCAL mode.
+  - Per-pool override: the global `QOD_NODE_LOCKDOWN` default stays OFF
+    (unchanged by this feature) - it is the fallback for pools that don't set
+    their own value. `POST /api/pool/setLockdown` layers a tri-state
+    `inherit | on | off` on top, superuser only, and restarts the pool's
+    nodes immediately so the new posture takes effect:
+    ```bash
+    # Per-pool override (superuser only; restarts the pool's nodes immediately).
+    # lockdown: "inherit" (default, follow QOD_NODE_LOCKDOWN) | "on" | "off"
+    curl -sS -X POST "http://localhost:20900/api/pool/setLockdown" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+      -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","lockdown":"off"}'
+    ```
   - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
     `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
     autoinstall_known_extensions=true` is denied, nodes come up healthy, and
