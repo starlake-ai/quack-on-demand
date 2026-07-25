@@ -38,7 +38,12 @@ final case class Pool(
     memory: String = "",
     // Full Pod-manifest YAML used as a base template when QOD_POD_TEMPLATE_ENABLED
     // is on; the manager overlays identity labels, the env contract, and resources.
-    podTemplateYaml: String = ""
+    podTemplateYaml: String = "",
+    // Per-pool node-lockdown override. None = inherit the global
+    // QOD_NODE_LOCKDOWN flag; Some(b) forces lockdown on/off for this pool.
+    // Resolved once in PoolSupervisor.effectiveLockdown and fed to BOTH
+    // enforcement layers (edge screen + spawn-time engine SQL).
+    lockdown: Option[Boolean] = None
 ):
   /** Effective scheduling plan: either the explicit cohorts, or one synthesized placement-less
     * cohort carrying the flat distribution.

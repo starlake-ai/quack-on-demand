@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0024-qodstate-pool-lockdown
+      author: quack-on-demand
+      changes:
+        # Per-pool node-lockdown override. NULL = inherit the manager's
+        # global QOD_NODE_LOCKDOWN flag; true/false forces the pool's
+        # posture. Nullable on purpose: existing rows read back as inherit.
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: lockdown
+                  type: BOOLEAN

@@ -51,3 +51,5 @@ databaseChangeLog:
       file: db/changelog/0022-user-enabled.yaml
   - include:
       file: db/changelog/0023-pool-suspended.yaml
+  - include:
+      file: db/changelog/0024-pool-lockdown.yaml

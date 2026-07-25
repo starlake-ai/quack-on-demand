@@ -187,6 +187,16 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listPools(pool.tenantDbId).find(_.id == pool.id).get.suspended shouldBe true
   }
 
+  it should "round-trip the pool lockdown tri-state" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    for (value <- List(None, Some(true), Some(false)))
+      val p = pool.copy(id = s"lock-$value", name = s"lock-$value", lockdown = value)
+      store.upsertPool(p)
+      val back = store.listPools(p.tenantDbId).find(_.id == p.id).get
+      back.lockdown shouldBe value
+  }
+
   it should "preserve idleTimeoutSec as a populated Option" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)
