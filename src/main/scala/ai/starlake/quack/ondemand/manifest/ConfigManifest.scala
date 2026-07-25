@@ -59,6 +59,13 @@ final case class ManifestPool(
     roleDistribution: ManifestRoleDistribution,
     maxConcurrentPerNode: Int = 0,
     disabled: Boolean = false,
+    // Scale-to-zero flag, round-tripped verbatim from Pool.suspended.
+    // Defaulted so pre-suspend YAMLs decode unchanged as not suspended.
+    // reconcile is the only thing that spawns nodes for an imported pool
+    // (the importer only writes the row); it skips a suspended pool the
+    // same way it does for one suspended via POST /api/pool/suspend, so
+    // an import never resurrects nodes for a pool meant to stay at zero.
+    suspended: Boolean = false,
     // Optional placement plan. When empty, the importer creates the
     // pool with no cohorts (single placement-less group). The
     // supervisor ignores cohorts when the runtime backend can't

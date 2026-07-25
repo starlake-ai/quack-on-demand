@@ -340,6 +340,7 @@ object ManifestImporter:
               distribution = dist,
               maxConcurrentPerNode = mp.maxConcurrentPerNode,
               disabled = mp.disabled,
+              suspended = mp.suspended,
               cohorts = cohorts,
               initSql = mp.initSql,
               cpu = mp.cpu,

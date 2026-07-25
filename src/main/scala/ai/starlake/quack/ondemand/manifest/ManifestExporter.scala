@@ -121,6 +121,7 @@ object ManifestExporter:
           ),
           maxConcurrentPerNode = p.maxConcurrentPerNode,
           disabled = p.disabled,
+          suspended = p.suspended,
           cohorts = p.cohorts.map { c =>
             ManifestPoolCohort(
               placement = ManifestNodePlacement(

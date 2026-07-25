@@ -86,6 +86,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         distribution = RoleDistribution(writeonly = 1, readonly = 1, dual = 1),
         maxConcurrentPerNode = 0,
         disabled = false,
+        suspended = true,
         cpu = "2",
         memory = "8Gi",
         podTemplateYaml = "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n",
@@ -177,6 +178,9 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // The per-pool lockdown override ("on") must survive the export -> import
     // cycle: a manifest import must not silently wipe a superuser's override.
     restoredPool.lockdown shouldBe Some(true)
+    // Same guarantee for the scale-to-zero flag: an import must not wake a
+    // suspended pool back up by resetting it to false.
+    restoredPool.suspended shouldBe true
 
     // Step 7: second export from the imported store
     val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
@@ -549,4 +553,36 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val result = ManifestImporter.apply(parsed, dst)
     result.isLeft shouldBe true
     result.left.toOption.get.exists(_.contains("lockdown")) shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // Test 9: a pool manifest that OMITS the suspended field imports as
+  // suspended = false, so a pre-suspend YAML never acquires a spurious
+  // scale-to-zero flag.
+  // ------------------------------------------------------------------
+
+  it should "import a pool that omits suspended as not suspended" in {
+    val yaml =
+      """apiVersion: quack-on-demand/v1
+        |kind: ConfigManifest
+        |exportedAt: '2026-06-05T12:00:00Z'
+        |exportedFrom: { managerVersion: x, hostname: y }
+        |tenants:
+        |  - name: tpch
+        |    tenantDbs:
+        |      - name: tpch_tpch1
+        |    pools:
+        |      - name: sales
+        |        tenantDb: tpch_tpch1
+        |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
+        |""".stripMargin
+    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    parsed.tenants.head.pools.head.suspended shouldBe false
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+
+    val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
+    dst.listPools(db.id).find(_.name == "sales").get.suspended shouldBe false
   }
