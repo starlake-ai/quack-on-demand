@@ -3,7 +3,8 @@ package ai.starlake.quack.ondemand.api
 import io.circe.Json
 
 /** Shared vocabulary + SQL builders for `ducklake_table_changes`-based diffs (Spec 02 data diff,
-  * Spec 04 restore dry-run). Verified live on the pinned DuckDB 1.5.4 / DuckLake 0.3 (see
+  * Spec 04 restore dry-run). Verified live on DuckDB 1.5.4 / DuckLake 0.3, re-verified
+  * unchanged on 1.5.5 (2026-07-25, live edge probes incl. the nonexistent-snapshot error) (see
   * docs/duckdb-pin-bump-checklist.md section 5): the change types are exactly insert / delete /
   * update_preimage / update_postimage; BOTH function bounds are inclusive, hence the `fromId + 1`
   * convention for an exclusive-of-from diff; and a bound naming a nonexistent snapshot is an engine

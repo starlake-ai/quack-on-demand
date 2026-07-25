@@ -8,7 +8,8 @@ package ai.starlake.quack.ondemand.maintenance
   * Expiry deliberately has NO older_than variant: retention holds require explicit versions (an
   * older_than call would expire pinned snapshots).
   *
-  * `rewriteTable`'s table name is a positional argument on the pinned engine (DuckDB 1.5.4 /
+  * `rewriteTable`'s table name is a positional argument on the pinned engine (DuckDB 1.5.4,
+  * still true on 1.5.5 per DuckLakeMaintenanceLandmineSpec 2026-07-25 /
   * DuckLake): `ducklake_rewrite_data_files` has no `table_name` named parameter - only
   * `(catalog, table, delete_threshold, schema)` positional/named, confirmed via
   * `duckdb_functions()` and a live probe (see task-1-report.md). Adjusted from the brief's

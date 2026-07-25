@@ -719,7 +719,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
   ): Option[TableHistoryPage] =
     currentTableId(schema, table).map { tid =>
       val creation = earliestBeginSnapshot(tid).getOrElse(-1L)
-      // Verb names pinned against a live DuckLake 0.3 (DuckDB 1.5.4) catalog - see
+      // Verb names pinned against a live DuckLake 0.3 (DuckDB 1.5.4) catalog, re-verified
+      // unchanged on DuckDB 1.5.5 (2026-07-25, live edge probes + catalog dump) - see
       // task-2-report.md for the raw `changes_made` dump. Two verbs differ from the DuckLake docs'
       // naming: unflushed inline writes emit `inlined_insert` / `inlined_delete` (NOT
       // `inserted_into_table` / `deleted_from_table`, which only appear once a write is flushed to
