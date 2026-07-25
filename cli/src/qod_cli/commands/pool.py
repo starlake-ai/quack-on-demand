@@ -178,6 +178,26 @@ def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: 
     call(ctx, "POST", "/api/pool/setResources", body={**_key(tenant, db, pool), "cpu": cpu, "memory": memory})
 
 
+@app.command("set-lockdown")
+@covers(
+    "POST",
+    "/api/pool/setLockdown",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "lockdown": "--lockdown"},
+)
+def set_lockdown(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    lockdown: str = typer.Option(
+        ...,
+        "--lockdown",
+        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag. Superuser only.",
+    ),
+):
+    call(ctx, "POST", "/api/pool/setLockdown", body={**_key(tenant, db, pool), "lockdown": lockdown})
+
+
 @app.command("set-pod-template")
 @covers(
     "POST",

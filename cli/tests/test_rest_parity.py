@@ -17,7 +17,6 @@ EXCLUSIONS = {
     "/api/auth/oidc/logout",      # browser session logout redirect
     "/api/auth/sql-token/start",  # opens the provider login page in a browser
     "/api/auth/sql-token/callback",  # provider redirect target
-    "/api/pool/setLockdown",      # superuser-only ops endpoint; CLI verb tracked as follow-up
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

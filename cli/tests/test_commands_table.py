@@ -166,6 +166,11 @@ CASES = [
         {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "cpu": "2", "memory": "4Gi"},
     ),
     (
+        ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--lockdown", "on"],
+        "POST", "/api/pool/setLockdown", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "lockdown": "on"},
+    ),
+    (
         ["pool", "permission", "list", "--tenant", "acme"],
         "GET", "/api/pool/permission/list", {"tenant": "acme"}, None,
     ),
