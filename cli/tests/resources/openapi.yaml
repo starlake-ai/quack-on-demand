@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Quack on Demand REST API
-  version: 0.4.5-SNAPSHOT
+  version: 0.5.3-SNAPSHOT
 paths:
   /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}:
     get:
@@ -3628,6 +3628,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setLockdown:
+    post:
+      operationId: postApiPoolSetlockdown
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolLockdownRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/pool/setPodTemplate:
     post:
       operationId: postApiPoolSetpodtemplate
@@ -4952,6 +4992,7 @@ components:
       - cpu
       - memory
       - podTemplateYaml
+      - lockdown
       properties:
         tenant:
           type: string
@@ -4985,6 +5026,8 @@ components:
         memory:
           type: string
         podTemplateYaml:
+          type: string
+        lockdown:
           type: string
     CreateRowPolicyRequest:
       title: CreateRowPolicyRequest
@@ -5832,6 +5875,8 @@ components:
       - initSql
       - cpu
       - memory
+      - lockdown
+      - lockdownEffective
       properties:
         tenant:
           type: string
@@ -5863,6 +5908,10 @@ components:
           type: string
         memory:
           type: string
+        lockdown:
+          type: string
+        lockdownEffective:
+          type: boolean
     PreviewColumn:
       title: PreviewColumn
       type: object
@@ -6269,6 +6318,23 @@ components:
           type: string
         disabled:
           type: boolean
+    SetPoolLockdownRequest:
+      title: SetPoolLockdownRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - lockdown
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        lockdown:
+          type: string
     SetPoolResourcesRequest:
       title: SetPoolResourcesRequest
       type: object

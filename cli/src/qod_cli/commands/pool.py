@@ -41,6 +41,7 @@ def list_(ctx: typer.Context):
         "initSql": "--init-sql",
         "startSuspended": "--start-suspended",
         "cohorts": "--cohort",
+        "lockdown": "--lockdown",
     },
 )
 def create(
@@ -67,6 +68,11 @@ def create(
         "When supplied, cohort counts must sum to --size and roles must sum to "
         "--writeonly/--readonly/--dual.",
     ),
+    lockdown: str = typer.Option(
+        "inherit",
+        "--lockdown",
+        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag.",
+    ),
 ):
     body = {
         **_key(tenant, db, pool),
@@ -79,6 +85,7 @@ def create(
         "memory": memory,
         "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
         "startSuspended": start_suspended,
+        "lockdown": lockdown,
     }
     if init_sql is not None:
         body["initSql"] = init_sql

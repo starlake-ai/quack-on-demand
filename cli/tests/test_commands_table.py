@@ -85,6 +85,7 @@ CASES = [
             "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
             "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
+            "lockdown": "inherit",
         },
     ),
     (
@@ -104,6 +105,20 @@ CASES = [
             "cohorts": [
                 {"placement": {"nodeSelector": {}, "tolerations": []}, "distribution": {"writeonly": 1, "readonly": 1, "dual": 0}},
             ],
+            "lockdown": "inherit",
+        },
+    ),
+    (
+        ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--size", "2", "--lockdown", "off"],
+        "POST",
+        "/api/pool/create",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
+            "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
+            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
+            "lockdown": "off",
         },
     ),
     (
