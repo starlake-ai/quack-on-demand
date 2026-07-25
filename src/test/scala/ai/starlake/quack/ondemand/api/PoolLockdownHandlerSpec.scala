@@ -13,6 +13,8 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -61,7 +63,7 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     */
   private def freshHandlers(
       lockdownEnabled: Boolean = false
-  ): (PoolHandlers, PoolSupervisor, CapturingBackend) =
+  ): (PoolHandlers, PoolSupervisor, CapturingBackend, RecordingTelemetryStore) =
     val backend = new CapturingBackend
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(
@@ -72,7 +74,9 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    (new PoolHandlers(sup, tracker), sup, backend)
+    val auditStore = new RecordingTelemetryStore
+    val audit      = new AuditRecorder(auditStore, _ => None)
+    (new PoolHandlers(sup, tracker, audit = audit), sup, backend, auditStore)
 
   private def req(
       pool: String = "sales",
@@ -91,7 +95,7 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     SessionScope(superuser = false, manageableTenants = Set(tenant))
 
   "pool/setLockdown" should "403 a tenant-admin session before any state change" in:
-    val (h, sup, _) = freshHandlers()
+    val (h, sup, _, auditStore) = freshHandlers()
     h.createPool(req(), None)((_: String) => None).unsafeRunSync()
     val key = PoolKey("acme", "acme_default", "sales")
     val out = h
@@ -102,9 +106,16 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
     sup.effectiveLockdown(key) shouldBe false
+    // The denied audit event fires before any state change (same gate shape
+    // as createPool's lockdown gate).
+    auditStore.events should not be empty
+    val denied = auditStore.events.last
+    denied.action shouldBe "pool.setLockdown"
+    denied.outcome shouldBe "denied"
+    denied.tenant shouldBe Some("acme")
 
   it should "400 on an invalid tri-state value" in:
-    val (h, _, _) = freshHandlers()
+    val (h, _, _, _) = freshHandlers()
     h.createPool(req(), None)((_: String) => None).unsafeRunSync()
     val out = h
       .setLockdown(
@@ -116,8 +127,8 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
 
   it should "404 on an unknown pool for a superuser" in:
-    val (h, _, _) = freshHandlers()
-    val out       = h
+    val (h, _, _, _) = freshHandlers()
+    val out          = h
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "missing", "on"),
         Some("tok")
@@ -126,7 +137,7 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   it should "persist the override, restart the pool's nodes, and echo it in PoolResponse" in:
-    val (h, sup, backend) = freshHandlers(lockdownEnabled = false)
+    val (h, sup, backend, auditStore) = freshHandlers(lockdownEnabled = false)
     h.createPool(req(), None)((_: String) => None).unsafeRunSync()
     val key           = PoolKey("acme", "acme_default", "sales")
     val nodeIdsBefore = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
@@ -152,9 +163,18 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     backend.starts.last.lockdownSql should include(
       "SET autoinstall_known_extensions = false"
     )
+    // The ok arm audits the action with the lockdown value in detail and the
+    // pool key (tenant/tenantDb/pool) as the target.
+    auditStore.events should not be empty
+    val ok = auditStore.events.last
+    ok.action shouldBe "pool.setLockdown"
+    ok.outcome shouldBe "ok"
+    ok.tenant shouldBe Some("acme")
+    ok.target shouldBe Some(key.toString)
+    ok.detail.get("lockdown") shouldBe Some("on")
 
   it should "map inherit back to the global flag in lockdownEffective" in:
-    val (h, sup, _) = freshHandlers(lockdownEnabled = true)
+    val (h, sup, _, _) = freshHandlers(lockdownEnabled = true)
     h.createPool(req(), None)((_: String) => None).unsafeRunSync()
     val out = h
       .setLockdown(
