@@ -726,17 +726,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
       // `inserted_into_table` / `deleted_from_table`, which only appear once a write is flushed to
       // a real data/delete file), and adjacent-file compaction emits `merge_adjacent` (NOT
       // `compacted_table`).
-      val allVerbs = List(
-        "created_table",
-        "dropped_table",
-        "altered_table",
-        "inserted_into_table",
-        "inlined_insert",
-        "deleted_from_table",
-        "inlined_delete",
-        "merge_adjacent"
-      )
-      val insRef =
+      val allVerbs = DuckLakeCatalogReader.HistoryVerbs
+      val insRef   =
         changeRefPattern(List("inserted_into_table", "inlined_insert"), tid, schema, table)
       val delRef =
         changeRefPattern(List("deleted_from_table", "inlined_delete"), tid, schema, table)
@@ -994,6 +985,30 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
   def close(): Unit = ds.close()
 
 object DuckLakeCatalogReader:
+
+  /** The `ducklake_snapshot_changes.changes_made` verbs `listTableHistory` classifies and uses for
+    * table-membership matching (pin-bump checklist item 1). Everything the engine emits that table
+    * history deliberately ignores lives in [[HistoryIgnoredVerbs]]; DuckLakePinBumpChecklistSpec
+    * asserts the engine emits nothing outside the union, so a renamed or added verb at an engine
+    * pin bump fails the suite instead of silently dropping commits from the timeline.
+    */
+  val HistoryVerbs: List[String] = List(
+    "created_table",
+    "dropped_table",
+    "altered_table",
+    "inserted_into_table",
+    "inlined_insert",
+    "deleted_from_table",
+    "inlined_delete",
+    "merge_adjacent"
+  )
+
+  /** `changes_made` verbs that are real engine output but intentionally NOT table-history events:
+    * `created_schema` is a schema-level event; `inline_flush` is the flush of inlined INSERTs
+    * (maintenance noise - the flush of an inlined DELETE emits `deleted_from_table` instead, which
+    * IS classified). Verified identical on DuckDB 1.5.4 and 1.5.5.
+    */
+  val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush")
 
   /** Build a reader from a resolved metastore map (the same shape
     * `PoolSupervisor.metastoreFor(tenant)` produces).
