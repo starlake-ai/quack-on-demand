@@ -1297,6 +1297,33 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
     out.swap.toOption.get.reason should startWith("access denied: lockdown:")
 
+  it should "deny ATTACH when effectiveSet is missing (no handshake state screens as non-superuser)" in:
+    // Pins the fail-closed comment in FlightSqlRouter ("effectiveSet = None
+    // (no handshake state attached) screens as non-superuser -- fail
+    // closed"): `!effectiveSet.exists(_.user.tenant.isEmpty)` is true when
+    // effectiveSet is None, so a missing EffectiveSet must never be treated
+    // as the superuser bypass.
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      lockdownFor = _ => true
+    )
+    val out = router
+      .execute(
+        "lockdown-1b",
+        "alice",
+        poolKey,
+        "ATTACH 'x.db' AS y",
+        effectiveSet = None
+      )
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    out.swap.toOption.get.reason should startWith("access denied: lockdown:")
+
   it should "admit ATTACH for a superuser caller" in:
     val (base, _, _) = setup()
     val router       = new FlightSqlRouter(
