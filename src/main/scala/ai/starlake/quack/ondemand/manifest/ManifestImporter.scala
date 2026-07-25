@@ -4,6 +4,7 @@ package ai.starlake.quack.ondemand.manifest
 import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
+  LockdownTriState,
   Names,
   NodePlacement,
   NodeToleration,
@@ -14,7 +15,6 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
-import ai.starlake.quack.ondemand.api.LockdownTriState
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   FederatedSourceStore,

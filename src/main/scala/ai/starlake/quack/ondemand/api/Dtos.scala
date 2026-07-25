@@ -142,21 +142,9 @@ final case class SetPoolLockdownRequest(
     tenant: String,
     tenantDb: String,
     pool: String,
-    // "inherit" | "on" | "off"
+    // "inherit" | "on" | "off" - see [[ai.starlake.quack.model.LockdownTriState]]
     lockdown: String
 )
-
-object LockdownTriState:
-  def parse(s: String): Either[String, Option[Boolean]] = s match
-    case "inherit" => Right(None)
-    case "on"      => Right(Some(true))
-    case "off"     => Right(Some(false))
-    case other     => Left(s"invalid lockdown value: '$other' (expected inherit | on | off)")
-
-  def render(v: Option[Boolean]): String = v match
-    case None        => "inherit"
-    case Some(true)  => "on"
-    case Some(false) => "off"
 
 final case class ScalePoolRequest(
     tenant: String,

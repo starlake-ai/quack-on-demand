@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
-import ai.starlake.quack.model.{PoolKey, QuantitySyntax}
+import ai.starlake.quack.model.{LockdownTriState, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}

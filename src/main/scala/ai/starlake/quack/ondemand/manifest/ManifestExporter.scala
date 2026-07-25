@@ -1,7 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.FederatedSecret
-import ai.starlake.quack.ondemand.api.LockdownTriState
+import ai.starlake.quack.model.{FederatedSecret, LockdownTriState}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 
 import java.time.Instant
