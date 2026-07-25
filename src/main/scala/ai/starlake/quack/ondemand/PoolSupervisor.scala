@@ -464,7 +464,8 @@ final class PoolSupervisor(
       kindWire = state.kindWire,
       extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
       dbInitSql = state.dbInitSql,
-      lockdownSql = NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), lockdownEnabled),
+      lockdownSql =
+        NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
       objectStoreSql = ObjectStoreSecret.sql(state.s3, state.metastore.getOrElse("dataPath", "")),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
@@ -535,7 +536,7 @@ final class PoolSupervisor(
           .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
           .getOrElse(""),
         dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
-        lockdownSql = NodeLockdown.sql(dataPath, lockdownEnabled),
+        lockdownSql = NodeLockdown.sql(dataPath, effectiveLockdown(key)),
         objectStoreSql = ObjectStoreSecret.sql(s3, dataPath)
       )
     }
@@ -1188,6 +1189,8 @@ final class PoolSupervisor(
       cpu: String = "",
       memory: String = "",
       podTemplateYaml: String = "",
+      // Per-pool lockdown override persisted at create time. None = inherit.
+      lockdown: Option[Boolean] = None,
       gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
@@ -1281,12 +1284,18 @@ final class PoolSupervisor(
                   initSql = initSql,
                   cpu = cpu,
                   memory = memory,
-                  podTemplateYaml = podTemplateYaml
+                  podTemplateYaml = podTemplateYaml,
+                  lockdown = lockdown
                 )
                 IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
                   poolRows.put(poolEntity.id, poolEntity)
                   poolIdByKey.put(key, poolEntity.id)
-                } *> {
+                } *> IO.defer {
+                  // Deferred: specFromState below resolves effectiveLockdown(key) via
+                  // poolRows, which the IO.delay just above only populates once this
+                  // chain actually runs. A plain (non-deferred) block here would
+                  // evaluate specs eagerly at chain-construction time -- before that
+                  // put -- and silently fall back to the global lockdown flag.
                   // Walk cohorts in order; each role gets the cohort's placement.
                   // Empty `cohorts` falls back to a single placement-less cohort
                   // carrying `dist`, matching pre-cohort behavior exactly.
@@ -1364,6 +1373,38 @@ final class PoolSupervisor(
                 store.upsertPool(updated)
                 poolRows.put(updated.id, updated)
                 pools.put(key, state.copy(disabled = disabled))
+                publish.topologyChanged()
+                Right(updated)
+      }
+    }
+
+  /** Single resolution point for the per-pool lockdown tri-state. None on the pool row (or no row
+    * at all: maintenance nodes, races during create) falls back to the manager-global flag. Feeds
+    * BOTH the edge screen (FlightSqlRouter.lockdownFor) and the spawn-time engine SQL.
+    */
+  def effectiveLockdown(key: PoolKey): Boolean =
+    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
+
+  def setPoolLockdown(
+      key: PoolKey,
+      lockdown: Option[Boolean]
+  ): IO[Either[SupervisorError, Pool]] =
+    IO.blocking {
+      withCacheRecovery("setPoolLockdown") {
+        pools.get(key) match
+          case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(_) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
+                )
+              case Some(p) =>
+                val updated = p.copy(lockdown = lockdown)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
                 publish.topologyChanged()
                 Right(updated)
       }

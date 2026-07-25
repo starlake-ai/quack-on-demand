@@ -77,15 +77,27 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   /** Supervisor + tenant `acme` + tenant-db `acme_default` carrying the
     * test metastore. Pool tests can call `createPool(key, ...)` directly. */
-  private def freshSupervisor() =
-    val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, new InMemoryControlPlaneStore())
+  private def freshSupervisor(lockdownEnabled: Boolean = false) =
+    val sup = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      lockdownEnabled = lockdownEnabled
+    )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
     sup
 
-  private def freshSupervisorWithBackend(): (PoolSupervisor, CapturingBackend) =
+  private def freshSupervisorWithBackend(
+      lockdownEnabled: Boolean = false
+  ): (PoolSupervisor, CapturingBackend) =
     val b   = new CapturingBackend
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    val sup = new PoolSupervisor(
+      b,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      lockdownEnabled = lockdownEnabled
+    )
     (sup, b)
 
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
@@ -115,6 +127,30 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     intercept[IllegalStateException](
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     )
+
+  // ---- effectiveLockdown: per-pool tri-state override against the global flag ----
+
+  "PoolSupervisor.effectiveLockdown" should "resolve the tri-state against the global flag" in:
+    val supOn  = freshSupervisor(lockdownEnabled = true)
+    val supOff = freshSupervisor(lockdownEnabled = false)
+    supOn.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    supOff.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    supOn.effectiveLockdown(key) shouldBe true    // inherit + global on
+    supOff.effectiveLockdown(key) shouldBe false  // inherit + global off
+    supOn.setPoolLockdown(key, Some(false)).unsafeRunSync().isRight shouldBe true
+    supOff.setPoolLockdown(key, Some(true)).unsafeRunSync().isRight shouldBe true
+    supOn.effectiveLockdown(key) shouldBe false   // off override beats global on
+    supOff.effectiveLockdown(key) shouldBe true   // on override beats global off
+    // Unknown pool falls back to the global flag (maintenance-node path).
+    supOn.effectiveLockdown(PoolKey("acme", "acme_default", "nope")) shouldBe true
+
+  it should "stamp the per-pool effective value into spawned lockdownSql" in:
+    val (sup, backend) = freshSupervisorWithBackend(lockdownEnabled = false)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1), lockdown = Some(true)).unsafeRunSync()
+    backend.specs.last.lockdownSql should include("SET autoinstall_known_extensions = false")
 
   // ---- initSql: free-form per-pool SQL prepended to the federation blob ----
   //
