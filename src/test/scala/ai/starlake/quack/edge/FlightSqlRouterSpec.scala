@@ -47,7 +47,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private def setup(
       stub: () => QuackResponse = defaultStub,
-      events: ManagerEventSink = ManagerEventSink.noop
+      events: ManagerEventSink = ManagerEventSink.noop,
+      lockdownFor: PoolKey => Boolean = _ => false
   ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -95,7 +96,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val sessions = new SessionRegistry
     val router   =
-      new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si, events = events)
+      new FlightSqlRouter(
+        sup,
+        sessions,
+        tracker,
+        adapter,
+        stmtInstruments = si,
+        events = events,
+        lockdownFor = lockdownFor
+      )
     (router, sessions, node)
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
@@ -1274,7 +1283,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      lockdownEnabled = true
+      lockdownFor = _ => true
     )
     val out = router
       .execute(
@@ -1296,7 +1305,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      lockdownEnabled = true
+      lockdownFor = _ => true
     )
     // Quarantine the only node so a statement that clears the lockdown screen
     // proceeds to routing and fails there (Unavailable) rather than being
@@ -1323,7 +1332,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
 
   it should "not consult the screen when disabled" in:
-    val (router, _, _) = setup() // lockdownEnabled defaults to false
+    val (router, _, _) = setup() // lockdownFor defaults to `_ => false`
     val out            = router
       .execute(
         "lockdown-3",
@@ -1338,3 +1347,20 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // behavior (routes to the stub node and gets an Ok/whatever the stub returns)
     // is unchanged.
     out.swap.toOption.foreach(_ shouldNot be(a[RouterFailure.AccessDenied]))
+
+  it should "resolve lockdown per pool: sibling pool with the override off is admitted" in:
+    // lockdownFor answers true only for a pool this session does NOT target,
+    // so the ATTACH that the locked-pool test sees denied must pass the
+    // lockdown screen here (it may still fail later for other reasons; the
+    // assertion is only "not a lockdown denial").
+    val (router, _, _) = setup(lockdownFor = k => k.pool == "some-other-pool")
+    val out            = router
+      .execute(
+        "lockdown-4",
+        "alice",
+        poolKey,
+        "ATTACH 'x.db' AS y",
+        effectiveSet = Some(effWithPolicies(Nil))
+      )
+      .unsafeRunSync()
+    out.swap.toOption.map(_.reason).getOrElse("") should not startWith "access denied: lockdown:"

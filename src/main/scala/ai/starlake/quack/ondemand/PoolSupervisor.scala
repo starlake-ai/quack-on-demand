@@ -100,9 +100,10 @@ final class PoolSupervisor(
     publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
       ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
     /** Engine lockdown gate (QOD_NODE_LOCKDOWN). Wired from Main via `lockdownCfg.enabled`; every
-      * NodeSpec build site (specFromState / maintenanceNodeSpec) stamps
-      * `NodeLockdown.sql(dataPath, lockdownEnabled)` into `lockdownSql` so the query path and the
-      * maintenance path can never drift.
+      * NodeSpec build site (specFromState / maintenanceNodeSpec) stamps the per-pool
+      * `effectiveLockdown(key)` into `lockdownSql` via `NodeLockdown.sql(dataPath, ...)`, with this
+      * `lockdownEnabled` flag as the global default that the pool-level tri-state inherits when no
+      * override is set, so the query path and the maintenance path can never drift.
       */
     lockdownEnabled: Boolean = false
 ):

@@ -1085,7 +1085,7 @@ object Main extends IOApp with LazyLogging:
         events = moduleEventBus.sink,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
-        lockdownEnabled = lockdownCfg.enabled
+        lockdownFor = sup.effectiveLockdown
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

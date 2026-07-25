@@ -61,7 +61,7 @@ final class FlightSqlRouter(
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
-    val lockdownEnabled: Boolean = false
+    val lockdownFor: PoolKey => Boolean = _ => false
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -291,11 +291,13 @@ final class FlightSqlRouter(
           prepMs
         )
 
-    // Node lockdown: consulted only when the flag is on and the caller is not a superuser.
+    // Node lockdown: consulted only when the target pool's effective lockdown resolves to
+    // true and the caller is not a superuser. Resolution is per pool (supervisor's cached
+    // tri-state: pool override else the global default) rather than one process-wide flag.
     // Runs BEFORE the ACL validator gate so a denied statement never reaches the SQL parser.
     // effectiveSet = None (no handshake state attached) screens as non-superuser -- fail closed.
     val lockdownDenial =
-      if lockdownEnabled && !effectiveSet.exists(_.user.tenant.isEmpty) then
+      if lockdownFor(poolKey) && !effectiveSet.exists(_.user.tenant.isEmpty) then
         LockdownScreen.screen(sql)
       else None
 
