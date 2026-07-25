@@ -127,7 +127,7 @@ qod start
 
 On **Windows on ARM** (e.g. Parallels on Apple Silicon), DuckDB is provisioned as native `windows-arm64`, but the bundled `quackwire.dll` is x86_64-only and cannot load in the arm64 JVM. The manager detects this at boot and falls back to the embedded client automatically (a `WARN` is logged); no configuration needed.
 
-**Building the Windows native (`quackwire.dll`), optional.** Requires MSVC (Visual Studio Build Tools) + CMake + `sbt`. Assemble a `DUCKDB_HOME` with `duckdb.lib` plus the full `duckdb/` include tree (see `.github/workflows/quackwire.yml`, step "Install libduckdb v1.5.4 (Windows)"), then:
+**Building the Windows native (`quackwire.dll`), optional.** Requires MSVC (Visual Studio Build Tools) + CMake + `sbt`. Assemble a `DUCKDB_HOME` with `duckdb.lib` plus the full `duckdb/` include tree (see `.github/workflows/quackwire.yml`, step "Install libduckdb v1.5.5 (Windows)"), then:
 
 ```powershell
 $env:DUCKDB_HOME = 'C:\path\to\duckdb-home'
