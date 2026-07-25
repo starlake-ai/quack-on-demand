@@ -429,7 +429,7 @@ def test_demo_refuses_when_latest_release_predates_the_demo(runner, monkeypatch)
 
 
 def test_duckdb_cli_url_platform_mapping():
-    base = "https://github.com/duckdb/duckdb/releases/download/v1.5.4"
+    base = "https://github.com/duckdb/duckdb/releases/download/v1.5.5"
     assert launcher.duckdb_cli_url("darwin", "arm64") == f"{base}/duckdb_cli-osx-universal.zip"
     assert launcher.duckdb_cli_url("linux", "x86_64") == f"{base}/duckdb_cli-linux-amd64.zip"
     assert launcher.duckdb_cli_url("linux", "aarch64") == f"{base}/duckdb_cli-linux-arm64.zip"
@@ -588,7 +588,7 @@ def test_demo_rejects_non_release_version_with_hint(runner, monkeypatch):
 
 
 def test_libduckdb_url_platform_mapping():
-    base = "https://github.com/duckdb/duckdb/releases/download/v1.5.4"
+    base = "https://github.com/duckdb/duckdb/releases/download/v1.5.5"
     assert launcher.libduckdb_url("darwin", "arm64") == f"{base}/libduckdb-osx-universal.zip"
     assert launcher.libduckdb_url("linux", "x86_64") == f"{base}/libduckdb-linux-amd64.zip"
     assert launcher.libduckdb_url("win32", "ARM64") == f"{base}/libduckdb-windows-arm64.zip"

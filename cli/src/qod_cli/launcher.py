@@ -284,7 +284,7 @@ def ensure_jre(
 # DuckDB CLI provisioning. The spawn script runs the `duckdb` CLI; the demo
 # pins it to the libquackwire ABI version (Versions.scala first 3 segments,
 # see docs/duckdb-pin-bump-checklist.md) instead of trusting a system install.
-DUCKDB_CLI_VERSION = "1.5.4"
+DUCKDB_CLI_VERSION = "1.5.5"
 
 _DUCKDB_PLAT = {
     ("darwin", "arm64"): "osx-universal",

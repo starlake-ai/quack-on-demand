@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.3
+
+- **DuckDB upgraded 1.5.4 -> 1.5.5** across every pinned layer: libquackwire
+  rebuilt against libduckdb 1.5.5 (`1.5.5-7e80f7ffcc98-1`, duckdb-quack
+  submodule at the v1.5-variegata head - brings fetch-batch pushdown fixes,
+  catalog fetch truncation fix, INSERT RETURNING rejection, and secret-sourced
+  quack_serve tokens), the DuckDB JDBC driver (`1.5.5.0`), and the runtime
+  libduckdb / DuckDB CLI fetched by `run-jar.sh` / `run-jar.ps1` and the
+  `qod` Python CLI.
+- **quackwire macOS CI now links the official libduckdb release zip** instead
+  of Homebrew (whose bottle lags DuckDB releases).
+- **`QOD_VERSION=BUILD` links the local libquackwire rebuild against the
+  pinned libduckdb** from the `.duckdb/<version>` cache (staging the internal
+  header tree once per version) instead of the operator's system install.
+
 ## 0.5.1
 
 ### Module SPI: mutation gates
