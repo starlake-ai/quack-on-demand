@@ -566,19 +566,26 @@ export default function PoolDetailBody({
         <h2 style={{ margin: 0 }}>
           {data.tenant} / {data.tenantDb} / {data.pool}
           {data.suspended && <span className="badge warn" style={{ marginLeft: 8 }}>Hibernated</span>}
-          <span className={data.lockdownEffective ? 'badge good' : 'badge warn'} style={{ marginLeft: 8 }}>
-            Lockdown: {data.lockdownEffective ? 'on' : 'off'}
-          </span>
+          {(data.lockdownEffective || (data.lockdown ?? 'inherit') !== 'inherit') && (
+            <span className={data.lockdownEffective ? 'badge good' : 'badge warn'} style={{ marginLeft: 8 }}>
+              Lockdown: {data.lockdownEffective ? 'on' : 'off'}
+            </span>
+          )}
           {(data.lockdown ?? 'inherit') !== 'inherit' && (
             <span className="subtle" style={{ marginLeft: 4 }}>(override: {data.lockdown})</span>
           )}
         </h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
           {isSuperuser && (
+            // The global `select` rule (styles.css) sets width: 100%, meant for
+            // stacked form fields; inline it back to auto here so the select
+            // sits sized-to-content in this flex row, matching the Suspend/Wake
+            // button beside it instead of stretching to fill the row.
             <select
               value={data.lockdown ?? 'inherit'}
               onChange={e => void handleSetLockdown(e.target.value)}
               aria-label="Set pool lockdown"
+              style={{ width: 'auto' }}
             >
               <option value="inherit">Lockdown: inherit</option>
               <option value="on">Lockdown: on</option>
