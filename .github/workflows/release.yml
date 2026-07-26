@@ -1,0 +1,420 @@
+name: release
+
+# Cut a full release entirely from GitHub Actions - the CI-native counterpart
+# of scripts/release.sh (which stays valid for local / offline cuts). One
+# trigger fans out to the four publish channels the local scripts cover:
+#   1. build-jar       - sbt assembly (all 5 libquackwire platforms bundled
+#                        from the vendored git binaries), sha256, artifact
+#   2. github-release  - the canonical jar channel: jar + .sha256 + notes
+#   3. pypi            - qod + qod-cli shim
+#   4. docker          - multi-arch image (matrix build + digest merge),
+#                        lifted from snapshot.yml and retagged for release
+#   5. announce        - Discord #news (best effort)
+#   6. next-snapshot   - opens a PR bumping version.sbt to the next -SNAPSHOT
+#                        (a PR, not a push, so protected main needs no bot token)
+#
+# The version is pinned by the tag, so this workflow never writes the
+# release-version commit: it checks out the tag and builds from it. That is
+# the deliberate difference from release-jar.sh's local sbt-release dance.
+#
+# Trigger:
+#   - push a tag v<X.Y.Z>            (the normal path; create + push the tag)
+#   - workflow_dispatch (version)    (re-run a channel against an existing tag)
+#
+# TAG CONTRACT: the tagged commit must already carry the release versions in
+# the tree - version.sbt = "X.Y.Z" (no -SNAPSHOT; sbt names the jar from
+# version.sbt, not the tag) and the qod/qod-cli pyprojects = X.Y.Z. Tagging a
+# -SNAPSHOT commit fails fast in build-jar (jar-name guard) and pypi (version
+# guard); nothing half-publishes.
+#
+# Required repo secrets (all already used by snapshot.yml except PYPI_TOKEN):
+#   DOCKERHUB_USERNAME        Docker Hub login
+#   DOCKER_PASSWORD           Docker Hub access token (RW)
+#   PYPI_TOKEN                PyPI API token (or switch to Trusted Publishing,
+#                            see the pypi job) - covers qod + qod-cli
+#   QOD_DISCORD_WEBHOOK_URL   #news webhook (optional; announce no-ops if unset)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without the leading v (e.g. 0.5.3). Tag v<version> must already exist.'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: starlakeai/quack-on-demand
+
+jobs:
+
+  # -----------------------------------------------------------------------
+  # 0. Resolve the release version + tag ref once for every downstream job.
+  # -----------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            # tag push: github.ref_name is the tag (v0.5.3); strip the v.
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          [[ -n "$version" ]] || { echo "::error::could not resolve version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"    >> "$GITHUB_OUTPUT"
+          echo "releasing v$version"
+
+  # -----------------------------------------------------------------------
+  # 1. Build the assembly jar from the tag and hand it to the release jobs.
+  # -----------------------------------------------------------------------
+  # Build once here, upload the exact file as an artifact; github-release and
+  # docker consume it / rebuild from the same tag. The .sha256 published to the
+  # GitHub release is computed from THIS jar, so it always matches what users
+  # download (sbt assembly is not byte-reproducible - never re-hash a rebuild).
+  build-jar:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set up Temurin 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup sbt launcher
+        uses: sbt/setup-sbt@v1
+        with:
+          sbt-runner-version: '1.12.11'
+
+      - name: Verify vendored libquackwire binaries match the pin
+        run: |
+          set -euo pipefail
+          source scripts/release-lib.sh
+          verify_quackwire_binaries
+
+      - name: sbt assembly
+        env:
+          SBT_OPTS: "-Xss8M -Xmx5g -XX:+UseG1GC"
+        # All five platform natives (incl. windows-x86_64/quackwire.dll) come
+        # from the vendored libquackwire/binaries/ tree automatically; the
+        # old QOD_WITH_WINDOWS_NATIVE opt-in flag is retired.
+        run: sbt --no-colors assembly
+
+      - name: Compute sha256 companion
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          jar="quack-on-demand-assembly-${version}.jar"
+          [[ -f "distrib/$jar" ]] || { echo "::error::distrib/$jar not produced" >&2; exit 1; }
+          ( cd distrib && shasum -a 256 "$jar" > "$jar.sha256" )
+
+      - name: Upload jar + sha256
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-jar
+          path: |
+            distrib/quack-on-demand-assembly-${{ needs.prepare.outputs.version }}.jar
+            distrib/quack-on-demand-assembly-${{ needs.prepare.outputs.version }}.jar.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # -----------------------------------------------------------------------
+  # 2. GitHub release - the canonical jar channel (idempotent).
+  # -----------------------------------------------------------------------
+  github-release:
+    needs: [prepare, build-jar]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-jar
+          path: distrib
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          version="${{ needs.prepare.outputs.version }}"
+          jar="distrib/quack-on-demand-assembly-${version}.jar"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; (re)uploading assets."
+            gh release upload "$tag" "$jar" "$jar.sha256" --clobber
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --generate-notes \
+              "$jar" "$jar.sha256"
+          fi
+
+  # -----------------------------------------------------------------------
+  # 3. PyPI - qod (the launcher) + qod-cli (the shim).
+  # -----------------------------------------------------------------------
+  # Uses the existing PYPI_TOKEN secret so no new PyPI setup is needed.
+  # To move to Trusted Publishing (no long-lived token): drop the `password`
+  # line below, add `permissions: id-token: write` to this job, and register
+  # each project's GitHub publisher on PyPI. skip-existing makes re-runs safe.
+  pypi:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Guard - CLI versions must equal the release version
+        # Without this, an unbumped CLI version would make the job green while
+        # skip-existing silently publishes nothing (silent drift). qod's
+        # version is hatch-dynamic from qod_cli.__version__ (read via the
+        # same release-lib.sh helper the local scripts use); the shim's is
+        # static in its pyproject.
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          source scripts/release-lib.sh
+          got_qod="$(cli_version)"
+          got_shim="$(python3 -c "import tomllib;print(tomllib.load(open('cli/shim-qod-cli/pyproject.toml','rb'))['project']['version'])")"
+          for pair in "qod:$got_qod" "qod-cli-shim:$got_shim"; do
+            name="${pair%%:*}"; got="${pair#*:}"
+            if [[ "$got" != "$version" ]]; then
+              echo "::error::$name version is $got, expected $version. The tagged commit must carry the release CLI versions." >&2
+              exit 1
+            fi
+          done
+
+      - name: Build qod + qod-cli shim sdists/wheels
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade build
+          ( cd cli && python -m build --outdir "$GITHUB_WORKSPACE/pypi-dist/qod" )
+          ( cd cli/shim-qod-cli && python -m build --outdir "$GITHUB_WORKSPACE/pypi-dist/shim" )
+
+      - name: Publish qod
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi-dist/qod
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: true
+
+      - name: Publish qod-cli shim
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi-dist/shim
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: true
+
+  # -----------------------------------------------------------------------
+  # 4a. Docker image build (per platform, push by digest).
+  # -----------------------------------------------------------------------
+  # Mirror of snapshot.yml's docker-build: each arch on its own native runner,
+  # pushed by digest, merged into one manifest list by the next job. The
+  # Dockerfile builds the assembly from the checked-out tag, so build.sbt /
+  # version.sbt already carry the released versions - no git-checkout dance.
+  docker-build:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set platform pair env
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Docker metadata (labels only - tags applied in merge step)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          labels: |
+            org.opencontainers.image.vendor=starlakeai
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=quack-on-demand
+            org.opencontainers.image.description=Auto-scaling DuckDB-Quack manager with FlightSQL edge.
+            org.opencontainers.image.url=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.source=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ env.PLATFORM_PAIR }}
+          cache-to:   type=gha,scope=docker-${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -----------------------------------------------------------------------
+  # 4b. Merge per-arch digests into one manifest list under the release tags.
+  # -----------------------------------------------------------------------
+  docker-merge:
+    needs: [prepare, docker-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          minor="$(echo "$version" | cut -d. -f1-2)"
+          major="$(echo "$version" | cut -d. -f1)"
+          # Release tagging mirrors release-docker.sh: :<version> :<minor>
+          # :<major> :latest (snapshot.yml uses :latest-snapshot instead).
+          docker buildx imagetools create \
+            -t "${{ env.REGISTRY_IMAGE }}:${version}" \
+            -t "${{ env.REGISTRY_IMAGE }}:${minor}" \
+            -t "${{ env.REGISTRY_IMAGE }}:${major}" \
+            -t "${{ env.REGISTRY_IMAGE }}:latest" \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${{ needs.prepare.outputs.version }}"
+
+  # -----------------------------------------------------------------------
+  # 5. Discord #news announcement (best effort, after the jar is public).
+  # -----------------------------------------------------------------------
+  announce:
+    needs: [prepare, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Announce on Discord
+        env:
+          QOD_DISCORD_WEBHOOK_URL: ${{ secrets.QOD_DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${QOD_DISCORD_WEBHOOK_URL:-}" ]]; then
+            echo "QOD_DISCORD_WEBHOOK_URL unset; skipping announce."
+            exit 0
+          fi
+          ./scripts/announce-release-discord.sh "${{ needs.prepare.outputs.version }}"
+
+  # -----------------------------------------------------------------------
+  # 6. Open a PR bumping version.sbt + the CLI versions to the next -SNAPSHOT.
+  # -----------------------------------------------------------------------
+  # A PR (not a direct push) keeps this workflow off protected main. libquackwire
+  # is deliberately NOT rebumped - its coord only changes when its inputs do.
+  # Requires the repo setting "Allow GitHub Actions to create and approve pull
+  # requests"; otherwise supply a PAT to the create-pull-request action.
+  next-snapshot:
+    needs: [prepare, github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Bump to next dev snapshot
+        id: bump
+        run: |
+          set -euo pipefail
+          source scripts/release-lib.sh
+          release_version="${{ needs.prepare.outputs.version }}"
+          next="$(next_manager_snapshot "$release_version")"
+          cli_next="${next%-SNAPSHOT}.dev0"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          # version.sbt (single quoted version literal on the ThisBuild line).
+          sed -i.bak -E "s|\"[^\"]+\"|\"${next}\"|" version.sbt && rm version.sbt.bak
+          set_cli_version "$cli_next"
+          set_cli_manager_version "$cli_next"
+          set_cli_shim_version "$cli_next"
+
+      - name: Open bump PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/next-snapshot-${{ steps.bump.outputs.next }}
+          title: "Setting version to ${{ steps.bump.outputs.next }}"
+          commit-message: "Setting version to ${{ steps.bump.outputs.next }}"
+          body: |
+            Post-release housekeeping after v${{ needs.prepare.outputs.version }}.
+            Bumps version.sbt and the qod CLI versions to the next dev snapshot.
+            libquackwire is intentionally left pinned.
