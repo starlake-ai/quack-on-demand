@@ -100,10 +100,32 @@ verify_quackwire_binaries() {
   stamped="$(cat libquackwire/binaries/VERSION 2>/dev/null || true)"
   [[ "$stamped" == "$version" ]] \
     || { echo "libquackwire/binaries/VERSION ($stamped) != libquackwireVersion ($version). Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
+
+  # Mandatory platforms must have their binary present - an unmatched glob in
+  # the checksum loop below silently iterates zero times, so a tree missing a
+  # whole platform (e.g. a refresh script CI-fetch that came up short) would
+  # otherwise pass as long as VERSION happened to already be correct.
+  local mandatory=(
+    "linux-x86_64:libquackwire.so"
+    "linux-aarch64:libquackwire.so"
+    "osx-x86_64:libquackwire.dylib"
+    "osx-aarch64:libquackwire.dylib"
+  )
+  local entry plat file missing=()
+  for entry in "${mandatory[@]}"; do
+    plat="${entry%%:*}"
+    file="${entry##*:}"
+    [[ -f "libquackwire/binaries/$plat/$file" ]] || missing+=("$plat")
+  done
+  [[ ${#missing[@]} -eq 0 ]] \
+    || { echo "missing vendored libquackwire binaries: ${missing[*]}. Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
+
+  # windows-x86_64/quackwire.dll rides along whenever present; only its
+  # checksum is verified below, same as every other platform's binary.
   local f
   for f in libquackwire/binaries/*/libquackwire.* libquackwire/binaries/*/quackwire.dll; do
     [[ -f "$f" && "$f" != *.sha256 ]] || continue
-    [[ -f "$f.sha256" ]] || { echo "missing checksum $f.sha256" >&2; return 1; }
+    [[ -f "$f.sha256" ]] || { echo "missing checksum $f.sha256. Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
     [[ "$(sha256_of "$f")" == "$(cat "$f.sha256")" ]] \
       || { echo "checksum mismatch for $f. Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
   done

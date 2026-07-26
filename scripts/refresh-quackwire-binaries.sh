@@ -64,7 +64,7 @@ cp "native/quackwire/build/libquackwire.$host_ext" \
    "libquackwire/binaries/$host_platform/libquackwire.$host_ext"
 
 # --- fetch the other platforms from CI (ported from step 4) ---
-# Download the other 3 platforms from the latest green quackwire CI run on
+# Download the other platforms from the latest green quackwire CI run on
 # main - same matrix CI uses, so bit-identical binaries without a local
 # cross-compile toolchain.
 echo "looking up the latest 'quackwire native build' run on main..."
