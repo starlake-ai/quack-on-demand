@@ -1,11 +1,12 @@
 name: quackwire native build
 
-# Builds the JNI shim `libquackwire.{so,dylib}` for the four platforms the
-# manager runs on, then aggregates them into a draft GitHub Release whose
-# tag encodes the pinned `duckdb-quack` short SHA (per design doc §9.7 /
-# §9.9). The sbt `fetchQuackwire` task in `project/QuackwireArtifact.scala`
-# consumes the release at compile time so a normal `sbt assembly` does not
-# need a local C/C++ toolchain.
+# Builds the JNI shim `libquackwire.{so,dylib,dll}` for the five platforms
+# the manager runs on and uploads each as a build artifact. Binaries are
+# vendored in git under libquackwire/binaries/ (see build.sbt's
+# resourceGenerator); scripts/refresh-quackwire-binaries.sh builds the host
+# platform locally and downloads the rest from the latest green run of this
+# workflow on main, then a developer reviews and commits the diff. No
+# Central publish, no GPG, no Sonatype.
 #
 # Co-pinned versions (single source of truth: design doc §9.9):
 #   - duckdb-quack : 7e80f7ffcc98d0b3e81d0e1df8cc1c2da240a64b
@@ -30,14 +31,12 @@ on:
     paths:
       - 'native/quackwire/**'
       - 'libquackwire/**'
-      - 'project/LibquackwireArtifacts.scala'
       - 'build.sbt'
       - '.github/workflows/quackwire.yml'
   pull_request:
     paths:
       - 'native/quackwire/**'
       - 'libquackwire/**'
-      - 'project/LibquackwireArtifacts.scala'
       - 'build.sbt'
       - '.github/workflows/quackwire.yml'
   workflow_dispatch:
@@ -190,8 +189,9 @@ jobs:
   # Separate job (not a matrix row) because the toolchain is MSVC + a
   # hand-assembled DUCKDB_HOME rather than a system package. Produces the
   # un-prefixed `quackwire.dll` (System.mapLibraryName has no "lib" prefix on
-  # Windows), uploaded as quackwire-windows-x86_64 so the publish job's
-  # `quackwire-*` glob picks it up alongside the four Unix artifacts.
+  # Windows), uploaded as quackwire-windows-x86_64 alongside the four Unix
+  # artifacts so scripts/refresh-quackwire-binaries.sh's `quackwire-*` glob
+  # picks it up when it downloads from the latest green run on main.
   build-windows:
     name: build windows-x86_64
     runs-on: windows-2022
@@ -262,74 +262,3 @@ jobs:
           path: native/quackwire/build/Release/quackwire.dll
           if-no-files-found: error
           retention-days: 30
-
-  # -----------------------------------------------------------------------
-  # 2. Publish per-platform classifier jars to Sonatype Central snapshots
-  # -----------------------------------------------------------------------
-  # Runs on push-to-main and on manual workflow_dispatch from main.
-  # Stages each platform binary into
-  # libquackwire/binaries/<platform>/ and runs `sbt libquackwire/publish`.
-  # Mirrors the manager's `.github/workflows/snapshot.yml` pattern:
-  # plain `publish` (no GPG signing required), targets Central snapshots
-  # because libquackwireVersion in build.sbt ends in -SNAPSHOT.
-  #
-  # build.sbt keeps pinning the last RELEASED (non-SNAPSHOT) coord between
-  # libquackwire changes; the publish step below fails fast in that state to
-  # signal that a native change landed without bumping libquackwireVersion
-  # to a new -SNAPSHOT.
-  #
-  # Required repo secrets (shared with the manager's snapshot workflow):
-  #   SONATYPE_USERNAME    Central Portal user token (NOT legacy OSSRH)
-  #   SONATYPE_PASSWORD    Central Portal user token secret
-  publish-central:
-    name: publish libquackwire to Sonatype Central snapshots
-    needs: [build, build-windows]
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Download all per-platform artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: quackwire-*
-          path: artifacts
-
-      - name: Stage binaries into libquackwire/binaries/
-        run: |
-          set -euo pipefail
-          for d in artifacts/quackwire-*; do
-            platform=$(basename "$d" | sed 's/^quackwire-//')
-            mkdir -p "libquackwire/binaries/$platform"
-            # Unix artifacts carry libquackwire.{so,dylib}; the Windows artifact
-            # carries the un-prefixed quackwire.dll. Copy whichever is present.
-            cp "$d"/libquackwire.* "libquackwire/binaries/$platform/" 2>/dev/null || true
-            cp "$d"/quackwire.dll  "libquackwire/binaries/$platform/" 2>/dev/null || true
-          done
-          find libquackwire/binaries -type f -ls
-
-      - name: Publish to Sonatype Central snapshots
-        env:
-          # Include the 5th (Windows) classifier in this publish.
-          QOD_WITH_WINDOWS_NATIVE: 'true'
-          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
-          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          version=$(sed -nE 's|^val libquackwireVersion = "(.*)"$|\1|p' build.sbt)
-          if [[ "$version" != *-SNAPSHOT ]]; then
-            echo "::error::libquackwireVersion is '$version' (non-SNAPSHOT): a native change" \
-              "landed without bumping the version. Bump libquackwireVersion in build.sbt to a" \
-              "new -SNAPSHOT (new rev; new duckdb prefix/hash if those changed) and re-push."
-            exit 1
-          fi
-          sbt --no-colors --batch "libquackwire/publish"

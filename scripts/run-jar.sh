@@ -8,11 +8,11 @@
 #                       $JAR_CACHE_DIR, run `java -jar`.
 #   <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
 #   latest-snapshot   - download the newest Central snapshot.
-#   BUILD             - rebuild libquackwire for the host platform (cmake +
-#                       sbt libquackwire/publishLocal), then run `sbt assembly`
-#                       from this checkout. Non-host platforms come from
-#                       Central snapshots so the assembly carries all four
-#                       libs. Uses the freshly-built jar in distrib/.
+#   BUILD             - rebuild libquackwire for the host platform (cmake)
+#                       into the vendored libquackwire/binaries/ tree, then
+#                       `sbt assembly` from this checkout. Non-host platforms
+#                       come from the git-tracked binaries already in the
+#                       repo. Uses the freshly-built jar in distrib/.
 #   LOCAL             - run the newest jar already in distrib/ without
 #                       rebuilding or consulting Maven Central (falls back
 #                       to a build when distrib/ is empty).
@@ -362,14 +362,12 @@ ensure_sbt() {
   echo "bootstrapped sbt -> $SBT_CMD"
 }
 
-# Re-build libquackwire for the host platform via CMake, then ensure all four
-# platforms' binaries are staged under libquackwire/binaries/ so
-# `sbt libquackwire/publishLocal` can produce a complete set of classifier
-# jars. Non-host platforms are pulled from Sonatype Central snapshots (the
-# same libquackwire-SNAPSHOT the manager's libraryDependencies points at)
-# and unpacked into the staging tree. After publishLocal lands the set in
-# ~/.ivy2/local/, the assembly task resolves all four classifier coords
-# from the local cache - the host one carries the freshly-built bits.
+# Re-build libquackwire for the host platform via CMake and drop the result
+# straight into the vendored libquackwire/binaries/<host>/ tree (git-tracked;
+# the other platforms' binaries are already in the repo, refreshed by
+# scripts/refresh-quackwire-binaries.sh). The build.sbt resourceGenerator
+# picks all of it up on the following `sbt assembly` - no publishLocal, no
+# Central round-trip.
 rebuild_libquackwire_locally() {
   # Skip if the C++ source tree is absent (e.g. distribution-style
   # checkout without native/quackwire/).
@@ -378,7 +376,7 @@ rebuild_libquackwire_locally() {
     return 0
   fi
   command -v cmake >/dev/null 2>&1 || {
-    echo "WARN: cmake not on PATH; skipping libquackwire rebuild (assembly will resolve from Central snapshots)." >&2
+    echo "WARN: cmake not on PATH; skipping libquackwire rebuild (assembly will use the vendored binaries already in the repo)." >&2
     return 0
   }
   # 1. Detect host platform - mirrors QuackNativeBridge.NativeLoader.platformDir().
@@ -425,51 +423,27 @@ rebuild_libquackwire_locally() {
   local host_built="$REPO_DIR/native/quackwire/build/libquackwire.$host_ext"
   [[ -f "$host_built" ]] || {
     echo "ERROR: cmake did not produce $host_built" >&2; exit 1; }
+
+  # 4. Copy the freshly-built host binary into the vendored tree (git-tracked;
+  # the other platforms' binaries are already in the repo). Refresh its
+  # checksum so release.sh's phase-1 verification stays truthful. The diff,
+  # if any, is the operator's to commit or discard.
   mkdir -p "$REPO_DIR/libquackwire/binaries/$host_platform"
-  cp "$host_built" "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext"
-
-  # 4. For the other 3 platforms, pull the matching classifier jar from
-  # Central snapshots (or use whatever is already staged from a prior run).
-  local snap_url="https://central.sonatype.com/repository/maven-snapshots/ai/starlake/libquackwire/${libq_version}"
-  local platforms=(linux-x86_64 linux-aarch64 osx-x86_64 osx-aarch64)
-  for plat in "${platforms[@]}"; do
-    [[ "$plat" == "$host_platform" ]] && continue
-    local ext
-    case "$plat" in *linux*) ext=so ;; *) ext=dylib ;; esac
-    local out_dir="$REPO_DIR/libquackwire/binaries/$plat"
-    local out_lib="$out_dir/libquackwire.$ext"
-    if [[ -f "$out_lib" ]]; then
-      continue
-    fi
-    mkdir -p "$out_dir"
-    local cls_url="${snap_url}/libquackwire-${libq_version}-${plat}.jar"
-    local tmp
-    tmp="$(mktemp -d)"
-    if curl -fsSL "$cls_url" -o "$tmp/cls.jar" 2>/dev/null; then
-      ( cd "$tmp" && unzip -q cls.jar "native/$plat/libquackwire.$ext" \
-        && mv "native/$plat/libquackwire.$ext" "$out_lib" )
-      echo "fetched libquackwire[$plat] from Central snapshots"
-    else
-      echo "WARN: could not fetch $cls_url; libquackwire[$plat] will be skipped (assembly may fail at sbt-assembly time)." >&2
-    fi
-    rm -rf "$tmp"
-  done
-
-  # 5. Publish all available classifiers into the local ivy cache so the
-  # assembly task resolves them without round-tripping Central for the host.
-  echo "sbt libquackwire/publishLocal..."
-  # </dev/null: keep sbt's JLine from seizing an interactive tty (raw/no-echo
-  # mode) on WSL. With a non-tty stdin JLine stays "dumb" and never reconfigures
-  # the pty -- the same reason CI runs never corrupt the terminal.
-  "$SBT_CMD" libquackwire/publishLocal </dev/null
+  cp "$REPO_DIR/native/quackwire/build/libquackwire.$host_ext" \
+     "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext"
+  shasum -a 256 "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext" \
+    | awk '{print $1}' > "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext.sha256"
 }
 
 build_locally() {
   ensure_sbt
   rebuild_libquackwire_locally
+  # Stale pre-vendoring BUILD output collides with the resourceGenerator.
+  rm -rf "$REPO_DIR/src/main/resources/native"
   echo "running '$SBT_CMD assembly' (local build)..."
-  # </dev/null: see the publishLocal note above -- prevents sbt/JLine from
-  # leaving the WSL pty in raw mode for the foreground java run that follows.
+  # </dev/null: keep sbt's JLine from seizing an interactive tty (raw/no-echo
+  # mode) on WSL. With a non-tty stdin JLine stays "dumb" and never
+  # reconfigures the pty -- the same reason CI runs never corrupt the terminal.
   "$SBT_CMD" assembly </dev/null
   JAR="$(ls -t "$DISTRIB_DIR"/quack-on-demand-assembly-*.jar 2>/dev/null | head -n1 || true)"
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
