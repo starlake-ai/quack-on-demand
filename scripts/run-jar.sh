@@ -362,6 +362,19 @@ ensure_sbt() {
   echo "bootstrapped sbt -> $SBT_CMD"
 }
 
+# sha256_of <file> - prints the hex digest. macOS ships shasum; Linux usually
+# ships sha256sum instead (and may lack shasum entirely). Duplicated from
+# release-lib.sh / refresh-quackwire-binaries.sh's helper of the same name:
+# run-jar.sh stays standalone rather than source release-lib.sh for a
+# two-line dependency.
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
 # Re-build libquackwire for the host platform via CMake and drop the result
 # straight into the vendored libquackwire/binaries/<host>/ tree (git-tracked;
 # the other platforms' binaries are already in the repo, refreshed by
@@ -431,8 +444,8 @@ rebuild_libquackwire_locally() {
   mkdir -p "$REPO_DIR/libquackwire/binaries/$host_platform"
   cp "$REPO_DIR/native/quackwire/build/libquackwire.$host_ext" \
      "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext"
-  shasum -a 256 "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext" \
-    | awk '{print $1}' > "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext.sha256"
+  sha256_of "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext" \
+    > "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext.sha256"
 }
 
 build_locally() {
