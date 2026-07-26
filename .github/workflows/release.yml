@@ -180,7 +180,9 @@ jobs:
   # line below, add `permissions: id-token: write` to this job, and register
   # each project's GitHub publisher on PyPI. skip-existing makes re-runs safe.
   pypi:
-    needs: prepare
+    # build-jar in needs: so a failed verify gate (stale vendored binaries at
+    # the tag) blocks EVERY publish channel, matching release.sh's phase order.
+    needs: [prepare, build-jar]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -240,7 +242,8 @@ jobs:
   # Dockerfile builds the assembly from the checked-out tag, so build.sbt /
   # version.sbt already carry the released versions - no git-checkout dance.
   docker-build:
-    needs: prepare
+    # build-jar in needs: for the same verify-gate reason as pypi above.
+    needs: [prepare, build-jar]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
