@@ -332,6 +332,30 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.specs.size should be >= before + 2
   }
 
+  "PoolSupervisor.reconcile" should "skip pools of a dataPath-blocked tenant-db" in {
+    // Regression for the DuckLake dataPath guard: once ensureDuckLakeInitialized blocks a
+    // tenant-db (DataPathMismatchException at boot), reconcile() must not keep retrying that
+    // tenant-db's pools -- every attempt would otherwise reproduce the same per-node DuckDB
+    // DATA_PATH error the guard exists to eliminate. CapturingBackend nodes are never reachable
+    // (see the reconcileLoop test above), so without the block reconcile() would respawn on the
+    // very first pass. blockDataPathForTest is the package-private seam this spec uses instead of
+    // spinning up a real mismatched DuckLake catalog.
+    val (sup, b) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val td = sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val before = b.specs.size // 1: the initial createPool spawn
+
+    sup.blockDataPathForTest(td.id, "dataPath mismatch (test)")
+    sup.reconcile().unsafeRunSync()
+
+    b.specs.size shouldBe before // no respawn attempted for the blocked tenant-db's pool
+  }
+
   "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
     // Repro for "node stuck in draining after drain + rescale": draining a node
     // (force=false) sets draining=true and deletes its store row but leaves the
@@ -1022,6 +1046,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
   it should "Left on unknown tenant-db" in {
     val (sup, _, _) = updateTenantDbFixture()
     sup.updateTenantDb("acme", "acme_nope", TenantDbPatch()).unsafeRunSync().isLeft shouldBe true
+  }
+
+  it should "clear a dataPath-blocked tenant-db's entry on a node-affecting edit" in {
+    // Staleness-invalidation regression for the DuckLake dataPath guard: without this, a
+    // tenant-db blocked at boot (DataPathMismatchException) would stay blocked forever even
+    // after the operator fixes it via the documented remediation path, POST
+    // /api/database/update, forcing an unnecessary manager restart.
+    val (sup, _, dbName) = updateTenantDbFixture()
+    val tdId             = sup.findTenantDb("acme", dbName).get.id
+    sup.blockDataPathForTest(tdId, "dataPath mismatch (test)")
+    sup.isDataPathBlockedForTest(tdId) shouldBe true
+
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2"))
+    )).unsafeRunSync()
+    out.isRight shouldBe true
+
+    sup.isDataPathBlockedForTest(tdId) shouldBe false
   }
 
   it should "reject a patch that drops a required metastore key" in {

@@ -366,6 +366,8 @@ object DuckLakeInitializer extends LazyLogging:
               "shared by two installations (e.g. a dev checkout and the qod launcher on the same " +
               "Postgres). Fix: point them at separate control planes with QOD_PG_DBNAME, or reset " +
               "this world (drop the control-plane and tenant-db databases, then re-seed), or if the " +
-              "data really moved, update the database's dataPath via POST /api/database/update."
+              "data really moved, update the database's dataPath via POST /api/database/update. " +
+              "After fixing, update the database via POST /api/database/update or restart the " +
+              "manager to re-attempt."
           )
       }

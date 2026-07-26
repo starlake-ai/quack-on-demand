@@ -120,6 +120,15 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
+  // tenant-db.id -> the DataPathMismatchException message that blocked it. Populated by
+  // ensureDuckLakeInitialized when DuckLakeInitializer's guard refuses a pre-existing tenant-db's
+  // dataPath at boot; consulted by reconcile() to skip that tenant-db's pools instead of letting
+  // every node spawn attempt fail with the same raw DuckDB DATA_PATH error. Cleared by
+  // updateTenantDb (the documented remediation path) and deleteTenantDb. Deliberately in-memory
+  // only, like every other DuckLakeInitializer failure -- a manager restart also clears it and lets
+  // the next boot re-attempt.
+  private val dataPathBlocked = TrieMap.empty[String, String]
+
   /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
     * zero-module boots and in every existing test, so default behavior is unchanged.
     */
@@ -229,6 +238,24 @@ final class PoolSupervisor(
         else PoolSupervisor.replaceLastSegment(rootData, td.name)
       if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb
 
+  /** True when `key`'s tenant-db is in [[dataPathBlocked]]. Falls back to `false` when the pool has
+    * no persisted row (InMemory-only test pools) -- consistent with every other optional
+    * `poolIdByKey`/`poolRows` lookup in this file, and safe: a pool this file never wrote to the
+    * store can never race with a boot-time DuckLakeInitializer failure either.
+    */
+  private def isDataPathBlocked(key: PoolKey): Boolean =
+    poolIdByKey.get(key).flatMap(poolRows.get).exists(p => dataPathBlocked.contains(p.tenantDbId))
+
+  /** Test-only seam: seed [[dataPathBlocked]] directly, without a live Postgres guard check, so
+    * specs can assert reconcile()'s skip behavior against a hand-built blocked entry.
+    */
+  private[ondemand] def blockDataPathForTest(tenantDbId: String, message: String): Unit =
+    dataPathBlocked.put(tenantDbId, message)
+
+  /** Test-only seam: read back [[dataPathBlocked]] membership. */
+  private[ondemand] def isDataPathBlockedForTest(tenantDbId: String): Boolean =
+    dataPathBlocked.contains(tenantDbId)
+
   def restore(): Unit =
     val snap = store.snapshot()
 
@@ -257,6 +284,9 @@ final class PoolSupervisor(
     poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
     pools.keys.toList.filterNot(snapPoolKeys).foreach(pools.remove)
     poolIdByKey.keys.toList.filterNot(snapPoolKeys).foreach(poolIdByKey.remove)
+    // A tenant-db a peer deleted directly in the store can no longer spawn anything, so any
+    // dataPath block held for it is moot; drop it rather than leaking it forever.
+    dataPathBlocked.keys.toList.filterNot(snapTenantDbIds).foreach(dataPathBlocked.remove)
 
     snap.tenants.foreach(t => tenants.put(t.id, t))
     snap.tenantDbs.foreach(td => tenantDbs.put(td.id, td))
@@ -380,14 +410,19 @@ final class PoolSupervisor(
   def ensureDuckLakeInitialized(): IO[Unit] = IO.blocking {
     tenantDbs.values.toList.foreach { td =>
       if td.kind == TenantDbKind.DuckLake then
-        try DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
+        try
+          DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
+          dataPathBlocked.remove(td.id)
         catch
           case t: DuckLakeInitializer.DataPathMismatchException =>
             // Not transient like the other init failures below: every future node spawn
             // for this tenant-db's pools would hit the same DuckDB DATA_PATH error, so
-            // this is surfaced loudly instead of the generic "will retry" WARN. The next
-            // tenant-db in this loop still gets its own attempt -- one bad tenant-db must
-            // not abort the whole manager boot.
+            // this is surfaced loudly instead of the generic "will retry" WARN, AND the
+            // tenant-db's pools are blocked from reconcile()'s spawn attempts (see
+            // isDataPathBlocked) instead of reproducing that error once per node. The
+            // next tenant-db in this loop still gets its own attempt -- one bad
+            // tenant-db must not abort the whole manager boot.
+            dataPathBlocked.put(td.id, t.getMessage)
             logger.error(s"ensureDuckLakeInitialized: '${td.name}' ${t.getMessage}")
           case t: Throwable =>
             logger.warn(
@@ -399,12 +434,31 @@ final class PoolSupervisor(
 
   /** Re-check every persisted node; respawn dead ones. */
   def reconcile(): IO[Unit] = IO.defer {
-    logger.info(
-      s"reconcile: checking ${pools.size} pool(s), ${pools.values.map(_.nodes.size).sum} node(s)"
-    )
-    pools.toList.foldLeft(IO.unit) { case (acc, (key, state)) =>
-      acc *> reconcilePool(key, state).void
-    }
+    // A dataPath-blocked tenant-db (see ensureDuckLakeInitialized) must not have its pools'
+    // node-spawn attempts retried every pass -- that reproduces the exact per-node DuckDB
+    // DATA_PATH noise this guard exists to eliminate. Skip those pools entirely rather than
+    // re-querying the guard here: the guard only re-runs at boot/create/update, never per tick.
+    val (blocked, runnable) = pools.toList.partition { case (key, _) => isDataPathBlocked(key) }
+    val skipLog             = blocked
+      .groupBy { case (key, _) => key.tenantDb }
+      .toList
+      .foldLeft(IO.unit) { case (acc, (tenantDbName, ps)) =>
+        acc *> IO.delay(
+          logger.warn(
+            s"reconcile: skipping ${ps.size} pool(s) of tenant-db '$tenantDbName': " +
+              "dataPath mismatch; see boot ERROR"
+          )
+        )
+      }
+    IO.delay(
+      logger.info(
+        s"reconcile: checking ${runnable.size} pool(s), " +
+          s"${runnable.map(_._2.nodes.size).sum} node(s)"
+      )
+    ) *> skipLog *>
+      runnable.foldLeft(IO.unit) { case (acc, (key, state)) =>
+        acc *> reconcilePool(key, state).void
+      }
   }
 
   /** Run [[reconcile]] forever, sleeping `interval` between passes. The boot path runs reconcile
@@ -1050,6 +1104,7 @@ final class PoolSupervisor(
                 else
                   store.deleteTenantDb(td.id)
                   tenantDbs.remove(td.id)
+                  dataPathBlocked.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
                   catch case _: Throwable => ()
                   dbAdmin.dropDatabase(td.name) match
@@ -1111,6 +1166,16 @@ final class PoolSupervisor(
                 IO.blocking {
                   store.upsertTenantDb(merged)
                   tenantDbs.put(merged.id, merged)
+                  // Staleness invalidation for the dataPath guard: a metastore/objectStore/
+                  // initSql edit is the documented remediation for a boot-time
+                  // DataPathMismatchException (POST /api/database/update), so it must clear
+                  // any earlier block instead of leaving reconcile() skipping this tenant-db's
+                  // pools forever. Deliberately unconditional (no live re-check against
+                  // Postgres here) -- the guard only runs at boot/create, never on every edit;
+                  // if the operator's fix was wrong, the per-node ATTACH will surface that on
+                  // the next respawn, and the next manager restart re-blocks it via
+                  // ensureDuckLakeInitialized if it is still wrong.
+                  if nodeAffecting then dataPathBlocked.remove(merged.id)
                   // Unlocked read-modify-write: same trade-off as documented on the
                   // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
                   pools.foreach { case (key, state) =>
