@@ -101,15 +101,14 @@ seaweedfs-config/
 # library dependencies, so the source tree never carries them.
 native/quackwire/build*/
 
-# CI-populated binaries staging dir for `sbt libquackwire/publishSigned`.
-# Each per-platform classifier jar is built by zipping
-# libquackwire/binaries/<platform>/libquackwire.<so|dylib>.
-libquackwire/binaries/
+# Vendored libquackwire binaries live in git under libquackwire/binaries/
+# (refreshed by scripts/refresh-quackwire-binaries.sh). Only the local
+# cmake build tree stays ignored (native/quackwire/build*/ above).
 
 # Defense in depth: src/main/resources/native/ is no longer how
-# libquackwire reaches the assembly (the classifier deps in
-# libraryDependencies handle that). Any binaries that land here would
-# be stale relative to the published Maven coord; ignore them.
+# libquackwire reaches the assembly (the resourceGenerator in build.sbt
+# copies libquackwire/binaries/ into resourceManaged; anything landing
+# here would be stale duplicates).
 src/main/resources/native/
 
 # Docs site (Docusaurus). The build, dependency, and generated-reference

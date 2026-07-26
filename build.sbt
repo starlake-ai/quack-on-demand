@@ -53,8 +53,8 @@ ThisBuild / developers := List(
 lazy val genOpenApi    = taskKey[Unit]("Generate website/static/openapi.yaml from the Tapir endpoints")
 lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configuration.md from ConfigRegistry")
 
-// ----- libquackwire (Maven Central) -----------------------------------------
-// JNI shim native binaries published as classifier-per-platform jars.
+// ----- libquackwire (vendored native binaries) -------------------------------
+// JNI shim native binaries.
 //
 // Version format:  <duckdb-abi>-<duckdb-quack-short-sha>-<rev>[-SNAPSHOT]
 // Example:         1.5.5-7e80f7ffcc98-1-SNAPSHOT
@@ -67,11 +67,10 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 //                           release for the same (abi, sha) pair. Lets
 //                           us re-release after a C++ fix without
 //                           bumping the duckdb-quack pin.
-//   -SNAPSHOT (suffix)      present during dev -> publishes to Central
-//                           snapshots (mutable, no GPG); stripped by
-//                           `scripts/release.sh` before publishSigned +
-//                           sonatypeBundleRelease, then bumped to
-//                           rev+1-SNAPSHOT for the next dev cycle.
+// The binaries are vendored in-repo under libquackwire/binaries/ and
+// refreshed by scripts/refresh-quackwire-binaries.sh; this val is no
+// longer a Maven coordinate. run-jar.sh greps it for the libduckdb ABI
+// check and the refresh script stamps it into libquackwire/binaries/VERSION.
 //
 // Bumping the duckdb-quack pin: update the submodule SHA, edit the SHA
 // segment here, and reset rev to 1.
@@ -83,75 +82,40 @@ lazy val genConfigDocs = taskKey[Unit]("Generate website/docs/reference/configur
 // file's header for how to re-derive them.
 val libquackwireVersion = "1.5.5-7e80f7ffcc98-1"
 
-// Opt-in Windows native classifier. Default OFF so existing Linux/macOS/CI
-// `sbt assembly` / `sbt test` never try to resolve a windows-x86_64 classifier
-// that isn't on Central yet. Set QOD_WITH_WINDOWS_NATIVE=true (CI's Windows
-// build/publish job, or after a local `sbt libquackwire/publishLocal` that
-// staged quackwire.dll) to bundle native/windows-x86_64/quackwire.dll.
-val withWindowsNative: Boolean =
-  sys.env.get("QOD_WITH_WINDOWS_NATIVE").exists(v => v == "true" || v == "1")
-val windowsNativeDep: Seq[ModuleID] =
-  if (withWindowsNative)
-    Seq("ai.starlake" % "libquackwire" % libquackwireVersion classifier "windows-x86_64")
-  else Seq.empty
-
-lazy val libquackwire = (project in file("libquackwire"))
-  .settings(
-    name := "libquackwire",
-    version := libquackwireVersion,
-    description :=
-      "JNI shim that speaks DuckDB Quack's binary wire (application/vnd.duckdb) " +
-      "directly from a JVM. Native binaries published as classifier jars per platform.",
-    crossPaths := false,         // not a Scala-versioned artifact
-    autoScalaLibrary := false,   // no scala-library dependency
-    // The `ThisBuild / publishTo` above keys off the root project's
-    // `isSnapshot.value` (read from `version.sbt`), so a non-SNAPSHOT
-    // libquackwire release would still get routed to Central snapshots
-    // and rejected with HTTP 400 because the version doesn't end in
-    // -SNAPSHOT. Override per-project so libquackwire's own version
-    // picks the endpoint: snapshots for *-SNAPSHOT, release-bundle
-    // staging otherwise.
-    publishTo := {
-      val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
-      if (version.value.endsWith("-SNAPSHOT"))
-        Some("central-snapshots" at centralSnapshots)
-      else
-        sonatypePublishToBundle.value
-    },
-    // sbt-sonatype's default `sonatypeBundleDirectory` is
-    // `target / "sonatype-staging" / version.value` at ThisBuild scope,
-    // so libquackwire's signed artifacts land under the root project's
-    // `0.1.0-SNAPSHOT` directory. Override to libquackwire's own version
-    // so `sonatypeBundleRelease` (invoked in the libquackwire project
-    // scope by `scripts/release.sh`) finds its own bundle and the
-    // SNAPSHOT check doesn't fire against the root version.
-    sonatypeBundleDirectory :=
-      (LocalRootProject / target).value / "sonatype-staging" / version.value,
-    // Stub main jar (Central requires one). Contains just the README.
-    Compile / packageBin / mappings := Seq(
-      (baseDirectory.value / "README.md") -> "META-INF/libquackwire/README.md"
-    ),
-    // No sources / docs - the source-of-truth is the parent repo's
-    // `native/quackwire/` directory at the duckdb-quack SHA in the version.
-    Compile / packageSrc / publishArtifact := false,
-    Compile / packageDoc / publishArtifact := false,
-    // Disable the noop compile task by emptying its source sets.
-    Compile / unmanagedSourceDirectories := Seq.empty,
-    // Four classifier artifacts. Each task zips
-    // libquackwire/binaries/<platform>/libquackwire.<ext> into a jar
-    // containing `native/<platform>/libquackwire.<ext>` - matching the
-    // runtime resource path `QuackNativeBridge.loaded` looks up.
-  )
-  .settings(LibquackwireArtifacts.classifierSettings*)
-
 lazy val root = (project in file("."))
   .settings(UiBuild.settings)
   .settings(
     name := "quack-on-demand",
-    // Resolve `ai.starlake:libquackwire:*-SNAPSHOT` from Sonatype Central
-    // snapshots. Released libquackwire versions (no -SNAPSHOT suffix)
-    // are picked up from Maven Central via the default resolver.
-    resolvers += "central-snapshots" at "https://central.sonatype.com/repository/maven-snapshots/",
+    // Vendored libquackwire natives: copy libquackwire/binaries/<p>/<lib> into
+    // resourceManaged as native/<p>/<lib> - the same classpath layout the
+    // retired Maven classifier jars produced, so QuackNativeBridge's
+    // getResourceAsStream("/native/<platform>/...") lookup is unchanged.
+    // Mandatory platforms fail the build when absent so an incomplete
+    // checkout cannot produce a silently-broken uber-jar; Windows rides in
+    // whenever its dll is present (no env flag).
+    Compile / resourceGenerators += Def.task {
+      val srcRoot   = baseDirectory.value / "libquackwire" / "binaries"
+      val outRoot   = (Compile / resourceManaged).value / "native"
+      val mandatory = Seq(
+        "linux-x86_64"  -> "libquackwire.so",
+        "linux-aarch64" -> "libquackwire.so",
+        "osx-x86_64"    -> "libquackwire.dylib",
+        "osx-aarch64"   -> "libquackwire.dylib"
+      )
+      val optional = Seq("windows-x86_64" -> "quackwire.dll")
+      val missing  = mandatory.filterNot { case (p, f) => (srcRoot / p / f).exists }
+      if (missing.nonEmpty)
+        sys.error(
+          "missing vendored libquackwire binaries: " + missing.map(_._1).mkString(", ") +
+            " under libquackwire/binaries/. Run scripts/refresh-quackwire-binaries.sh (or QOD_VERSION=BUILD ./scripts/run-jar.sh for the host platform)."
+        )
+      val present = mandatory ++ optional.filter { case (p, f) => (srcRoot / p / f).exists }
+      present.map { case (p, f) =>
+        val out = outRoot / p / f
+        IO.copyFile(srcRoot / p / f, out)
+        out
+      }
+    }.taskValue,
     libraryDependencySchemes += "io.circe" %% "circe-yaml-common" % VersionScheme.Always,
     dependencyOverrides ++= Seq(
       "io.netty" % "netty-buffer"                       % Versions.netty,
@@ -210,22 +174,6 @@ lazy val root = (project in file("."))
       Dependencies.blobstoreGcs,
       Dependencies.blobstoreAzure,
       Dependencies.duckdbJdbc,
-      // libquackwire JNI shim - one classifier dep per supported platform.
-      // sbt-assembly bundles each classifier jar's payload into the uber-jar,
-      // so the resulting `quack-on-demand-assembly-*.jar` carries
-      // `native/<platform>/libquackwire.<so|dylib>` for all four platforms.
-      // `QuackNativeBridge` resolves the matching one at runtime via
-      // `getResourceAsStream("/native/<host-platform>/libquackwire.<ext>")`.
-      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "linux-x86_64",
-      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "linux-aarch64",
-      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-x86_64",
-      "ai.starlake" % "libquackwire" % libquackwireVersion classifier "osx-aarch64",
-      // The 5th classifier (Windows) is opt-in via QOD_WITH_WINDOWS_NATIVE so
-      // existing Linux/macOS/CI builds don't fail resolving an artifact that
-      // isn't on Central yet. Turn it on once the windows-x86_64 classifier is
-      // published (CI's quackwire.yml Windows job, or a local publishLocal) to
-      // bundle native/windows-x86_64/quackwire.dll into the assembly. See the
-      // `windowsNativeDep` def below.
       Dependencies.micrometerCore,
       Dependencies.micrometerPrometheus,
       Dependencies.micrometerCloudwatch,
@@ -235,7 +183,7 @@ lazy val root = (project in file("."))
       Dependencies.scalaTest,
       Dependencies.wireMock,
       Dependencies.http4sBlazeClient % Test
-    ) ++ windowsNativeDep,
+    ),
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "versions", "9", "module-info.class") => MergeStrategy.discard
       case PathList("META-INF", xs @ _*) =>
