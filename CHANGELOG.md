@@ -2,6 +2,26 @@
 
 ## 0.5.3
 
+- **Per-pool node lockdown override.** `qodstate_pool` gains a tri-state
+  `lockdown` (`inherit | on | off`, default inherit = the global
+  `QOD_NODE_LOCKDOWN` flag), resolved once per pool and enforced by BOTH
+  layers (edge screen per statement, engine SQL at node spawn). Superuser-only
+  `POST /api/pool/setLockdown` persists the override and restarts the pool's
+  nodes; `pool/create` takes a `lockdown` field (superuser-gated when not
+  `inherit`) surfaced as `qod pool create --lockdown` and a pool-detail UI
+  toggle; manifests export/import the override (and now `suspended` too).
+- **libquackwire is vendored in-repo; Maven Central publication retired.**
+  The native JNI binaries for all five platforms live in git under
+  `libquackwire/binaries/` (with sha256 companions and a VERSION stamp) and
+  are packaged straight into the assembly - no classifier jars, no Sonatype,
+  no GPG. `scripts/refresh-quackwire-binaries.sh` rebuilds the host platform
+  and pulls the rest from CI; releases verify the vendored set instead of
+  querying Central. `QOD_WITH_WINDOWS_NATIVE` is retired: `quackwire.dll` is
+  bundled automatically whenever it is vendored (it currently is).
+- **Tag-driven release workflow.** Pushing a `v<X.Y.Z>` tag now cuts the full
+  release from GitHub Actions (jar + sha256, GitHub release, PyPI `qod` +
+  `qod-cli` with a version-drift guard, multi-arch Docker, Discord announce,
+  next-snapshot bump PR); `scripts/release.sh` remains valid for local cuts.
 - **Per-database object-store credentials take effect at runtime.** A tenant-db's
   `objectStore` map now authors a DuckDB secret scoped to that database's
   `dataPath` at node spawn, so each database authenticates its own bucket with
