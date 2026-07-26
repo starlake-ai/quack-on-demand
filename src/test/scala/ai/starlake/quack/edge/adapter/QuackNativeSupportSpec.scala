@@ -10,8 +10,9 @@ import org.scalatest.matchers.should.Matchers
 class QuackNativeSupportSpec extends AnyFlatSpec with Matchers:
 
   "QuackNativeSupport.available" should "see the bundled native for this platform" in {
-    // The four Unix classifier jars are on the test classpath; dev machines and
-    // CI are all Unix, so the current platform's native must be present.
+    // The four Unix platform binaries are vendored under libquackwire/binaries/
+    // and bundled into resources at build time; dev machines and CI are all
+    // Unix, so the current platform's native must be present.
     QuackNativeSupport.availableForThisPlatform shouldBe true
   }
 

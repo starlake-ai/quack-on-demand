@@ -122,7 +122,7 @@ qod start
 
 **Client path.** Two ways the manager talks to the Quack nodes:
 
-- **Native wire (default, fastest)** needs `native\windows-x86_64\quackwire.dll` bundled in the assembly. The published cross-platform jar carries it; a jar you build yourself only carries it when built with `QOD_WITH_WINDOWS_NATIVE=true` (see below).
+- **Native wire (default, fastest)** needs `native\windows-x86_64\quackwire.dll` bundled in the assembly. `quackwire.dll` is bundled automatically whenever `libquackwire\binaries\windows-x86_64\quackwire.dll` exists in the checkout (it does in a normal clone - all 5 platforms are vendored). No env flag needed; see below to build it yourself.
 - **Embedded DuckDB (JDBC), no native build** - set `$env:QOD_NATIVE_CLIENT = 'false'`. The DuckDB JDBC driver ships its own Windows native, so this works with any assembly jar out of the box (slower; serialized). Good for a first run.
 
 On **Windows on ARM** (e.g. Parallels on Apple Silicon), DuckDB is provisioned as native `windows-arm64`, but the bundled `quackwire.dll` is x86_64-only and cannot load in the arm64 JVM. The manager detects this at boot and falls back to the embedded client automatically (a `WARN` is logged); no configuration needed.
@@ -135,8 +135,6 @@ cmake -S native\quackwire -B native\quackwire\build -DCMAKE_BUILD_TYPE=Release -
 cmake --build native\quackwire\build --config Release
 New-Item -ItemType Directory -Force libquackwire\binaries\windows-x86_64 | Out-Null
 Copy-Item native\quackwire\build\Release\quackwire.dll libquackwire\binaries\windows-x86_64\
-$env:QOD_WITH_WINDOWS_NATIVE = 'true'
-sbt libquackwire/publishLocal
 sbt assembly            # bundles native/windows-x86_64/quackwire.dll
 qod start --jar distrib\quack-on-demand-assembly-<version>.jar
 ```

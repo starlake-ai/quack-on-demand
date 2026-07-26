@@ -40,8 +40,8 @@ object DemoConfig:
       apiKey = None,
       defaultMetastore = metastore,
       // The demo must run unmodified on any host: the JNI native client
-      // (`quackwire`) is an ABI-pinned, opt-in-classifier native lib (see
-      // CLAUDE.md "JVM forking" / "native installers") that can fail to load
+      // (`quackwire`) is an ABI-pinned vendored native lib (see CLAUDE.md
+      // "JVM forking" / "native installers") that can fail to load
       // on a glibc it wasn't built against (observed: `UnsatisfiedLinkError:
       // GLIBC_2.32 not found`). The plain HTTP client (`QuackHttpClient`'s
       // non-native path) is the documented fallback for exactly this case, so

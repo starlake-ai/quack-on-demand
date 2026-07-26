@@ -27,9 +27,9 @@ On **Windows** the manager runs natively (no WSL/Docker) via PowerShell twins:
 `scripts/spawn-quack-node.ps1` (a mirror of the bash spawn script; keeps DuckDB
 alive by holding stdin open instead of a FIFO). Teardown uses `taskkill /T` so
 the `duckdb.exe` grandchild dies with its wrapper. The native `quackwire.dll` is
-an opt-in classifier (`QOD_WITH_WINDOWS_NATIVE=true`); without it, run the
-embedded client with `QOD_NATIVE_CLIENT=false`. See guides/RUNNING.md
-"Path 1 on Windows".
+bundled automatically whenever `libquackwire/binaries/windows-x86_64/quackwire.dll`
+exists in the checkout; without it, run the embedded client with
+`QOD_NATIVE_CLIENT=false`. See guides/RUNNING.md "Path 1 on Windows".
 
 UI dev loop (proxies `/api/*` to `localhost:20900`):
 

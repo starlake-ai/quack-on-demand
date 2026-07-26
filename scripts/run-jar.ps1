@@ -206,9 +206,10 @@ function Invoke-Build {
   $sbt = Resolve-Sbt
   Write-Host "running 'sbt assembly' (local build)..."
   # Note: unlike run-jar.sh, we don't rebuild the Windows quackwire.dll here (it
-  # needs MSVC/CMake and is gated behind QOD_WITH_WINDOWS_NATIVE). sbt assembly
-  # resolves the native classifiers already staged in the repo / Central. To
-  # build the dll, see the "Run on Windows" section of the install guide.
+  # needs MSVC/CMake). sbt assembly bundles whichever platform binaries are
+  # already vendored under libquackwire/binaries/ in the checkout - no env
+  # flag, no publish. To build the dll, see the "Run on Windows" section of
+  # the install guide.
   & $sbt assembly
   if ($LASTEXITCODE -ne 0) { Write-Error "sbt assembly failed"; exit 1 }
   $jar = Get-LocalJar

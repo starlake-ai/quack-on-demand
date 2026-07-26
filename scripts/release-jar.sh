@@ -4,8 +4,8 @@
 # release (the canonical jar channel), then bump to the next dev snapshot and
 # push. The manager is NOT published to Maven Central: nothing consumes it as
 # a Maven dependency - the qod CLI, install.sh, and brew all download the
-# GitHub Release asset (sha256-verified). Only libquackwire stays on Central
-# (it is a build-time dependency that must resolve anonymously).
+# GitHub Release asset (sha256-verified). libquackwire is vendored in git
+# under libquackwire/binaries/, not published anywhere.
 #
 # Doing the steps explicitly is the whole point of the split: any step that a
 # network failure interrupted can be resumed by simply re-running this
@@ -16,9 +16,9 @@
 #   - GitHub release already exists              -> skip gh release
 #   - version.sbt already bumped to -SNAPSHOT    -> skip the finalize bumps
 #
-# Prerequisite: libquackwire must already be released (build.sbt pins a
-# non-SNAPSHOT coord that is on Maven Central) - run release-libquackwire.sh
-# first. This mirrors sbt-release's checkSnapshotDependencies gate.
+# Prerequisite: the vendored libquackwire binaries must match `libquackwireVersion`
+# in build.sbt - the gate below runs `verify_quackwire_binaries` and dies with
+# a pointer to scripts/refresh-quackwire-binaries.sh if they don't.
 #
 # Required env: PYPI_TOKEN.
 # Optional env: RELEASE_VERSION (pin the release; default = strip -SNAPSHOT),
@@ -102,11 +102,12 @@ else
   git tag "v${release_version}"
 fi
 
-# Bundle the Windows classifier so the released uber-jar (built for the GitHub
-# release in step 5) runs the native client on Windows AND Linux/macOS
-# (matches the snapshot workflow). Requires the windows-x86_64 libquackwire
-# classifier to already be on Maven Central - release-libquackwire.sh
-# publishes it (its CI-artifact stage now includes quackwire.dll).
+# The Windows quackwire.dll rides into the released uber-jar (built for the
+# GitHub release in step 5) automatically - it's one of the 5 platforms
+# vendored under libquackwire/binaries/ and copied in by build.sbt's
+# resourceGenerator, gated above by verify_quackwire_binaries. This export is
+# now a no-op (nothing in build.sbt reads it); left in place as a low-risk
+# no-behavior-change edit, flagged for cleanup in a follow-up.
 export QOD_WITH_WINDOWS_NATIVE=true
 
 # ---- 3. PyPI: qod + qod-cli shim (idempotent) ------------------------------
@@ -168,12 +169,11 @@ if [[ "$(cli_version)" != "$cli_next" || "$(cli_manager_version)" != "$cli_next"
   git commit -m "next dev version: qod-cli ${cli_next}" -q
 fi
 
-# libquackwire is deliberately NOT bumped back to -SNAPSHOT here. Its version
-# only changes when its inputs change (the DuckDB pin or the C++ under
-# native/quackwire/): bump `libquackwireVersion` in build.sbt manually then -
-# that re-arms both the CI snapshot publisher and release-libquackwire.sh.
-# Auto-bumping per manager release minted a new libquackwire coord every
-# cycle with zero native changes.
+# libquackwireVersion is deliberately NOT bumped here. It only changes when
+# its inputs change (the DuckDB pin or the C++ under native/quackwire/): edit
+# the val in build.sbt manually, push (CI builds the new binaries), then run
+# scripts/refresh-quackwire-binaries.sh and commit the diff. Auto-bumping per
+# manager release would mint a new pin every cycle with zero native changes.
 
 echo "pushing commits + tag to origin..."
 git push origin HEAD
