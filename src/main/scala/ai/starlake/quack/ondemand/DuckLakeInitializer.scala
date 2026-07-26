@@ -174,6 +174,15 @@ object DuckLakeInitializer extends LazyLogging:
           s"jdbc:postgresql://$pgHost:$pgPort/${java.net.URLEncoder.encode(dbName, "UTF-8")}"
         val pgConn = DriverManager.getConnection(pgUrl, pgUser, pgPassword)
         try
+          // Two installations (e.g. a dev checkout and the `qod` launcher) can end up
+          // sharing the same control-plane Postgres. When that happens this manager's
+          // effective dataPath for `dbName` no longer matches what the OTHER installation
+          // already recorded in this tenant-db's own `ducklake_metadata`, and the ATTACH
+          // below would fail per-node with DuckDB's raw DATA_PATH mismatch error -- once
+          // per spawn attempt, forever. Catch it here instead, before the lock and the
+          // ATTACH, with one clear message naming the fix.
+          guardDataPath(pgConn, dbName, dataPath)
+
           val lockStmt = pgConn.prepareStatement(
             "SELECT pg_advisory_lock(hashtext(?))"
           )
@@ -280,3 +289,83 @@ object DuckLakeInitializer extends LazyLogging:
     */
   private[ondemand] def libpqValue(v: String): String =
     "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+  /** Raised by [[guardDataPath]] when the effective dataPath this manager is about to ATTACH with
+    * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`. Callers
+    * (`PoolSupervisor`) catch this type specifically to log at ERROR and refuse to proceed, unlike
+    * the generic "first pool spawn will retry" handling for other init failures -- a dataPath
+    * mismatch is not transient and retrying only reproduces the same DuckDB error on every node
+    * spawn.
+    */
+  final case class DataPathMismatchException(message: String) extends RuntimeException(message)
+
+  /** Strict URI scheme prefix, e.g. `s3://`, `gs://`, `az://`. Mirrors the scheme regex
+    * `PoolSupervisor.replaceLastSegment` uses for the same "is this a URI root" question.
+    */
+  private val schemeRe = """^[a-zA-Z][a-zA-Z0-9+\-.]*://.*$""".r
+
+  /** A path is comparable when it is unambiguous regardless of the process's cwd: an absolute
+    * filesystem path (leading `/`) or a scheme URL. A relative path (`./foo`, `foo/bar`) resolves
+    * differently depending on where the comparing process happens to run, so it cannot be compared
+    * reliably here -- DuckDB remains the enforcer for that case.
+    */
+  private def isComparable(path: String): Boolean =
+    path.startsWith("/") || schemeRe.matches(path)
+
+  /** Guard against two installations sharing one control-plane Postgres while pointing tenant-db
+    * `dbName` at different DuckLake storage roots. Queries `ducklake_metadata` on the tenant-db's
+    * OWN Postgres connection (`pgConn`, already opened by [[runInit]]) -- never the control-plane
+    * database, which holds `qodstate_*` only.
+    *
+    * Outcomes:
+    *   - no `ducklake_metadata` table, or no `data_path` row: fresh catalog, PASS silently
+    *     (`runInit`'s ATTACH will create it).
+    *   - both `effectiveDataPath` and the recorded value are comparable ([[isComparable]]): PASS if
+    *     equal after stripping a trailing `/`, else throw [[DataPathMismatchException]].
+    *   - either side is relative: WARN with both values and PASS -- DuckDB is the enforcer here,
+    *     since relative resolution depends on the attaching process's cwd and can't be compared
+    *     reliably from the manager.
+    */
+  private[ondemand] def guardDataPath(
+      pgConn: java.sql.Connection,
+      dbName: String,
+      effectiveDataPath: String
+  ): Unit =
+    val existsStmt = pgConn.prepareStatement(
+      "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1"
+    )
+    val tableExists =
+      try
+        existsStmt.setString(1, "ducklake_metadata")
+        val rs = existsStmt.executeQuery()
+        try rs.next()
+        finally rs.close()
+      finally existsStmt.close()
+    if tableExists then
+      val valueStmt = pgConn.prepareStatement(
+        "SELECT value FROM ducklake_metadata WHERE key = 'data_path' LIMIT 1"
+      )
+      val recordedOpt =
+        try
+          val rs = valueStmt.executeQuery()
+          try if rs.next() then Some(rs.getString(1)) else None
+          finally rs.close()
+        finally valueStmt.close()
+      recordedOpt.foreach { recorded =>
+        if !isComparable(effectiveDataPath) || !isComparable(recorded) then
+          logger.warn(
+            s"DuckLake data_path check for '$dbName': at least one of the effective dataPath " +
+              s"('$effectiveDataPath') or the catalog's recorded data_path ('$recorded') is a " +
+              "relative path, so they cannot be compared reliably from the manager. Proceeding; " +
+              "DuckDB will enforce the DATA_PATH match at ATTACH time."
+          )
+        else if effectiveDataPath.stripSuffix("/") != recorded.stripSuffix("/") then
+          throw DataPathMismatchException(
+            s"tenant-db $dbName: control-plane dataPath ($effectiveDataPath) does not match the " +
+              s"DuckLake catalog's recorded data_path ($recorded). This control plane is probably " +
+              "shared by two installations (e.g. a dev checkout and the qod launcher on the same " +
+              "Postgres). Fix: point them at separate control planes with QOD_PG_DBNAME, or reset " +
+              "this world (drop the control-plane and tenant-db databases, then re-seed), or if the " +
+              "data really moved, update the database's dataPath via POST /api/database/update."
+          )
+      }

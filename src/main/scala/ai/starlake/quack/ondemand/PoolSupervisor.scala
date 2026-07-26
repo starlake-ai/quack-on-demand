@@ -382,6 +382,13 @@ final class PoolSupervisor(
       if td.kind == TenantDbKind.DuckLake then
         try DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
         catch
+          case t: DuckLakeInitializer.DataPathMismatchException =>
+            // Not transient like the other init failures below: every future node spawn
+            // for this tenant-db's pools would hit the same DuckDB DATA_PATH error, so
+            // this is surfaced loudly instead of the generic "will retry" WARN. The next
+            // tenant-db in this loop still gets its own attempt -- one bad tenant-db must
+            // not abort the whole manager boot.
+            logger.error(s"ensureDuckLakeInitialized: '${td.name}' ${t.getMessage}")
           case t: Throwable =>
             logger.warn(
               s"ensureDuckLakeInitialized: '${td.name}' pre-init raised ${t.getClass.getSimpleName}: " +
@@ -984,17 +991,32 @@ final class PoolSupervisor(
                                   DuckLakeInitializer.initBlocking(
                                     effectiveMeta.updated("dataPath", dataPath)
                                   )
+                                  store.upsertTenantDb(td)
+                                  tenantDbs.put(td.id, td)
+                                  publish.topologyChanged()
+                                  events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
+                                  Right(td)
                                 catch
+                                  case t: DuckLakeInitializer.DataPathMismatchException =>
+                                    // Not transient: retrying reproduces the same DuckDB
+                                    // DATA_PATH error on every future node spawn, so refuse
+                                    // to create the tenant-db instead of the usual
+                                    // swallow-and-retry handling below.
+                                    logger.error(
+                                      s"createTenantDb: DuckLake pre-init for '$full' refused: " +
+                                        t.getMessage
+                                    )
+                                    Left(SupervisorError.Internal(t.getMessage))
                                   case t: Throwable =>
                                     logger.warn(
                                       s"createTenantDb: DuckLake pre-init for '$full' failed; " +
                                         s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
                                     )
-                                store.upsertTenantDb(td)
-                                tenantDbs.put(td.id, td)
-                                publish.topologyChanged()
-                                events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
-                                Right(td)
+                                    store.upsertTenantDb(td)
+                                    tenantDbs.put(td.id, td)
+                                    publish.topologyChanged()
+                                    events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
+                                    Right(td)
                           case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                             store.upsertTenantDb(td)
                             tenantDbs.put(td.id, td)
