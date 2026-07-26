@@ -41,12 +41,11 @@ require_cmd gh
 require_cmd shasum
 gh auth status >/dev/null 2>&1 || die "'gh auth login' first (needed to create the GitHub release)."
 
-# ---- Gate: libquackwire must be released (checkSnapshotDependencies) ----
+# ---- Gate: vendored libquackwire binaries match the pin -------------------
+# (Central publication was retired 2026-07; binaries are vendored in git.)
 libq="$(libquackwire_version)"
-[[ "$libq" != *-SNAPSHOT ]] \
-  || die "build.sbt pins a -SNAPSHOT libquackwire ($libq). Run ./scripts/release-libquackwire.sh first."
-libquackwire_on_central "$libq" \
-  || die "libquackwire $libq is not on Maven Central yet. Run ./scripts/release-libquackwire.sh first."
+verify_quackwire_binaries \
+  || die "vendored libquackwire binaries are stale or missing for $libq. Run ./scripts/refresh-quackwire-binaries.sh first."
 
 # ---- Resolve versions ----------------------------------------------------
 current="$(manager_version)"

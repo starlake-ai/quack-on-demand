@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 #
 # Shared helpers for the split release scripts:
-#   release-libquackwire.sh  - build + publish the native libquackwire jars
 #   release-jar.sh           - version-set, tag, publish the manager, GH release
 #   release-docker.sh        - multi-arch Docker image
-#   release.sh               - orchestrator that runs the three in order
+#   release.sh               - orchestrator that runs both in order, plus the
+#                               libquackwire vendored-binaries verification
 #
 # Source this file; do not execute it. It anchors CWD at the repo root and
-# exposes the version-math + Maven-Central idempotency helpers every phase
-# needs. The phases are individually re-runnable: each one no-ops the work it
-# detects is already done (coord already on Central, tag already present,
-# version.sbt already bumped), so a mid-release network failure is resumed by
-# simply running the failed phase again.
+# exposes the version-math + PyPI/GitHub-release idempotency helpers every
+# phase needs, plus verify_quackwire_binaries (the vendored-binaries check
+# shared by release.sh's phase 1 and release-jar.sh's pre-publish gate - see
+# scripts/refresh-quackwire-binaries.sh for how the binaries themselves get
+# refreshed). The phases are individually re-runnable: each one no-ops the
+# work it detects is already done (tag already present, version.sbt already
+# bumped), so a mid-release network failure is resumed by simply running the
+# failed phase again.
 
 # Repo root, derived from this file's own location (scripts/release-lib.sh).
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,24 +61,7 @@ warn_if_not_main() {
   fi
 }
 
-require_sonatype_creds() {
-  : "${SONATYPE_USERNAME:?SONATYPE_USERNAME is required - Central Portal user-token name}"
-  : "${SONATYPE_PASSWORD:?SONATYPE_PASSWORD is required - Central Portal user-token secret}"
-}
-
-require_pgp() {
-  : "${PGP_PASSPHRASE:?PGP_PASSPHRASE is required - GPG signing key passphrase}"
-  command -v gpg >/dev/null 2>&1 || die "gpg not on PATH. Install GnuPG before releasing."
-  gpg --list-secret-keys --keyid-format LONG 2>/dev/null | grep -q '^sec' \
-    || die "no GPG secret key in keyring. See release-libquackwire.sh header for setup."
-}
-
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "$1 not on PATH${2:+ ($2)}."; }
-
-require_gh_auth() {
-  require_cmd gh "needed to download the non-host libquackwire binaries from CI"
-  gh auth status >/dev/null 2>&1 || die "'gh auth login' first - we download artifacts from quackwire.yml runs."
-}
 
 # confirm <prompt> - honors RELEASE_YES=1 for non-interactive / orchestrated runs.
 confirm() {
@@ -91,29 +77,44 @@ libquackwire_version() { grep -E '^val libquackwireVersion' build.sbt | sed -E '
 
 strip_snapshot() { echo "${1%-SNAPSHOT}"; }
 
+# sha256_of <file> - prints the hex digest. macOS ships shasum; Linux usually
+# ships sha256sum instead (and may lack shasum entirely).
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+# ---- vendored libquackwire verification ----------------------------------
+# Replaces the old Maven-Central-availability gate: binaries are vendored in
+# git now (refreshed by scripts/refresh-quackwire-binaries.sh), so "is
+# libquackwire safe to ship with this manager release" means "does the
+# working tree's libquackwire/binaries/ match the pinned version and its own
+# checksums" rather than "is it on Central". Shared by release.sh's phase 1
+# and release-jar.sh's pre-publish gate.
+verify_quackwire_binaries() {
+  local version stamped
+  version="$(grep -E '^val libquackwireVersion' build.sbt | sed -E 's/.*"(.*)".*/\1/')"
+  stamped="$(cat libquackwire/binaries/VERSION 2>/dev/null || true)"
+  [[ "$stamped" == "$version" ]] \
+    || { echo "libquackwire/binaries/VERSION ($stamped) != libquackwireVersion ($version). Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
+  local f
+  for f in libquackwire/binaries/*/libquackwire.* libquackwire/binaries/*/quackwire.dll; do
+    [[ -f "$f" && "$f" != *.sha256 ]] || continue
+    [[ -f "$f.sha256" ]] || { echo "missing checksum $f.sha256" >&2; return 1; }
+    [[ "$(sha256_of "$f")" == "$(cat "$f.sha256")" ]] \
+      || { echo "checksum mismatch for $f. Run scripts/refresh-quackwire-binaries.sh." >&2; return 1; }
+  done
+  echo "phase 1 OK: vendored libquackwire binaries match $version"
+}
+
 # 0.3.5 -> 0.3.6-SNAPSHOT (sbt-release's default patch bump).
 next_manager_snapshot() {
   local v; v="$(strip_snapshot "$1")"
   local a b c; IFS=. read -r a b c <<<"$v"
   echo "${a}.${b}.$((c + 1))-SNAPSHOT"
-}
-
-
-# ---- Maven Central idempotency ------------------------------------------
-# Central is immutable; re-publishing the same coord fails with an opaque 4xx.
-# These let each phase skip the build+publish when the artifact is already up.
-on_central() { # <artifact> <version>
-  curl -sfI "https://repo1.maven.org/maven2/ai/starlake/$1/$2/$1-$2.pom" >/dev/null 2>&1
-}
-libquackwire_on_central() { on_central libquackwire "$1"; }
-
-# ---- sbt with signing ----------------------------------------------------
-# Injects the PGP passphrase so sbt-pgp's signing step never blocks on the
-# gpg-agent prompt. Pass the sbt commands as separate args.
-sbt_signed() {
-  sbt -no-colors \
-    "set ThisBuild / pgpPassphrase := Some(\"$PGP_PASSPHRASE\".toCharArray)" \
-    "$@"
 }
 
 # ---- qod CLI (PyPI) --------------------------------------------------------

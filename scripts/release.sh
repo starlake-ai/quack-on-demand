@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# Cut a full release by running the three phase scripts in order:
-#   1. release-libquackwire.sh  - native libquackwire jars -> Maven Central
+# Cut a full release by running three phases in order:
+#   1. verify_quackwire_binaries - vendored libquackwire binaries match the
+#                                 libquackwireVersion pin (no publish step;
+#                                 refresh with scripts/refresh-quackwire-binaries.sh)
 #   2. release-jar.sh           - tag, PyPI, GH release (the jar's canonical
 #                                 channel; the manager is NOT on Maven Central)
 #   3. release-docker.sh        - multi-arch image -> Docker Hub  (skip: NO_DOCKER=1)
@@ -11,8 +13,10 @@
 # failed phase directly - you don't have to restart from the top. See each
 # script's header for details.
 #
-# Required env: PYPI_TOKEN; SONATYPE_USERNAME, SONATYPE_PASSWORD, and
-# PGP_PASSPHRASE only when phase 1 has a new libquackwire to publish.
+# Required env: PYPI_TOKEN. PGP/Sonatype creds are no longer needed for phase
+# 1 (libquackwire is vendored, not published) - they are unused by this
+# script; nothing in the manager-artifact phases (release-jar.sh,
+# release-docker.sh) needs them either.
 # Optional env: NO_DOCKER=1, RELEASE_VERSION, NEXT_VERSION, REGISTRY_IMAGE,
 #               DOCKERHUB_USERNAME, DOCKER_PASSWORD.
 #
@@ -47,7 +51,9 @@ fi
 # don't re-prompt.
 export RELEASE_YES=1
 
-"$SCRIPTS/release-libquackwire.sh"
+# Phase 1 (verify_quackwire_binaries is defined in release-lib.sh, shared
+# with release-jar.sh's own pre-publish gate).
+verify_quackwire_binaries
 "$SCRIPTS/release-jar.sh"
 if [[ "$NO_DOCKER" == "1" ]]; then
   echo "skipping Docker Hub push (NO_DOCKER=1)."
