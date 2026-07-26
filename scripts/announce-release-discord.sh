@@ -4,7 +4,7 @@
 # followed by the version's CHANGELOG.md section, split into messages under
 # Discord's 2000-character limit.
 #
-# Called by release-jar.sh right after it creates the GitHub release. Also safe
+# Called by release.yml's announce job right after the GitHub release. Also safe
 # to run standalone to (re)announce a version:
 #   ./scripts/announce-release-discord.sh 0.3.6
 #

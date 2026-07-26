@@ -30,7 +30,7 @@ Refreshed by `scripts/refresh-quackwire-binaries.sh`: it rebuilds the
 host platform locally via CMake and downloads the rest from the latest
 green run of `.github/workflows/quackwire.yml` on main, then leaves the
 diff for a developer to review and commit like any other change.
-`scripts/release.sh` phase 1 (also `release-jar.sh`'s gate) verifies
+`scripts/release.sh` (and CI's release.yml before publishing) verifies
 the stamped `VERSION` and every `.sha256` match `libquackwireVersion`
 in `build.sbt` before a release proceeds.
 

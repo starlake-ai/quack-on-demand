@@ -1,8 +1,8 @@
 name: release
 
-# Cut a full release entirely from GitHub Actions - the CI-native counterpart
-# of scripts/release.sh (which stays valid for local / offline cuts). One
-# trigger fans out to the four publish channels the local scripts cover:
+# Cut a full release entirely from GitHub Actions. CI is the SOLE publisher
+# (decided 2026-07-26): scripts/release.sh only stamps versions, tags, and
+# pushes; every publish channel lives here. One trigger fans out to:
 #   1. build-jar       - sbt assembly (all 5 libquackwire platforms bundled
 #                        from the vendored git binaries), sha256, artifact
 #   2. github-release  - the canonical jar channel: jar + .sha256 + notes
@@ -14,8 +14,8 @@ name: release
 #                        (a PR, not a push, so protected main needs no bot token)
 #
 # The version is pinned by the tag, so this workflow never writes the
-# release-version commit: it checks out the tag and builds from it. That is
-# the deliberate difference from release-jar.sh's local sbt-release dance.
+# release-version commit: it checks out the tag and builds from it;
+# scripts/release.sh writes that commit before pushing the tag.
 #
 # Trigger:
 #   - push a tag v<X.Y.Z>            (the normal path; create + push the tag)

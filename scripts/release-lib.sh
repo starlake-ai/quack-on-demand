@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 #
-# Shared helpers for the split release scripts:
-#   release-jar.sh           - version-set, tag, publish the manager, GH release
-#   release-docker.sh        - multi-arch Docker image
-#   release.sh               - orchestrator that runs both in order, plus the
-#                               libquackwire vendored-binaries verification
+# Shared helpers for the release scripts:
+#   release.sh               - cut a release: verify, stamp versions, tag,
+#                               push (CI publishes via release.yml)
+#   release-docker.sh        - manual FALLBACK for a broken CI Docker channel
+#   release.yml (CI)         - sources this file for cli_version,
+#                               next_manager_snapshot, set_cli_* and
+#                               verify_quackwire_binaries
 #
 # Source this file; do not execute it. It anchors CWD at the repo root and
-# exposes the version-math + PyPI/GitHub-release idempotency helpers every
-# phase needs, plus verify_quackwire_binaries (the vendored-binaries check
-# shared by release.sh's phase 1 and release-jar.sh's pre-publish gate - see
-# scripts/refresh-quackwire-binaries.sh for how the binaries themselves get
-# refreshed). The phases are individually re-runnable: each one no-ops the
-# work it detects is already done (tag already present, version.sbt already
-# bumped), so a mid-release network failure is resumed by simply running the
-# failed phase again.
+# exposes the version-math helpers plus verify_quackwire_binaries (the
+# vendored-binaries check - see scripts/refresh-quackwire-binaries.sh for how
+# the binaries themselves get refreshed). Steps are idempotent: each no-ops
+# the work it detects is already done (tag already present, version.sbt
+# already bumped), so an interrupted cut is resumed by re-running release.sh.
 
 # Repo root, derived from this file's own location (scripts/release-lib.sh).
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,7 +92,7 @@ sha256_of() {
 # libquackwire safe to ship with this manager release" means "does the
 # working tree's libquackwire/binaries/ match the pinned version and its own
 # checksums" rather than "is it on Central". Shared by release.sh's phase 1
-# and release-jar.sh's pre-publish gate.
+# and by release.yml before any CI channel publishes.
 verify_quackwire_binaries() {
   local version stamped
   version="$(grep -E '^val libquackwireVersion' build.sbt | sed -E 's/.*"(.*)".*/\1/')"
@@ -174,40 +173,5 @@ set_cli_shim_version() {
     "$CLI_SHIM_PYPROJECT"
   rm "${CLI_SHIM_PYPROJECT}.bak"
 }
-
-cli_on_pypi() {
-  curl -fsS -o /dev/null "https://pypi.org/pypi/qod/$1/json"
-}
-
-cli_shim_on_pypi() {
-  curl -fsS -o /dev/null "https://pypi.org/pypi/qod-cli/$1/json"
-}
-
-# build + twine live in a repo-local venv so the release never depends on
-# whatever python3 happens to be first on PATH (a stray project venv, a
-# bare system python). Provisioned on demand, reused across runs.
-PYPI_VENV="$REPO_DIR/.venv-release"
-
-pypi_python() {
-  if [[ -x "$PYPI_VENV/bin/python" ]]; then
-    echo "$PYPI_VENV/bin/python"
-  else
-    echo "$PYPI_VENV/Scripts/python.exe"   # Windows venv layout
-  fi
-}
-
-ensure_pypi_tooling() {
-  if "$(pypi_python)" -c "import build, twine" >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "provisioning $PYPI_VENV with build + twine (one-time)..."
-  python3 -m venv "$PYPI_VENV" \
-    || die "python3 -m venv failed; install a python3 with venv support."
-  "$(pypi_python)" -m pip install --quiet --upgrade pip build twine \
-    || die "pip install build twine failed in $PYPI_VENV."
-}
-
-require_pypi_creds() {
-  [[ -n "${PYPI_TOKEN:-}" ]] || die "PYPI_TOKEN not set (PyPI API token for qod-cli)."
-  ensure_pypi_tooling
-}
+# PyPI publication moved to CI (release.yml, 2026-07-26); the local flow
+# only stamps versions and pushes the tag, so no PyPI helpers live here.

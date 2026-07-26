@@ -18,10 +18,13 @@
   and pulls the rest from CI; releases verify the vendored set instead of
   querying Central. `QOD_WITH_WINDOWS_NATIVE` is retired: `quackwire.dll` is
   bundled automatically whenever it is vendored (it currently is).
-- **Tag-driven release workflow.** Pushing a `v<X.Y.Z>` tag now cuts the full
-  release from GitHub Actions (jar + sha256, GitHub release, PyPI `qod` +
-  `qod-cli` with a version-drift guard, multi-arch Docker, Discord announce,
-  next-snapshot bump PR); `scripts/release.sh` remains valid for local cuts.
+- **Tag-driven release workflow; CI is the sole publisher.** Pushing a
+  `v<X.Y.Z>` tag cuts the full release from GitHub Actions (jar + sha256,
+  GitHub release, PyPI `qod` + `qod-cli` with a version-drift guard,
+  multi-arch Docker, Discord announce, next-snapshot bump PR).
+  `scripts/release.sh` now only verifies, stamps the release versions, tags,
+  and pushes; `release-jar.sh` is retired and `release-docker.sh` is a manual
+  fallback.
 - **Per-database object-store credentials take effect at runtime.** A tenant-db's
   `objectStore` map now authors a DuckDB secret scoped to that database's
   `dataPath` at node spawn, so each database authenticates its own bucket with

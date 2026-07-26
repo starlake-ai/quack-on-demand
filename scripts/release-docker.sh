@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Release phase 3/3: build + push the multi-arch Docker image to Docker Hub.
-#
-# Independent of the other phases and safely re-runnable. Tags the image
-# :<version>, :<major>.<minor>, :<major>, :latest.
+# MANUAL FALLBACK ONLY: CI is the sole publisher (release.yml's docker
+# channel builds and pushes the multi-arch image on every v<version> tag).
+# Use this script only when that channel is broken and cannot be re-run via
+# workflow_dispatch. Safely re-runnable. Tags the image
+# :<version>, :<major>.<minor>, :<major>, :latest - identical to CI.
 #
 # The image builds the assembly from source, so the jar version + libquackwire
 # coord come from build.sbt / version.sbt in the build context. By the time
@@ -35,7 +36,7 @@ if [[ -z "$release_version" ]]; then
 fi
 [[ -n "$release_version" ]] || die "could not resolve a release version (pass one as an arg or set RELEASE_VERSION)."
 git rev-parse -q --verify "refs/tags/v${release_version}" >/dev/null \
-  || die "tag v${release_version} does not exist. Run release-jar.sh first."
+  || die "tag v${release_version} does not exist. Run release.sh first."
 
 minor="$(echo "$release_version" | cut -d. -f1-2)"
 major="$(echo "$release_version" | cut -d. -f1)"
