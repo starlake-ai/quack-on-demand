@@ -110,6 +110,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
+  given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -131,6 +132,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]          = deriveReader[CatalogConfig]
+  given ConfigReader[RoutingConfig]          = deriveReader[RoutingConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]

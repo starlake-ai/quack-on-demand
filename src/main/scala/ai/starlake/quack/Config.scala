@@ -462,6 +462,7 @@ final case class ManagerConfig(
     telemetry: TelemetryConfig = TelemetryConfig(),
     maintenance: MaintenanceConfig = MaintenanceConfig(),
     catalog: CatalogConfig = CatalogConfig(),
+    routing: RoutingConfig = RoutingConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
@@ -475,6 +476,26 @@ final case class ManagerConfig(
     k8s: K8sConfig,
     federation: FederationConfig,
     auth: ManagerAuthConfig
+)
+
+final case class RoutingConfig(
+    @field @ConfigField(
+      envVar = "QOD_ROUTING_CACHE_AWARE",
+      description =
+        "Cache-aware placement on object-store pools. false = pure least-loaded (instant revert)."
+    )
+    cacheAware: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_ROUTING_LOAD_CAP_FACTOR",
+      description =
+        "Load cap c: a table's home node is bypassed when its inFlight exceeds c x pool average."
+    )
+    loadCapFactor: Double = 2.0,
+    @field @ConfigField(
+      envVar = "QOD_ROUTING_DIRECTORY_MAX_TABLES",
+      description = "Per-pool bound on placement-directory entries (LRU-evicted). Safety bound."
+    )
+    directoryMaxTables: Int = 4096
 )
 
 final case class FlightConfig(
