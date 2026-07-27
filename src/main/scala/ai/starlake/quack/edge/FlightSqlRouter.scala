@@ -511,9 +511,10 @@ final class FlightSqlRouter(
                       // from `refs` (extracted from `sql`, the pre-rewrite statement, NOT finalSql:
                       // RLS rewrites are per-principal, which would defeat memoization, and
                       // placement keys should be the user-visible tables). Gated on recordExecution
-                      // so probes do not skew the metrics. `placement.record` runs for tx-pinned and
-                      // preferredNode-pinned statements too: the statement really lands on `nodeId`,
-                      // so the directory must learn it regardless of how the node was chosen.
+                      // so probes do not skew the metrics. `placement.record` runs for
+                      // tx-pinned and preferredNode-pinned statements too: the statement
+                      // really lands on `nodeId`, so the directory must learn it regardless
+                      // of how the node was chosen.
                       if recordExecution then
                         val outcome =
                           if !cacheAwareRouting then "flag-off"
@@ -529,7 +530,10 @@ final class FlightSqlRouter(
                               pinned = pinned.isDefined
                             )
                         routingInstruments.recordDecision(poolKey.tenant, poolKey.pool, outcome)
-                        if placementEligible then
+                        // Skip the load-ratio observation for a pinned statement: the load cap
+                        // never applied to it (a tx pin / preferredNode bypasses the scorer), so a
+                        // pinned node over its cap is not a cap violation worth reporting.
+                        if placementEligible && pinned.isEmpty then
                           val avg = math.max(
                             1.0,
                             routableIds.iterator.map(id => snap.loadOf(id).inFlight).sum.toDouble /

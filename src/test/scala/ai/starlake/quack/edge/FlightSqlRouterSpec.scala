@@ -1574,3 +1574,21 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       qr => qr.close()
     }
     decisionCount(reg, "not-eligible") shouldBe 1.0
+
+  it should "let a transaction pin override the placement scorer and record pinned-move" in:
+    val (router, reg, _, nodes) = setupPlacement()
+    // Warm `customer` on whichever node serves the first read: that becomes its placement home.
+    val warm = router.execute("pin-mv", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync()
+    val homeNode = warm.toOption.get.nodeId
+    warm.toOption.get.close()
+    // Open a transaction pinned to the OTHER node, via the preferredNode seam on BEGIN, so the tx
+    // pin and the scorer's warm home deliberately disagree.
+    val other = nodes.map(_.nodeId).find(_ != homeNode).getOrElse(fail("need >1 node"))
+    router.execute("pin-mv", "alice", poolKey, "BEGIN", preferredNode = Some(other)).unsafeRunSync()
+    router.session("pin-mv").flatMap(_.pinnedNodeId) shouldBe Some(other)
+    // A read of the same table inside the tx: the scorer would pick `homeNode`, but the tx pin
+    // forces `other`. Assert both the node identity and the pinned-move decision label.
+    val inTx = router.execute("pin-mv", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync()
+    inTx.toOption.get.nodeId shouldBe other
+    inTx.toOption.get.close()
+    decisionCount(reg, "pinned-move") shouldBe 1.0

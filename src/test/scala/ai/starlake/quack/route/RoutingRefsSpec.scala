@@ -34,7 +34,7 @@ class RoutingRefsSpec extends AnyFlatSpec with Matchers:
 
   it should "return empty on statements over the size guard without parsing" in:
     val huge = "SELECT * FROM t WHERE x IN (" + "1," * 60000 + "1)"
-    huge.length should be > 100000
+    huge.length should be > RoutingRefs.MaxSqlLength
     RoutingRefs.extract(huge, cfg) shouldBe RoutingRefs.empty
 
   "RoutingRefsCache" should "memoize by sql text and config fingerprint" in:
@@ -45,9 +45,15 @@ class RoutingRefsSpec extends AnyFlatSpec with Matchers:
     val otherCfg = Config.forDuckDB(Some("other"), Some("main"))
     cache.extract("SELECT * FROM customer", otherCfg).reads shouldBe Set("other.main.customer")
 
-  it should "evict beyond maxEntries without failing" in:
+  it should "evict beyond maxEntries and recompute the evicted entry" in:
     val cache = new RoutingRefsCache(maxEntries = 2)
-    cache.extract("SELECT * FROM a", cfg)
+    val first = cache.extract("SELECT * FROM a", cfg)
+    // b then c push a out of the 2-entry LRU (a was least-recently-used).
     cache.extract("SELECT * FROM b", cfg)
-    cache.extract("SELECT * FROM c", cfg)
-    cache.extract("SELECT * FROM a", cfg).reads shouldBe Set("tpch1.main.a")
+    val cResident = cache.extract("SELECT * FROM c", cfg)
+    // a was evicted: the next lookup parses afresh, so it is a different instance.
+    val aReloaded = cache.extract("SELECT * FROM a", cfg)
+    (aReloaded eq first) shouldBe false
+    aReloaded.reads shouldBe Set("tpch1.main.a")
+    // c is still resident: a repeat lookup returns the very same instance.
+    (cache.extract("SELECT * FROM c", cfg) eq cResident) shouldBe true
