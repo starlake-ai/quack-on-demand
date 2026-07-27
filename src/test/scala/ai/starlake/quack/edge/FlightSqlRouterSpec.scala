@@ -117,6 +117,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok")
       .count() shouldBe (beforeCount + 1.0)
 
+  it should "record locality metrics for routed statements" in:
+    val reg          = new SimpleMeterRegistry
+    val ri           = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
+      routingInstruments = ri
+    )
+    // Same SELECT twice on the single-node pool: the table is new on the first pass and a
+    // repeat (staying on the same node) on the second.
+    router.execute("loc-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync().foreach {
+      qr => qr.close()
+    }
+    router.execute("loc-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync().foreach {
+      qr => qr.close()
+    }
+    reg
+      .counter(
+        "routing_tables_total",
+        "tenant",
+        poolKey.tenant,
+        "pool",
+        poolKey.pool,
+        "result",
+        "new"
+      )
+      .count() shouldBe 1.0
+    reg
+      .counter(
+        "routing_tables_total",
+        "tenant",
+        poolKey.tenant,
+        "pool",
+        poolKey.pool,
+        "result",
+        "repeat"
+      )
+      .count() shouldBe 1.0
+
   it should "expose the chosen nodeId on the QueryResult so callers can soft-pin follow-ups" in:
     val (router, _, node) = setup()
     val out               = router.execute("c-1b", "alice", poolKey, "SELECT 1").unsafeRunSync()

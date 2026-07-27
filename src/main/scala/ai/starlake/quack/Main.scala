@@ -1067,6 +1067,21 @@ object Main extends IOApp with LazyLogging:
           result
         }
 
+      // Cache-aware routing (milestone-1 metrics on the current least-loaded router).
+      // refsConfigFor mirrors attachedCatalogsOf's use of sup.effectiveMetastoreFor so the
+      // ACL SQL parser resolves unqualified table refs the same way the validator does.
+      val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
+        val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
+        ai.starlake.acl.model.Config.forDuckDB(
+          Some(ms.getOrElse("dbName", key.tenantDb)),
+          Some(ms.getOrElse("schemaName", "main")),
+          attachedCatalogsOf(key)
+        )
+      val routingInstruments =
+        new ai.starlake.quack.observability.metrics.RoutingInstruments(metricsReg.composite)
+      val localityTracker  = new ai.starlake.quack.route.LocalityTracker()
+      val routingRefsCache = new ai.starlake.quack.route.RoutingRefsCache()
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -1085,7 +1100,11 @@ object Main extends IOApp with LazyLogging:
         events = moduleEventBus.sink,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
-        lockdownFor = sup.effectiveLockdown
+        lockdownFor = sup.effectiveLockdown,
+        routingRefs = routingRefsCache,
+        refsConfigFor = refsConfigFor,
+        locality = localityTracker,
+        routingInstruments = routingInstruments
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,

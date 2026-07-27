@@ -61,7 +61,15 @@ final class FlightSqlRouter(
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
-    val lockdownFor: PoolKey => Boolean = _ => false
+    val lockdownFor: PoolKey => Boolean = _ => false,
+    val routingRefs: ai.starlake.quack.route.RoutingRefsCache =
+      new ai.starlake.quack.route.RoutingRefsCache(),
+    val refsConfigFor: PoolKey => ai.starlake.acl.model.Config = _ =>
+      ai.starlake.acl.model.Config.forDuckDB(None, None),
+    val locality: ai.starlake.quack.route.LocalityTracker =
+      new ai.starlake.quack.route.LocalityTracker(),
+    val routingInstruments: ai.starlake.quack.observability.metrics.RoutingInstruments =
+      ai.starlake.quack.observability.metrics.RoutingInstruments.noop
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -474,6 +482,22 @@ final class FlightSqlRouter(
                         if recordExecution then
                           Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
                         else None
+                      // Phase-0 locality baseline. Observed on `sql` (the pre-rewrite statement),
+                      // NOT finalSql: RLS rewrites are per-principal, which would defeat
+                      // memoization, and placement keys should be the user-visible tables. Gated
+                      // on recordExecution so probes do not skew the metric.
+                      if recordExecution then
+                        val refs = routingRefs.extract(sql, refsConfigFor(poolKey))
+                        if refs.all.nonEmpty then
+                          val obs = locality.observe(poolKey, refs.all, nodeId)
+                          routingInstruments.recordLocality(
+                            poolKey.tenant,
+                            poolKey.pool,
+                            obs.newTables,
+                            obs.repeatTables,
+                            obs.stays,
+                            obs.switches
+                          )
                       adapter
                         .send(
                           node,
