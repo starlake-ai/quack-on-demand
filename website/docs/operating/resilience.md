@@ -7,7 +7,7 @@ This page describes what the code does today. Aspirational items are noted as ga
 
 ## Topology
 
-quack-on-demand runs as a single-instance manager process. It is designed to be safely restartable, not active-active. Running two managers against the same Postgres control-plane database is not safe today: both would attempt to reconcile the same node registry and race on database creation (tracked: [#11](https://github.com/starlake-ai/quack-on-demand/issues/11) for v0.4).
+By default quack-on-demand runs as a single-instance manager process, designed to be safely restartable. Multi-manager high availability is opt-in and Kubernetes-only: set `QOD_HA_ENABLED=true` (Helm `replicaCount > 1`) to run N active-active replicas that all serve REST and FlightSQL. One replica holds a Postgres session advisory lock (`HaCoordinator`) and runs the singleton duties (reconcile respawns, bootstrap, DuckLake init, revoked-jti purge); pool mutations serialize across replicas via per-pool advisory locks (`PoolLocker`); caches propagate over Postgres `LISTEN`/`NOTIFY` on the `qod_topology` / `qod_rbac` / `qod_revocation` channels with a periodic snapshot-refresh fallback, and JWT revocations persist in `qodstate_revoked_jti`. HA with the local backend is refused at config load. With the flag off (the default), running two uncoordinated managers against the same Postgres control-plane database is unsafe: both would reconcile the same node registry and race on database creation.
 
 Worker pools scale horizontally. A pool can contain any number of Quack nodes; the router distributes statements across all healthy nodes in the pool. Adding nodes increases query throughput without touching the manager.
 
@@ -63,6 +63,7 @@ There is no transparent replay. quack-on-demand does not buffer or re-execute th
 | Per-node latency histogram (p50/p95/p99) | `NodeLoadTracker` latency ring (256-sample window) | UI latency widgets reset to zero. |
 | FlightSQL sessions and session pins | `SessionRegistry` | Every client must reconnect. Any open transaction is implicitly rolled back at the Quack node level. |
 | Admin UI session tokens | `SessionTokenStore` | Admin UI users must log in again. The static `QOD_API_KEY` continues to work. |
+| Cache-aware routing directory | `PlacementDirectory`, `LocalityTracker`, `RoutingRefsCache` (per-manager, in-memory) | Table-to-node placement hints reset to empty; one pass of live traffic rebuilds them. Routing falls back to least-loaded until the directory repopulates. In HA mode each replica keeps its own directory (no cross-replica coordination): divergence is by design, worst case a table warm on two nodes of a pool (benign redundancy over immutable files). |
 
 All of these recover through re-population from live traffic. None cause incorrect behavior; they only create gaps in operator-visible signal during and immediately after a restart.
 
@@ -81,11 +82,11 @@ All of these recover through re-population from live traffic. None cause incorre
 | Disk full on manager host | Logback `RollingFileAppender` drops writes; JVM may OOM | Manager eventually crashes. | Same as manager JVM crash. | - |
 | Disk full on a Quack node (Parquet write fails) | Node returns 5xx from `/quack`; adapter classifies as `transient` | Router tries a different node (retry-once outside tx; pin invalidation inside tx). | Reads continue. Writes fail until disk is cleared. | - |
 | TLS cert expiry | First TLS handshake fails | Manager refuses new FlightSQL connections. | The auto-generated cert in `certs/` has a 10-year validity. Only a concern for production deployments using externally issued certificates. | Rotate via cert-manager in Kubernetes. |
-| Two managers against the same Postgres | Both restore the same state and both try to reconcile | Both attempt to spawn pods with the same node IDs (Kubernetes API returns 409 for the second create; local mode races on port allocation). `DbAdmin.createDatabase` for new tenant-dbs races: one wins, the other sees "database already exists". **Not safe today.** | Avoid. | Multi-manager HA ([#11](https://github.com/starlake-ai/quack-on-demand/issues/11)) |
+| Two uncoordinated managers against the same Postgres (HA flag off) | Both restore the same state and both try to reconcile | Both attempt to spawn pods with the same node IDs (Kubernetes API returns 409 for the second create; local mode races on port allocation). `DbAdmin.createDatabase` for new tenant-dbs races: one wins, the other sees "database already exists". **Unsafe with `QOD_HA_ENABLED` off.** | Do not run two managers without HA; enable opt-in HA instead. | Resolved by opt-in HA (`QOD_HA_ENABLED=true`, Kubernetes only): a Postgres session advisory lock elects one leader for reconcile / bootstrap / DuckLake init, and per-pool advisory locks serialize pool mutations. |
 
 ## Operational guidance
 
-If you are running this in production today (single-manager plus Postgres):
+If you are running the default single-manager mode in production (one manager plus Postgres), the guidance below applies. For zero-downtime rolling deploys and replica-crash tolerance, enable opt-in HA on Kubernetes (`QOD_HA_ENABLED=true`, `replicaCount > 1`); the same process-supervisor and probe guidance then applies to each replica.
 
 - **Run under a process supervisor** that restarts the JVM on exit: systemd with `Restart=always`, a Kubernetes `Deployment` with `restartPolicy: Always` (the default), or Docker with `restart: unless-stopped`.
 
