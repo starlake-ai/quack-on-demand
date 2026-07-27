@@ -289,7 +289,14 @@ final class PoolSupervisor(
     tenants.keys.toList.filterNot(snapTenantIds).foreach(tenants.remove)
     tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(tenantDbs.remove)
     poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
-    pools.keys.toList.filterNot(snapPoolKeys).foreach(pools.remove)
+    // A pool a peer deleted directly in the store leaves this replica holding stale placement /
+    // locality state for it (PlacementDirectory + LocalityTracker never auto-expire), so fire the
+    // teardown hook for each removed key. Deletions only: suspend transitions keep the pool row, and
+    // a suspended pool's dead homes are already dropped lazily by the live-node filter. Boot-time
+    // hydration removes nothing, so the hook stays silent there.
+    val removedPoolKeys = pools.keys.toList.filterNot(snapPoolKeys)
+    removedPoolKeys.foreach(pools.remove)
+    removedPoolKeys.foreach(onPoolTeardown)
     poolIdByKey.keys.toList.filterNot(snapPoolKeys).foreach(poolIdByKey.remove)
     // A tenant-db a peer deleted directly in the store can no longer spawn anything, so any
     // dataPath block held for it is moot; drop it rather than leaking it forever.

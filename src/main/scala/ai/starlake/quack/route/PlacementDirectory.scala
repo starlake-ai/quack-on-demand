@@ -71,14 +71,19 @@ final class PlacementDirectory(maxTablesPerPool: Int = 4096):
         }
 
   /** Apply one routed statement and return its outcome label:
-    * `claim | sticky-fresh | sticky-stale | overflow-new-home | overflow-evict-home`.
+    * `claim | sticky-fresh | sticky-stale | overflow-new-home | overflow-evict-home | pinned-sticky
+    * | pinned-move`. When `pinned` is true the scorer did not choose this node (a tx pin or a
+    * soft preferredNode did), so the placement-quality labels collapse to trigger-neutral
+    * `pinned-sticky` / `pinned-move`: the directory still learns where the statement landed, but the
+    * overflow signal the B-full build trigger reads stays free of placements the scorer never made.
     */
   def record(
       key: PoolKey,
       chosenNodeId: String,
       refs: RoutingRefs,
       liveNodeIds: Set[String],
-      now: Long
+      now: Long,
+      pinned: Boolean = false
   ): String =
     val dir = pools.getOrElseUpdate(key, new PoolDir)
     dir.map.synchronized {
@@ -90,6 +95,9 @@ final class PlacementDirectory(maxTablesPerPool: Int = 4096):
 
       val outcome =
         if pre.isEmpty then "claim"
+        else if pinned then
+          if pre.values.forall(a => chosenEntry(a).isDefined) then "pinned-sticky"
+          else "pinned-move"
         else if pre.values.forall(a => chosenEntry(a).isDefined) then
           if pre.values.forall(a => chosenEntry(a).exists(_.warmEpoch == a.currentEpoch)) then
             "sticky-fresh"

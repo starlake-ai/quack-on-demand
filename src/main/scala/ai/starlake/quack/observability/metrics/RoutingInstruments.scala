@@ -6,7 +6,7 @@ import io.micrometer.core.instrument.MeterRegistry
   * FlightSqlRouter after each routed statement. `recordLocality` publishes the phase-0 baseline
   * (repeat/switch rates on ANY routing policy); `recordDecision` labels each placement decision
   * with the outcome vocabulary
-  * `claim | sticky-fresh | sticky-stale | overflow-new-home | overflow-evict-home | no-refs-fallback | not-eligible | flag-off`;
+  * `claim | sticky-fresh | sticky-stale | overflow-new-home | overflow-evict-home | pinned-sticky | pinned-move | no-refs-fallback | not-eligible | flag-off`;
   * `recordLoadRatio` observes chosen-node inFlight over pool average, which should stay under the
   * configured loadCapFactor.
   */

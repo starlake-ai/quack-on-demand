@@ -525,7 +525,8 @@ final class FlightSqlRouter(
                               nodeId,
                               refs,
                               routableIds,
-                              System.currentTimeMillis()
+                              System.currentTimeMillis(),
+                              pinned = pinned.isDefined
                             )
                         routingInstruments.recordDecision(poolKey.tenant, poolKey.pool, outcome)
                         if placementEligible then

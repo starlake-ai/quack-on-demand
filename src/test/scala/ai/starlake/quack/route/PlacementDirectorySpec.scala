@@ -40,6 +40,22 @@ class PlacementDirectorySpec extends AnyFlatSpec with Matchers:
     d.record(poolKey, "n4", reads(tA), four, 4L) shouldBe "overflow-evict-home"
     d.viewFor(poolKey, Set(tA), four)(tA).homes.map(_.nodeId) shouldBe List("n4", "n3", "n2")
 
+  it should "label a pinned re-home pinned-move and still re-home like an unpinned overflow" in:
+    val d = new PlacementDirectory()
+    d.record(poolKey, "n1", reads(tA), live, 1L)
+    d.record(poolKey, "n2", reads(tA), live, 2L, pinned = true) shouldBe "pinned-move"
+    d.viewFor(poolKey, Set(tA), live) shouldBe
+      Map(tA -> Assignment(List(HomeEntry("n2", 0L), HomeEntry("n1", 0L)), 0L, 2L))
+
+  it should "label a pinned statement to an existing home pinned-sticky" in:
+    val d = new PlacementDirectory()
+    d.record(poolKey, "n1", reads(tA), live, 1L)
+    d.record(poolKey, "n1", reads(tA), live, 2L, pinned = true) shouldBe "pinned-sticky"
+
+  it should "label a pinned first touch as a plain claim" in:
+    val d = new PlacementDirectory()
+    d.record(poolKey, "n1", reads(tA), live, 1L, pinned = true) shouldBe "claim"
+
   it should "bump the epoch on writes, keep the writer fresh, and leave other homes stale" in:
     val d = new PlacementDirectory()
     d.record(poolKey, "n1", reads(tA), live, 1L)

@@ -735,6 +735,35 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.get(poolKey) shouldBe None
     sup.list().map(_.key) should not contain poolKey
 
+  it should "fire onPoolTeardown so followers clear placement state on a peer-driven pool delete" in:
+    val store   = new InMemoryControlPlaneStore()
+    val cleared = scala.collection.mutable.ListBuffer.empty[PoolKey]
+    val sup     = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      store,
+      onPoolTeardown = k => cleared += k
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    val poolKey = PoolKey("acme", "acme_default", "sales")
+    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    // A boot-style restore() with nothing removed must fire nothing.
+    sup.restore()
+    cleared.toList shouldBe Nil
+
+    // Peer deletes the pool straight through the store (nodes first for FK RESTRICT).
+    val pid = sup.poolId(poolKey).get
+    store.listNodes(pid).foreach(n => store.deleteNode(n.nodeId))
+    store.deletePool(pid)
+
+    sup.restore()
+    cleared.toList should contain(poolKey)
+    sup.get(poolKey) shouldBe None
+
   it should "drop a tenant a peer deleted directly in the store" in:
     val store = new InMemoryControlPlaneStore()
     val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
