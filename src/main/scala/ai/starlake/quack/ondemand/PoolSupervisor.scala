@@ -1166,15 +1166,11 @@ final class PoolSupervisor(
                 IO.blocking {
                   store.upsertTenantDb(merged)
                   tenantDbs.put(merged.id, merged)
-                  // Staleness invalidation for the dataPath guard: a metastore/objectStore/
-                  // initSql edit is the documented remediation for a boot-time
-                  // DataPathMismatchException (POST /api/database/update), so it must clear
-                  // any earlier block instead of leaving reconcile() skipping this tenant-db's
-                  // pools forever. Deliberately unconditional (no live re-check against
-                  // Postgres here) -- the guard only runs at boot/create, never on every edit;
-                  // if the operator's fix was wrong, the per-node ATTACH will surface that on
-                  // the next respawn, and the next manager restart re-blocks it via
-                  // ensureDuckLakeInitialized if it is still wrong.
+                  // Staleness invalidation for the dataPath guard: a node-affecting edit is the
+                  // documented remediation for a boot-time DataPathMismatchException (POST
+                  // /api/database/update), so it must clear any earlier block instead of leaving
+                  // reconcile() skipping this tenant-db's pools forever. Optimistic: a wrong fix
+                  // surfaces on the restarted nodes; boot re-blocks on the next manager start.
                   if nodeAffecting then dataPathBlocked.remove(merged.id)
                   // Unlocked read-modify-write: same trade-off as documented on the
                   // former setTenantDbInitSql; self-healing via restore()/NOTIFY.
