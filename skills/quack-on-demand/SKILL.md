@@ -459,6 +459,8 @@ Per-node fields surfaced via `/api/pool/list`:
 - `p50Ms`/`p95Ms`/`p99Ms` - rolling 256-sample window
 - `healthy` / `draining` - tracker flags
 
+On object-store pools the router biases toward a node that already has the query's tables cached (cache-aware placement, on by default); local-path pools stay pure least-loaded. `QOD_ROUTING_CACHE_AWARE=false` instantly reverts routing decisions to least-loaded everywhere while the locality metrics keep running.
+
 ## Incident response
 
 Quarantine is durable operator state, separate from node health. Check the quarantined flag in `pool/list` before debugging a node that shows unhealthy-like symptoms.

@@ -19,7 +19,7 @@ Every node in a pool has one of three roles. The router picks a node for each st
 
 When a pool is created you declare how its nodes split across the three roles via `roleDistribution`. The three counts must sum to `size`. A pool of all-`dual` nodes is the simplest choice; splitting `readonly` from `writeonly` lets read and write traffic scale and fail independently.
 
-Within the acceptable roles for a statement, the router picks the least-loaded node (in-flight count plus an EWMA of completed-statement latency).
+Within the acceptable roles for a statement, the router picks the least-loaded node (in-flight count plus an EWMA of completed-statement latency). On object-store pools it biases that choice toward a node that already has the query's tables cached, staying within a load cap; see [cache-aware placement](/concepts/routing).
 
 ## Create a pool
 

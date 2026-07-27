@@ -28,7 +28,7 @@ When a client runs a statement, it passes through a fixed sequence:
 
 1. **Authenticate.** The edge validates the connection's credential (database password, JWT, or OIDC) and resolves the target `(tenant, pool)`; the owning tenant-db is resolved server-side. See [Authenticating](/connecting/authenticating).
 2. **Authorize.** When ACL is enabled, the statement is parsed and every table access is checked against the principal's effective permissions before it touches a node. See the [Access control model](/operating/rbac-model).
-3. **Classify and route.** The statement is classified read / write / DDL and dispatched to the least-loaded node whose role can serve it; an open transaction pins to its node. See [Routing](/concepts/routing) and [Sessions and transactions](/concepts/sessions-transactions).
+3. **Classify and route.** The statement is classified read / write / DDL and dispatched to the least-loaded node whose role can serve it (on object-store pools, biased toward a node that already has its tables cached); an open transaction pins to its node. See [Routing](/concepts/routing) and [Sessions and transactions](/concepts/sessions-transactions).
 4. **Execute and stream.** The chosen DuckDB node runs the SQL against its DuckLake catalog and streams Arrow batches back through the edge to the client.
 
 ## Why this shape

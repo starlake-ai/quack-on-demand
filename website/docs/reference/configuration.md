@@ -18,6 +18,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-flightsql.tlsCertChain` | `PROXY_TLS_CERT_CHAIN` | `certs/server-cert.pem` |  | Path to the TLS certificate chain PEM (auto-generated if missing). |
 | `quack-flightsql.tlsPrivateKey` | `PROXY_TLS_PRIVATE_KEY` | `certs/server-key.pem` |  | Path to the TLS private key PEM (auto-generated if missing). |
 | `quack-flightsql.sessionTtlSec` | `QOD_SESSION_TTL_SEC` | `3600` |  | Edge session TTL in seconds before a fresh handshake is forced. |
+| `quack-flightsql.resumeHoldTimeoutSec` | `PROXY_RESUME_HOLD_TIMEOUT_SEC` | `60` |  | Max seconds the edge holds a statement while a suspended pool cold-starts. |
 
 ## `quack-flightsql.acl`
 
@@ -105,7 +106,6 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | Key | Env var | Default | Sensitive | Description |
 | --- | --- | --- | --- | --- |
 | `quack-on-demand.auth.management.identitySource` | `QOD_MGMT_IDENTITY_SOURCE` | `db` |  | System-scope (bare /ui/) admin-UI login mode: 'db' (password form) or 'oidc' (SSO). Per-tenant login mode is read from the tenant's authProvider, not this key. |
-| `quack-on-demand.auth.management.identityClaim` | `QOD_MGMT_IDENTITY_CLAIM` | `preferred_username` |  | JWT claim matched against qodstate_user.username when identitySource=oidc (email is tried as a fallback). |
 | `quack-on-demand.auth.management.sessionJwtSecret` | `QOD_SESSION_JWT_SECRET` | `***` | yes | HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make sessions survive manager restart and to share session state across replicas. Empty = autogenerate a fresh 32-byte secret at boot (sessions die on restart, no horizontal scale). |
 | `quack-on-demand.auth.management.sessionCookieSecure` | `QOD_SESSION_COOKIE_SECURE` | `auto` |  | Whether the qod_session cookie carries the `Secure` flag. Accepts 'auto' (default, derives from the request's X-Forwarded-Proto -- https=Secure, http or absent=not Secure), 'true' (force Secure regardless of request scheme; use behind a TLS ingress that strips X-Forwarded-Proto), or 'false' (force not Secure). |
 | `quack-on-demand.auth.management.sessionCookiePath` | `QOD_SESSION_COOKIE_PATH` | `/api` |  | Path attribute on the qod_session cookie. Default '/api'. Override when the manager sits behind a path-rewriting reverse proxy: the value must match the BROWSER-visible URL prefix, not the backend's. E.g. proxy at https://platform/quack/api/* -> QOD_SESSION_COOKIE_PATH=/quack/api. |
@@ -122,6 +122,8 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.catalog.auditCatalogReads` | `QOD_AUDIT_CATALOG_READS` | `false` |  | Audit catalog browser reads: one catalog.read event per gated GET. Off by default (reads are chatty; mutations are always audited). |
 | `quack-on-demand.catalog.previewMaxRows` | `QOD_CATALOG_PREVIEW_MAX_ROWS` | `1000` |  | Hard cap on rows returned by the catalog data-preview endpoint. |
 | `quack-on-demand.catalog.previewTimeoutSec` | `QOD_CATALOG_PREVIEW_TIMEOUT_SEC` | `30` |  | Seconds before a catalog data-preview query is cancelled. |
+| `quack-on-demand.catalog.undropTimeoutSec` | `QOD_CATALOG_UNDROP_TIMEOUT_SEC` | `300` |  | Seconds before an undrop recovery CTAS is abandoned. Larger than the preview timeout because it is a mutation over potentially large tables; on timeout the handler probes whether the table was created anyway and reports accordingly. |
+| `quack-on-demand.catalog.restoreTimeoutSec` | `QOD_CATALOG_RESTORE_TIMEOUT_SEC` | `300` |  | Seconds before a restore CREATE OR REPLACE is abandoned. On timeout the handler probes whether the replace committed anyway and reports accordingly. |
 
 ## `quack-on-demand.defaultMetastore`
 
@@ -161,6 +163,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.k8s.startupTimeoutSec` | `QOD_K8S_STARTUP_TIMEOUT_SEC` | `120` |  | Seconds to wait for a spawned node pod to become ready. |
 | `quack-on-demand.k8s.podLabel` | `QOD_K8S_POD_LABEL` | `managed-by=quack-on-demand` |  | Label selector that identifies manager-owned node pods. |
 | `quack-on-demand.k8s.podTemplateEnabled` | `QOD_POD_TEMPLATE_ENABLED` | `false` |  | Allow superusers to supply a full Pod-manifest YAML template for a pool's node pods. Off by default; raw manifests are cluster-level power. |
+| `quack-on-demand.k8s.runAsUser` | `QOD_K8S_RUN_AS_USER` | `1000` |  | Pod-level runAsUser/fsGroup applied to spawned node pods. A pod template's own securityContext.runAsUser (if set) wins over this default. |
 
 ## `quack-on-demand.maintenance`
 
@@ -184,6 +187,14 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.metrics.azure.stepSeconds` | `QOD_METRICS_AZURE_STEP_SEC` | `60` |  | Azure Monitor publish step in seconds. |
 | `quack-on-demand.metrics.gcp.projectId` | `QOD_METRICS_GCP_PROJECT_ID` | _(unset)_ |  | GCP project ID when metrics.sink=gcp. |
 | `quack-on-demand.metrics.gcp.stepSeconds` | `QOD_METRICS_GCP_STEP_SEC` | `60` |  | GCP Cloud Monitoring publish step in seconds. |
+
+## `quack-on-demand.routing`
+
+| Key | Env var | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- |
+| `quack-on-demand.routing.cacheAware` | `QOD_ROUTING_CACHE_AWARE` | `true` |  | Cache-aware placement on object-store pools. false instantly reverts routing decisions to pure least-loaded; locality metrics and their memoized statement parse keep running. |
+| `quack-on-demand.routing.loadCapFactor` | `QOD_ROUTING_LOAD_CAP_FACTOR` | `2.0` |  | Load cap c: a table's home node is bypassed when its inFlight exceeds c x pool average. |
+| `quack-on-demand.routing.directoryMaxTables` | `QOD_ROUTING_DIRECTORY_MAX_TABLES` | `4096` |  | Per-pool bound on placement-directory entries (LRU-evicted). Safety bound. |
 
 ## `quack-on-demand.telemetry`
 

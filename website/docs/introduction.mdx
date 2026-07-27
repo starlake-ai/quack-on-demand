@@ -18,7 +18,7 @@ import useBaseUrl from '@docusaurus/useBaseUrl';
 
 ## What it does
 
-Clients speak Arrow Flight SQL to one endpoint. The gateway authenticates the connection, authorizes every statement against a role-based access model, classifies it read or write, and routes it to the least-loaded DuckDB node that can serve it. The nodes read and write Parquet through shared DuckLake catalogs, so they present one consistent view and a pool can scale out across many of them.
+Clients speak Arrow Flight SQL to one endpoint. The gateway authenticates the connection, authorizes every statement against a role-based access model, classifies it read or write, and routes it to the least-loaded DuckDB node that can serve it (on object-store pools, biased toward a node that already has the query's tables cached). The nodes read and write Parquet through shared DuckLake catalogs, so they present one consistent view and a pool can scale out across many of them.
 
 In other words, it adds the things a single embedded DuckDB does not have on its own: **multi-tenancy, authentication and per-statement access control, horizontal scale, and a stable client endpoint**, without replacing DuckDB as the engine.
 
@@ -32,7 +32,7 @@ Reach for Quack on Demand when you want to:
 
 - **Serve many users or applications** from shared DuckDB/DuckLake data through one Arrow Flight SQL endpoint, instead of handing out database files.
 - **Enforce access control** on every query: role-based, per-table permissions with tenant isolation, applied before a statement touches a node.
-- **Scale horizontally**: spread read and write traffic across a pool of DuckDB nodes over a single shared catalog, with least-loaded routing and retry on failure.
+- **Scale horizontally**: spread read and write traffic across a pool of DuckDB nodes over a single shared catalog, with least-loaded routing (cache-aware on object-store pools) and retry on failure.
 - **Isolate tenants**: keep each tenant's databases, users, and compute separate, with its own auth provider.
 - **Federate external sources** (Postgres, S3 / Iceberg, anything DuckDB can attach) behind the same SQL surface and the same access model.
 - **Standardize on Arrow Flight SQL** clients: JDBC, ADBC, ODBC, PyArrow, DBeaver, and Spark all connect the same way.
@@ -52,7 +52,7 @@ It is the wrong tool when:
 | --- | --- |
 | Multi-tenancy | Tenants own databases (DuckLake catalogs) and pools of DuckDB nodes |
 | Access control | Authentication (database, JWT, OIDC) plus role-based, per-statement table ACL |
-| Routing | Statement classification, least-loaded node selection, transaction pinning, retry-once |
+| Routing | Statement classification, least-loaded node selection (cache-aware on object-store pools), transaction pinning, retry-once |
 | Storage | DuckLake catalogs over a filesystem or S3-compatible object store |
 | Federation | Attach external catalogs (Postgres, S3/Iceberg) under the same ACL |
 | Operations | Prometheus / cloud metrics, a config manifest for backup and restore, an admin UI |

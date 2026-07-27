@@ -18,6 +18,17 @@ The manager registers these series through Micrometer. They are emitted to which
 | `node_in_flight` | gauge | `tenant`, `pool`, `node_id`, `role` | Statements currently executing on the node. |
 | `node_ewma_latency_seconds` | gauge | `tenant`, `pool`, `node_id`, `role` | EWMA of completed-statement latency, the signal the router uses to pick the least-loaded node. |
 
+## Routing metrics
+
+Emitted per routed statement by the [cache-aware placement](/concepts/routing) layer. The locality series (`routing_tables_total`, `routing_placements_total`) run on any routing policy and stay populated even with `QOD_ROUTING_CACHE_AWARE=false`; the decision and load series describe placement outcomes.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `routing_tables_total` | counter | `tenant`, `pool`, `result` | Table references seen, split into `new` (first time this table is routed) and `repeat` (seen before). A low repeat rate means locality has little to exploit. |
+| `routing_placements_total` | counter | `tenant`, `pool`, `result` | Repeat-table routings by whether the table `stay`ed on its last node or `switch`ed to another. The switch rate is the locality-loss (scatter) signal: high means placement is being destroyed. |
+| `routing_decisions_total` | counter | `tenant`, `pool`, `outcome` | Placement decisions by outcome: `claim`, `sticky-fresh`, `sticky-stale`, `overflow-new-home`, `overflow-evict-home`, `no-refs-fallback`, `not-eligible`, `flag-off`. Frequent `overflow-evict-home` on a pool means three homes are not enough for its hottest tables. |
+| `routing_load_ratio` | summary | `tenant`, `pool` | Chosen-node in-flight count over the pool average. Should stay under `routing.loadCapFactor`; a sustained excess means the load cap is not binding. |
+
 ## Maintenance metrics
 
 Emitted per finished [managed-maintenance](/operating/maintenance) run. These series carry the `qod_` prefix; the legacy series above predate the prefix convention.

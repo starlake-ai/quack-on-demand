@@ -47,6 +47,40 @@ The in-flight count and the latency EWMA are maintained per node by the load tra
 
 A statement that is pinned to a node by an open transaction short-circuits all of the above; see [Sessions and transactions](/concepts/sessions-transactions).
 
+## Cache-aware placement
+
+Least-loaded routing spreads statements evenly but ignores which node already has a table's files warm in cache. On object-store pools that is a real cost: a cold read pays object-store latency and egress. Cache-aware placement keeps least-loaded as the base story and adds a locality qualifier on top of it, sending a statement to a node that has recently served its tables when doing so does not overload that node.
+
+It applies to a statement only when all of these hold:
+
+1. `routing.cacheAware` is true (the default; env `QOD_ROUTING_CACHE_AWARE`).
+2. The pool's DuckLake `dataPath` is an object store (`s3://`, `gs://`, `az://`, and the like). Local-filesystem and `file://` pools keep pure least-loaded routing, since their cold reads ride the OS page cache.
+3. The pool has more than one routable node (a single-node pool, including `--demo`, has nothing to choose between).
+
+Everything else, including every statement whose tables the parser cannot extract, takes the least-loaded path unchanged. Placement is a routing hint, never a gate: it never rejects or fails a statement.
+
+### Table homes and write epochs
+
+The manager keeps a per-pool **placement directory**: a map from each table to up to three **home** nodes, most-recently-used first. Reads stick to a warm home; writes make the other homes stale.
+
+Each table carries a write **epoch**. A home that last served or produced the table at the current epoch is **fresh**; a home left behind by a later write is **stale**. Because the manager routes every write, it bumps the table's epoch itself when it dispatches one, with no per-query catalog lookup. The node that serves the write becomes the fresh home (it produced the new files); the table's other listed homes stay in the set but go stale, since they still hold every Parquet file the write did not touch. DuckLake files are immutable, so a stale home is still warm for most of the table and stays preferred over a cold node.
+
+For each candidate node the router scores the statement's tables: **2** if the node is a fresh home, **1** if it is a stale home, **0** otherwise. It picks the highest-scoring node, breaking ties by the same `(inFlight, ewmaMs)` least-loaded order as before.
+
+### The load cap and overflow
+
+A hot table must not funnel all its traffic onto one home. Each candidate is held under a per-node load cap: its in-flight count may not exceed `c * max(1, average in-flight of the other routable nodes)`, where `c` is `routing.loadCapFactor` (default `2.0`, env `QOD_ROUTING_LOAD_CAP_FACTOR`). The candidate is excluded from its own average, so a busy home cannot inflate its own cap.
+
+When every home of a statement's tables is over the cap, the router falls back to the least-loaded node under the cap and **adds** it as a new home for those tables rather than moving an existing one. If a table already has three homes, its least-recently-used home is dropped to make room. Overflow therefore turns a hot table into a genuinely replicated one, and a load burst cannot ping-pong a table's placement, since the original homes stay listed.
+
+Precedence is unchanged from least-loaded routing: an open transaction's pin wins absolutely, then the Prepare-to-Execute soft pin, then the cache-aware scorer, then plain least-loaded. A pinned statement still updates the directory, so the node it lands on is learned regardless of why it was chosen.
+
+### State, HA, and the revert switch
+
+The directory is per-manager and in-memory only. It is lost on restart and rebuilt from one pass of traffic; there is no recovery path and none is needed. Where more than one manager runs, each keeps its own independent directory with no coordination, by design: the worst case is a table warm on one extra node of a small pool, which is benign over immutable files, and merging cross-manager hints would make each local estimate less trustworthy, not more.
+
+Setting `QOD_ROUTING_CACHE_AWARE=false` instantly reverts routing **decisions** to pure least-loaded everywhere, bit-identical to the pre-feature behavior. The locality metrics and their memoized statement parse keep running regardless, so the [routing metrics](/reference/metrics) stay populated with the flag off.
+
 ## Default-schema qualification
 
 Each statement runs in a fresh DuckDB session on the chosen node, so an unqualified `SELECT * FROM customer` would not find its catalog. Before sending, the router prepends `USE <dbName>.<schemaName>;` derived from the pool's metastore, so unqualified names and two-part `"schema"."table"` identifiers resolve to what the node actually exposes. The schema is pre-created once per node by the health probe (`CREATE SCHEMA IF NOT EXISTS`), so the `USE` always resolves by the time client traffic flows.
