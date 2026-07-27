@@ -1,17 +1,26 @@
 # Changelog
 
-## 0.5.3
+## 0.6.0
 
-- Cache-aware query routing (directory-lite): repeat queries over the same tables stick to the
-  node that already holds their data on object-store pools, with a load cap bounding skew.
+- **Cache-aware query routing (directory-lite).** Repeat queries over the same tables stick to
+  the node that already holds their data on object-store pools, with a load cap bounding skew.
+  Each table gets up to three warm "homes" (spread by overflow, invalidated by write epochs);
+  routing picks the warmest eligible node and falls back to least-loaded everywhere else.
   New config: routing.cacheAware (QOD_ROUTING_CACHE_AWARE, default true),
   routing.loadCapFactor (QOD_ROUTING_LOAD_CAP_FACTOR, default 2.0). New metrics:
   routing_tables_total, routing_placements_total, routing_decisions_total, routing_load_ratio.
   Setting cacheAware=false instantly reverts routing decisions to least-loaded; the locality
   metrics and their memoized statement parse keep running (they are the milestone-1 baseline
   and are deliberately ungated). Pinned statements (transaction pin or soft preferredNode) are
-  now labeled pinned-sticky/pinned-move in routing_decisions_total, keeping the overflow-evict-home
+  labeled pinned-sticky/pinned-move in routing_decisions_total, keeping the overflow-evict-home
   build trigger clean; HA followers clear placement state on peer-driven pool deletes.
+- **Docs: HA is documented as supported.** operating/resilience.md now describes the opt-in
+  Kubernetes HA mode (advisory-lock singleton duties, per-pool locks, LISTEN/NOTIFY cache
+  propagation) instead of calling two managers unsafe, and lists the routing caches among the
+  per-manager in-memory state rebuilt from traffic.
+
+## 0.5.3
+
 - **Per-pool node lockdown override.** `qodstate_pool` gains a tri-state
   `lockdown` (`inherit | on | off`, default inherit = the global
   `QOD_NODE_LOCKDOWN` flag), resolved once per pool and enforced by BOTH
