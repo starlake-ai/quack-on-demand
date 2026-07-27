@@ -9,7 +9,7 @@
 #      via `docker save | ctr import` (single-platform, no kind /
 #      multi-arch quirks).
 #   3. Apply the in-cluster Postgres + SeaweedFS + Prometheus + Grafana.
-#      The dashboard ConfigMap is rebuilt from observability/grafana-dashboard.json
+#      The dashboard ConfigMap is rebuilt from observability/grafana-dashboard-k8s.json
 #      so the repo file stays the single source of truth.
 #   4. Helm-install the chart from `values-local-stack.yaml`.
 #   5. Optional TPC-H seed via `kubectl exec` into the manager pod
@@ -198,7 +198,7 @@ kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/landing.yaml"
 # `kubectl create --dry-run | kubectl apply` is the only kubectl-native
 # way to upsert a CM from a single file without losing the rest of the
 # CM if it grows additional keys later.
-DASHBOARD_JSON="$REPO_DIR/observability/grafana-dashboard.json"
+DASHBOARD_JSON="$REPO_DIR/observability/grafana-dashboard-k8s.json"
 if [[ -f "$DASHBOARD_JSON" ]]; then
   kubectl -n "$NAMESPACE" create configmap grafana-dashboard-qod \
     --from-file="quack-on-demand.json=$DASHBOARD_JSON" \

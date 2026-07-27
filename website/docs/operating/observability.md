@@ -42,7 +42,7 @@ Prometheus scrapes the manager container directly over the compose network. Graf
 Manager UI:    http://localhost:20900/ui/       (admin / admin)
 Prometheus:    http://localhost:9090            (try query: up)
 Grafana:       http://localhost:3000            (anonymous admin; no login)
-               Dashboard: "Quack-on-Demand - Operator Overview"
+               Dashboard: "QoD - Single Node"
 ```
 
 Grafana runs anonymous-admin for zero-login local use; do not expose port 3000 to a public network without disabling that. See the [Docker deployment](/operating/deploy-docker) page for the profile mechanics. Tear down with `docker compose -f docker-compose.yml --profile observability down`.
@@ -105,17 +105,31 @@ Attach static labels to every series to distinguish environments in a shared Gra
 
 Set `QOD_METRICS_SINK=none`: no `/metrics` endpoint is mounted, no cloud push occurs, and all counters, timers, and gauges become no-ops.
 
-## The bundled Grafana dashboard
+## The bundled Grafana dashboards
 
-`observability/grafana-dashboard.json` is a single-screen operator overview, ready to import (Grafana 10.x: **Dashboards → New → Import → Upload JSON file**, then pick your Prometheus datasource; the `${datasource}` variable resolves to its UID).
+Two deployment-shaped dashboards ship under `observability/`, both ready to import (Grafana 10.x: **Dashboards → New → Import → Upload JSON file**, then pick your Prometheus datasource; the `${datasource}` variable resolves to its UID):
+
+- **`grafana-dashboard-single.json`** ("QoD - Single Node") - for the single-box docker-compose stack. Mounted by the top-level `docker-compose.yml` observability profile.
+- **`grafana-dashboard-k8s.json`** ("QoD - Kubernetes") - the single-node content plus the Pool Occupancy, Node Health, and Routing Locality rows. Mounted by the standalone `observability/docker-compose.yml` and rebuilt into the kind smoke rig's ConfigMap.
+
+Rows common to both, top to bottom:
 
 | Row | Panels |
 |---|---|
-| Overview | Total QPS, error rate, active sessions, total nodes |
+| Overview | Total QPS, error rate, active sessions, sessions in transaction, total nodes |
 | Latency | p50 / p95 / p99 statement-duration percentiles |
 | By Tenant | Stacked QPS per tenant, outcomes by status |
+| DuckDB Engine | Memory used, spill bytes, spill files, temp storage per node |
+| DuckLake Maintenance | Runs by result, duration percentiles, files compacted, bytes reclaimed, snapshots expired |
+| Security Rewrites | Column- / row-policy rewrites by outcome, rewrite duration means, catalog lookups by result |
+| JVM | Heap used, GC pause rate, live threads, process uptime |
+
+Kubernetes-only rows (in `grafana-dashboard-k8s.json`):
+
+| Row | Panels |
+|---|---|
 | Pool Occupancy | Node count by tenant / pool / role |
 | Node Health | Per-node table: healthy, draining, in-flight, EWMA latency |
-| JVM | Heap used, GC pause rate, live threads, process uptime |
+| Routing Locality | Table repeat rate, placement switch (scatter) rate, placement decisions by outcome, load ratio |
 
 The metric names and labels these panels query are listed in the [Metrics reference](/reference/metrics). For the `QOD_METRICS_*` configuration keys, see the [Configuration reference](/reference/configuration).

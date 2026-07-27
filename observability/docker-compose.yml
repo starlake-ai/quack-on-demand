@@ -43,7 +43,7 @@ services:
     volumes:
       - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
+      - ./grafana-dashboard-k8s.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus

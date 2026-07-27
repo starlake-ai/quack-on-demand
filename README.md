@@ -147,7 +147,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 ### Operability
 
 - **React admin console** at `http://localhost:20900/ui/` - tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
-- **Observability built in** - Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships a Grafana dashboard at [observability/grafana-dashboard.json](observability/grafana-dashboard.json)
+- **Observability built in** - Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards - [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json)
 - **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://qod.starlake.ai/operating/resilience)
 - **Every config key is overridable** via a `QOD_*` env var
 

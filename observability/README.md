@@ -44,14 +44,16 @@ containers defined in the top-level `docker-compose.yml`; Prometheus
 scrapes the manager container directly over the compose network (no
 `host.docker.internal` indirection needed). Grafana is preprovisioned
 with the Prometheus datasource (UID `prometheus-local`) so the bundled
-dashboard renders without manual datasource selection.
+dashboard renders without manual datasource selection. The compose stack
+mounts `grafana-dashboard-single.json` (the "QoD - Single Node" dashboard);
+see Section 6 for the two deployment-shaped variants.
 
 ```text
 # UIs (printed by run-docker-compose.sh at the end of boot)
 Manager UI:    http://localhost:20900/ui/       (admin / admin)
 Prometheus:    http://localhost:9090            (try query: up)
 Grafana:       http://localhost:3000            (anonymous admin; no login)
-               Dashboard: "Quack-on-Demand - Operator Overview"
+               Dashboard: "QoD - Single Node"
 ```
 
 Tear down:
@@ -95,7 +97,9 @@ docker compose -f observability/docker-compose.yml down -v
 ```
 
 Grafana's preprovisioning is identical to the integrated path: same
-datasource UID, same auto-loaded dashboard. Pick whichever path
+datasource UID. This standalone stack mounts `grafana-dashboard-k8s.json`
+(the "QoD - Kubernetes" dashboard) because its typical target is a
+multi-node manager reached over a port-forward. Pick whichever path
 matches where your manager lives.
 
 ## 3. Cloud push (`sink = "aws" | "azure" | "gcp"`)
@@ -136,33 +140,54 @@ export QOD_METRICS_DEPLOYMENT=prod-eu
 export QOD_METRICS_REGION=eu-west-1
 ```
 
-## 6. Grafana dashboard
+## 6. Grafana dashboards
 
-`grafana-dashboard.json` is a single-screen operator overview covering all key signals. It was validated with `python3 -m json.tool` and is ready to import.
+Two deployment-shaped dashboards ship in this directory. Both were validated with `python3 -m json.tool` and are ready to import.
+
+- **`grafana-dashboard-single.json`** ("QoD - Single Node") - for the single-box docker-compose stack. It drops the Pool Occupancy and Node Health rows (a one-box deployment has a single manager and the node-fanout view adds noise) but keeps the Total Nodes stat.
+- **`grafana-dashboard-k8s.json`** ("QoD - Kubernetes") - the single-node content plus the Pool Occupancy row, the Node Health per-node table, and a Routing Locality row for the cache-aware, multi-node router.
+
+Which stack mounts which:
+
+| Stack | Dashboard |
+|---|---|
+| Top-level `docker-compose.yml` (`observability` profile) | `grafana-dashboard-single.json` |
+| Standalone `observability/docker-compose.yml` (manager elsewhere / port-forward) | `grafana-dashboard-k8s.json` |
+| kind smoke rig (`charts/quack-on-demand/local-stack-k8s`) | `grafana-dashboard-k8s.json` |
 
 **Import procedure:**
 
 1. In Grafana 10.x, navigate to **Dashboards → New → Import**.
-2. Click **Upload JSON file** and select `docs/observability/grafana-dashboard.json`.
+2. Click **Upload JSON file** and select the variant that matches your deployment.
 3. At the datasource prompt, select your Prometheus datasource. The `${datasource}` variable in the JSON resolves to its UID automatically.
 4. Click **Import**.
 
-**Dashboard layout:**
+**Layout (rows common to both, top to bottom):**
 
 | Row | Panels |
 |---|---|
-| Overview | Total QPS, Error Rate, Active Sessions, Total Nodes |
+| Overview | Total QPS, Error Rate, Active Sessions, Sessions in Transaction, Total Nodes |
 | Latency | p50 / p95 / p99 statement duration percentiles |
 | By Tenant | Stacked QPS per tenant, Outcomes by status |
+| DuckDB Engine | Memory used, spill bytes, spill files, temp storage per node (health-probe scrape) |
+| DuckLake Maintenance | Runs by result, duration percentiles, files compacted, bytes reclaimed, snapshots expired |
+| Security Rewrites | Column- / row-policy rewrites by outcome, rewrite duration means, catalog lookups by result |
+| JVM | Heap used, GC pause rate, live threads, process uptime |
+
+**Kubernetes-only rows** (present in `grafana-dashboard-k8s.json`):
+
+| Row | Panels |
+|---|---|
 | Pool Occupancy | Node count bar chart by tenant / pool / role |
 | Node Health | Table: healthy, draining, in-flight, EWMA latency per node |
-| DuckDB Engine | Buffer-manager memory and spill-to-disk bytes per node (health-probe scrape) |
-| JVM | Heap used, GC pause rate, live threads, process uptime |
+| Routing Locality | Table repeat rate, placement switch (scatter) rate, placement decisions by outcome, load ratio |
 
 **Expected metric names** (all registered by the manager):
 
 - `statements_total` - counter, labels: `tenant`, `pool`, `status`
-- `statement_duration_seconds` - histogram, labels: `tenant`, `pool`
+- `statement_duration_seconds` - histogram, labels: `tenant`, `pool`, `status`
+- `flightsql_sessions_active` - gauge
+- `flightsql_sessions_in_transaction` - gauge
 - `node_healthy` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
 - `node_draining` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
 - `node_in_flight` - gauge, labels: `tenant`, `pool`, `node_id`, `role`
@@ -171,7 +196,17 @@ export QOD_METRICS_REGION=eu-west-1
 - `node_duckdb_temp_storage_bytes` - gauge, same labels (buffer-manager temp storage)
 - `node_duckdb_spill_files` / `node_duckdb_spill_bytes` - gauges, same labels (live spill-to-disk files and their total size)
 - `pool_nodes` - gauge, labels: `tenant`, `pool`, `role`
-- `flightsql_sessions_active` - gauge
+- `qod_maint_runs_total` - counter, labels: `tenant`, `tenant_db`, `result` (`succeeded` / `failed` / `partial`)
+- `qod_maint_duration_seconds` - histogram, labels: `tenant`, `tenant_db`
+- `qod_maint_files_compacted_total` / `qod_maint_bytes_reclaimed_total` / `qod_maint_snapshots_expired_total` - counters, labels: `tenant`, `tenant_db`
+- `column_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `denied` / `passthrough`)
+- `row_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `passthrough` / `parse_failed`)
+- `column_policy_rewrite_duration_seconds` / `row_policy_rewrite_duration_seconds` - histograms, labels: `tenant`, `pool`
+- `column_policy_catalog_lookups_total` - counter, labels: `tenant`, `pool`, `result` (`hit` / `miss` / `error`)
+- `routing_tables_total` - counter, labels: `tenant`, `pool`, `result` (`new` / `repeat`)
+- `routing_placements_total` - counter, labels: `tenant`, `pool`, `result` (`stay` / `switch`)
+- `routing_decisions_total` - counter, labels: `tenant`, `pool`, `outcome`
+- `routing_load_ratio` - summary, labels: `tenant`, `pool`
 - `jvm_memory_used_bytes` - gauge (Micrometer JVM binder)
 - `jvm_gc_pause_seconds_sum` - counter (Micrometer JVM binder)
 - `jvm_threads_live_threads` - gauge (Micrometer JVM binder)

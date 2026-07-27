@@ -10,7 +10,7 @@
 #                           /var/lib/grafana/dashboards.
 #   - grafana-dashboard-qod : holds the dashboard JSON itself. The
 #                           run-local-stack-k8s.sh script (re)creates
-#                           this CM from observability/grafana-dashboard.json
+#                           this CM from observability/grafana-dashboard-k8s.json
 #                           so the repo file stays the single source
 #                           of truth -- this YAML only ships an empty
 #                           stub so `kubectl apply -f grafana.yaml`

@@ -1,6 +1,6 @@
 # Auto-provisioned Prometheus datasource. The UID matches the
-# `${datasource}` variable in grafana-dashboard.json so the dashboard
-# renders without manual datasource selection on first open.
+# `${datasource}` variable in the grafana-dashboard-*.json files so the
+# dashboard renders without manual datasource selection on first open.
 
 apiVersion: 1
 

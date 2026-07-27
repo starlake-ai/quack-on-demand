@@ -380,7 +380,7 @@ services:
     volumes:
       - ./observability/grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./observability/grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./observability/grafana-dashboard.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
+      - ./observability/grafana-dashboard-single.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
       - grafana-data:/var/lib/grafana
 
 volumes:

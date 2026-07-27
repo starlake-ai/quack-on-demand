@@ -1,5 +1,5 @@
 # Auto-load the quack-on-demand dashboard from /var/lib/grafana/dashboards
-# (the docker-compose mounts grafana-dashboard.json there). Grafana
+# (the docker-compose mounts grafana-dashboard-single.json there). Grafana
 # re-reads this path every 10s, so re-saving the JSON file on the host
 # refreshes the dashboard live.
 
