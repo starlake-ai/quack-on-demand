@@ -109,3 +109,129 @@ class RouterSpec extends AnyFlatSpec with Matchers:
     Router.pick(snap(List(ro1), loads), StatementKind.Select, None) match
       case RoutingDecision.Unavailable(_) => succeed
       case other                          => fail(s"expected Unavailable, got $other")
+
+  // --- placement-aware pick (cache-aware routing) ---
+
+  private def req(
+      tables: Set[String],
+      assignments: Map[String, Assignment],
+      c: Double = 2.0
+  ) = Some(PlacementRequest(tables, assignments, c))
+
+  private def home(nodeId: String, warm: Long = 0L, epoch: Long = 0L) =
+    Assignment(List(HomeEntry(nodeId, warm)), epoch, 1L)
+
+  it should "route to the fresh home over a less-loaded node" in:
+    val loads = Map("ro1" -> NodeLoad(2, 100), "ro2" -> NodeLoad(0, 100))
+    val a     = Map("db.main.t" -> home("ro1"))
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro1")
+
+  it should "prefer a fresh home over a stale home on multi-table queries" in:
+    val a = Map(
+      "db.main.x" -> home("ro1", warm = 1L, epoch = 1L), // fresh on ro1: 2 points
+      "db.main.y" -> home("ro2", warm = 1L, epoch = 2L)  // stale on ro2: 1 point
+    )
+    Router.pick(
+      snap(List(ro1, ro2)),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.x", "db.main.y"), a)
+    ) shouldBe RoutingDecision.Use("ro1")
+
+  it should "prefer a stale home over a cold node" in:
+    val a = Map("db.main.t" -> home("ro1", warm = 0L, epoch = 1L)) // stale: 1 point beats 0
+    Router.pick(
+      snap(List(ro1, ro2)),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro1")
+
+  it should "score any listed home, not only the MRU one" in:
+    val a = Map(
+      "db.main.t" -> Assignment(List(HomeEntry("ro2", 0L), HomeEntry("ro1", 0L)), 0L, 1L)
+    )
+    val loads = Map("ro1" -> NodeLoad(0, 100), "ro2" -> NodeLoad(2, 100))
+    // Both are fresh homes (score 2 each); least-loaded tie-break picks ro1.
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro1")
+
+  it should "bypass the home when it exceeds its load cap" in:
+    // capFor(ro1) = 1.5 x max(1, avg of others = 1) = 1.5 < 9 -> excluded; ro2 admitted.
+    val loads = Map("ro1" -> NodeLoad(9, 100), "ro2" -> NodeLoad(1, 100))
+    val a     = Map("db.main.t" -> home("ro1"))
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a, c = 1.5)
+    ) shouldBe RoutingDecision.Use("ro2")
+
+  it should "bind the cap even on a 2-node pool (candidate excluded from its own average)" in:
+    // Pool-wide average would give cap = 2 x (3/2) = 3 and admit ro1 forever; excluding the
+    // candidate gives capFor(ro1) = 2 x max(1, 0) = 2 < 3 -> overflow to ro2.
+    val loads = Map("ro1" -> NodeLoad(3, 100), "ro2" -> NodeLoad(0, 100))
+    val a     = Map("db.main.t" -> home("ro1"))
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro2")
+
+  it should "fall back to least-loaded when no table has an assignment" in:
+    val loads = Map("ro1" -> NodeLoad(3, 100), "ro2" -> NodeLoad(1, 100))
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), Map.empty)
+    ) shouldBe RoutingDecision.Use("ro2")
+
+  it should "break score ties by least-loaded" in:
+    val loads = Map("ro1" -> NodeLoad(3, 100), "ro2" -> NodeLoad(1, 100))
+    val a     = Map(
+      "db.main.x" -> home("ro1"),
+      "db.main.y" -> home("ro2")
+    )
+    Router.pick(
+      snap(List(ro1, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.x", "db.main.y"), a)
+    ) shouldBe RoutingDecision.Use("ro2")
+
+  it should "still respect maxConcurrent capacity in the placement arm" in:
+    val capped = node("ro1", Role.ReadOnly).copy(maxConcurrent = 1)
+    val loads  = Map("ro1" -> NodeLoad(1, 100), "ro2" -> NodeLoad(0, 100))
+    val a      = Map("db.main.t" -> home("ro1"))
+    Router.pick(
+      snap(List(capped, ro2), loads),
+      StatementKind.Select,
+      None,
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro2")
+
+  it should "behave identically to the 3-arg pick when placement is None" in:
+    val loads = Map("ro1" -> NodeLoad(3, 100), "ro2" -> NodeLoad(2, 100))
+    val s     = snap(List(ro1, ro2), loads)
+    Router.pick(s, StatementKind.Select, None, None) shouldBe
+      Router.pick(s, StatementKind.Select, None)
+
+  it should "let a pinned node win over any placement" in:
+    val a = Map("db.main.t" -> home("ro1"))
+    Router.pick(
+      snap(List(ro1, ro2)),
+      StatementKind.Select,
+      Some("ro2"),
+      req(Set("db.main.t"), a)
+    ) shouldBe RoutingDecision.Use("ro2")
