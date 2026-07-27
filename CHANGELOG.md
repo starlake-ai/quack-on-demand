@@ -7,6 +7,9 @@
   New config: routing.cacheAware (QOD_ROUTING_CACHE_AWARE, default true),
   routing.loadCapFactor (QOD_ROUTING_LOAD_CAP_FACTOR, default 2.0). New metrics:
   routing_tables_total, routing_placements_total, routing_decisions_total, routing_load_ratio.
+  Setting cacheAware=false instantly reverts routing decisions to least-loaded; the locality
+  metrics and their memoized statement parse keep running (they are the milestone-1 baseline
+  and are deliberately ungated).
 - **Per-pool node lockdown override.** `qodstate_pool` gains a tri-state
   `lockdown` (`inherit | on | off`, default inherit = the global
   `QOD_NODE_LOCKDOWN` flag), resolved once per pool and enforced by BOTH

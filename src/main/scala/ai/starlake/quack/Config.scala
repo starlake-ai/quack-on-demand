@@ -482,7 +482,8 @@ final case class RoutingConfig(
     @field @ConfigField(
       envVar = "QOD_ROUTING_CACHE_AWARE",
       description =
-        "Cache-aware placement on object-store pools. false = pure least-loaded (instant revert)."
+        "Cache-aware placement on object-store pools. false instantly reverts routing decisions " +
+          "to pure least-loaded; locality metrics and their memoized statement parse keep running."
     )
     cacheAware: Boolean = true,
     @field @ConfigField(

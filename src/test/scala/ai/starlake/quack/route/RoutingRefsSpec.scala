@@ -32,6 +32,11 @@ class RoutingRefsSpec extends AnyFlatSpec with Matchers:
     val refs = RoutingRefs.extract("SELECT * FROM customer AT (VERSION => 3)", cfg)
     refs.reads shouldBe Set("tpch1.main.customer")
 
+  it should "return empty on statements over the size guard without parsing" in:
+    val huge = "SELECT * FROM t WHERE x IN (" + "1," * 60000 + "1)"
+    huge.length should be > 100000
+    RoutingRefs.extract(huge, cfg) shouldBe RoutingRefs.empty
+
   "RoutingRefsCache" should "memoize by sql text and config fingerprint" in:
     val cache = new RoutingRefsCache(maxEntries = 2)
     val a     = cache.extract("SELECT * FROM customer", cfg)
