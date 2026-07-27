@@ -1435,3 +1435,142 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     out.swap.toOption.map(_.reason).getOrElse("") should not startWith "access denied: lockdown:"
+
+  // ---- cache-aware placement (milestone-2 edge integration) ----
+
+  /** Two dual-role nodes on an object-store (or, when overridden, local) dataPath, a
+    * SimpleMeterRegistry-backed RoutingInstruments, and a shared PlacementDirectory the test can
+    * inspect. refsConfigFor supplies db/main so `SELECT * FROM customer` canonicalizes to
+    * `db.main.customer`. The tenant-db is DuckLake-kind because that is the only kind whose
+    * PoolState.metastore carries a `dataPath` key (the router's object-store gate reads it);
+    * DuckLake pre-init against pgPort 0 fails fast and is swallowed with a warning by design.
+    */
+  private def setupPlacement(
+      cacheAware: Boolean = true,
+      dataPath: String = "s3://bucket/data"
+  ) =
+    val backend = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          29000 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(id: String)    = IO { n.remove(id); () }
+      def isAlive(id: String) = n.contains(id)
+      def discoverExisting()  = IO.pure(n.values.toList)
+      def cleanup()           = IO(n.clear())
+
+    val tracker = new NodeLoadTracker
+    val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
+      def createDatabase(name: String): Either[String, Unit] = Right(())
+      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore(), dbAdmin = admin)
+    sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
+    sup
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.DuckLake,
+        Map(
+          "pgHost"     -> "127.0.0.1",
+          "pgPort"     -> "0",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "schemaName" -> "main"
+        ),
+        dataPath
+      )
+      .unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
+
+    val client = new QuackHttpClient(
+      TestArrow.sharedAllocator,
+      nativeClient = true,
+      nodeDisableSsl = true
+    ):
+      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        IO.pure(TestArrow.okResponse())
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val reg     = new SimpleMeterRegistry
+    val ri      = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
+    val dir     = new ai.starlake.quack.route.PlacementDirectory()
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
+      routingInstruments = ri,
+      placement = dir,
+      cacheAwareRouting = cacheAware
+    )
+    (router, reg, dir, sup.get(poolKey).get.nodes)
+
+  private def decisionCount(reg: SimpleMeterRegistry, outcome: String): Double =
+    reg
+      .counter(
+        "routing_decisions_total",
+        "tenant",
+        poolKey.tenant,
+        "pool",
+        poolKey.pool,
+        "outcome",
+        outcome
+      )
+      .count()
+
+  "cache-aware placement" should "route repeat reads of the same table to the same node (sticky)" in:
+    val (router, reg, _, _) = setupPlacement()
+    val first = router.execute("stk-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync()
+    val firstNode = first.toOption.get.nodeId
+    first.toOption.get.close()
+    val second = router.execute("stk-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync()
+    val secondNode = second.toOption.get.nodeId
+    second.toOption.get.close()
+    firstNode shouldBe secondNode
+    decisionCount(reg, "claim") shouldBe 1.0
+    decisionCount(reg, "sticky-fresh") shouldBe 1.0
+
+  it should "bump the epoch when a write is routed and keep the writer as fresh MRU home" in:
+    val (router, _, dir, nodes) = setupPlacement()
+    val live                    = nodes.map(_.nodeId).toSet
+    val table                   = "db.main.customer"
+    val out1                    =
+      router.execute("wr-1", "alice", poolKey, "INSERT INTO customer VALUES (1)").unsafeRunSync()
+    val writer = out1.toOption.get.nodeId
+    out1.toOption.get.close()
+    val a1 = dir.viewFor(poolKey, Set(table), live)(table)
+    a1.homes shouldBe List(ai.starlake.quack.route.HomeEntry(writer, 0L))
+    a1.currentEpoch shouldBe 0L
+    val out2 =
+      router.execute("wr-1", "alice", poolKey, "INSERT INTO customer VALUES (1)").unsafeRunSync()
+    out2.toOption.get.close()
+    val a2 = dir.viewFor(poolKey, Set(table), live)(table)
+    a2.currentEpoch shouldBe 1L
+    a2.homes.head shouldBe ai.starlake.quack.route.HomeEntry(writer, 1L)
+
+  it should "fall back to least-loaded and label flag-off when cacheAwareRouting is false" in:
+    val (router, reg, _, _) = setupPlacement(cacheAware = false)
+    router.execute("off-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync().foreach {
+      qr => qr.close()
+    }
+    decisionCount(reg, "flag-off") shouldBe 1.0
+
+  it should "label not-eligible on a local-dataPath pool" in:
+    val (router, reg, _, _) = setupPlacement(dataPath = "/tmp/data")
+    router.execute("loc-1", "alice", poolKey, "SELECT * FROM customer").unsafeRunSync().foreach {
+      qr => qr.close()
+    }
+    decisionCount(reg, "not-eligible") shouldBe 1.0

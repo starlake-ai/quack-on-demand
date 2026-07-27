@@ -86,6 +86,13 @@ final class PoolSupervisor(
       * catalog reader is replaced by a fresh one that picks up the new credentials.
       */
     onTenantDbChanged: (String, String) => Unit = (_, _) => (),
+    /** Callback fired after a pool is torn down (scaled away by [[stopPool]], drained by
+      * [[suspendPool]], or removed by [[deletePool]]). The default is a no-op; `Main` wires it to
+      * clear the pool's placement-directory and locality-tracker entries so a resumed or recreated
+      * pool starts from a clean placement slate instead of routing on assignments keyed to nodes
+      * that no longer exist.
+      */
+    onPoolTeardown: PoolKey => Unit = _ => (),
     /** Module event emission (SPI). Noop by default; Main wires the ModuleEventBus sink. Emit AFTER
       * the store/state mutation succeeds so modules never observe an uncommitted change.
       */
@@ -1694,7 +1701,7 @@ final class PoolSupervisor(
     * instead of auto-waking on the next query.
     */
   def stopPool(key: PoolKey, force: Boolean): IO[Unit] =
-    pools.get(key) match
+    val work: IO[Unit] = pools.get(key) match
       case None                   => IO.unit
       case Some(s) if s.suspended =>
         // A suspended pool has no nodes, so delegating to scale(0) would early-return
@@ -1724,6 +1731,7 @@ final class PoolSupervisor(
                   }
         }))
       case Some(_) => scale(key, 0, RoleDistribution(0, 0, 0), force).void
+    work.flatTap(_ => IO(onPoolTeardown(key)))
 
   /** Scale-to-zero: set suspended=true, then drain-stop every node while KEEPING the persisted
     * distribution (unlike [[stopPool]], which zeroes it). Reconcile never respawns suspended pools
@@ -1732,37 +1740,42 @@ final class PoolSupervisor(
     * racing the drain observes suspended=true and re-wakes the pool once the lock frees.
     */
   def suspendPool(key: PoolKey, reason: String): IO[Either[SupervisorError, Pool]] =
-    locks.withLock(key)(withCacheRecoveryIO("suspendPool")(IO.defer {
-      pools.get(key) match
-        case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
-        case Some(state) =>
-          poolIdByKey.get(key).flatMap(poolRows.get) match
-            case None =>
-              IO.pure(
-                Left(
-                  SupervisorError.Internal(
-                    s"pool entity missing for $key (control-plane out of sync)"
+    locks
+      .withLock(key)(withCacheRecoveryIO("suspendPool")(IO.defer {
+        pools.get(key) match
+          case None        => IO.pure(Left(SupervisorError.NotFound(s"pool not found: $key")))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                IO.pure(
+                  Left(
+                    SupervisorError.Internal(
+                      s"pool entity missing for $key (control-plane out of sync)"
+                    )
                   )
                 )
-              )
-            case Some(p) =>
-              val updated = p.copy(suspended = true)
-              val flagIO  = IO.blocking {
-                store.upsertPool(updated)
-                poolRows.put(updated.id, updated)
-                pools.put(key, state.copy(suspended = true))
-                publish.topologyChanged()
-              }
-              flagIO *> drainAndForgetNodes(key, state.nodes) *> IO
-                .delay {
-                  pools.put(key, state.copy(nodes = Nil, suspended = true))
+              case Some(p) =>
+                val updated = p.copy(suspended = true)
+                val flagIO  = IO.blocking {
+                  store.upsertPool(updated)
+                  poolRows.put(updated.id, updated)
+                  pools.put(key, state.copy(suspended = true))
                   publish.topologyChanged()
-                  events.emit(
-                    ManagerEvent.PoolSuspended(key.tenant, key.tenantDb, key.pool, reason)
-                  )
                 }
-                .as(Right(updated))
-    }))
+                flagIO *> drainAndForgetNodes(key, state.nodes) *> IO
+                  .delay {
+                    pools.put(key, state.copy(nodes = Nil, suspended = true))
+                    publish.topologyChanged()
+                    events.emit(
+                      ManagerEvent.PoolSuspended(key.tenant, key.tenantDb, key.pool, reason)
+                    )
+                  }
+                  .as(Right(updated))
+      }))
+      .flatTap {
+        case Right(_) => IO(onPoolTeardown(key))
+        case Left(_)  => IO.unit
+      }
 
   /** Wake a suspended pool: clear the flag, respawn to the stored distribution (via the same
     * [[spawnFromDistribution]] path reconcile uses). Idempotent; resuming a non-suspended pool is a
@@ -1806,9 +1819,11 @@ final class PoolSupervisor(
     * merely scales it to 0.
     */
   def deletePool(key: PoolKey, force: Boolean): IO[Unit] =
-    locks.withLock(key) {
-      withCacheRecoveryIO("deletePool")(deletePoolUnlocked(key, force))
-    }
+    locks
+      .withLock(key) {
+        withCacheRecoveryIO("deletePool")(deletePoolUnlocked(key, force))
+      }
+      .flatTap(_ => IO(onPoolTeardown(key)))
 
   private def deletePoolUnlocked(key: PoolKey, force: Boolean): IO[Unit] =
     pools.get(key) match

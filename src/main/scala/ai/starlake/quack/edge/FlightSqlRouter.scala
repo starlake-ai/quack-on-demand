@@ -69,7 +69,11 @@ final class FlightSqlRouter(
     val locality: ai.starlake.quack.route.LocalityTracker =
       new ai.starlake.quack.route.LocalityTracker(),
     val routingInstruments: ai.starlake.quack.observability.metrics.RoutingInstruments =
-      ai.starlake.quack.observability.metrics.RoutingInstruments.noop
+      ai.starlake.quack.observability.metrics.RoutingInstruments.noop,
+    val placement: ai.starlake.quack.route.PlacementDirectory =
+      new ai.starlake.quack.route.PlacementDirectory(),
+    val cacheAwareRouting: Boolean = true,
+    val loadCapFactor: Double = 2.0
 ):
 
   /** Record a statement outcome into the in-memory history, the metrics instruments, and
@@ -449,7 +453,28 @@ final class FlightSqlRouter(
                 if recordExecution then
                   stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
                 else None
-              Router.pick(snap, kind, pinned) match
+              import ai.starlake.quack.route.{PlacementDirectory, PlacementRequest, RoutingRefs}
+              val refs =
+                if recordExecution then routingRefs.extract(sql, refsConfigFor(poolKey))
+                else RoutingRefs.empty
+              val routableIds =
+                snap.nodes.filter(n => snap.loadOf(n.nodeId).routable).map(_.nodeId).toSet
+              val dataPath =
+                supervisor.get(poolKey).map(_.metastore.getOrElse("dataPath", "")).getOrElse("")
+              val placementEligible =
+                cacheAwareRouting && recordExecution && refs.all.nonEmpty &&
+                  routableIds.size > 1 && PlacementDirectory.isObjectStorePath(dataPath)
+              val placementReq =
+                if placementEligible then
+                  Some(
+                    PlacementRequest(
+                      refs.all,
+                      placement.viewFor(poolKey, refs.all, routableIds),
+                      loadCapFactor
+                    )
+                  )
+                else None
+              Router.pick(snap, kind, pinned, placementReq) match
                 case RoutingDecision.Unavailable(reason) =>
                   maybeRecord(
                     nodeId = "-",
@@ -482,12 +507,38 @@ final class FlightSqlRouter(
                         if recordExecution then
                           Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
                         else None
-                      // Phase-0 locality baseline. Observed on `sql` (the pre-rewrite statement),
-                      // NOT finalSql: RLS rewrites are per-principal, which would defeat
-                      // memoization, and placement keys should be the user-visible tables. Gated
-                      // on recordExecution so probes do not skew the metric.
+                      // Phase-0 locality baseline plus the placement decision. Both are computed
+                      // from `refs` (extracted from `sql`, the pre-rewrite statement, NOT finalSql:
+                      // RLS rewrites are per-principal, which would defeat memoization, and
+                      // placement keys should be the user-visible tables). Gated on recordExecution
+                      // so probes do not skew the metrics. `placement.record` runs for tx-pinned and
+                      // preferredNode-pinned statements too: the statement really lands on `nodeId`,
+                      // so the directory must learn it regardless of how the node was chosen.
                       if recordExecution then
-                        val refs = routingRefs.extract(sql, refsConfigFor(poolKey))
+                        val outcome =
+                          if !cacheAwareRouting then "flag-off"
+                          else if refs.all.isEmpty then "no-refs-fallback"
+                          else if !placementEligible then "not-eligible"
+                          else
+                            placement.record(
+                              poolKey,
+                              nodeId,
+                              refs,
+                              routableIds,
+                              System.currentTimeMillis()
+                            )
+                        routingInstruments.recordDecision(poolKey.tenant, poolKey.pool, outcome)
+                        if placementEligible then
+                          val avg = math.max(
+                            1.0,
+                            routableIds.iterator.map(id => snap.loadOf(id).inFlight).sum.toDouble /
+                              routableIds.size
+                          )
+                          routingInstruments.recordLoadRatio(
+                            poolKey.tenant,
+                            poolKey.pool,
+                            snap.loadOf(nodeId).inFlight / avg
+                          )
                         if refs.all.nonEmpty then
                           val obs = locality.observe(poolKey, refs.all, nodeId)
                           routingInstruments.recordLocality(

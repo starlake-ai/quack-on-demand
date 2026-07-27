@@ -461,7 +461,12 @@ object Main extends IOApp with LazyLogging:
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
-    val sup            = new PoolSupervisor(
+    // Cache-aware routing state. Constructed before the supervisor so its teardown hook can clear
+    // a torn-down pool's entries; the FlightSQL router below shares the same two instances.
+    val placementDirectory =
+      new ai.starlake.quack.route.PlacementDirectory(mgrCfg.routing.directoryMaxTables)
+    val localityTracker = new ai.starlake.quack.route.LocalityTracker()
+    val sup             = new PoolSupervisor(
       backend,
       tracker,
       store,
@@ -470,6 +475,7 @@ object Main extends IOApp with LazyLogging:
       federationBlobOf,
       onTenantDbDeleted = evictCatalogReader,
       onTenantDbChanged = evictCatalogReader,
+      onPoolTeardown = key => { placementDirectory.clear(key); localityTracker.clear(key) },
       locks = poolLocks,
       publish = publisher,
       events = moduleEventBus.sink,
@@ -1081,7 +1087,6 @@ object Main extends IOApp with LazyLogging:
         )
       val routingInstruments =
         new ai.starlake.quack.observability.metrics.RoutingInstruments(metricsReg.composite)
-      val localityTracker  = new ai.starlake.quack.route.LocalityTracker()
       val routingRefsCache = new ai.starlake.quack.route.RoutingRefsCache()
 
       val fsRouter = new FlightSqlRouter(
@@ -1106,7 +1111,10 @@ object Main extends IOApp with LazyLogging:
         routingRefs = routingRefsCache,
         refsConfigFor = refsConfigFor,
         locality = localityTracker,
-        routingInstruments = routingInstruments
+        routingInstruments = routingInstruments,
+        placement = placementDirectory,
+        cacheAwareRouting = mgrCfg.routing.cacheAware,
+        loadCapFactor = mgrCfg.routing.loadCapFactor
       )
 
       // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
