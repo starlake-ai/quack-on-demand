@@ -26,7 +26,7 @@ Emitted per routed statement by the [cache-aware placement](/concepts/routing) l
 |---|---|---|---|
 | `routing_tables_total` | counter | `tenant`, `pool`, `result` | Table references seen, split into `new` (first time this table is routed) and `repeat` (seen before). A low repeat rate means locality has little to exploit. |
 | `routing_placements_total` | counter | `tenant`, `pool`, `result` | Repeat-table routings by whether the table `stay`ed on its last node or `switch`ed to another. The switch rate is the locality-loss (scatter) signal: high means placement is being destroyed. |
-| `routing_decisions_total` | counter | `tenant`, `pool`, `outcome` | Placement decisions by outcome: `claim`, `sticky-fresh`, `sticky-stale`, `overflow-new-home`, `overflow-evict-home`, `no-refs-fallback`, `not-eligible`, `flag-off`. Frequent `overflow-evict-home` on a pool means three homes are not enough for its hottest tables. |
+| `routing_decisions_total` | counter | `tenant`, `pool`, `outcome` | Placement decisions by outcome: `claim`, `sticky-fresh`, `sticky-stale`, `overflow-new-home`, `overflow-evict-home`, `pinned-sticky`, `pinned-move`, `no-refs-fallback`, `not-eligible`, `flag-off`. Frequent `overflow-evict-home` on a pool means three homes are not enough for its hottest tables. `pinned-sticky` / `pinned-move` mark statements a transaction pin or soft preferredNode placed rather than the scorer, so they are excluded from the overflow signal. |
 | `routing_load_ratio` | summary | `tenant`, `pool` | Chosen-node in-flight count over the pool average. Should stay under `routing.loadCapFactor`; a sustained excess means the load cap is not binding. |
 
 ## Maintenance metrics
