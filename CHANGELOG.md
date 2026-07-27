@@ -18,6 +18,10 @@
   Kubernetes HA mode (advisory-lock singleton duties, per-pool locks, LISTEN/NOTIFY cache
   propagation) instead of calling two managers unsafe, and lists the routing caches among the
   per-manager in-memory state rebuilt from traffic.
+- **Two deployment-shaped Grafana dashboards.** grafana-dashboard.json is replaced by
+  grafana-dashboard-single.json (one-box docker-compose stack) and grafana-dashboard-k8s.json
+  (multi-node / Kubernetes, adds pool occupancy, node health, and the new routing locality row).
+  Both gain DuckLake maintenance and CLS/RLS rewrite panels that were never dashboarded before.
 
 ## 0.5.3
 
