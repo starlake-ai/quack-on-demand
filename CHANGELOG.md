@@ -2,6 +2,11 @@
 
 ## 0.5.3
 
+- Cache-aware query routing (directory-lite): repeat queries over the same tables stick to the
+  node that already holds their data on object-store pools, with a load cap bounding skew.
+  New config: routing.cacheAware (QOD_ROUTING_CACHE_AWARE, default true),
+  routing.loadCapFactor (QOD_ROUTING_LOAD_CAP_FACTOR, default 2.0). New metrics:
+  routing_tables_total, routing_placements_total, routing_decisions_total, routing_load_ratio.
 - **Per-pool node lockdown override.** `qodstate_pool` gains a tri-state
   `lockdown` (`inherit | on | off`, default inherit = the global
   `QOD_NODE_LOCKDOWN` flag), resolved once per pool and enforced by BOTH
