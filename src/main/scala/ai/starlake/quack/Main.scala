@@ -2,17 +2,7 @@ package ai.starlake.quack
 
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.auth.{
-  AuthQueryPreconditions,
-  AuthenticationService,
-  OidcBearerAuthenticator,
-  OidcDiscovery,
-  OidcEndpointResolver,
-  OidcEndpoints,
-  OidcSsoService,
-  OidcStateCodec
-}
-import ai.starlake.quack.secrets.SecretRefResolver
+import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
   AclConfig,
   AuthenticationConfig,
@@ -24,9 +14,15 @@ import ai.starlake.quack.edge.config.{
   KeycloakAuthConfig,
   NodeLockdownConfig
 }
-import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
+import ai.starlake.quack.boot.{
+  BootFactories,
+  BootPreflight,
+  CatalogReaders,
+  EdgeRewriters,
+  ManagementAuthWiring
+}
+import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.model.Names
-import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -44,7 +40,6 @@ import ai.starlake.quack.ondemand.telemetry.{
   EventJournal,
   NoopTelemetryStore,
   PostgresTelemetryStore,
-  TelemetryPurge,
   TelemetryStore
 }
 import ai.starlake.quack.ondemand.ha.{
@@ -55,25 +50,9 @@ import ai.starlake.quack.ondemand.ha.{
   PoolLocker,
   StateChangePublisher
 }
-import ai.starlake.quack.ondemand.auth.{
-  GrantsLookup,
-  ManagementAuthMode,
-  ManagementAuthModeResolver,
-  ManagementIdentitySource
-}
+import ai.starlake.quack.ondemand.auth.GrantsLookup
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
-import ai.starlake.quack.ondemand.catalog.ReaderCacheSweeper
-import ai.starlake.quack.ondemand.federation.{
-  AwsSecretsManagerResolver,
-  AzureSecretsManagerResolver,
-  DispatchingSecretResolver,
-  EnvSecretResolver,
-  FederationBlobBuilder,
-  GcpSecretsManagerResolver,
-  PostgresSecretResolver,
-  SecretResolver,
-  VaultSecretResolver
-}
+import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, SecretResolver}
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
@@ -237,120 +216,20 @@ object Main extends IOApp with LazyLogging:
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
-    // Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery
-    // must each project (password_hash, role, enabled) -- exactly the shape
-    // DatabaseAuthenticator requires at runtime now that the tolerant
-    // two-column branch is gone. Caught here instead of at first login.
-    // Runs AFTER the Liquibase apply above: the default queries target
-    // qodstate_user in the control-plane database, which does not exist yet
-    // on a fresh (or nuked) metastore until the changelog has been applied.
-    // The probe result is computed first and sys.error'd after, so an
-    // unreachable auth database surfaces as the same clean config-error
-    // framing as the sibling gates above, not a raw JDBC exception.
-    if authCfg.database.enabled then
-      val probeResult: Either[String, Unit] =
-        try
-          Class.forName("org.postgresql.Driver")
-          val probeConn = java.sql.DriverManager.getConnection(
-            authCfg.database.jdbcUrl,
-            authCfg.database.username,
-            authCfg.database.password
-          )
-          try AuthQueryPreconditions.validate(probeConn, authCfg.database)
-          finally probeConn.close()
-        catch
-          case e: Exception =>
-            Left(
-              "auth.database startup validation failed: could not probe " +
-                s"systemQuery/tenantQuery against '${authCfg.database.jdbcUrl}' " +
-                s"(${e.getMessage}). Check QOD_AUTH_DB_JDBC_URL / QOD_AUTH_DB_USER / " +
-                "QOD_AUTH_DB_PASSWORD and that the auth database is reachable."
-            )
-      probeResult.left.foreach(msg => sys.error(msg))
+    // Startup gate for database auth: probe systemQuery/tenantQuery shape now
+    // instead of at first login. Must run AFTER the Liquibase apply above.
+    if authCfg.database.enabled then BootPreflight.probeAuthDatabase(authCfg.database)
 
     // Single shared UserStore (one Hikari pool against qodstate_user): reused by
     // the admin bootstrap below, the SSO grants lookup, and the RBAC user
     // handlers. Closed in the shutdown hook.
     val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-    val admins    = mgrCfg.admin.usernameList
-    if admins.isEmpty then
-      logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
-    else
-      admins.foreach { name =>
-        // Superuser scope: tenant=NULL. The qodstate_user_scope_consistency
-        // CHECK only forbids empty-string tenants now; NULL alone is fine.
-        val out = userStore.upsertUser(
-          tenant = None,
-          username = name,
-          plaintext = mgrCfg.admin.password,
-          role = mgrCfg.admin.role
-        )
-        val verb = if out.inserted then "created" else "updated"
-        logger.info(
-          s"admin user $verb: $name (id=${out.id}, role=${mgrCfg.admin.role}) in qodstate_user"
-        )
-      }
+    BootPreflight.seedAdminUsers(userStore, mgrCfg.admin)
 
-    val backend: QuackBackend = mgrCfg.runtimeType.toLowerCase match
-      case "local" =>
-        new LocalQuackBackend(
-          mgrCfg.minPort,
-          mgrCfg.maxPort,
-          mgrCfg.defaultMetastore.asMap,
-          commandFor =
-            LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
-        )
-      case "kubernetes" | "k8s" =>
-        val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
-        new KubernetesQuackBackend(
-          k8s,
-          mgrCfg.k8s.namespace,
-          mgrCfg.k8s.image,
-          mgrCfg.k8s.quackPort,
-          mgrCfg.k8s.podLabel,
-          mgrCfg.k8s.startupTimeoutSec,
-          mgrCfg.defaultMetastore.asMap,
-          podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
-          serviceAccount = mgrCfg.k8s.serviceAccount,
-          serviceType = mgrCfg.k8s.serviceType,
-          runAsUser = mgrCfg.k8s.runAsUser
-        )
-      case other => sys.error(s"unknown runtime: $other")
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
 
-    // `dispatch` routes per-secret based on the row's shape (value -> Postgres,
-    // externalRef prefix -> matching cloud / env / vault resolver). Other
-    // values force a single backend; useful only when an operator wants to
-    // hard-restrict the manager to one secret store.
-    // `dispatch` keeps the stub resolvers wired so a deployment that only
-    // uses postgres/env secrets still comes up; runtime errors surface
-    // only for secrets that actually carry a stub-backed externalRef
-    // prefix (aws-sm: / gcp-sm: / azure-kv: / vault:). Selecting a stub
-    // directly is refused here because every secret resolved through it
-    // would crash at handshake time -- caller's mistake should fail at
-    // boot, not in production.
-    val UnimplementedSingleBackends    = Set("aws-sm", "gcp-sm", "azure-kv", "vault")
-    val secretResolver: SecretResolver = mgrCfg.federation.secretStore match {
-      case "dispatch" | "auto" =>
-        new DispatchingSecretResolver(
-          postgres = new PostgresSecretResolver,
-          env = new EnvSecretResolver(),
-          awsSm = new AwsSecretsManagerResolver,
-          gcpSm = new GcpSecretsManagerResolver,
-          azureKv = new AzureSecretsManagerResolver,
-          vault = new VaultSecretResolver
-        )
-      case "postgres"                                   => new PostgresSecretResolver
-      case "env"                                        => new EnvSecretResolver()
-      case s if UnimplementedSingleBackends.contains(s) =>
-        sys.error(
-          s"federation.secretStore = '$s' is not implemented (the resolver is a stub). " +
-            "Set QOD_FEDERATION_SECRET_STORE to 'postgres' (inline secret values), " +
-            "'env' (resolve \\$VARS), or 'dispatch' (route per-secret by externalRef " +
-            s"prefix -- the dispatch mode keeps the $s stub wired; only sources whose " +
-            s"secrets actually carry an '$s:' externalRef will fail at resolve time)."
-        )
-      case other => sys.error(s"unknown federation.secretStore: '$other'")
-    }
+    val secretResolver: SecretResolver =
+      BootFactories.secretResolver(mgrCfg.federation.secretStore)
     logger.info(
       s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}"
     )
@@ -403,51 +282,22 @@ object Main extends IOApp with LazyLogging:
         case None =>
           _ => IO.pure(None)
 
-    // The DuckLake catalog cache is allocated up-front (not inside the
-    // catalogHandlers branch below) so we can plug its eviction callback
-    // into the supervisor's onTenantDbDeleted hook. Tenant-db delete
-    // (or cascaded delete via deleteTenant) calls evict, which both
-    // removes the entry and closes the underlying HikariCP pool. Same
-    // hook covers an operator deleting + recreating a tenant-db to
-    // rotate Postgres credentials -- the new reader picks up the new
-    // metastore on the next call.
-    val catalogReaderCache =
-      new java.util.concurrent.ConcurrentHashMap[
-        (String, String),
-        ReaderCacheSweeper.Entry[DuckLakeCatalogReader]
-      ]()
-    def evictCatalogReader(tenant: String, tenantDb: String): Unit =
-      val removed = catalogReaderCache.remove((tenant, tenantDb))
-      if removed != null then
-        try removed.reader.close()
-        catch case _: Throwable => ()
-
-    // Idle-eviction backstop for the cache above: thousands of self-serve
-    // tenant-dbs would otherwise pin one HikariCP pool each forever. Runs
-    // process-local on every replica (not HA-singleton-gated) since the
-    // cache itself is process-local. `catalogReader.sweepIntervalMin` /
-    // `catalogReader.idleEvictMin` (QOD_CATALOG_READER_SWEEP_MIN /
-    // QOD_CATALOG_READER_IDLE_EVICT_MIN) tune the cadence and threshold.
+    // Cached per-tenant-db DuckLake catalog readers (see CatalogReaders for the
+    // cache + idle-eviction contract). Allocated up-front (not inside the
+    // catalogHandlers branch below) so its eviction callback plugs into the
+    // supervisor's onTenantDbDeleted/onTenantDbChanged hooks. Construction
+    // cycle with `sup` below (readers need the supervisor's effective-metastore
+    // resolution, the supervisor's hooks need evict): broken via supRef, filled
+    // right after the supervisor is built. get() only runs on request-time
+    // calls, long after that, and would NPE loudly (not silently misroute) if
+    // that ordering were ever broken.
+    val supRef           = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
     val catalogReaderCfg =
       com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.catalogReader")
-    val catalogReaderSweeper =
-      new ReaderCacheSweeper[(String, String), DuckLakeCatalogReader](
-        catalogReaderCache,
-        closeReader = _.close(),
-        idleEvict = java.time.Duration.ofMinutes(catalogReaderCfg.getInt("idleEvictMin").toLong)
-      )
-    val catalogReaderSweeperExecutor =
-      java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r =>
-        val t = new Thread(r, "qod-catalog-reader-sweeper")
-        t.setDaemon(true)
-        t
-      }
-    val catalogReaderSweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
-    catalogReaderSweeperExecutor.scheduleAtFixedRate(
-      () => catalogReaderSweeper.sweep(): Unit,
-      catalogReaderSweepIntervalMin,
-      catalogReaderSweepIntervalMin,
-      java.util.concurrent.TimeUnit.MINUTES
+    val catalogReaders: CatalogReaders = new CatalogReaders(
+      metastoreOf = (t, td) => supRef.get().effectiveMetastoreFor(t, td),
+      idleEvictMin = catalogReaderCfg.getInt("idleEvictMin").toLong,
+      sweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
     )
 
     // HA collaborators are wired only when ha.enabled=true. With HA off they
@@ -473,14 +323,15 @@ object Main extends IOApp with LazyLogging:
       mgrCfg.defaultMetastore.asMap,
       dbAdmin,
       federationBlobOf,
-      onTenantDbDeleted = evictCatalogReader,
-      onTenantDbChanged = evictCatalogReader,
+      onTenantDbDeleted = catalogReaders.evict,
+      onTenantDbChanged = catalogReaders.evict,
       onPoolTeardown = key => { placementDirectory.clear(key); localityTracker.clear(key) },
       locks = poolLocks,
       publish = publisher,
       events = moduleEventBus.sink,
       lockdownEnabled = lockdownCfg.enabled
     )
+    supRef.set(sup)
 
     // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
     // per-tenant clientId / clientSecretRef gets its own Google
@@ -498,22 +349,11 @@ object Main extends IOApp with LazyLogging:
       Some(tenantOidcRegistry)
     )
 
-    // Catalog reader resolver. Only meaningful in postgres mode: the DuckLake
-    // catalog tables (ducklake_schema, ducklake_table, ...) only exist in a
-    // Postgres metastore. One reader per tenant, cached so we don't reopen
-    // Hikari on every request. The resolver reads the effective metastore
-    // (default <- tenant overrides) the same way PoolSupervisor does for
-    // spawn-node. The CatalogHandlers themselves are constructed further
+    // Catalog reader resolver: request-time accessor over the CatalogReaders
+    // cache above. The CatalogHandlers themselves are constructed further
     // down, after the audit recorder and the tag handlers they depend on.
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
-      val entry = catalogReaderCache.computeIfAbsent(
-        (tenant, tenantDb),
-        { case (t, td) =>
-          new ReaderCacheSweeper.Entry(DuckLakeCatalogReader(sup.effectiveMetastoreFor(t, td)))
-        }
-      )
-      entry.lastAccess = java.time.Instant.now()
-      entry.reader
+      catalogReaders.get(tenant, tenantDb)
 
     val healthCache =
       new java.util.concurrent.atomic.AtomicReference[(Long, Boolean)]((0L, true))
@@ -694,154 +534,28 @@ object Main extends IOApp with LazyLogging:
         )
       )
     }
-    val identitySource = ManagementIdentitySource.fromConfig(mgrCfg.auth.management.identitySource)
-    // System scope (bare /ui/) login mode mirrors identitySource; per-tenant logins resolve their
-    // mode from the tenant's authProvider via the resolver below.
-    val systemAuthMode = identitySource match
-      case ManagementIdentitySource.Oidc => ManagementAuthMode.Oidc
-      case ManagementIdentitySource.Db   => ManagementAuthMode.Db
-    val authModeResolver = new ManagementAuthModeResolver(
-      loadTenant = id => sup.getTenantById(id),
-      systemMode = systemAuthMode
+    // Admin-UI / management-plane auth wiring (identity source, per-tenant auth
+    // modes, cookie Secure policy, OIDC SSO, SQL-token flow): see
+    // ManagementAuthWiring for the component contracts.
+    val mgmtAuth = ManagementAuthWiring.build(
+      mgrCfg,
+      authCfg,
+      loadTenant = id => sup.getTenantById(id)
     )
     val grantsForIdentity: GrantsLookup =
       (identity, email) => userStore.grantsForIdentity(identity, email)
-    // 'auto' -> None (handler derives Secure from X-Forwarded-Proto per request); 'true' / 'false'
-    // -> explicit override. Unknown values fall back to auto with a warning so a typo in the env
-    // var doesn't accidentally weaken the cookie.
-    val cookieSecureOverride: Option[Boolean] =
-      mgrCfg.auth.management.sessionCookieSecure.trim.toLowerCase match
-        case "auto"  => None
-        case "true"  => Some(true)
-        case "false" => Some(false)
-        case other   =>
-          logger.warn(
-            s"QOD_SESSION_COOKIE_SECURE='$other' not recognized; expected auto|true|false. " +
-              "Treating as 'auto' (derive from X-Forwarded-Proto)."
-          )
-          None
-    // Build the admin-UI OIDC SSO service only in oidc mode. Discovery + token exchange use a shared
-    // java.net.http client; id_token validation reuses OidcBearerAuthenticator against the discovered
-    // jwks_uri. redirect_uri is built from the public base URL (must match the IdP client's
-    // registered redirect URI).
-    val oidcSso: Option[OidcSsoService] =
-      if identitySource == ManagementIdentitySource.Oidc then
-        val httpClient = java.net.http.HttpClient
-          .newBuilder()
-          .connectTimeout(java.time.Duration.ofSeconds(10))
-          .build()
-        val discovery = new OidcDiscovery(httpGet =
-          url =>
-            try
-              val req = java.net.http.HttpRequest
-                .newBuilder()
-                .uri(java.net.URI.create(url))
-                .GET()
-                .timeout(java.time.Duration.ofSeconds(15))
-                .build()
-              val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-              if resp.statusCode() == 200 then Right(resp.body())
-              else Left(s"discovery HTTP ${resp.statusCode()}")
-            catch case e: Exception => Left(e.getMessage)
-        )
-        val resolver = new OidcEndpointResolver(
-          loadTenant = id => sup.getTenantById(id),
-          secrets = SecretRefResolver.default,
-          discovery = discovery
-        )
-        val codec = new OidcStateCodec(mgrCfg.auth.management.sessionJwtSecret, 600000L)
-        if mgrCfg.auth.management.publicBaseUrl.trim.isEmpty then
-          logger.warn(
-            "identitySource=oidc but QOD_MGMT_PUBLIC_BASE_URL is unset; OIDC redirect_uri defaults " +
-              s"to http://localhost:${mgrCfg.port}, which must match the IdP client's registered " +
-              "redirect URI. Set QOD_MGMT_PUBLIC_BASE_URL for any non-localhost deploy."
-          )
-        val publicBaseUrlOf = () =>
-          val base = mgrCfg.auth.management.publicBaseUrl
-          if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-        val httpExchange = (url: String, form: String) =>
-          try
-            val req = java.net.http.HttpRequest
-              .newBuilder()
-              .uri(java.net.URI.create(url))
-              .header("Content-Type", "application/x-www-form-urlencoded")
-              .POST(java.net.http.HttpRequest.BodyPublishers.ofString(form))
-              .timeout(java.time.Duration.ofSeconds(15))
-              .build()
-            val resp = httpClient.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-            if resp.statusCode() == 200 then Right(resp.body())
-            else Left(s"token endpoint HTTP ${resp.statusCode()}")
-          catch case e: Exception => Left(e.getMessage)
-        val buildValidator = (ep: OidcEndpoints) =>
-          new OidcBearerAuthenticator(
-            ep.provider,
-            ep.jwksUrl,
-            ep.issuer,
-            ep.clientId,
-            authCfg.roleClaim
-          )
-        Some(
-          new OidcSsoService(
-            resolver = resolver,
-            mgmt = mgrCfg.auth.management.oidc,
-            codec = codec,
-            roleClaim = authCfg.roleClaim,
-            publicBaseUrlOf = publicBaseUrlOf,
-            httpExchange = httpExchange,
-            buildValidator = buildValidator
-          )
-        )
-      else None
-    // Data-plane SQL-token flow (/api/auth/sql-token): an auth-code login against the EDGE OIDC
-    // provider (not the management one) that hands a JDBC client a bearer to paste into DBeaver's
-    // `token` property. None when no edge OIDC provider is enabled; handlers gate on `.enabled`.
-    val sqlTokenPublicBaseUrl = () =>
-      val base = mgrCfg.auth.management.publicBaseUrl
-      if base.trim.nonEmpty then base.trim else s"http://localhost:${mgrCfg.port}"
-    val sqlTokenSvc =
-      if authCfg.keycloak.enabled || authCfg.google.enabled || authCfg.azure.enabled then
-        // Discovery is fetched server-side from the in-cluster issuer, but yields the provider's
-        // browser-facing authorization_endpoint (so the 302 the user follows is reachable) and the
-        // back-channel token_endpoint (for the server-side code exchange).
-        val sqlTokenHttp = java.net.http.HttpClient
-          .newBuilder()
-          .connectTimeout(java.time.Duration.ofSeconds(10))
-          .build()
-        val sqlTokenDiscovery = new ai.starlake.quack.edge.auth.OidcDiscovery(httpGet =
-          url =>
-            try
-              val req = java.net.http.HttpRequest
-                .newBuilder()
-                .uri(java.net.URI.create(url))
-                .GET()
-                .timeout(java.time.Duration.ofSeconds(15))
-                .build()
-              val resp = sqlTokenHttp.send(req, java.net.http.HttpResponse.BodyHandlers.ofString())
-              if resp.statusCode() == 200 then Right(resp.body())
-              else Left(s"discovery HTTP ${resp.statusCode()}")
-            catch case e: Exception => Left(e.getMessage)
-        )
-        Some(
-          new ai.starlake.quack.edge.auth.SqlTokenOidcService(
-            authCfg,
-            sqlTokenPublicBaseUrl,
-            mgrCfg.auth.management.sessionJwtSecret,
-            sqlTokenDiscovery
-          )
-        )
-      else None
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
-      identitySource = identitySource,
+      identitySource = mgmtAuth.identitySource,
       grantsForIdentity = grantsForIdentity,
-      authModeResolver = authModeResolver,
-      cookieSecureOverride = cookieSecureOverride,
+      authModeResolver = mgmtAuth.authModeResolver,
+      cookieSecureOverride = mgmtAuth.cookieSecureOverride,
       cookiePath = mgrCfg.auth.management.sessionCookiePath,
       // Let operators log in with either the tenant id or its display name.
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
-      oidc = oidcSso,
-      sqlToken = sqlTokenSvc,
+      oidc = mgmtAuth.oidcSso,
+      sqlToken = mgmtAuth.sqlToken,
       audit = auditRecorder,
       events = moduleEventBus.sink
     )
@@ -860,38 +574,9 @@ object Main extends IOApp with LazyLogging:
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter = new QuackHttpAdapter(client, tracker)
-    // SQL ACL validator. The RBAC-backed PostgresAclValidator reads from
-    // the cached EffectiveSet pinned on ConnectionContext at handshake
-    // time. acl.enabled=false falls back to allow-all for local-dev
-    // workflows.
-    val aclValidator: StatementValidator =
-      if !aclCfg.enabled then
-        logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
-        StatementValidator.allowAll
-      else
-        val defaultDb     = mgrCfg.defaultMetastore.dbName
-        val defaultSchema =
-          if mgrCfg.defaultMetastore.schemaName.nonEmpty then mgrCfg.defaultMetastore.schemaName
-          else "main"
-        logger.info(
-          s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
-        )
-        new PostgresAclValidator(
-          defaultDatabase = defaultDb,
-          defaultSchema = defaultSchema,
-          dialect = aclCfg.dialect,
-          // Scope wildcard catalog grants to the session's tenant. Maps
-          // qodstate_tenant.id -> the set of tenant_db.name's the tenant
-          // owns; the validator's `catalogMatch` consults this to decide
-          // whether `*.*.*` admits a referenced catalog. Empty set = no
-          // catalog matches via wildcard (fail-closed). Explicit named
-          // grants bypass this and still cross tenants on purpose.
-          tenantCatalogs = tenantId =>
-            sup
-              .getTenantById(tenantId)
-              .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
-              .getOrElse(Set.empty)
-        )
+    // SQL ACL validator (see BootFactories.aclValidator for the RBAC-backed
+    // PostgresAclValidator contract; acl.enabled=false falls back to allow-all).
+    val aclValidator: StatementValidator = BootFactories.aclValidator(aclCfg, mgrCfg, sup)
     logger.info(
       s"node lockdown: ${if lockdownCfg.enabled then "enabled" else "disabled"}"
     )
@@ -944,79 +629,12 @@ object Main extends IOApp with LazyLogging:
         metricsEndpoint: MetricsEndpoint,
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
-      // Build the routing classifier from operator config. Defaults live in
-      // application.conf under `quack-on-demand.statementClassifier.*`;
-      // matching `QOD_CLASSIFIER_*` env vars override. Comma-separated.
-      val classifierRoot =
-        com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.statementClassifier")
-      val classifierCfg = StatementClassifierConfig(
-        select = StatementClassifierConfig.parseCsv(classifierRoot.getString("select")),
-        dml = StatementClassifierConfig.parseCsv(classifierRoot.getString("dml")),
-        ddl = StatementClassifierConfig.parseCsv(classifierRoot.getString("ddl")),
-        begin = StatementClassifierConfig.parseCsv(classifierRoot.getString("begin")),
-        commit = StatementClassifierConfig.parseCsv(classifierRoot.getString("commit")),
-        rollback = StatementClassifierConfig.parseCsv(classifierRoot.getString("rollback"))
-      )
-      val classifier = new StatementClassifier(classifierCfg)
-
-      val clsConfig = com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.cls")
-      val clsEnabled: Boolean = clsConfig.getBoolean("enabled")
-      if !clsEnabled then
-        logger.info(
-          "column-level security is DISABLED (quack-on-demand.cls.enabled=false). " +
-            "Every statement bypasses the rewriter."
-        )
-      val unresolvedTableMode: ai.starlake.quack.edge.cls.UnresolvedMode =
-        clsConfig.getString("unresolvedTable").toLowerCase match
-          case "deny" => ai.starlake.quack.edge.cls.UnresolvedMode.Deny
-          case "pass" => ai.starlake.quack.edge.cls.UnresolvedMode.Pass
-          case other  =>
-            logger.warn(
-              s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to pass"
-            )
-            ai.starlake.quack.edge.cls.UnresolvedMode.Pass
-
-      // Resolve a DuckDB-side catalog name to its DuckLakeCatalogReader by looking up the
-      // tenant-db owning that catalog and reusing the cache populated by `catalogHandlers`.
-      // Returns Nil for unknown catalogs; the rewriter's unresolvedMode then decides whether
-      // to deny or pass through.
-      val columnCatalog: ai.starlake.quack.edge.cls.ColumnCatalog =
-        new ai.starlake.quack.edge.cls.DuckLakeColumnCatalog(
-          fetch = (cat, sch, tab) =>
-            IO.blocking {
-              sup.findTenantDbByCatalogName(cat) match
-                case None     => Nil
-                case Some(td) =>
-                  sup.getTenantById(td.tenantId) match
-                    case None    => Nil
-                    case Some(t) =>
-                      val entry = catalogReaderCache.computeIfAbsent(
-                        (t.id, td.name),
-                        { case (tn, dn) =>
-                          new ReaderCacheSweeper.Entry(
-                            DuckLakeCatalogReader(sup.effectiveMetastoreFor(tn, dn))
-                          )
-                        }
-                      )
-                      entry.lastAccess = java.time.Instant.now()
-                      entry.reader.columnNames(sch, tab)
-            },
-          instruments = Some(stmtInstruments)
-        )
-      val columnPolicyRewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        catalog = columnCatalog,
-        unresolvedMode = unresolvedTableMode,
-        enabled = clsEnabled
-      )
-
-      val rlsEnabled: Boolean =
-        com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
-      if !rlsEnabled then
-        logger.info(
-          "row-level security is DISABLED (quack-on-demand.rls.enabled=false). " +
-            "Every statement bypasses the row-policy rewriter."
-        )
-      val rowPolicyRewriter = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = rlsEnabled)
+      // Routing classifier + CLS / RLS rewriters, built from operator config
+      // (see EdgeRewriters for the knobs and the catalog-resolution contract).
+      val classifier           = EdgeRewriters.statementClassifier()
+      val columnPolicyRewriter =
+        EdgeRewriters.columnPolicyRewriter(sup, catalogReaders, stmtInstruments)
+      val rowPolicyRewriter = EdgeRewriters.rowPolicyRewriter()
 
       // journalDropped references metricsReg (parameter of runWithMetrics);
       // eventJournal must be constructed before fsRouter so the router can be
@@ -1526,125 +1144,24 @@ object Main extends IOApp with LazyLogging:
                     edgeCfg.tlsEnabled
                   )
                 )
-                // Belt-and-braces JVM shutdown hook: when the JVM is told
-                // to exit (SIGTERM in containers; user Ctrl-C at the
-                // terminal) we want every spawned child Quack node killed
-                // before we let the process die, even if cats-effect's own
-                // cancellation finalizer below never runs.
-                //
-                // The hook is a FALLBACK, not a parallel teardown: it first
-                // waits for `gracefulShutdown` (the finalizer chain below) to
-                // terminate. Running both concurrently killed nodes and closed
-                // the control-plane pools mid-drain, and let the
-                // not-yet-cancelled reconcile fiber respawn "dead" nodes after
-                // the hook's cleanup - orphaning them past JVM exit. The latch
-                // fires on any termination of the graceful chain (success,
-                // error, or cancellation); the bounded wait keeps the hook a
-                // real backstop when the runtime is wedged. `cleanup()` is
-                // idempotent so the hook's own pass stays safe either way.
-                val gracefulDone = new java.util.concurrent.CountDownLatch(1)
-                val shutdownHook = new Thread(
-                  { () =>
-                    val finished =
-                      try
-                        gracefulDone.await(
-                          mgrCfg.drainTimeoutSec.toLong + 15L,
-                          java.util.concurrent.TimeUnit.SECONDS
-                        )
-                      catch case _: InterruptedException => false
-                    if !finished then
-                      logger.warn(
-                        "shutdown hook: graceful shutdown did not finish in time; forcing teardown"
-                      )
-                    try edge.stop()
-                    catch case _: Throwable => ()
-                    try backend.cleanup().unsafeRunSync()
-                    catch case _: Throwable => ()
-                      // Release the leader lock + LISTEN connection. Terminal +
-                      // idempotent; safe to run before the pools are drained.
-                    try coordinator.foreach(_.close())
-                    catch case _: Throwable => ()
-                      // Drain the audit event journal and close the telemetry store
-                      // before the control-plane pool shuts down.
-                    try eventJournal.drainNow()
-                    catch case _: Throwable => ()
-                    try telemetryStore.close()
-                    catch case _: Throwable => ()
-                      // Drain the JDBC connection pools. Both close()s are
-                      // idempotent + no-op if already closed.
-                    try store.close()
-                    catch case _: Throwable => ()
-                    try userStore.close()
-                    catch case _: Throwable => ()
-                      // Stop the idle-eviction sweeper before tearing down the
-                      // cache it sweeps.
-                    try catalogReaderSweeperExecutor.shutdownNow()
-                    catch case _: Throwable => ()
-                      // Close every cached catalog reader's Hikari pool. The
-                      // map shouldn't see new entries past this point because
-                      // serve() has already returned, but iterate defensively.
-                    val it = catalogReaderCache.values.iterator()
-                    while it.hasNext do
-                      val r = it.next()
-                      try r.reader.close()
-                      catch case _: Throwable => ()
-                    catalogReaderCache.clear()
-                  },
-                  "qod-shutdown-hook"
+                // Teardown wiring: graceful finalizer chain + belt-and-braces JVM
+                // shutdown hook (see ShutdownCoordinator for the fallback contract).
+                val shutdownCoordinator = new ai.starlake.quack.boot.ShutdownCoordinator(
+                  edge = edge,
+                  backend = backend,
+                  coordinator = coordinator,
+                  eventJournal = eventJournal,
+                  telemetryStore = telemetryStore,
+                  store = store,
+                  userStore = userStore,
+                  catalogReaders = catalogReaders,
+                  tracker = tracker,
+                  modules = modules,
+                  moduleEventBus = moduleEventBus,
+                  drainTimeoutSec = mgrCfg.drainTimeoutSec
                 )
-                Runtime.getRuntime.addShutdownHook(shutdownHook)
-
-                // Graceful drain on cancellation: stop accepting new
-                // FlightSQL sessions, poll the load tracker until no node
-                // reports in-flight work (or `drainTimeoutSec` elapses),
-                // then SIGTERM child Quack nodes via `backend.cleanup()`.
-                def waitForDrain: IO[Unit] =
-                  val deadlineNs =
-                    System.nanoTime() +
-                      scala.concurrent.duration.SECONDS.toNanos(mgrCfg.drainTimeoutSec.toLong)
-                  def tick: IO[Unit] = IO
-                    .delay {
-                      tracker.snapshotAll.values.map(_.inFlight).sum
-                    }
-                    .flatMap { inflight =>
-                      if inflight <= 0 then IO.unit
-                      else if System.nanoTime() >= deadlineNs then
-                        IO.delay(
-                          logger.warn(
-                            s"graceful shutdown: $inflight statement(s) still in-flight " +
-                              s"after ${mgrCfg.drainTimeoutSec}s; proceeding"
-                          )
-                        )
-                      else IO.sleep(scala.concurrent.duration.DurationInt(200).millis) *> tick
-                    }
-                  tick
-
-                val gracefulShutdown: IO[Unit] =
-                  (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
-                    IO.delay(edge.stop()) *>
-                    IO.delay(
-                      logger.info(
-                        s"graceful shutdown: awaiting in-flight statements (up to ${mgrCfg.drainTimeoutSec}s)"
-                      )
-                    ) *>
-                    waitForDrain *>
-                    // Stop SPI modules after the edge has drained but before the
-                    // control-plane pools close, so a module's stop can still reach
-                    // its qodhosted_* tables. A stop failure is logged, not fatal.
-                    IO.delay(logger.info("graceful shutdown: stopping modules")) *>
-                    modules.traverse_(m =>
-                      m.stop.handleErrorWith(t =>
-                        IO(logger.warn(s"module ${m.name}: stop failed: ${t.getMessage}"))
-                      )
-                    ) *>
-                    IO.delay(moduleEventBus.shutdown()) *>
-                    IO.delay(logger.info("graceful shutdown: stopping child Quack nodes")) *>
-                    backend.cleanup() *>
-                    IO.delay(logger.info("graceful shutdown: complete")))
-                    // Release the JVM shutdown hook whichever way the WHOLE chain
-                    // ends (success, error, cancellation); otherwise the hook's
-                    // fallback wait runs its full timeout before forcing teardown.
-                    .guaranteeCase(_ => IO.delay(gracefulDone.countDown()))
+                shutdownCoordinator.installJvmHook()
+                val gracefulShutdown: IO[Unit] = shutdownCoordinator.gracefulShutdown
 
                 // Periodic reconcile: respawn nodes that die while the manager is
                 // up (boot only ran reconcile once). Disabled when the interval is
@@ -1665,141 +1182,22 @@ object Main extends IOApp with LazyLogging:
                     logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
                     IO.unit.start
 
-                // Managed maintenance (EPIC Spec 09): leader-gated cadence/threshold enqueue
-                // (scheduler) + the drain loop that claims queued runs and executes them under a
-                // per-tenant-db advisory lock (runner). Both are no-ops when the config flag is off.
-                val maintenanceScheduler =
-                  new ai.starlake.quack.ondemand.maintenance.MaintenanceScheduler(
-                    store = store,
-                    smallFileCountsOf = (t, td, bytes) =>
-                      try catalogReader(t, td).smallFileCounts(bytes)
-                      catch
-                        case e: Exception =>
-                          logger.warn(
-                            s"maintenance: small-file count read failed for $t/$td, " +
-                              s"treating as no hot tables this tick: ${e.getMessage}"
-                          )
-                          Map.empty,
-                    minIntervalMinutes = mgrCfg.maintenance.minIntervalMin,
-                    runTimeoutMinutes = mgrCfg.maintenance.runTimeoutMin,
-                    staggerOf = ai.starlake.quack.ondemand.maintenance.PolicyMath.staggerMinutes,
-                    tickSeconds = mgrCfg.maintenance.tickSec,
-                    isLeader = () => coordinator.forall(_.isLeader)
-                  )
-                val pinnedSetResolver =
-                  new ai.starlake.quack.ondemand.catalog.PinnedSetResolver(store, catalogReader)
-                val maintenanceRunner =
-                  new ai.starlake.quack.ondemand.maintenance.MaintenanceRunner(
-                    store = store,
-                    spawn = (t, td) =>
-                      sup.maintenanceNodeSpec(t, td) match
-                        case Some(spec) =>
-                          backend
-                            .start(spec)
-                            .flatMap { node =>
-                              // start() returns at fork time (local backend); the node only listens
-                              // once DuckDB finishes INSTALL/LOAD + ATTACH. Gate here or the chain's
-                              // first statement dies with ConnectException.
-                              ai.starlake.quack.ondemand.runtime.NodeReadiness
-                                .awaitReachable(
-                                  node.host,
-                                  node.port,
-                                  timeout = scala.concurrent.duration
-                                    .DurationInt(mgrCfg.maintenance.nodeReadyTimeoutSec)
-                                    .seconds,
-                                  isAlive = () => backend.isAlive(node.nodeId)
-                                )
-                                .flatMap { ready =>
-                                  if ready then IO.pure(Some(node))
-                                  else
-                                    IO.delay(
-                                      logger.warn(
-                                        s"maintenance: node ${node.nodeId} for $t/$td did not " +
-                                          "accept connections within " +
-                                          s"${mgrCfg.maintenance.nodeReadyTimeoutSec}s; stopping it"
-                                      )
-                                    ) *> backend
-                                      .stop(node.nodeId)
-                                      .handleErrorWith(_ => IO.unit)
-                                      .as(None)
-                                }
-                            }
-                            .handleErrorWith { e =>
-                              IO.delay(
-                                logger.warn(
-                                  s"maintenance: node spawn failed for $t/$td: ${e.getMessage}"
-                                )
-                              ).as(None)
-                            }
-                        case None => IO.pure(None),
-                    stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
-                    exec = (node, sql) =>
-                      adapter.send(node, sql, session = None, recordLoad = false).map {
-                        case ai.starlake.quack.edge.adapter.QuackResponse.Ok(r, _, close) =>
-                          close(); Right(())
-                        case ai.starlake.quack.edge.adapter.QuackResponse.Failed(e, _) =>
-                          Left(e.toString)
-                      },
-                    snapshotsOlderThan =
-                      (t, td, cutoff) => catalogReader(t, td).snapshotsOlderThan(cutoff),
-                    pinnedSnapshotsOf = pinnedSetResolver.pinnedSnapshots,
-                    pinnedFilesOf = pinnedSetResolver.pinnedFiles,
-                    scheduledForDeletion =
-                      (t, td) => catalogReader(t, td).filesScheduledForDeletion(),
-                    totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
-                    effectivePolicyOf = (t, td, s, tb) =>
-                      ai.starlake.quack.ondemand.maintenance.PolicyMath
-                        .effective(store.listMaintenancePolicies(t, td), s, tb),
-                    catalogAlias =
-                      (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
-                    audit = auditRecorder,
-                    metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
-                  )
-
-                val maintenanceSchedulerFiber =
-                  if mgrCfg.maintenance.enabled then maintenanceScheduler.start
-                  else IO.unit.start
-
-                // Drain loop: while leader and below maxConcurrent in-flight, claim queued runs
-                // and fork each execution under the tenant-db's __maint advisory lock so two
-                // replicas (or a replica and a stray retry) never run the same lake at once.
-                // The tick keeps claiming until the queue is empty or capacity is reached, so
-                // tickSec only spaces empty polls.
-                val maintenanceInFlight = new java.util.concurrent.atomic.AtomicInteger(0)
-                def maintenanceDrainTick: IO[Unit] =
-                  if !coordinator.forall(_.isLeader) then IO.unit
-                  else if maintenanceInFlight.get() >= mgrCfg.maintenance.maxConcurrent then IO.unit
-                  else
-                    IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
-                      case None      => IO.unit
-                      case Some(run) =>
-                        maintenanceInFlight.incrementAndGet()
-                        poolLocks
-                          .withLock(
-                            ai.starlake.quack.model.PoolKey(run.tenant, run.tenantDb, "__maint")
-                          ) {
-                            maintenanceRunner.executeRun(run)
-                          }
-                          .guarantee(IO.delay(maintenanceInFlight.decrementAndGet()).void)
-                          .handleErrorWith(t =>
-                            IO.delay(
-                              logger.error(
-                                s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
-                              )
-                            )
-                          )
-                          .start *> maintenanceDrainTick
-                    }
-                val maintenanceDrainFiber =
-                  if mgrCfg.maintenance.enabled then
-                    (maintenanceDrainTick
-                      .handleErrorWith(e =>
-                        IO(logger.error(s"maintenance drain-loop tick failed: ${e.getMessage}"))
-                      )
-                      *> IO.sleep(
-                        scala.concurrent.duration.DurationInt(mgrCfg.maintenance.tickSec).seconds
-                      )).foreverM.void.start
-                  else IO.unit.start
+                // Managed maintenance (EPIC Spec 09): see MaintenanceWiring for the
+                // scheduler / runner / drain-loop contracts.
+                val maintenanceWiring = new ai.starlake.quack.boot.MaintenanceWiring(
+                  store = store,
+                  sup = sup,
+                  backend = backend,
+                  adapter = adapter,
+                  poolLocks = poolLocks,
+                  catalogReader = catalogReader,
+                  maintenance = mgrCfg.maintenance,
+                  isLeader = () => coordinator.forall(_.isLeader),
+                  audit = auditRecorder,
+                  metrics = new MaintenanceMetrics.Micrometer(metricsReg.composite)
+                )
+                val maintenanceSchedulerFiber = maintenanceWiring.schedulerFiber
+                val maintenanceDrainFiber     = maintenanceWiring.drainFiber
 
                 // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
                 val coordinatorFiber = coordinator match
@@ -1843,70 +1241,16 @@ object Main extends IOApp with LazyLogging:
 
                 val journalFiber =
                   if telemetryStore.enabled then eventJournal.start else IO.unit.start
-                val auditPurgeFiber =
-                  if telemetryStore.enabled then
-                    (IO
-                      .blocking {
-                        if coordinator.forall(_.isLeader) then
-                          val now = java.time.Instant.now()
-                          TelemetryPurge.cutoffFor(mgrCfg.telemetry.auditRetentionDays, now) match
-                            case Some(cutoff) =>
-                              val n = telemetryStore.purgeAudit(cutoff)
-                              if n > 0 then
-                                logger.info(s"audit purge: deleted $n events older than $cutoff")
-                            case None => ()
-                          // raw retention must cover the rollup watermark's full day
-                          // (recompute rebuilds it); keep >= 2 days
-                          TelemetryPurge
-                            .cutoffFor(mgrCfg.telemetry.stmtHistoryRetentionDays, now)
-                            .foreach { c =>
-                              val n = telemetryStore.purgeStatements(c)
-                              if n > 0 then
-                                logger.info(s"stmt-history purge: deleted $n rows older than $c")
-                            }
-                          TelemetryPurge
-                            .cutoffFor(mgrCfg.telemetry.hourlyRollupRetentionDays, now)
-                            .foreach { c =>
-                              val n = telemetryStore.purgeRollups("hour", c)
-                              if n > 0 then
-                                logger.info(
-                                  s"hourly-rollup purge: deleted $n buckets older than $c"
-                                )
-                            }
-                          TelemetryPurge
-                            .cutoffFor(mgrCfg.telemetry.usageRetentionDays, now)
-                            .foreach { c =>
-                              val n = telemetryStore.purgeRollups("day", c)
-                              if n > 0 then
-                                logger.info(s"daily-rollup purge: deleted $n buckets older than $c")
-                            }
-                      }
-                      .handleErrorWith(e =>
-                        IO(logger.error(s"audit purge failed: ${e.getMessage}"))
-                      )
-                      *> IO.sleep(
-                        scala.concurrent.duration.DurationInt(1).hours
-                      )).foreverM.void.start
-                  else IO.unit.start
-
-                val rollupFiber =
-                  if telemetryStore.enabled then
-                    (IO
-                      .blocking {
-                        if coordinator.forall(_.isLeader) then
-                          val to = java.time.Instant.now().minusSeconds(60)
-                          telemetryStore.recomputeRollups(telemetryStore.rollupWatermark(), to)
-                          telemetryStore.advanceRollupWatermark(to)
-                      }
-                      .handleErrorWith(e =>
-                        IO(logger.error(s"rollup pass failed: ${e.getMessage}"))
-                      )
-                      *> IO.sleep(
-                        scala.concurrent.duration
-                          .DurationInt(mgrCfg.telemetry.rollupIntervalSec)
-                          .seconds
-                      )).foreverM.void.start
-                  else IO.unit.start
+                val auditPurgeFiber = ai.starlake.quack.boot.TelemetryFibers.auditPurge(
+                  telemetryStore,
+                  mgrCfg.telemetry,
+                  isLeader = () => coordinator.forall(_.isLeader)
+                )
+                val rollupFiber = ai.starlake.quack.boot.TelemetryFibers.rollup(
+                  telemetryStore,
+                  mgrCfg.telemetry,
+                  isLeader = () => coordinator.forall(_.isLeader)
+                )
 
                 // SPI module fibers: one per-event dispatch loop, plus the singleton
                 // task loops (leader-gated under HA). `dispatchers` builds fresh loop
