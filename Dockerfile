@@ -33,9 +33,9 @@ ARG TARGETARCH
 COPY build.sbt /src/
 COPY project/  /src/project/
 COPY ui/package.json ui/package-lock.json* /src/ui/
-RUN --mount=type=cache,target=/root/.sbt \
-    --mount=type=cache,target=/root/.ivy2/cache \
-    --mount=type=cache,target=/root/.cache/coursier \
+RUN --mount=type=cache,sharing=locked,target=/root/.sbt \
+    --mount=type=cache,sharing=locked,target=/root/.ivy2/cache \
+    --mount=type=cache,sharing=locked,target=/root/.cache/coursier \
     --mount=type=cache,target=/src/ui/node_modules,id=ui-node-modules-$TARGETARCH \
     sbt -no-colors update && \
     (cd /src/ui && npm ci)
@@ -45,9 +45,9 @@ COPY . /src/
 # cache-mount target above is always an existing (possibly empty) directory,
 # so we re-run `npm ci` here to guarantee the tsc/vite binaries are present
 # before `sbt assembly` invokes `npm run build`.
-RUN --mount=type=cache,target=/root/.sbt \
-    --mount=type=cache,target=/root/.ivy2/cache \
-    --mount=type=cache,target=/root/.cache/coursier \
+RUN --mount=type=cache,sharing=locked,target=/root/.sbt \
+    --mount=type=cache,sharing=locked,target=/root/.ivy2/cache \
+    --mount=type=cache,sharing=locked,target=/root/.cache/coursier \
     --mount=type=cache,target=/src/ui/node_modules,id=ui-node-modules-$TARGETARCH <<EOF
 set -eu
 cd /src/ui && npm ci
@@ -94,7 +94,7 @@ case "${TARGETARCH:-amd64}" in
   arm64) DUCKDB_ARCH=linux-arm64 ;;
   *)     echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;;
 esac
-curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-${DUCKDB_ARCH}.zip" \
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-${DUCKDB_ARCH}.zip" \
   -o /tmp/duckdb-cli.zip
 unzip -d /usr/local/bin /tmp/duckdb-cli.zip
 chmod +x /usr/local/bin/duckdb
@@ -104,7 +104,7 @@ rm /tmp/duckdb-cli.zip
 # powers QOD_NATIVE_CLIENT=true) because the shim links against
 # DuckDB::LibraryVersion / ArrowConverter / etc. The duckdb CLI above is
 # self-contained and does not provide a system-installed libduckdb.so.
-curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${DUCKDB_ARCH}.zip" \
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${DUCKDB_ARCH}.zip" \
   -o /tmp/libduckdb.zip
 unzip -d /tmp/libduckdb /tmp/libduckdb.zip
 install -m 0755 /tmp/libduckdb/libduckdb.so /usr/local/lib/libduckdb.so
