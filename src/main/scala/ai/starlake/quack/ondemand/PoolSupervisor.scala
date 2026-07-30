@@ -139,10 +139,11 @@ final class PoolSupervisor(
   /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
     * zero-module boots and in every existing test, so default behavior is unchanged.
     */
-  @volatile private var mutationGates: List[ai.starlake.quack.spi.MutationGate] = Nil
+  private val mutationGates: cats.effect.Ref[IO, List[ai.starlake.quack.spi.MutationGate]] =
+    cats.effect.Ref.unsafe(Nil)
 
-  def setMutationGates(gates: List[ai.starlake.quack.spi.MutationGate]): Unit =
-    mutationGates = gates
+  def setMutationGates(gates: List[ai.starlake.quack.spi.MutationGate]): IO[Unit] =
+    mutationGates.set(gates)
 
   /** First Left wins. A throwing gate refuses (fail closed): a broken quota store must not grant
     * unlimited provisioning. gateBypass short-circuits (superuser / static-key callers).
@@ -151,17 +152,21 @@ final class PoolSupervisor(
       m: ai.starlake.quack.spi.StructureMutation,
       bypass: Boolean
   ): IO[Either[String, Unit]] =
-    if bypass || mutationGates.isEmpty then IO.pure(Right(()))
+    if bypass then IO.pure(Right(()))
     else
-      mutationGates.foldLeft(IO.pure(Right(()): Either[String, Unit])) { (acc, g) =>
-        acc.flatMap {
-          case l @ Left(_) => IO.pure(l)
-          case Right(())   =>
-            g.check(m).attempt.map {
-              case Left(t)  => Left(s"gate error: ${t.getMessage}")
-              case Right(r) => r
+      mutationGates.get.flatMap { gates =>
+        if gates.isEmpty then IO.pure(Right(()))
+        else
+          gates.foldLeft(IO.pure(Right(()): Either[String, Unit])) { (acc, g) =>
+            acc.flatMap {
+              case l @ Left(_) => IO.pure(l)
+              case Right(())   =>
+                g.check(m).attempt.map {
+                  case Left(t)  => Left(s"gate error: ${t.getMessage}")
+                  case Right(r) => r
+                }
             }
-        }
+          }
       }
 
   /** In-memory mirror of the RBAC slice of the snapshot. The REST handlers and the FlightSQL

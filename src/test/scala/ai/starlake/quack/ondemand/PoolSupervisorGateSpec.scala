@@ -39,7 +39,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
 
   "createPool" should "raise QuotaExceededException when a gate refuses" in {
     val sup = setup()
-    sup.setMutationGates(List(denyPools("pool quota reached (2)")))
+    sup.setMutationGates(List(denyPools("pool quota reached (2)"))).unsafeRunSync()
     val key = PoolKey("acme", dbName(sup), "p1")
     val ex  = intercept[QuotaExceededException] {
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
@@ -50,7 +50,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
 
   it should "proceed when gateBypass is set" in {
     val sup = setup()
-    sup.setMutationGates(List(denyAll))
+    sup.setMutationGates(List(denyAll)).unsafeRunSync()
     val key = PoolKey("acme", dbName(sup), "p1")
     sup.createPool(key, RoleDistribution(0, 0, 1), gateBypass = true).unsafeRunSync()
     sup.get(key) should not be None
@@ -58,7 +58,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse when a gate throws (fail closed)" in {
     val sup = setup()
-    sup.setMutationGates(List(throwing))
+    sup.setMutationGates(List(throwing)).unsafeRunSync()
     val key = PoolKey("acme", dbName(sup), "p1")
     intercept[QuotaExceededException] {
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
@@ -67,7 +67,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
 
   "createTenantDb" should "return Left(QuotaExceeded) when a gate refuses" in {
     val sup = setup()
-    sup.setMutationGates(List(denyAll))
+    sup.setMutationGates(List(denyAll)).unsafeRunSync()
     sup
       .createTenantDb("acme", "second", TenantDbKind.InMemory, Map.empty, "")
       .unsafeRunSync() match
@@ -79,7 +79,7 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
     val sup = setup()
     val key = PoolKey("acme", dbName(sup), "p1")
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    sup.setMutationGates(List(denyAll))
+    sup.setMutationGates(List(denyAll)).unsafeRunSync()
     intercept[QuotaExceededException] {
       sup.scale(key, 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
     }

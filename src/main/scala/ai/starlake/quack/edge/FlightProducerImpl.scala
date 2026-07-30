@@ -422,29 +422,29 @@ final class FlightProducerImpl(
     resolvePreparedCall(handle, context) match
       case Left(err) => listener.error(err)
       case Right(p)  =>
-        scala.util.Try(
-          router
-            .execute(
-              p.connId,
-              p.user,
-              p.poolKey,
-              p.sql,
-              p.effectiveSet,
-              p.preferredNode,
-              prepareDurationMs = p.prepareDurationMs
-            )
-            .unsafeRunSync()
-        ) match
-          case scala.util.Success(Right(result)) =>
-            try streamArrow(result.rows, listener)
-            catch
-              case t: Throwable =>
-                listener.error(internalError("streaming Arrow batches", t))
-            finally result.close()
-          case scala.util.Success(Left(f)) =>
-            listener.error(toFlightException(f))
-          case scala.util.Failure(t) =>
-            listener.error(internalError("getStreamPreparedStatement re-execute", t))
+        router
+          .execute(
+            p.connId,
+            p.user,
+            p.poolKey,
+            p.sql,
+            p.effectiveSet,
+            p.preferredNode,
+            prepareDurationMs = p.prepareDurationMs
+          )
+          .unsafeToFuture()
+          .onComplete {
+            case scala.util.Success(Right(result)) =>
+              try streamArrow(result.rows, listener)
+              catch
+                case t: Throwable =>
+                  listener.error(internalError("streaming Arrow batches", t))
+              finally result.close()
+            case scala.util.Success(Left(f)) =>
+              listener.error(toFlightException(f))
+            case scala.util.Failure(t) =>
+              listener.error(internalError("getStreamPreparedStatement re-execute", t))
+          }(scala.concurrent.ExecutionContext.global)
 
   // -----------------------------------------------------------------
   //  Metadata endpoints - DBeaver / JDBC clients walk these to populate

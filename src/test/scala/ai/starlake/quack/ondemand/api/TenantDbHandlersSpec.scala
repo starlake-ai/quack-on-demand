@@ -321,7 +321,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
   "TenantDbHandlers.createTenantDb (mutation gates)" should
     "map a gate refusal to 429 quota_exceeded for tenant sessions" in:
     val (sup, h) = freshHandlersWithSupervisor()
-    sup.setMutationGates(List(denyingGate))
+    sup.setMutationGates(List(denyingGate)).unsafeRunSync()
     val tenantAdminScopeOf: String => Option[SessionScope] =
       _ => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
     val out = h.createTenantDb(
@@ -336,7 +336,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "bypass gates for superuser sessions" in:
     val (sup, h) = freshHandlersWithSupervisor()
-    sup.setMutationGates(List(denyingGate))
+    sup.setMutationGates(List(denyingGate)).unsafeRunSync()
     val superuserScopeOf: String => Option[SessionScope] = _ => Some(SessionScope.Superuser)
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "gated2", kind = "memory"),

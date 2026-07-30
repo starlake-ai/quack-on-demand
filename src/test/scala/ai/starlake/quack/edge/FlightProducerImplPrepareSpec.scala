@@ -345,7 +345,8 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
   // ---- Prepare + Execute merge into a single history row ----
 
   /** Walk through the FlightSQL Prepare action + the subsequent Execute, and return whatever
-    * the router's history store recorded across both halves. */
+    * the router's history store recorded across both halves. The prepared re-execute runs
+    * asynchronously, so this blocks until the stream reaches a terminal signal. */
   private def runPrepareThenExecute(producer: FlightProducerImpl, peer: String, sql: String): Unit =
     val prepListener = runPrepare(producer, peer, sql)
     val prepResult   = decodePrepareResult(prepListener.onNextValue.get())
@@ -354,22 +355,9 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       .newBuilder()
       .setPreparedStatementHandle(com.google.protobuf.ByteString.copyFromUtf8(handle))
       .build()
-    val execListener = new org.apache.arrow.flight.FlightProducer.ServerStreamListener:
-      // Only the abstract methods need implementations; the Java defaults cover the rest.
-      def isCancelled(): Boolean                                                       = false
-      def isReady(): Boolean                                                            = true
-      def setOnCancelHandler(h: Runnable): Unit                                        = ()
-      def start(
-          root: org.apache.arrow.vector.VectorSchemaRoot,
-          provider: org.apache.arrow.vector.dictionary.DictionaryProvider,
-          options: org.apache.arrow.vector.ipc.message.IpcOption
-      ): Unit = ()
-      def putNext(): Unit                                                              = ()
-      def putNext(metadata: org.apache.arrow.memory.ArrowBuf): Unit                    = ()
-      def putMetadata(metadata: org.apache.arrow.memory.ArrowBuf): Unit                = ()
-      def error(throwable: Throwable): Unit                                            = ()
-      def completed(): Unit                                                            = ()
+    val execListener = new RecordingStreamListener
     producer.getStreamPreparedStatement(command, fakeCallContext(peer), execListener)
+    execListener.awaitTerminal()
 
   it should "record ONE history row per SELECT (Prepare suppressed) with prepareDurationMs set" in:
     val (producer, _, router, peer) = setupProducer()
@@ -473,10 +461,15 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
 
   // ---- audit #6: prepared handles are peer-bound + re-check the live session ----
 
-  /** ServerStreamListener that records the terminal error (if any). */
+  /** ServerStreamListener that records the terminal error (if any) and lets tests block until
+    * the (now asynchronous) prepared re-execute reaches completed() or error(). */
   private final class RecordingStreamListener
       extends org.apache.arrow.flight.FlightProducer.ServerStreamListener:
     val onErrorRef                            = new AtomicReference[Throwable](null)
+    private val terminal                      = new java.util.concurrent.CountDownLatch(1)
+    def awaitTerminal(): Unit =
+      if !terminal.await(10, java.util.concurrent.TimeUnit.SECONDS) then
+        throw new AssertionError("stream saw neither completed() nor error() within 10s")
     def isCancelled(): Boolean                = false
     def isReady(): Boolean                    = true
     def setOnCancelHandler(h: Runnable): Unit = ()
@@ -488,8 +481,10 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     def putNext(): Unit                                           = ()
     def putNext(metadata: org.apache.arrow.memory.ArrowBuf): Unit = ()
     def putMetadata(metadata: org.apache.arrow.memory.ArrowBuf): Unit = ()
-    def error(throwable: Throwable): Unit                        = onErrorRef.set(throwable)
-    def completed(): Unit                                        = ()
+    def error(throwable: Throwable): Unit =
+      onErrorRef.set(throwable)
+      terminal.countDown()
+    def completed(): Unit = terminal.countDown()
 
   private def prepareQueryHandle(
       producer: FlightProducerImpl,
@@ -509,6 +504,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
       val listener = new RecordingStreamListener
       producer.getStreamPreparedStatement(command, fakeCallContext(otherPeer), listener)
+      listener.awaitTerminal()
       val err = listener.onErrorRef.get()
       err should not be null
       err.asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code() shouldBe
@@ -521,6 +517,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     ConnectionContext.unbind(peer)
     val listener = new RecordingStreamListener
     producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    listener.awaitTerminal()
     val err = listener.onErrorRef.get()
     err should not be null
     err.asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code() shouldBe
@@ -548,6 +545,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val command                   = prepareQueryHandle(producer, peer, "SELECT a FROM t")
     val listener                  = new RecordingStreamListener
     producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    listener.awaitTerminal()
     listener.onErrorRef.get() shouldBe null
     // The query actually reached a node.
     sent.exists(_._2.contains("SELECT a FROM t")) shouldBe true

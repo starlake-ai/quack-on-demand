@@ -1122,7 +1122,7 @@ object Main extends IOApp with LazyLogging:
         // once their own config/state is loaded), so this reads modules.mutationGates
         // strictly after moduleStart and installs them on the supervisor before the
         // server binds.
-        IO(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
+        sup.setMutationGates(modules.flatMap(_.mutationGates)) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
           mgr.serve.use { _ =>
             logger.info(
