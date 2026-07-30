@@ -73,10 +73,8 @@ import pureconfig.generic.semiauto.deriveReader
 
 object Main extends IOApp with LazyLogging:
 
-  // Match the camelCase keys used in application.conf rather than pureconfig's
-  // default kebab-case mapping. Affects our own ManagerConfig / FlightConfig
-  // AND the edge AuthenticationConfig types (which `derives ConfigReader`
-  // at class-definition time - we shadow those defaults here).
+  // Match application.conf's camelCase keys instead of pureconfig's kebab-case
+  // default; also shadows the `derives ConfigReader` defaults of the edge auth types.
   private val camelMapping: ConfigFieldMapping = ConfigFieldMapping(CamelCase, CamelCase)
   given ProductHint[K8sConfig]                 = ProductHint[K8sConfig](camelMapping)
   given ProductHint[AdminConfig]               = ProductHint[AdminConfig](camelMapping)
@@ -126,10 +124,8 @@ object Main extends IOApp with LazyLogging:
   private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
 
   def run(args: List[String]): IO[ExitCode] =
-    // Route java.util.logging through slf4j so logback.xml governs the JUL loggers too.
-    // grpc-netty logs via JUL directly; without the bridge its warnings (e.g.
-    // NettyServerHandler's benign "Stream closed before write could take place" on a
-    // client-cancelled Flight stream) print raw to stderr and cannot be filtered.
+    // Route JUL through slf4j: grpc-netty logs via JUL directly, and without the
+    // bridge its benign stream-cancel warnings print raw to stderr, unfilterable.
     org.slf4j.bridge.SLF4JBridgeHandler.removeHandlersForRootLogger()
     org.slf4j.bridge.SLF4JBridgeHandler.install()
     args match
@@ -192,20 +188,8 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
-    // AuthenticationService construction is deferred until after `sup` is built
-    // so the optional per-tenant OIDC registry can read tenant authConfig rows
-    // out of the supervisor.
-
-    // Bootstrap admin users at startup so the DB auth backend has at least
-    // one credential. Re-hashed on every boot: changing QOD_ADMIN_PASSWORD
-    // + restart rotates. All names in QOD_ADMIN_USERNAME (comma-separated)
-    // get the same password + role.
-    // Apply the Liquibase changelog first: `qodstate_user` (and the rest
-    // of the control plane) must exist before we upsert the admin row.
-    // Idempotent: DATABASECHANGELOG records skip already-applied changesets.
-    // Operator preflight: always print the control-plane Postgres URL and refuse
-    // to start when it is unreachable, with a clear message instead of a raw
-    // JDBC stack trace from the Liquibase apply below.
+    // Refuse to start when the control-plane Postgres is unreachable, with a clear
+    // message instead of a raw JDBC stack trace from the Liquibase apply below.
     Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
       case Left(message) =>
         println(message)
@@ -216,13 +200,11 @@ object Main extends IOApp with LazyLogging:
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
-    // Startup gate for database auth: probe systemQuery/tenantQuery shape now
-    // instead of at first login. Must run AFTER the Liquibase apply above.
+    // Probe the database-auth query shape now instead of at first login.
+    // Must run AFTER the Liquibase apply above.
     if authCfg.database.enabled then BootPreflight.probeAuthDatabase(authCfg.database)
 
-    // Single shared UserStore (one Hikari pool against qodstate_user): reused by
-    // the admin bootstrap below, the SSO grants lookup, and the RBAC user
-    // handlers. Closed in the shutdown hook.
+    // One shared Hikari pool against qodstate_user; closed in the shutdown hook.
     val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     BootPreflight.seedAdminUsers(userStore, mgrCfg.admin)
 
@@ -239,37 +221,26 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-    // Control-plane JDBC coordinates, derived once from the same keys
-    // `fromDefaultMetastore` uses. HA leader election and cross-replica
-    // NOTIFY (topology / RBAC / revocation) run against this database.
+    // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
-    // Telemetry store is built early so every handler (including those constructed
-    // before runWithMetrics) can record audit events. The metrics drop-counter is
-    // wired inside runWithMetrics once metricsReg is available; until then dropped
-    // events are silently ignored (best-effort, failure-safe by design).
+    // Built early so handlers constructed before runWithMetrics can record audit
+    // events; its metrics drop-counter is wired later, drops until then are silent.
     val telemetryStore: TelemetryStore = mgrCfg.telemetry.store match
       case "none" => NoopTelemetryStore
       case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
     if telemetryStore.enabled then logger.info("telemetry: postgres (qodstate_audit)")
     else logger.info("telemetry: none (audit log disabled; nothing is recorded)")
     val haOn = mgrCfg.ha.enabled
-    // Per-tenant-db Postgres provisioning. The admin connection opens
-    // against the `postgres` system DB and issues CREATE/DROP DATABASE
-    // for each `qodstate_tenant_db` row the supervisor manages.
+    // Opens against the `postgres` system DB to CREATE/DROP per-tenant-db databases.
     val dbAdmin = PostgresDbAdmin.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
 
-    // Shared FederatedSourceStore: used by federationBlobOf (resolves
-    // sources + secrets into spawn SQL), by TenantDbHandlers (counts
-    // sources per tenant-db for the UI), by FederatedSourceHandlers
-    // (CRUD), and by ManifestHandlers (YAML round-trip).
+    // Shared by federationBlobOf, TenantDbHandlers, FederatedSourceHandlers, ManifestHandlers.
     val manifestFedStore: Option[FederatedSourceStore] =
       val dm      = mgrCfg.defaultMetastore
       val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
       Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
 
-    // Federation blob lookup: resolves enabled federated sources + their
-    // secrets into a ready-to-execute SQL blob for each tenant-db.
     val federationBlobOf: String => IO[Option[String]] =
       manifestFedStore match
         case Some(federatedStore) =>
@@ -282,15 +253,10 @@ object Main extends IOApp with LazyLogging:
         case None =>
           _ => IO.pure(None)
 
-    // Cached per-tenant-db DuckLake catalog readers (see CatalogReaders for the
-    // cache + idle-eviction contract). Allocated up-front (not inside the
-    // catalogHandlers branch below) so its eviction callback plugs into the
-    // supervisor's onTenantDbDeleted/onTenantDbChanged hooks. Construction
-    // cycle with `sup` below (readers need the supervisor's effective-metastore
-    // resolution, the supervisor's hooks need evict): broken via supRef, filled
-    // right after the supervisor is built. get() only runs on request-time
-    // calls, long after that, and would NPE loudly (not silently misroute) if
-    // that ordering were ever broken.
+    // Cached per-tenant-db DuckLake catalog readers (contract in CatalogReaders).
+    // Construction cycle with `sup`: readers need the supervisor's metastore
+    // resolution, the supervisor's hooks need evict. Broken via supRef, filled
+    // right after the supervisor is built; get() only runs at request time.
     val supRef           = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
     val catalogReaderCfg =
       com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.catalogReader")
@@ -300,10 +266,7 @@ object Main extends IOApp with LazyLogging:
       sweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
     )
 
-    // HA collaborators are wired only when ha.enabled=true. With HA off they
-    // stay at their process-local no-op defaults: no advisory locks are taken
-    // and no NOTIFY is emitted, so single-manager mode opens no extra
-    // connection and behaves exactly as before.
+    // With HA off these stay no-ops: no advisory locks, no NOTIFY, no extra connection.
     val poolLocks =
       if haOn then new PgPoolLocker(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
       else PoolLocker.noop
@@ -311,8 +274,8 @@ object Main extends IOApp with LazyLogging:
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
-    // Cache-aware routing state. Constructed before the supervisor so its teardown hook can clear
-    // a torn-down pool's entries; the FlightSQL router below shares the same two instances.
+    // Constructed before the supervisor so its teardown hook can clear a torn-down
+    // pool's entries; the FlightSQL router shares the same two instances.
     val placementDirectory =
       new ai.starlake.quack.route.PlacementDirectory(mgrCfg.routing.directoryMaxTables)
     val localityTracker = new ai.starlake.quack.route.LocalityTracker()
@@ -333,11 +296,8 @@ object Main extends IOApp with LazyLogging:
     )
     supRef.set(sup)
 
-    // Per-tenant OIDC registry: each tenant on `authProvider = google` with a
-    // per-tenant clientId / clientSecretRef gets its own Google
-    // OidcBearerAuthenticator (substituted into the bearer chain when the
-    // FlightSQL handshake resolves to that tenant). Other tenants fall back
-    // to the manager-wide `quack-flightsql.auth.google` block.
+    // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
+    // authenticator; others fall back to the manager-wide auth.google block.
     val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
       loadTenant = id => sup.getTenantById(id),
       secrets = ai.starlake.quack.secrets.SecretRefResolver.default,
@@ -349,9 +309,6 @@ object Main extends IOApp with LazyLogging:
       Some(tenantOidcRegistry)
     )
 
-    // Catalog reader resolver: request-time accessor over the CatalogReaders
-    // cache above. The CatalogHandlers themselves are constructed further
-    // down, after the audit recorder and the tag handlers they depend on.
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaders.get(tenant, tenantDb)
 
@@ -369,8 +326,7 @@ object Main extends IOApp with LazyLogging:
     val health = new HealthHandler(sup, dbHealthy)
 
     if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
-      // ERROR (not warn): a security misconfiguration report must survive the
-      // quiet default log level (logback root defaults to ERROR).
+      // ERROR (not warn) so it survives the default ERROR root log level.
       logger.error(
         "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
           "sessions on this manager. Override QOD_SESSION_JWT_SECRET before exposing the " +
@@ -380,10 +336,8 @@ object Main extends IOApp with LazyLogging:
       secret = mgrCfg.auth.management.sessionJwtSecret,
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds,
       onRevoke = (jti, exp) =>
-        // Persistence + NOTIFY are best-effort and unconditional: in single-manager
-        // mode notifyListeners is a no-op signal (no listeners) and insert keeps the
-        // denylist durable across restarts. A Postgres blip during logout must never
-        // throw out of revoke(); the local in-process denylist stays authoritative.
+        // Best-effort: a Postgres blip during logout must never throw out of
+        // revoke(); the local in-process denylist stays authoritative.
         try
           store.insertRevokedJti(jti, exp)
           store.notifyListeners("qod_revocation", s"$jti|${exp.getEpochSecond}")
@@ -395,16 +349,10 @@ object Main extends IOApp with LazyLogging:
             )
     )
 
-    // auditRecorder built here so the sessionTokens.get lookup closure is ready.
-    // All handlers (early and inside runWithMetrics) share this instance.
     val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
 
-    // SPI: context handed to each module at start, plus the ordered start action.
-    // Ordering guarantee: moduleStart runs m.start(ctx) for every module FIRST;
-    // only afterwards does the boot IO chain construct the ManagerServer, which
-    // reads each module's endpoints/publicPathPrefixes/staticMounts exactly once.
-    // A module that builds its routes inside start() is therefore honored, and
-    // those endpoints/staticMounts are live from the first served request.
+    // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
+    // ManagerServer is constructed, so routes built inside start() are honored.
     val moduleCtx = ai.starlake.quack.spi.ManagerContext(
       supervisor = sup,
       users = userStore,
@@ -431,9 +379,6 @@ object Main extends IOApp with LazyLogging:
       onAuthChanged = tenantOidcRegistry.invalidate,
       audit = auditRecorder
     )
-    // Snapshot-tag CRUD (EPIC P2 / Spec 06). Snapshot existence resolves
-    // through the same cached per-tenant-db DuckLake reader as the catalog
-    // browser; tag rows live in the control-plane store.
     val tagHandlers: Option[ai.starlake.quack.ondemand.api.TagHandlers] = Some(
       new ai.starlake.quack.ondemand.api.TagHandlers(
         sup,
@@ -444,9 +389,6 @@ object Main extends IOApp with LazyLogging:
       )
     )
 
-    // Catalog browser handlers (session-gated since Spec 00). AS OF selector
-    // resolution (asOf / asOfTag / asOfTs) runs inside getTable via
-    // SnapshotSelector; reads are audited only when catalog.auditCatalogReads is on.
     def tenantDbKindOf(
         tenant: String,
         tenantDb: String
@@ -465,8 +407,6 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
-    // Per-table history timeline (EPIC Spec 01). Same reader cache, gate, and audit knob as the
-    // browser handlers.
     val catalogHistoryHandlers: Option[ai.starlake.quack.ondemand.api.CatalogHistoryHandlers] =
       Some(
         new ai.starlake.quack.ondemand.api.CatalogHistoryHandlers(
@@ -485,8 +425,7 @@ object Main extends IOApp with LazyLogging:
       audit = auditRecorder
     )
 
-    // Managed maintenance (EPIC Spec 09). REST surface only; the scheduler + drain-loop
-    // fibers are started later, alongside the other duty fibers, once mgrCfg is in scope there.
+    // REST surface only; the scheduler + drain-loop fibers start later with the duty fibers.
     val maintenanceHandlers: Option[ai.starlake.quack.ondemand.api.MaintenanceHandlers] = Some(
       new ai.starlake.quack.ondemand.api.MaintenanceHandlers(
         sup,
@@ -505,11 +444,8 @@ object Main extends IOApp with LazyLogging:
       audit = auditRecorder
     )
 
-    // Leader elector + LISTEN dispatcher. Present only under HA. Handlers close
-    // over `sup` and `sessionTokens`: topology/RBAC NOTIFYs re-restore the
-    // supervisor cache and reseed the revocation denylist; a revocation NOTIFY
-    // adds the single jti directly (falling back to a full refresh on a
-    // malformed payload).
+    // Leader elector + LISTEN dispatcher, present only under HA. Topology/RBAC
+    // NOTIFYs re-restore the supervisor cache and reseed the revocation denylist.
     val coordinator = Option.when(haOn) {
       def refreshFromStore(): Unit =
         sup.restore()
@@ -534,9 +470,7 @@ object Main extends IOApp with LazyLogging:
         )
       )
     }
-    // Admin-UI / management-plane auth wiring (identity source, per-tenant auth
-    // modes, cookie Secure policy, OIDC SSO, SQL-token flow): see
-    // ManagementAuthWiring for the component contracts.
+    // Management-plane auth wiring; component contracts in ManagementAuthWiring.
     val mgmtAuth = ManagementAuthWiring.build(
       mgrCfg,
       authCfg,
@@ -573,28 +507,16 @@ object Main extends IOApp with LazyLogging:
         .effectiveNativeClient(mgrCfg.nativeClient),
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
-    val adapter = new QuackHttpAdapter(client, tracker)
-    // SQL ACL validator (see BootFactories.aclValidator for the RBAC-backed
-    // PostgresAclValidator contract; acl.enabled=false falls back to allow-all).
+    val adapter                          = new QuackHttpAdapter(client, tracker)
     val aclValidator: StatementValidator = BootFactories.aclValidator(aclCfg, mgrCfg, sup)
     logger.info(
       s"node lockdown: ${if lockdownCfg.enabled then "enabled" else "disabled"}"
     )
 
-    // Background health probe so transient failures don't permanently mark
-    // nodes unhealthy. Pings each running node with a cheap `SELECT 1` and
-    // updates the tracker.
-    //
-    // Per-node schema init. The first time we probe a node successfully we
-    // also run `CREATE SCHEMA IF NOT EXISTS <db>.<schema>` so the pool's
-    // default schema is guaranteed to exist before
-    // `FlightSqlRouter.wrapWithDefaultSchema` ever prepends `USE <db>.<schema>`
-    // to a client query. After that first success the node-id is recorded in
-    // `schemaInited` and every subsequent probe reverts to plain `SELECT 1`.
-    // Self-healing if the first probe fails - not recorded -> next tick
-    // retries the CREATE. Manager restart resets the map; the next first
-    // probe per node re-runs the (idempotent) CREATE - at most one wasted
-    // round-trip per node per restart.
+    // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
+    // so the pool's default schema exists before wrapWithDefaultSchema ever
+    // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
+    // recorded, so the next tick retries the (idempotent) CREATE.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
     val healthProbe  = new HealthProbe(
       tracker,
@@ -618,8 +540,7 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
-      // Piggyback the DuckDB engine-stats scrape (memory, temp storage, spill) on every
-      // successful health tick. Fail-soft: a failed scrape keeps the previous sample.
+      // Piggyback the engine-stats scrape on each healthy tick; fail-soft.
       onHealthy = n =>
         adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st)))
     )
@@ -629,16 +550,11 @@ object Main extends IOApp with LazyLogging:
         metricsEndpoint: MetricsEndpoint,
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
-      // Routing classifier + CLS / RLS rewriters, built from operator config
-      // (see EdgeRewriters for the knobs and the catalog-resolution contract).
       val classifier           = EdgeRewriters.statementClassifier()
       val columnPolicyRewriter =
         EdgeRewriters.columnPolicyRewriter(sup, catalogReaders, stmtInstruments)
       val rowPolicyRewriter = EdgeRewriters.rowPolicyRewriter()
 
-      // journalDropped references metricsReg (parameter of runWithMetrics);
-      // eventJournal must be constructed before fsRouter so the router can be
-      // passed it as its last constructor argument.
       val journalDropped: Int => Unit = n =>
         metricsReg.composite
           .counter("qod_journal_dropped_total", "table", "audit")
@@ -656,19 +572,11 @@ object Main extends IOApp with LazyLogging:
         )
       auditRecorder.onDropCounter(journalDropped)
 
-      // Per-pool attached-catalogs lookup for ACL resolution (attached-catalog-aware ACL):
-      // the tenant-db's own dbName + ALL of its federation aliases (enabled or disabled)
-      // + the DuckDB built-in catalogs (memory/system/temp) that are always attached.
-      // Cached 60s per PoolKey -- federation-source edits only reach the engine on node
-      // respawn anyway (documented lifecycle), so a short TTL is not a staleness
-      // regression. Disabled sources are included deliberately: a disabled source's
-      // alias remains ATTACHed on already-running nodes until the pool recycles, so
-      // excluding it would re-open the two-part-name bypass for broadly granted
-      // principals. Deliberately NO invalidation hook (unlike the EffectiveSet cache):
-      // the set reflects what MAY be attached on any node of the pool. The only
-      // residual exposure is (a) a newly created source whose alias enters the set
-      // within the 60s TTL, and (b) a deleted source, whose alias disappears from the
-      // store entirely while still attached on running nodes until the pool recycles.
+      // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey.
+      // Disabled sources are included deliberately: their alias stays ATTACHed on
+      // running nodes until the pool recycles, and excluding it would re-open the
+      // two-part-name bypass. No invalidation hook by design: the set reflects what
+      // MAY be attached on any node of the pool.
       val attachedCatalogsCache =
         new java.util.concurrent.ConcurrentHashMap[
           ai.starlake.quack.model.PoolKey,
@@ -693,9 +601,8 @@ object Main extends IOApp with LazyLogging:
           result
         }
 
-      // Cache-aware routing (milestone-1 metrics on the current least-loaded router).
-      // refsConfigFor mirrors attachedCatalogsOf's use of sup.effectiveMetastoreFor so the
-      // ACL SQL parser resolves unqualified table refs the same way the validator does.
+      // Mirrors attachedCatalogsOf's metastore resolution so the ACL SQL parser
+      // resolves unqualified table refs the same way the validator does.
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
         val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
         ai.starlake.acl.model.Config.forDuckDB(
@@ -735,10 +642,8 @@ object Main extends IOApp with LazyLogging:
         loadCapFactor = mgrCfg.routing.loadCapFactor
       )
 
-      // FlightEdgeServer construction allocates Arrow's RootAllocator eagerly,
-      // so defer it to IO. The explicit try/catch downgrades JVM `Error`s (e.g.
-      // LinkageError when arrow-memory-* and Netty diverge) into a RuntimeException
-      // - IO.attempt routes that, but treats raw `Error`s as fatal.
+      // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
+      // RuntimeException: IO.attempt routes that, but treats raw Errors as fatal.
       val edgeIO: IO[FlightEdgeServer] = IO.delay {
         try
           val srv = new FlightEdgeServer(
@@ -756,9 +661,8 @@ object Main extends IOApp with LazyLogging:
               sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
                 case None      => Left(s"pool '$pool' not found in tenant '$tenant'")
                 case Some(key) =>
-                  // Tenant kill switch wins over pool kill switch -- a disabled
-                  // tenant should report itself, not its pool, to avoid leaking
-                  // pool existence under a disabled tenant.
+                  // Tenant kill switch wins: a disabled tenant reports itself, not
+                  // its pool, to avoid leaking pool existence.
                   sup.getTenant(key.tenant) match
                     case Some(t) if t.disabled =>
                       Left(s"tenant '${key.tenant}' is disabled")
@@ -768,20 +672,12 @@ object Main extends IOApp with LazyLogging:
                           Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
                         case _ =>
                           Right(key.tenantDb),
-            // Accept either form of the FlightSQL `tenant` connection param.
-            // Surrogate ids (`t-<8 hex>`) and display names are disjoint shapes,
-            // so the `Names.looksLikeTenantId` check picks the right index.
-            // FlightEdgeServer uses the result to normalize the wire value to
-            // a display name (for lookupPool / authorize) AND to recover the id
-            // for the Basic auth chain (which queries qodstate_user.tenant).
+            // The FlightSQL `tenant` param may be a surrogate id or a display
+            // name; the shapes are disjoint, so the check picks the right index.
             raw =>
               if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
               else sup.getTenant(raw),
-            // Handshake authorize: user-scope + pool-access + EffectiveSet.
-            // Failures bubble up as PERMISSION_DENIED on the FlightSQL
-            // handshake. JWT role + groups claims flow in from
-            // FlightEdgeServer.handshake and get union-merged with the
-            // user's local membership edges inside the supervisor.
+            // Handshake authorize; failures bubble up as PERMISSION_DENIED.
             (tenant, pool, username, jwtRoles, jwtGroups) =>
               sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups)
           )
@@ -792,10 +688,6 @@ object Main extends IOApp with LazyLogging:
             throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
 
-      // RBAC handlers wire through the supervisor + user store so persistence
-      // and the in-memory RbacResolver cache stay in lockstep. The user
-      // handler is built first because role / group / pool-permission
-      // handlers share its DTO mappers.
       val userHandlers       = new UserHandlers(sup, userStore, audit = auditRecorder)
       val roleHandlers       = new RoleHandlers(sup, userHandlers, audit = auditRecorder)
       val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
@@ -806,12 +698,7 @@ object Main extends IOApp with LazyLogging:
       val rowPolicyHandlers =
         new ai.starlake.quack.ondemand.api.RoleRowPolicyHandlers(sup, audit = auditRecorder)
 
-      // Config page registry. The roots list pairs each typed config
-      // class with its HOCON prefix; the reflector pulls every
-      // @ConfigField-annotated scalar (including nested case-class
-      // fields). The live `Config` is the same one pureconfig drove
-      // `ConfigSource.default` from, so values render with env-var
-      // substitutions already applied.
+      // Config page registry; values render with env-var substitutions applied.
       val liveConfig    = com.typesafe.config.ConfigFactory.load()
       val configEntries = ConfigRegistry.collect(
         ConfigRegistry.rootsFor(
@@ -843,11 +730,6 @@ object Main extends IOApp with LazyLogging:
           )
         )
 
-      // manifestFedStore is hoisted above the supervisor build (see top of
-      // this Resource.eval block); reuse the same instance here so the
-      // manifest sees the same federation table as TenantDbHandlers /
-      // FederatedSourceHandlers.
-
       val manifestHandlers = new ai.starlake.quack.ondemand.api.ManifestHandlers(
         store = store,
         supervisor = sup,
@@ -858,58 +740,19 @@ object Main extends IOApp with LazyLogging:
         audit = auditRecorder
       )
 
-      // Time-travel preview (Spec 00 Task 5). The executor adapts
-      // FlightSqlRouter.execute to CatalogPreviewHandlers.PreviewExecutor's shape, mirroring
-      // the FlightSQL handshake's own EffectiveSet resolution EXACTLY:
-      //   - the SuperuserIdentity sentinel (no session / unresolved token / open mode, per
-      //     CatalogPreviewHandlers' identity contract) gets a synthetic superuser EffectiveSet
-      //     (`user.tenant = None`) so PostgresAclValidator's superuser bypass applies -- NOT
-      //     `effectiveSet = None`, which the validator treats as "no RBAC principal bound" and
-      //     denies fail-safe (see PostgresAclValidator.validate's `case None => Denied`).
-      //   - a real session identity resolves through `sup.authorizeHandshake`, the SAME
-      //     supervisor method (and therefore the same 60s-TTL EffectiveSet cache) the FlightSQL
-      //     handshake uses. A Left here (disabled user, no pool grant, unknown pool/tenant) short
-      //     circuits straight to RouterFailure.AccessDenied without ever calling
-      //     fsRouter.execute, mirroring the handshake gate rejecting before any statement runs.
-      // `recordExecution = false` keeps previews out of statement history and per-node load
-      // stats, the same probe precedent HealthProbe's LIMIT-0 check uses.
-      //
-      // Cancellation safety (no wrapper needed -- proof, not just a claim): the handler
-      // (CatalogPreviewHandlers.preview) wraps this whole executor call in
-      // `.timeout(cfg.previewTimeoutSec.seconds)`. cats-effect's `Temporal#timeout` races the
-      // executor's IO against a sleep and, per its own contract, returns the executor's value
-      // intact whenever the executor side reaches a terminal outcome first -- ties go to the
-      // source, and a fiber that has already produced `Succeeded(value)` can never have that
-      // value silently discarded by the timer "winning" a shared race (cancellation only ever
-      // targets the LOSING fiber, never discards a completed winner). Cooperative cancellation
-      // also means a running, boundary-free synchronous tail cannot be preempted mid-flight: it
-      // either finishes and wins the race, or the timeout fires strictly before that tail even
-      // starts (in which case no QueryResult was ever built and there's nothing to close).
-      //
-      // SCOPE OF THIS PROOF: it covers the QueryResult only. It does NOT cover the wire-level
-      // node connection: the underlying call runs in IO.blocking, whose cancellation is
-      // best-effort (Thread.interrupt), so a timed-out preview can leave the abandoned blocking
-      // call to complete on its own and open a node connection/reader that nobody closes. That
-      // window is bounded by previewTimeoutSec and is a PRE-EXISTING property of the shared
-      // executor path (the FlightSQL prepare-probe has the identical exposure); the durable fix
-      // is bracketing the connection inside QuackHttpClient/QuackProtocol, tracked as a repo
-      // follow-up. Do not cite this comment as proof that a cancelled preview leaks nothing.
-      // The timeout also wraps the EffectiveSet-resolution leg, not just the HTTP leg
-      // (harmless: that leg holds no closeable resource).
-      // Reading FlightSqlRouter.execute's final flatMap chain (the `QuackResponse.Ok` arm)
-      // confirms there is no such boundary to worry about here: once the HTTP call to the Quack
-      // node returns `QuackResponse.Ok(reader, latency, close)`, every step to
-      // `IO.pure(Right(QueryResult(reader, closeAndDeregister, nodeId, latency)))` is
-      // synchronous, in-memory bookkeeping with no further suspension point --
-      // `sessions.onStatement` (TrieMap update), `registry.register`/`attachCancel` (TrieMap
-      // puts), and `maybeRecord` (in-memory ring buffer + Micrometer counters + a non-blocking
-      // queue offer for the audit journal, whose Postgres flush runs on a wholly separate
-      // background fiber). So the only place a preview's underlying connection can leak is if
-      // the timeout fires WHILE the HTTP call itself is still in flight -- and in that case no
-      // `QueryResult` was ever constructed, so there is nothing for this adapter to close.
-      // `recordExecution = false` for read-only probes (preview, data diff: never stamp);
-      // `true` for undrop's CTAS and restore's CREATE OR REPLACE so the snapshot carries the
-      // author stamp. Restore's dry-run summary rides the `false` path.
+      // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
+      // handshake's EffectiveSet resolution: the SuperuserIdentity sentinel gets a
+      // synthetic superuser EffectiveSet (NOT None, which PostgresAclValidator
+      // denies fail-safe); real sessions resolve through sup.authorizeHandshake
+      // (same gate + 60s cache as the handshake), a Left short-circuiting to
+      // AccessDenied before fsRouter.execute.
+      // recordExecution = false for read-only probes (preview, data diff, restore
+      // dry-run); true for undrop's CTAS and restore's CREATE OR REPLACE so the
+      // snapshot carries the author stamp.
+      // Caveat: the handler-level timeout cannot cancel the underlying IO.blocking
+      // node call, so a timed-out preview may leave that call to finish unobserved
+      // (bounded by previewTimeoutSec, pre-existing on the shared executor path;
+      // durable fix is bracketing the connection inside QuackHttpClient).
       def routedExecutor(
           recordExecution: Boolean
       ): ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
@@ -993,12 +836,8 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
-      // Deferred: the three module surfaces (endpoints / publicPathPrefixes /
-      // staticMounts) are read inside this constructor, so it MUST run after
-      // moduleStart (m.start(ctx)) so a module that builds its routes in
-      // start() has them registered. Called from the IO chain below, strictly
-      // after moduleStart. RouteCollisions still fails fast, now at build time
-      // inside the IO chain, which is still a boot-time abort.
+      // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
+      // so it MUST run after moduleStart; called from the IO chain below.
       def buildManagerServer(): ManagerServer = new ManagerServer(
         mgrCfg,
         edgeCfg,
@@ -1039,28 +878,11 @@ object Main extends IOApp with LazyLogging:
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts)
       )
-      // DuckLake pre-init is per-tenant-db; PoolSupervisor.createTenantDb
-      // calls DuckLakeInitializer.initBlocking once the tenant-db's own
-      // Postgres database has been provisioned. The control-plane
-      // database holds qodstate_* tables only and must never carry
-      // ducklake_* tables.
-      // Order matters: the bootstrap hook may insert tenants/pools/users
-      // into the store. We must run it BEFORE restore() so the supervisor's
-      // in-memory cache reflects the imported state; reconcile() then sees
-      // those pools and can spawn nodes. Inverting the order leaves the
-      // REST/UI reading from an empty cache after a fresh boot.
-      // Decide initial leadership synchronously before the boot sequence.
-      // `coordinator.forall(_.isLeader)` is true when HA is off (None), so the
-      // single-manager path is preserved exactly. The follower branch skips
-      // bootstrap/init/discover/reconcile (the leader owns those) but still
-      // restores its in-memory cache and seeds the revocation denylist.
-      //
-      // The leader-only duties are extracted into `leaderDuties` so they can run
-      // EITHER at boot (this branch) OR later on promotion (haRefreshFiber tick)
-      // when every replica happened to boot as a follower (a transient
-      // coordinator-connection failure). `leaderDutiesDone` guards against them
-      // ever running twice: boot's leader branch sets it; the refresh tick
-      // checks-then-sets it only on success.
+      // Leader-only boot duties. Ordering: the bootstrap hook runs BEFORE restore()
+      // so the supervisor cache reflects imported state and reconcile() can spawn
+      // those pools; inverting leaves the REST/UI on an empty cache after boot.
+      // Extracted so they run either at boot or later on promotion (haRefreshFiber
+      // tick); leaderDutiesDone guards against running twice.
       val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
       def leaderDuties: IO[Unit] =
         DemoBootstrapHook.run(
@@ -1089,10 +911,8 @@ object Main extends IOApp with LazyLogging:
         ) *>
           IO.delay(sup.restore()) *>
           sup.ensureDuckLakeInitialized() *>
-          // Latent-bug fix: repopulate the K8s per-pod token cache from the
-          // qod-token-* Secrets before reconcile() adopts pods. No-op in
-          // local mode (returns empty). Runs on the leader (and always in
-          // single-manager mode, which takes this branch).
+          // Repopulate the K8s per-pod token cache from the qod-token-* Secrets
+          // before reconcile() adopts pods; no-op in local mode.
           backend
             .discoverExisting()
             .flatMap(found =>
@@ -1109,19 +929,12 @@ object Main extends IOApp with LazyLogging:
            ) *>
              IO.delay(sup.restore()) *>
              IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))) *>
-        // Single-manager deployments never run the HA leader periodic purge, so
-        // do a one-shot purge at boot (unconditional) to keep expired denylist
-        // rows from accumulating.
+        // One-shot purge at boot: single-manager mode never runs the HA leader's
+        // periodic purge of expired denylist rows.
         IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
-        // Start SPI modules before the server binds so their endpoints and
-        // static mounts are live from the first served request. The module
-        // surfaces and the ManagerServer are constructed here, strictly after
-        // moduleStart, so a module that registers routes in start() is honored.
         moduleStart *>
-        // Modules may build their MutationGates only after start() has run (e.g.
-        // once their own config/state is loaded), so this reads modules.mutationGates
-        // strictly after moduleStart and installs them on the supervisor before the
-        // server binds.
+        // Modules may build their MutationGates only inside start(), so this reads
+        // them strictly after moduleStart and before the server binds.
         sup.setMutationGates(modules.flatMap(_.mutationGates)) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
           mgr.serve.use { _ =>
@@ -1132,8 +945,7 @@ object Main extends IOApp with LazyLogging:
             edgeIO.attempt.flatMap {
               case Right(edge) =>
                 logger.info("edge FlightSQL started")
-                // Operator banner: stdout, unconditional (default log level is
-                // ERROR); printed only once both listeners are actually up.
+                // Stdout banner (default log level is ERROR), once both listeners are up.
                 println(
                   Banner.startup(
                     mgrCfg.defaultMetastore.asMap,
@@ -1144,8 +956,6 @@ object Main extends IOApp with LazyLogging:
                     edgeCfg.tlsEnabled
                   )
                 )
-                // Teardown wiring: graceful finalizer chain + belt-and-braces JVM
-                // shutdown hook (see ShutdownCoordinator for the fallback contract).
                 val shutdownCoordinator = new ai.starlake.quack.boot.ShutdownCoordinator(
                   edge = edge,
                   backend = backend,
@@ -1163,11 +973,8 @@ object Main extends IOApp with LazyLogging:
                 shutdownCoordinator.installJvmHook()
                 val gracefulShutdown: IO[Unit] = shutdownCoordinator.gracefulShutdown
 
-                // Periodic reconcile: respawn nodes that die while the manager is
-                // up (boot only ran reconcile once). Disabled when the interval is
-                // 0, in which case the fiber is a no-op we still cancel uniformly.
-                // Under HA only the leader reconciles; the gate is `true` when HA
-                // is off (coordinator None), so single-manager mode is unchanged.
+                // Respawn nodes that die while the manager is up; under HA only the
+                // leader reconciles (the gate is true when HA is off).
                 val reconcileGate: () => Boolean = () => coordinator.forall(_.isLeader)
                 val reconcileFiber               =
                   if mgrCfg.reconcileIntervalSec > 0 then
@@ -1182,8 +989,6 @@ object Main extends IOApp with LazyLogging:
                     logger.info("periodic reconcile disabled (reconcileIntervalSec=0)")
                     IO.unit.start
 
-                // Managed maintenance (EPIC Spec 09): see MaintenanceWiring for the
-                // scheduler / runner / drain-loop contracts.
                 val maintenanceWiring = new ai.starlake.quack.boot.MaintenanceWiring(
                   store = store,
                   sup = sup,
@@ -1204,17 +1009,15 @@ object Main extends IOApp with LazyLogging:
                   case Some(c) => c.loop.start
                   case None    => IO.unit.start
 
-                // Follower/leader convergence loop: periodically re-restore the
-                // supervisor cache and reseed the denylist (a safety net beyond
-                // the NOTIFY handlers); the leader also purges expired jtis.
+                // Periodic re-restore + denylist reseed, a safety net beyond the
+                // NOTIFY handlers; the leader also purges expired jtis.
                 val haRefreshFiber = coordinator match
                   case Some(c) =>
                     val period =
                       scala.concurrent.duration.DurationInt(mgrCfg.ha.topologyRefreshSec).seconds
-                    // On promotion (this replica became leader after booting a
-                    // follower), run the leader duties exactly once. Guarded by its
-                    // own handleErrorWith so a duty failure neither sets the flag
-                    // (retried next tick) nor aborts the rest of this tick's refresh.
+                    // On promotion, run the leader duties exactly once. A duty
+                    // failure neither sets the flag (retried next tick) nor aborts
+                    // the rest of this tick's refresh.
                     val promoteDuties: IO[Unit] =
                       if c.isLeader && !leaderDutiesDone.get then
                         (leaderDuties *> IO.delay(leaderDutiesDone.set(true)))
@@ -1252,9 +1055,8 @@ object Main extends IOApp with LazyLogging:
                   isLeader = () => coordinator.forall(_.isLeader)
                 )
 
-                // SPI module fibers: one per-event dispatch loop, plus the singleton
-                // task loops (leader-gated under HA). `dispatchers` builds fresh loop
-                // closures on each call, so it is evaluated exactly once here.
+                // `dispatchers` builds fresh loop closures per call, so it is
+                // evaluated exactly once here.
                 val moduleDispatcherFibers =
                   moduleEventBus.dispatchers.traverse(_.start)
                 val moduleSingletonFibers =
