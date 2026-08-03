@@ -25,32 +25,18 @@ final class FlightProducerImpl(
 
   private val allocator: BufferAllocator = new RootAllocator()
 
-  /** Per-handle execution context, captured at Prepare time and replayed on every
-    * `getStreamPreparedStatement` so the same handle can drive many Executes (as the Arrow Flight
-    * SQL spec requires). Arrow JDBC / DBeaver / ADBC all reuse a Prepare handle across multiple
-    * ExecuteQuery calls until they explicitly call ClosePreparedStatement.
+  /** Per-handle execution context, captured at Prepare time. Arrow batches are not cached (a reader
+    * cannot be replayed), so the SQL re-executes through the router on every Execute: one handle
+    * drives many Executes until ClosePreparedStatement, as the spec requires.
     *
-    * We don't cache the materialized Arrow batches: a `VectorSchemaRoot` is consumed by the first
-    * stream and the underlying [[QueryResult.rows]] cannot be replayed. So we re-execute the SQL
-    * through the router on every Execute. One Prepare = one extra round-trip vs. caching, but the
-    * client gets correct multi-Execute semantics.
+    * `ownerPeer` binds the handle to the creating session: Execute/Update reject other peers, so a
+    * leaked handle cannot be replayed. The EffectiveSet is deliberately NOT stored: Execute
+    * re-reads it live from [[ConnectionContext]], so mid-session revocation is honored and an
+    * expired session kills the handle.
     *
-    * `ownerPeer` is the `peerIdentity` that created the handle. Execute/Update paths reject a
-    * caller whose peer differs, so a leaked 128-bit handle cannot be replayed by another session
-    * (audit finding #6, handle-sharing leg). The authorization set is NOT stored here: the Execute
-    * paths re-read the live [[EffectiveSet]] from [[ConnectionContext]] keyed on `ownerPeer`, so a
-    * grant revoked mid-session takes effect within the session TTL exactly as it does for a
-    * non-prepared statement, and a handle whose session has expired can no longer run at all (audit
-    * finding #6, revocation-lag leg).
-    *
-    * `preferredNode` is the Quack node that served Prepare (when there was one). The Execute path
-    * forwards it to the router as a soft pin so DuckDB-side per-process caches stay warm across the
-    * two halves of the FlightSQL Prepare + Execute dance. `None` when Prepare made no node call
-    * (DML / DDL / transaction control via [[PrepareStrategy.SkipExecute]]).
-    *
-    * `prepareDurationMs` is the wall-clock time the LIMIT-0 probe spent on the node. Forwarded to
-    * the router on the Execute call so the resulting [[StatementRecord]] carries it -- the UI uses
-    * it to render "57 ms / prep 28 ms" on the single visible row. `None` for SkipExecute.
+    * `preferredNode` soft-pins Execute to the node that served Prepare (warm DuckDB caches);
+    * `prepareDurationMs` rides into the Execute's [[StatementRecord]] for the UI. Both None for
+    * SkipExecute. `datasetSchema` answers getSchemaPreparedStatement without a second probe.
     */
   private final case class PreparedExec(
       sql: String,
@@ -60,9 +46,6 @@ final class FlightProducerImpl(
       poolKey: ai.starlake.quack.model.PoolKey,
       preferredNode: Option[String],
       prepareDurationMs: Option[Long],
-      // R5 / Power BI ODBC: the SCHEMA used to answer
-      // `getSchemaPreparedStatement`. Captured from the Prepare-time probe
-      // so the Execute path doesn't pay a second probe.
       datasetSchema: Schema
   )
 
@@ -79,9 +62,8 @@ final class FlightProducerImpl(
       prepareDurationMs: Option[Long]
   )
 
-  /** Cached empty Arrow schema. Returned for DML/DDL Prepare results (zero-field schema = "this is
-    * an update, dispatch through executeUpdate"), and as the wire-time `parameter_schema` value
-    * since Quack has no parameter binding.
+  /** Zero-field schema: the "dispatch through executeUpdate" marker, and the `parameter_schema`
+    * value since Quack has no parameter binding.
     */
   private val emptySchema: Schema =
     new Schema(java.util.Collections.emptyList[Field]())
@@ -89,15 +71,9 @@ final class FlightProducerImpl(
   private val emptySchemaBytes: ByteString =
     serializeSchema(emptySchema)
 
-  /** Schema a Quack node streams back for a non-result statement (DML / DDL / transaction control
-    * via [[PrepareStrategy.SkipExecute]]): DuckDB materializes every such statement as a single-row
-    * `Count BIGINT`. Both the prepared (`getFlightInfoPreparedStatement`) and non-prepared
-    * (`getFlightInfoStatement`) FlightInfo paths must advertise THIS schema, not an empty one,
-    * because ADBC enforces `FlightInfo.schema == DoGet stream schema`; a zero-field schema there
-    * fails with "expected schema fields: 0 but got schema fields: 1 (Count int64)". ADBC's
-    * `cursor.execute()` drives the prepared path, so the empty-schema "this is an executeUpdate"
-    * convention can't be used here. Verified live across DML, DDL and BEGIN - all stream this one
-    * column.
+  /** DuckDB streams every non-result statement (DML / DDL / txn control) as a single-row
+    * `Count BIGINT`. Both FlightInfo paths must advertise THIS schema, not an empty one: ADBC
+    * enforces FlightInfo.schema == DoGet stream schema.
     */
   private val countSchema: Schema =
     new Schema(
@@ -148,12 +124,8 @@ final class FlightProducerImpl(
       -1L
     )
 
-  /** Diagnostic-only `getStream` override. Earlier in this branch we shipped a self-auth ticket
-    * envelope here to bridge a Flight SQL ODBC driver that claimed to skip the bearer on DoGet; the
-    * wire evidence (see commit log of `0282a37`) showed the real Power BI build never sends
-    * credentials on any RPC, so the envelope had nothing useful to do and was reverted. The
-    * override stays as a per-call observability hook: it logs the DoGet peer + ticket shape before
-    * forwarding to the FlightSqlProducer dispatcher.
+  /** Diagnostic-only override: logs the DoGet peer + ticket shape before forwarding to the
+    * FlightSqlProducer dispatcher.
     */
   override def getStream(
       context: FlightProducer.CallContext,
@@ -169,10 +141,8 @@ final class FlightProducerImpl(
       )
     super.getStream(context, ticket, listener)
 
-  /** Map a typed [[RouterFailure]] to the Arrow Flight `CallStatus` the wire surfaces to clients.
-    * Keeps the status code authoritative so connectors (Power BI, DBeaver, ADBC) can branch on
-    * UNAUTHORIZED / NOT_FOUND / INVALID_ARGUMENT / UNAVAILABLE / INTERNAL without parsing the
-    * description string. R12.
+  /** Map a typed [[RouterFailure]] to its Flight `CallStatus` so connectors can branch on the
+    * status code without parsing the description string.
     */
   private def toFlightException(f: RouterFailure): Throwable =
     val status = f match
@@ -183,12 +153,9 @@ final class FlightProducerImpl(
       case RouterFailure.Internal(_)     => CallStatus.INTERNAL
     status.withDescription(f.reason).toRuntimeException()
 
-  /** Build an INTERNAL Flight exception for an UNEXPECTED server-side throwable without leaking its
-    * message to the client. The raw exception text can carry SQL fragments, node hostnames, file
-    * paths and internal class names; we log the full detail server-side against a short random
-    * error id and hand the client only that id, so an operator can correlate a user's error report
-    * with the server log line. Typed, curated failures should still go through
-    * [[toFlightException]] -- this is only for the `catch { case t: Throwable }` arms.
+  /** INTERNAL Flight exception for an unexpected throwable. The raw message may leak SQL, hostnames
+    * or paths, so the client gets only a short random error id; the full detail is logged
+    * server-side under that id. Typed failures go through [[toFlightException]].
     */
   private def internalError(context: String, t: Throwable): Throwable =
     val errorId = java.util.UUID.randomUUID().toString.take(8)
@@ -197,16 +164,10 @@ final class FlightProducerImpl(
       .withDescription(s"internal error (errorId=$errorId)")
       .toRuntimeException()
 
-  /** Resolve a prepared-statement handle into an executable plan, enforcing the two authorization
-    * invariants from audit finding #6:
-    *   1. The calling peer MUST be the one that created the handle. A different peer (a client that
-    *      somehow obtained the 128-bit handle) is rejected with UNAUTHORIZED, so a leaked handle
-    *      cannot be replayed under the owner's grants.
-    *   2. The [[EffectiveSet]] is read LIVE from [[ConnectionContext]] rather than replayed from
-    *      the Prepare-time snapshot, so a mid-session revocation takes effect within the session
-    *      TTL and a handle whose session has expired resolves to `Left` (deny) instead of running.
-    *
-    * Returns `Left(flightException)` to fail the call, or `Right(plan)` to execute.
+  /** Resolve a prepared handle into an executable plan, enforcing two invariants: the calling peer
+    * must be the handle's creator (a leaked handle cannot be replayed), and the [[EffectiveSet]] is
+    * read live from [[ConnectionContext]] (mid-session revocation is honored; an expired session
+    * denies instead of running).
     */
   private def resolvePreparedCall(
       handle: String,
@@ -267,9 +228,6 @@ final class FlightProducerImpl(
         val kind     = router.classifier.classify(sql)
         val strategy = PrepareStrategy.choose(sql, kind)
 
-        // Schema-probe SQL the node sees at Prepare time. For DML/DDL we don't ask anything;
-        // for a wrappable SELECT we send a LIMIT-0 subquery so the planner returns the result
-        // schema without running the body; for everything else we fall back to the original SQL.
         val probeSqlOpt: Option[String] = strategy match
           case PrepareStrategy.SkipExecute      => None
           case PrepareStrategy.ProbeWrap(probe) => Some(probe)
@@ -277,10 +235,7 @@ final class FlightProducerImpl(
 
         probeSqlOpt match
           case None =>
-            // SkipExecute (DML / DDL / txn control): no node call, no soft pin, no prep duration.
-            // Advertise `countSchema` (single-row Count BIGINT) - the node streams exactly that on
-            // Execute, and ADBC (which drives Execute through this prepared path) rejects any
-            // FlightInfo schema that doesn't match the DoGet stream. See `countSchema`.
+            // SkipExecute: no node call; advertise countSchema (see its doc for the ADBC why).
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(
               handle,
@@ -299,29 +254,23 @@ final class FlightProducerImpl(
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
               .setDatasetSchema(countSchemaBytes)
-              // Apache Arrow Flight SQL ODBC reads parameter_schema to learn
-              // the parameter count. An absent field throws "Tried reading
-              // schema message, was null or length 0". Quack has no parameter
-              // binding so we advertise zero parameters via the empty schema.
+              // The ODBC driver throws on an ABSENT parameter_schema, so advertise
+              // zero parameters explicitly via the empty schema.
               .setParameterSchema(emptySchemaBytes)
               .build()
             listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
             listener.onCompleted()
 
           case Some(probeSql) =>
-            // `recordExecution = false`: the probe is internal plumbing -- the operator-visible
-            // history row is the matching Execute, which will carry the probe's duration via
-            // PreparedExec.prepareDurationMs.
+            // recordExecution = false: the operator-visible history row is the matching
+            // Execute, which carries the probe's duration via prepareDurationMs.
             scala.util.Try(
               router
                 .execute(connId, user, poolKey, probeSql, eff, recordExecution = false)
                 .unsafeRunSync()
             ) match
               case scala.util.Success(Right(result)) =>
-                val handle = java.util.UUID.randomUUID().toString
-                // Capture both the Schema object (for getSchemaPreparedStatement)
-                // and the IPC-serialized bytes (for the Prepare response) in a
-                // single read of the probe result; close the reader either way.
+                val handle                = java.util.UUID.randomUUID().toString
                 val (schema, schemaBytes) =
                   try
                     val s = result.rows.getVectorSchemaRoot.getSchema
@@ -344,8 +293,6 @@ final class FlightProducerImpl(
                   .newBuilder()
                   .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
                   .setDatasetSchema(schemaBytes)
-                  // Empty parameter_schema = zero bound parameters. See the
-                  // SkipExecute arm above for the why.
                   .setParameterSchema(emptySchemaBytes)
                   .build()
                 listener.onNext(new Result(ProtoAny.pack(resp).toByteArray))
@@ -366,10 +313,8 @@ final class FlightProducerImpl(
     preparedStatements.remove(handle)
     listener.onCompleted()
 
-  /** R5 / Power BI ODBC: return the cached Prepare-time dataset schema. The Arrow Flight SQL ODBC
-    * driver calls GetSchema before fetching rows so it can answer SQLDescribeCol /
-    * SQLNumResultCols. Without this override the NoOp default throws UNIMPLEMENTED and Power BI
-    * surfaces "Tried reading schema message, was null or length 0".
+  /** Return the cached Prepare-time schema: the ODBC driver calls GetSchema before fetching rows,
+    * and the NoOp default (UNIMPLEMENTED) breaks Power BI.
     */
   override def getSchemaPreparedStatement(
       command: FlightSql.CommandPreparedStatementQuery,
@@ -398,14 +343,9 @@ final class FlightProducerImpl(
       case Some(p) =>
         val ticket   = new Ticket(ProtoAny.pack(command).toByteArray)
         val endpoint = new FlightEndpoint(ticket)
-        // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver
-        // reads the result schema from FlightInfo.schema rather than the
-        // dedicated GetSchema RPC, so a null schema here makes the SQLGetData
-        // / SQLDescribeCol path fall through to "schema message was null or
-        // length 0" inside Power BI. We pass the cached Prepare-time schema
-        // (matches the DoGet stream byte-for-byte) which keeps ADBC happy:
-        // ADBC's mismatch guard is "FlightInfo.schema differs from the
-        // stream schema", not "FlightInfo.schema is non-null".
+        // The ODBC driver reads the result schema from FlightInfo.schema (not the
+        // GetSchema RPC): a null here breaks Power BI, and the cached Prepare-time
+        // schema matches the DoGet stream so ADBC's mismatch guard stays happy.
         new FlightInfo(p.datasetSchema, descriptor, Collections.singletonList(endpoint), -1L, -1L)
 
   override def getStreamPreparedStatement(
@@ -414,11 +354,8 @@ final class FlightProducerImpl(
       listener: FlightProducer.ServerStreamListener
   ): Unit =
     val handle = command.getPreparedStatementHandle.toStringUtf8
-    // Re-execute on every Execute so the handle stays valid until the client
-    // sends ClosePreparedStatement -- the spec contract Arrow JDBC / DBeaver /
-    // ADBC rely on. `resolvePreparedCall` re-reads the LIVE EffectiveSet from
-    // ConnectionContext and rejects a caller that isn't the handle's owner, so
-    // a mid-session revocation is honored and a leaked handle can't be replayed.
+    // Re-execute on every Execute so the handle stays valid until
+    // ClosePreparedStatement; auth invariants live in resolvePreparedCall.
     resolvePreparedCall(handle, context) match
       case Left(err) => listener.error(err)
       case Right(p)  =>
@@ -447,11 +384,8 @@ final class FlightProducerImpl(
           }(scala.concurrent.ExecutionContext.global)
 
   // -----------------------------------------------------------------
-  //  Metadata endpoints - DBeaver / JDBC clients walk these to populate
-  //  the catalog browser. Each handler translates the Flight SQL request
-  //  into a SQL query against the Quack node's information_schema and
-  //  forwards through the router, so column types and schemas use the
-  //  same Arrow-IPC path as regular queries.
+  //  Metadata endpoints: each translates the Flight SQL request into a
+  //  query against the node's information_schema, via the router.
   // -----------------------------------------------------------------
 
   private def quote(s: String): String = s.replace("'", "''")
@@ -492,10 +426,8 @@ final class FlightProducerImpl(
     val schemaPattern =
       if command.hasDbSchemaFilterPattern then Some(command.getDbSchemaFilterPattern) else None
     val filters = (
-      // LIKE not = : the Apache Arrow Flight SQL ODBC driver forwards PBI's
-      // SQLTables wildcard '%' as a literal catalog value, so `=` rejects every
-      // row. Treating the filter as a LIKE pattern restores wildcard semantics
-      // without breaking exact-match callers (literal names match themselves).
+      // LIKE not = : the ODBC driver forwards the SQLTables wildcard '%' as a
+      // literal catalog value; literal names still match themselves.
       catalog.map(c => s"catalog_name LIKE '${quote(c)}'") ::
         schemaPattern.map(p => s"schema_name LIKE '${quote(p)}'") ::
         Some("schema_name NOT IN ('information_schema', 'pg_catalog')") :: Nil
@@ -549,12 +481,9 @@ final class FlightProducerImpl(
     if !command.getIncludeSchema then runStatement(listSql, context, listener)
     else streamTablesWithSchema(listSql, context, listener)
 
-  /** include_schema=true variant of getStreamTables. DBeaver and the Arrow Flight SQL JDBC driver
-    * call this to populate column metadata: each row carries the table's Arrow schema as
-    * IPC-serialized bytes in a fifth `table_schema` column. We fetch the table list through the
-    * router, then probe each table with `SELECT * ... LIMIT 0` to capture its schema, and emit a
-    * single VectorSchemaRoot built locally (not streamed from Quack - the per-table-schema shape
-    * isn't expressible as one SQL).
+  /** include_schema=true variant of getStreamTables: each row carries the table's Arrow schema as
+    * IPC bytes. Probes each table with LIMIT 0 and emits a locally built root (the per-table-schema
+    * shape isn't expressible as one SQL).
     */
   private def streamTablesWithSchema(
       listSql: String,
@@ -611,9 +540,8 @@ final class FlightProducerImpl(
       buf.toList
     finally result.close()
 
-  /** Probe a single table's Arrow schema via `SELECT * FROM cat.schema.name LIMIT 0`. Returns the
-    * IPC-serialized Schema bytes, or empty bytes on failure (so one bad table doesn't break the
-    * whole metadata response).
+  /** Probe one table's schema via LIMIT 0; empty bytes on failure so one bad table doesn't break
+    * the whole metadata response.
     */
   private def probeTableSchema(
       connId: String,
@@ -706,11 +634,8 @@ final class FlightProducerImpl(
     )
 
   // -----------------------------------------------------------------
-  //  Key-metadata endpoints - DBeaver's "Properties" tab polls these.
-  //  DuckLake/DuckDB doesn't enforce primary/foreign keys, so we return
-  //  empty result sets conforming to the Flight SQL canonical schemas
-  //  rather than UNIMPLEMENTED. Empty + correct schema is what JDBC
-  //  callers expect when the engine has no key constraints.
+  //  Key-metadata endpoints: DuckLake enforces no key constraints, so
+  //  return empty result sets with the canonical schemas, not UNIMPLEMENTED.
   // -----------------------------------------------------------------
 
   private def emitEmpty(
@@ -782,16 +707,9 @@ final class FlightProducerImpl(
   ): Unit =
     emitEmpty(Schemas.GET_CROSS_REFERENCE_SCHEMA, listener)
 
-  /** FlightSQL "execute an update statement" entrypoint. A client's `executeUpdate` on a literal
-    * INSERT / UPDATE / DELETE / DDL arrives here as a `CommandStatementUpdate` -- the read path
-    * `getStreamStatement` only ever sees a SELECT (DoGet). We resolve the per-peer pool context
-    * exactly as [[runStatement]] does, run the SQL through the router (ACL gate + routing + node
-    * call), and return the affected-row count to the client as a `DoPutUpdateResult`.
-    *
-    * A plain statement update carries no bound parameters, so we never read `flightStream` --
-    * mirroring the Arrow reference producer. Parameterized DML (`INSERT ... VALUES (?)`) is a
-    * separate, larger feature: it additionally needs a `parameter_schema` advertised at Prepare and
-    * an `acceptPutPreparedStatementUpdate` override.
+  /** Literal executeUpdate entrypoint: run the SQL through the router and ack the affected-row
+    * count as a DoPutUpdateResult. No bound parameters are supported, so `flightStream` is drained,
+    * never read.
     */
   override def acceptPutStatement(
       command: FlightSql.CommandStatementUpdate,
@@ -815,16 +733,9 @@ final class FlightProducerImpl(
           case _ =>
             ackStream.onError(noContext(peer, _ => "no pool bound to session; authenticate first"))
 
-  /** FlightSQL "execute a prepared update" entrypoint. Arrow JDBC / ADBC / DBeaver prepare *every*
-    * statement, so a literal INSERT / UPDATE / DELETE / DDL the user runs arrives here (not via
-    * [[acceptPutStatement]]): first `createPreparedStatement` stores the handle, then
-    * `executeUpdate` lands as a `CommandPreparedStatementUpdate`. We replay the SQL captured at
-    * Prepare time -- same (connId, user, poolKey, EffectiveSet) as [[getStreamPreparedStatement]]
-    * -- and ack the count.
-    *
-    * Bound parameters (`?`) would arrive as rows on `flightStream`; we don't read them, so this
-    * covers literal (non-parameterized) prepared updates only. Parameterized DML still needs the
-    * `parameter_schema` work at Prepare.
+  /** Prepared-update entrypoint: Arrow JDBC / ADBC / DBeaver prepare every statement, so literal
+    * DML lands here rather than [[acceptPutStatement]]. Replays the Prepare-time SQL and acks the
+    * count. Literal updates only: bound parameters are never read.
     */
   override def acceptPutPreparedStatementUpdate(
       command: FlightSql.CommandPreparedStatementUpdate,
@@ -858,21 +769,15 @@ final class FlightProducerImpl(
               "acceptPutPreparedStatementUpdate"
             )
 
-  /** Consume and discard the DoPut request stream. A FlightSQL update client streams its bound
-    * parameter batches (often a single empty batch for a literal statement) on the DoPut channel;
-    * if the server writes its `PutResult` and half-closes WITHOUT reading them, the client's
-    * in-flight write breaks and surfaces as `UNAVAILABLE: io exception`. We don't support bound
-    * parameters, so drain the batches and throw them away. `null` only in unit tests, which drive
-    * `run()` directly without a wire stream.
+  /** Drain and discard the DoPut request stream: half-closing without reading the client's
+    * parameter batches breaks its in-flight write ("UNAVAILABLE: io exception"). `null` only in
+    * unit tests, which drive run() directly.
     */
   private def drainPutStream(flightStream: FlightStream): Unit =
     if flightStream != null then while flightStream.next() do ()
 
-  /** Shared tail of the two update entrypoints: turn a router execution outcome into a
-    * `DoPutUpdateResult` ack (or an error on the ack stream). Closes the result either way. R12:
-    * router failures are mapped to their kind-appropriate Flight status (AccessDenied ->
-    * UNAUTHORIZED, NotFound -> NOT_FOUND, etc.) via [[toFlightException]], not folded to
-    * INVALID_ARGUMENT.
+  /** Shared tail of the two update entrypoints: outcome -> DoPutUpdateResult ack or typed error on
+    * the ack stream. Closes the result either way.
     */
   private def ackUpdateResult(
       attempt: scala.util.Try[Either[RouterFailure, QueryResult]],
@@ -890,10 +795,8 @@ final class FlightProducerImpl(
       case scala.util.Failure(t) =>
         ackStream.onError(internalError(label, t))
 
-  /** Best-effort affected-row count from a DML result. DuckDB returns a single-row, single-column
-    * "Count" (BigInt) for INSERT / UPDATE / DELETE; we read that cell. Anything else (DDL, or a
-    * node that returns no count) yields -1, which FlightSQL clients accept as an unknown update
-    * count.
+  /** Best-effort affected-row count: DuckDB's single-row Count cell, or -1 (accepted by FlightSQL
+    * clients as "unknown").
     */
   private def updateCountOf(reader: org.apache.arrow.vector.ipc.ArrowReader): Long =
     try
@@ -907,9 +810,7 @@ final class FlightProducerImpl(
       else -1L
     catch case _: Throwable => -1L
 
-  /** Serialize a `DoPutUpdateResult{record_count}` into an ArrowBuf and hand it to the ack stream.
-    * The buffer is released only after `onNext` + `onCompleted` have consumed it (mirrors the Arrow
-    * reference producer's try-with-resources ordering).
+  /** Ack the update count; the buffer is released only after onNext + onCompleted have consumed it.
     */
   private def emitUpdateCount(
       count: Long,
@@ -924,11 +825,8 @@ final class FlightProducerImpl(
     finally buf.close()
 
   // -----------------------------------------------------------------
-  //  Type info + SQL info - R7. Power BI and other ODBC clients read
-  //  these to learn the server's type system and SQL capabilities. The
-  //  NoOp base throws UNIMPLEMENTED; we emit the canonical Flight SQL
-  //  schemas populated from [[TypeInfoCatalog]] (types) and a
-  //  [[SqlInfoBuilder]] (server identification + dialect knobs).
+  //  Type info + SQL info: ODBC clients read these to learn the type
+  //  system and SQL capabilities (NoOp base throws UNIMPLEMENTED).
   // -----------------------------------------------------------------
 
   override def getFlightInfoTypeInfo(
@@ -999,10 +897,7 @@ final class FlightProducerImpl(
         setOptionInt(columnSizeVec, i, r.columnSize)
         setOptionStr(literalPrefixVec, i, r.literalPrefix)
         setOptionStr(literalSuffixVec, i, r.literalSuffix)
-        // R7: emit create_params as a null list. ODBC consumers (Power BI,
-        // DBeaver) use it only when issuing DDL like CREATE TABLE; they don't
-        // need it to render result sets. Skipping the dense ListVector writer
-        // dance keeps this method readable.
+        // Null list: ODBC consumers only use create_params when issuing DDL.
         createParamsVec.setNull(i)
         nullableVec.setSafe(i, r.nullable)
         caseSensitiveVec.setSafe(i, if r.caseSensitive then 1 else 0)
@@ -1048,15 +943,9 @@ final class FlightProducerImpl(
     case Some(x) => vec.setSafe(i, if x then 1 else 0)
     case None    => vec.setNull(i)
 
-  /** SqlInfoBuilder pre-loaded with the full standard SqlInfo set. R7. The Arrow Flight SQL ODBC
-    * driver builds its SQLGetInfo cache from this response; any code we omit surfaces to the client
-    * as `Unknown GetInfo type: N`. Values reflect DuckDB's actual behavior where it differs from
-    * generic defaults (case-insensitive unquoted / case-sensitive quoted identifiers, full ANSI-92
-    * grammar, serializable isolation, no stored procedures).
-    *
-    * Maximum-length codes use `0` per ODBC convention for "no fixed limit". Function-name lists use
-    * JDBC escape names (the standard JDBC `getNumericFunctions` / `getStringFunctions` /
-    * `getSystemFunctions` / `getTimeDateFunctions` surface) so ODBC translation tables resolve.
+  /** Full standard SqlInfo set: any omitted code surfaces to ODBC clients as "Unknown GetInfo type:
+    * N". Values reflect DuckDB's actual behavior; max-length codes use 0 ("no fixed limit"),
+    * function lists use JDBC escape names.
     */
   private val sqlInfoBuilder: org.apache.arrow.flight.sql.SqlInfoBuilder =
     import org.apache.arrow.flight.sql.impl.FlightSql.*
@@ -1068,13 +957,9 @@ final class FlightProducerImpl(
       .withFlightSqlServerReadOnly(false)
       .withFlightSqlServerSql(true)
       .withFlightSqlServerSubstrait(false)
-      // R7 fix-up: report NONE for the FlightSql server-managed transaction
-      // action surface. Quack handles inline BEGIN/COMMIT/ROLLBACK statements
-      // through the regular query path (see `SqlTransactionsSupported = true`
-      // below), but it does NOT implement the FlightSql BeginTransaction /
-      // EndTransaction / BeginSavepoint actions - those still inherit
-      // UNIMPLEMENTED from NoOpFlightSqlProducer. Advertising TRANSACTION made
-      // ADBC autocommit-off clients call BeginTransaction and hard-fail.
+      // NONE: inline BEGIN/COMMIT/ROLLBACK work via the query path, but the FlightSql
+      // BeginTransaction/EndTransaction actions are UNIMPLEMENTED; advertising
+      // TRANSACTION made ADBC autocommit-off clients call them and hard-fail.
       .withFlightSqlServerTransaction(
         SqlSupportedTransaction.SQL_SUPPORTED_TRANSACTION_NONE
       )
@@ -1298,29 +1183,19 @@ final class FlightProducerImpl(
       context: FlightProducer.CallContext,
       descriptor: FlightDescriptor
   ): FlightInfo =
-    // Flight SQL ticket discipline: the ticket bytes must be a protobuf Any
-    // wrapping a TicketStatementQuery (or another well-known message). The
-    // NoOpFlightSqlProducer.getStream parses ticket.getBytes() as Any and
-    // dispatches to getStreamStatement only when the unwrapped message is
-    // TicketStatementQuery. Raw SQL bytes will silently fail dispatch.
+    // Ticket bytes must be an Any-wrapped TicketStatementQuery; raw SQL bytes
+    // silently fail the NoOpFlightSqlProducer.getStream dispatch.
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
     val tsq  = FlightSql.TicketStatementQuery
       .newBuilder()
       .setStatementHandle(ByteString.copyFromUtf8(command.getQuery))
       .build()
     val ticket = new Ticket(ProtoAny.pack(tsq).toByteArray)
-    // No locations → client follows up on the same connection.
+    // No locations: client follows up on the same connection.
     val endpoint = new FlightEndpoint(ticket)
-    // R5 / Power BI ODBC follow-up: the Arrow Flight SQL ODBC driver reads
-    // the result schema from FlightInfo.schema (via FlightSqlResultSet::Init)
-    // rather than the dedicated GetSchema RPC. We probe with the same
-    // LIMIT-0 wrap createPreparedStatement uses and embed the result here.
-    // For DML/DDL (SkipExecute) probeStatementSchema returns None; we then
-    // advertise `countSchema` - the single-row `Count BIGINT` the node streams
-    // for those statements. A null/empty schema here serializes as a zero-field
-    // schema and trips ADBC's `FlightInfo.schema == DoGet stream` guard, which
-    // is exactly the "CORRECT schema passes, empty schema breaks" case the
-    // driver team flagged.
+    // The ODBC driver reads the result schema from FlightInfo.schema, so probe it
+    // here. DML/DDL probes None -> advertise countSchema; an empty schema would trip
+    // ADBC's FlightInfo.schema == DoGet stream guard.
     val schema = probeStatementSchema(peer, command.getQuery).getOrElse(countSchema)
     new FlightInfo(
       schema,
@@ -1330,15 +1205,9 @@ final class FlightProducerImpl(
       -1L
     )
 
-  /** Probe the result-set Schema for a literal statement using the same PrepareStrategy split as
-    * [[createPreparedStatement]]. Returns `Some(schema)` for queries (LIMIT-0 wrap on SELECT, full
-    * execute on SHOW/DESCRIBE/EXPLAIN) and `None` for DML/DDL (no result schema to advertise up
-    * front - the stream emits a single-row Count instead). Run with `recordExecution = false` so
-    * the probe stays invisible in operator history and per-node load metrics.
-    *
-    * Throws a Flight RuntimeException on auth / router failure. Used by [[getSchemaStatement]]
-    * (dedicated RPC) and [[getFlightInfoStatement]] (the FlightInfo.schema path the Apache Arrow
-    * Flight SQL ODBC driver actually reads, per its `FlightSqlResultSet::Init()`).
+  /** Probe the result schema for a literal statement (same PrepareStrategy split as
+    * createPreparedStatement): Some for queries, None for DML/DDL. recordExecution = false keeps
+    * the probe out of history and load metrics. Throws a Flight exception on auth / router failure.
     */
   private def probeStatementSchema(
       peer: String,
@@ -1369,9 +1238,8 @@ final class FlightProducerImpl(
       case _ =>
         throw noContext(peer)
 
-  /** R5 / Power BI ODBC: serve the dedicated GetSchema RPC for `CommandStatementQuery`. Driver
-    * teams that read the schema from this RPC (rather than from `FlightInfo.schema`) get the same
-    * probed schema. Empty schema for DML/DDL - the documented contract for the RPC.
+  /** Dedicated GetSchema RPC for CommandStatementQuery: same probed schema, empty for DML/DDL (the
+    * documented contract for this RPC).
     */
   override def getSchemaStatement(
       command: FlightSql.CommandStatementQuery,
@@ -1421,16 +1289,9 @@ final class FlightProducerImpl(
       case _ =>
         listener.error(noContext(peer))
 
-  /** Read batches from `reader` and push them to the Flight `listener`. Reuses
-    * `reader.getVectorSchemaRoot()` directly - the listener flushes the current state of the root
-    * on each `putNext()`.
-    *
-    * The loop is gated on `!listener.isCancelled()`: clients legitimately abandon streams
-    * mid-flight (DBeaver closes the result set after its first fetch page, ADBC readers get closed
-    * early), and pumping the remaining batches into a cancelled gRPC stream both wastes node reads
-    * and guarantees netty's "Stream closed before write could take place" warning. A residual race
-    * stays possible (frames queued in the window before the RST_STREAM arrives); that noise is
-    * silenced at the logging layer instead.
+  /** Stream batches from `reader` to the Flight `listener`. Gated on !isCancelled(): clients
+    * legitimately abandon streams mid-flight, and pumping batches into a cancelled gRPC stream
+    * wastes node reads and spams netty warnings.
     */
   private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
