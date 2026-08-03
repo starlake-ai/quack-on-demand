@@ -22,12 +22,9 @@ import cats.effect.IO
 
 import scala.concurrent.duration.*
 
-/** Carries a streaming result back through the router. The caller MUST invoke `close()` once all
-  * batches have been consumed. `nodeId` is the Quack node that produced the stream, exposed so the
-  * Flight producer can soft-pin a prepared statement's later Execute back to the same node.
-  * `durationMs` is the wall-clock latency the adapter measured on the node call; the Flight
-  * producer captures it during the Prepare-time probe and threads it onto the matching Execute
-  * record as `prepareDurationMs` so the UI can render "57 ms / prep 28 ms" on a single row.
+/** Streaming result; the caller MUST invoke `close()` once all batches are consumed. `nodeId` lets
+  * the Flight producer soft-pin a prepared Execute to the Prepare node; `durationMs` is the
+  * node-call latency (becomes prepareDurationMs on the Execute record).
   */
 final case class QueryResult(
     rows: org.apache.arrow.vector.ipc.ArrowReader,
@@ -76,18 +73,9 @@ final class FlightSqlRouter(
     val loadCapFactor: Double = 2.0
 ):
 
-  /** Record a statement outcome into the in-memory history, the metrics instruments, and
-    * (selectively) the audit journal.
-    *
-    * Journal emission rules:
-    *   - status "denied" -> family "data-denial", action "sql.denied".
-    *   - status "ok" && kind Dml -> family "data-write", action "sql.write".
-    *   - status "ok" && kind Ddl -> family "data-write", action "sql.ddl".
-    *   - All other statuses (transient, permanent, no-node, ...) -> no journal event.
-    *
-    * `realm`: "system" when the actor is a superuser principal (user.tenant.isEmpty); "tenant"
-    * otherwise. Computed by the caller (maybeRecord) from the session's EffectiveSet so that
-    * `record` does not need a reference to it.
+  /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
+    * "denied" journals as data-denial, "ok" DML/DDL as data-write, all other statuses journal
+    * nothing. `realm` is "system" for superuser principals, "tenant" otherwise.
     */
   private def record(
       user: String,
@@ -168,14 +156,10 @@ final class FlightSqlRouter(
         )
       )
 
-  /** Build the stamping prelude (EPIC P1) for a write, or None when stamping does not apply.
-    * Applies to DML / DDL on ducklake pools outside a client-opened transaction, when the pool
-    * advertises a dbName. The prelude runs as the first PREPARE of the wire bracket
-    * ([[ai.starlake.quack.edge.adapter.QuackHttpClient.queryStamped]]); the statement itself
-    * follows unmodified, so its result reaches the client byte-identical to the unstamped path.
-    *
-    * author = tenant:<pool tenant>/user:<session user> (spec-01 section 9). All values are
-    * interpolated as escaped DuckDB literals: the username is client-controlled input.
+  /** Author-stamping prelude for a write, or None when stamping does not apply (DML/DDL on ducklake
+    * pools outside a client-opened transaction, dbName advertised). Runs as the first PREPARE of
+    * the wire bracket; the statement itself follows unmodified. All values are escaped DuckDB
+    * literals: the username is client-controlled input.
     */
   private[edge] def stampPrelude(
       kind: StatementKind,
@@ -201,30 +185,18 @@ final class FlightSqlRouter(
 
   def session(connectionId: String) = sessions.get(connectionId)
 
-  /** Run a statement under the named connection. Success path yields a [[QueryResult]] streaming
-    * Arrow batches from the chosen Quack node; the caller MUST close it. Failure path is a plain
-    * error message.
+  /** Run a statement under the named connection; the caller MUST close the [[QueryResult]].
     *
-    * `effectiveSet` carries the RBAC closure pinned on ConnectionContext at handshake time. `None`
-    * means no handshake state was attached; PostgresAclValidator denies anything tenant-scoped in
-    * that case to fail safe.
+    * `effectiveSet = None` means no handshake state was attached; PostgresAclValidator denies
+    * anything tenant-scoped in that case to fail safe.
     *
-    * `preferredNode` is a SOFT pin: when set and still present in the pool snapshot, the router
-    * routes here regardless of load. A transaction pin (set by an open BEGIN on this connection)
-    * still overrides. When the preferred node has disappeared, fall back to the load-aware pick.
-    * Used by the FlightSQL prepared-statement path to keep Prepare + Execute on the same Quack
-    * process so DuckDB-side caches stay warm across the two halves of one client `execute()`.
+    * `preferredNode` is a SOFT pin (prepared Prepare + Execute on the same node for warm caches): a
+    * transaction pin still overrides, and a vanished node falls back to the load-aware pick.
     *
-    * `recordExecution=false` suppresses the in-memory history record AND the per-node load /
-    * latency bookkeeping ([[ai.starlake.quack.edge.adapter.NodeLoadTracker]]: inFlight,
-    * totalServed, ewmaMs, p50/p95/p99). The FlightSQL Prepare-time LIMIT-0 probe uses this so the
-    * UI shows ONE history row per user-visible query instead of two, AND so the probe doesn't
-    * inflate the dashboard's Total Served / QPS / avg latency / percentiles. The probe's duration
-    * is then attached to the matching Execute record via [[prepareDurationMs]] so operators can
-    * still see it.
-    *
-    * `prepareDurationMs` is folded into the resulting [[StatementRecord]] so the UI can render it
-    * as subtext under the Execute duration ("57 ms / prep 28 ms").
+    * `recordExecution = false` (the Prepare-time probe) suppresses the history record AND the
+    * per-node load / latency bookkeeping, so the UI shows one row per user-visible query and probes
+    * don't skew the dashboard; the probe's duration reaches the Execute record via
+    * `prepareDurationMs`.
     */
   def execute(
       connectionId: String,
@@ -238,19 +210,14 @@ final class FlightSqlRouter(
   ): IO[Either[RouterFailure, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse {
       val opened = sessions.open(connectionId, user, poolKey)
-      // Gate module telemetry on recordExecution: internal probes and prepare-time
-      // probes pass recordExecution=false and must not emit, matching every other
-      // telemetry surface in execute.
+      // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
       if recordExecution then
         events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, "flightsql"))
       opened
     }
     val kind = classifier.classify(sql)
-    // ACL / SQL validation gate. Runs before routing so denied
-    // statements never touch a Quack node and don't burn capacity.
-    // Per-pool dbName/schemaName overrides feed the SQL parser so
-    // unqualified table refs resolve to what the Quack node actually
-    // sees at execution time.
+    // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
+    // table refs resolve to what the node actually sees at execution time.
     val maybeState = supervisor.get(poolKey)
     val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
     val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
@@ -275,10 +242,8 @@ final class FlightSqlRouter(
       effectiveSet = effectiveSet,
       attachedCatalogs = attachedCatalogsOf(poolKey)
     )
-    // No-op variant when the caller is the Prepare-time probe -- we don't want the LIMIT-0
-    // wrapper to clutter the operator's history view or skew the per-pool metrics.
-    // `deniedRefs` carries the unauthorized TableAccess set from the ACL validator; it is
-    // non-empty only on the ACL denial arm and forwarded into the journal event's "denied" key.
+    // No-op for probes. deniedRefs is non-empty only on the ACL denial arm and
+    // feeds the journal event's "denied" key.
     def maybeRecord(
         nodeId: String,
         durationMs: Long,
@@ -303,11 +268,9 @@ final class FlightSqlRouter(
           prepMs
         )
 
-    // Node lockdown: consulted only when the target pool's effective lockdown resolves to
-    // true and the caller is not a superuser. Resolution is per pool (supervisor's cached
-    // tri-state: pool override else the global default) rather than one process-wide flag.
-    // Runs BEFORE the ACL validator gate so a denied statement never reaches the SQL parser.
-    // effectiveSet = None (no handshake state attached) screens as non-superuser -- fail closed.
+    // Node lockdown, resolved per pool (tri-state: pool override else global default).
+    // Runs BEFORE the ACL gate so a denied statement never reaches the SQL parser;
+    // effectiveSet = None screens as non-superuser (fail closed).
     val lockdownDenial =
       if lockdownFor(poolKey) && !effectiveSet.exists(_.user.tenant.isEmpty) then
         LockdownScreen.screen(sql)
@@ -341,8 +304,7 @@ final class FlightSqlRouter(
       defaultSchema = ctx.defaultSchema
     )
     import cats.effect.unsafe.implicits.global
-    // Deny arm shared by every CLS outcome that refuses the statement: stamp the
-    // instrument tag, journal the denial, surface the wire error.
+    // Shared CLS deny arm: instrument tag, journal, wire error.
     def clsDenied(tag: String, reason: String): Either[RouterFailure, String] =
       stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, tag)
       maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
@@ -361,10 +323,8 @@ final class FlightSqlRouter(
             stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
             Right(sql)
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
-            // Fail closed: the rewriter only reaches a parse attempt once the principal has
-            // column policies, so a parse failure means we cannot prove the masked columns are
-            // absent. Forwarding the original SQL would leak them. Deny instead of passthrough.
-            // See security-audit-2026-07-02 #5a.
+            // Fail closed: the principal has column policies and we cannot prove the masked
+            // columns are absent; forwarding the original SQL would leak them.
             clsDenied(
               "parse_failed",
               "column policy rewrite could not parse statement; denied (fail-closed)"
@@ -375,13 +335,11 @@ final class FlightSqlRouter(
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
             clsDenied("denied", reason)
           case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
-            // Deny path where the cause was an unresolved table/schema/catalog coordinate
-            // rather than a policy match. Same wire error as Denied but tagged separately.
+            // Unresolved coordinate, not a policy match; same wire error, separate tag.
             clsDenied("unresolved_deny", "unresolved table")
 
-    // Row-level security: filter rows AFTER column masking is decided, but injected at the BASE
-    // table so the predicate runs on the true (unmasked) values. Operates on the CLS output so the
-    // two rewriters compose (RLS innermost, CLS outermost).
+    // RLS operates on the CLS output but injects at the BASE table, so the predicate
+    // runs on true (unmasked) values: RLS innermost, CLS outermost.
     def rlsRewritten(rewrittenSql: String): Either[RouterFailure, String] = effectiveSet match
       case None      => Right(rewrittenSql)
       case Some(eff) =>
@@ -398,27 +356,21 @@ final class FlightSqlRouter(
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
             Right(rewrittenSql)
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.PassthroughParseFailed =>
-            // Fail closed: the rewriter only reaches a parse attempt once the principal has row
-            // policies, so a parse failure means we cannot prove the filtered rows are excluded.
-            // Forwarding the original SQL would return unfiltered rows. Deny instead of passthrough.
-            // See security-audit-2026-07-02 #5a.
+            // Fail closed: the principal has row policies and forwarding the original SQL
+            // would return unfiltered rows.
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "parse_failed")
             val f = RouterFailure.AccessDenied(
               "access denied: row policy rewrite could not parse statement; denied (fail-closed)"
             )
-            // Journals the PREFIXED reason -- the historical shape of this arm's record.
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(f.reason))
             Left(f)
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             Right(s)
 
-    // ACL -> CLS -> RLS pipeline: each stage runs only when the previous one allowed,
-    // and every denial arm has already journaled + instrumented itself.
-    // Bound to resultIO (rather than being the tail expression of execute) so a single
-    // flatTap below can emit exactly one StatementExecuted event on every exit path,
-    // including the validation-denial arms above whose IO.pure(Left(...)) already flows
-    // through this same match.
+    // ACL -> CLS -> RLS pipeline; every denial arm has already journaled itself.
+    // Bound to resultIO so one flatTap below emits exactly one StatementExecuted
+    // event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, QueryResult]] =
       aclCheck.flatMap(_ => clsRewritten()).flatMap(rlsRewritten) match
         case Left(f)         => IO.pure(Left(f))
@@ -437,18 +389,15 @@ final class FlightSqlRouter(
               )
               IO.pure(Left(f))
             case Right(snap) =>
-              // Tx pin wins; otherwise honor the soft preferredNode if it still exists in the
-              // current snapshot; otherwise None lets Router.pick run its load-aware choice.
+              // Tx pin wins; then the soft preferredNode if still in the snapshot;
+              // else Router.pick's load-aware choice.
               val txPin  = s.pinnedNodeId.filter(_ => s.txOpen)
               val pinned =
                 txPin.orElse(preferredNode.filter(id => snap.nodes.exists(_.nodeId == id)))
-              // Each quack_query lands in a fresh DuckDB session on the remote, so
-              // an unqualified `SELECT * FROM customer` would 404 - we wrap the user
-              // SQL with `USE <dbName>.<dbName>; ...` (matching the spawn script's
-              // initial schema) when the pool's metastore advertises a dbName.
+              // Each quack_query lands in a fresh remote DuckDB session, so unqualified
+              // refs need the USE prefix (see wrapWithDefaultSchema).
               val wrappedSql = wrapWithDefaultSchema(supervisor.get(poolKey), finalSql)
-              // Internal probes (recordExecution=false) never stamp: they must not open
-              // transactions on the node even if a future probe shape classifies as a write.
+              // Probes never stamp: they must not open transactions on the node.
               val prelude =
                 if recordExecution then
                   stampPrelude(kind, kindWire, poolMeta, s.txOpen, user, poolKey.tenant, finalSql)
@@ -496,25 +445,17 @@ final class FlightSqlRouter(
                     case None =>
                       IO.pure(Left(RouterFailure.Internal(s"node $nodeId not in snapshot")))
                     case Some(node) =>
-                      // Register just before the send so the statement appears in the operator's
-                      // active-statement view from the first byte on the wire. Only when
-                      // recordExecution is true; the Prepare-time probe is ephemeral and should
-                      // not appear in the active-statement list.
-                      // Known race: a kill arriving between register and attachCancel fires the
-                      // noop handle seeded by register, which evicts the entry from the registry
-                      // but does not interrupt the stream. Accepted best-effort semantics.
+                      // Register before the send so the statement is visible (and killable) from
+                      // the first wire byte. Known race: a kill between register and attachCancel
+                      // evicts the entry but does not interrupt the stream; accepted best-effort.
                       val stmtId =
                         if recordExecution then
                           Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
                         else None
-                      // Phase-0 locality baseline plus the placement decision. Both are computed
-                      // from `refs` (extracted from `sql`, the pre-rewrite statement, NOT finalSql:
-                      // RLS rewrites are per-principal, which would defeat memoization, and
-                      // placement keys should be the user-visible tables). Gated on recordExecution
-                      // so probes do not skew the metrics. `placement.record` runs for
-                      // tx-pinned and preferredNode-pinned statements too: the statement
-                      // really lands on `nodeId`, so the directory must learn it regardless
-                      // of how the node was chosen.
+                      // Locality + placement are computed from `refs` (pre-rewrite `sql`, NOT
+                      // finalSql: per-principal RLS rewrites would defeat memoization).
+                      // placement.record runs for pinned statements too: the statement really
+                      // lands on nodeId, so the directory must learn it either way.
                       if recordExecution then
                         val outcome =
                           if !cacheAwareRouting then "flag-off"
@@ -530,9 +471,8 @@ final class FlightSqlRouter(
                               pinned = pinned.isDefined
                             )
                         routingInstruments.recordDecision(poolKey.tenant, poolKey.pool, outcome)
-                        // Skip the load-ratio observation for a pinned statement: the load cap
-                        // never applied to it (a tx pin / preferredNode bypasses the scorer), so a
-                        // pinned node over its cap is not a cap violation worth reporting.
+                        // Pinned statements bypass the scorer, so an over-cap pinned node
+                        // is not a cap violation worth reporting.
                         if placementEligible && pinned.isEmpty then
                           val avg = math.max(
                             1.0,
@@ -564,8 +504,8 @@ final class FlightSqlRouter(
                         )
                         .flatMap {
                           case QuackResponse.Ok(reader, latency, close) =>
-                            // Idempotent close: an admin kill fires the same close the Flight
-                            // producer will fire later; the second invocation must be a no-op.
+                            // Idempotent close: an admin kill and the Flight producer fire the
+                            // same close; the second invocation must be a no-op.
                             val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
                             val closeOnce: () => Unit =
                               () => if closedOnce.compareAndSet(false, true) then close()
@@ -590,10 +530,8 @@ final class FlightSqlRouter(
                                 )
                               )
                             else
-                              // Retry MUST send finalSql (RLS-wrapped, CLS-applied), NOT
-                              // rewrittenSql (CLS only, pre-RLS) -- otherwise a retried query
-                              // returns rows the row policy should have filtered. See
-                              // security-audit-2026-07-02 #5b.
+                              // Retry MUST send finalSql (CLS + RLS applied): retrying the
+                              // pre-RLS SQL would return rows the row policy should filter.
                               retryOnce(
                                 connectionId,
                                 user,
@@ -613,9 +551,7 @@ final class FlightSqlRouter(
           }
 
     val startedAtNanos = System.nanoTime()
-    // Gate the module StatementExecuted event on recordExecution: internal probes and
-    // prepare-time probes pass recordExecution=false and must not emit, matching every
-    // other telemetry surface in execute.
+    // Probes must not emit the module StatementExecuted event either.
     if recordExecution then
       resultIO.flatTap { r =>
         IO(
@@ -634,19 +570,10 @@ final class FlightSqlRouter(
       }
     else resultIO
 
-  /** Prepend `USE <dbName>.<schemaName>;` so the remote DuckDB session lands in the pool's
-    * catalog+schema, letting unqualified table names AND 2-part `"schema"."table"` paths resolve.
-    * `schemaName` comes from the pool's metastore (defaults to `main`). It MUST differ from the
-    * catalog name - same-named catalog+schema is an ambiguous reference in DuckDB, which JDBC
-    * clients hit on 2-part identifier resolution.
-    *
-    * Prerequisite: the schema must already exist on the node. That is the `HealthProbe`'s job - on
-    * its first successful probe per node it runs `CREATE SCHEMA IF NOT EXISTS <db>.<schema>`
-    * exactly once, so by the time client traffic flows this `USE` always resolves. See `Main.scala`
-    * where the probe is constructed.
-    *
-    * Skipped for explicit USE / SET / BEGIN / COMMIT / ROLLBACK / ATTACH / DETACH so the operator
-    * can still escape the default.
+  /** Prepend `USE <dbName>.<schemaName>;` so unqualified and 2-part names resolve in the remote
+    * session. schemaName MUST differ from the catalog name (same-named catalog+schema is ambiguous
+    * in DuckDB). The schema itself is pre-created by HealthProbe's first successful probe per node.
+    * Skipped for USE / SET / txn control / ATTACH / DETACH so the operator can escape the default.
     */
   private def wrapWithDefaultSchema(
       state: Option[ai.starlake.quack.ondemand.PoolState],
@@ -666,11 +593,10 @@ final class FlightSqlRouter(
           case None => sql
       case _ => sql
 
-  /** Resolve the routing snapshot, waking a suspended pool first. On a suspended (and not disabled)
-    * pool this fires resumePool(reason="query") and polls until a routable node appears, bounded by
-    * resumeHoldTimeout; expiry yields the retryable "pool is resuming" UNAVAILABLE. Disabled pools
-    * are never auto-woken. resumePool errors are swallowed here (.attempt): the flag is already
-    * cleared, so reconcile retries the spawn and the poll either sees a node or times out.
+  /** Resolve the routing snapshot, waking a suspended (never a disabled) pool first: fire
+    * resumePool then poll for a routable node, bounded by resumeHoldTimeout; expiry yields the
+    * retryable "pool is resuming" UNAVAILABLE. resumePool errors are swallowed (.attempt):
+    * reconcile retries the spawn and the poll either sees a node or times out.
     */
   private def resolveSnapshot(poolKey: PoolKey): IO[Either[RouterFailure, PoolSnapshot]] =
     supervisor.get(poolKey) match
@@ -718,9 +644,7 @@ final class FlightSqlRouter(
                   .send(n, wrapped, None, recordLoad = recordLoad, stampPrelude = prelude)
                   .map {
                     case QuackResponse.Ok(reader, latency, close) =>
-                      // Mirror the primary path: register the statement so it appears in
-                      // the active-statement view and is killable. Registration is gated on
-                      // the same recordLoad flag used by the primary path.
+                      // Mirror the primary path: registered, killable, gated on recordLoad.
                       val stmtId =
                         if recordLoad then
                           Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
@@ -733,11 +657,8 @@ final class FlightSqlRouter(
                         stmtId.foreach(registry.deregister)
                         closeOnce()
                       }
-                      // Pin the session on the retry node so a follow-up
-                      // COMMIT/ROLLBACK lands on the same Quack instance.
-                      // Without this, a BEGIN that retried onto node B
-                      // would have its COMMIT routed by load and likely
-                      // hit node A - breaking transaction consistency.
+                      // Pin the session on the retry node: a BEGIN that retried onto node B
+                      // must have its COMMIT land there too, not be re-routed by load.
                       sessions.onStatement(connectionId, kind, nodeId)
                       Right(QueryResult(reader, closeAndDeregister, nodeId, latency))
                     case QuackResponse.Failed(QuackError.Transient(m), _) =>
@@ -750,11 +671,8 @@ final class FlightSqlRouter(
           case _ =>
             IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
 
-  /** Map a permanent DuckDB error envelope to a typed failure. DuckDB stamps user-input errors with
-    * prefixes like `Parser Error`, `Binder Error`, `Catalog Error` - we route the ones about
-    * missing objects to [[RouterFailure.NotFound]] and the rest to [[RouterFailure.BadRequest]].
-    * The `permanent failure:` prefix is preserved in the reason for operators reading metrics /
-    * history.
+  /** Map a permanent DuckDB error to a typed failure: missing-object errors become NotFound, the
+    * rest BadRequest. The "permanent failure:" prefix is preserved for operators.
     */
   private def classifyPermanent(message: String): RouterFailure =
     val lower    = message.toLowerCase
