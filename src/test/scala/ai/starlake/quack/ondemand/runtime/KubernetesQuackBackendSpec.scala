@@ -699,11 +699,16 @@ class KubernetesQuackBackendSpec
 
     // The incumbent's token Secret must survive - ensureTokenSecret's createOr overwrote it
     // in place during the failed attempt, but it pre-existed this call, so it must never be
-    // in the "created" gate and cleanup must leave it alone.
-    server.getClient.secrets
+    // in the "created" gate and cleanup must leave it alone. Its VALUE must also be restored
+    // to the incumbent's own token: cleanup captures it before the overwrite and puts it back,
+    // so a later discoverExisting (e.g. after a manager restart) keeps matching the incumbent
+    // pod's still-live env instead of 401-ing on the failed attempt's rotated token.
+    val survivingSecret = server.getClient.secrets
       .inNamespace("default")
       .withName(tokenSecretName("quack-race-3"))
-      .get() should not be null
+      .get()
+    survivingSecret should not be null
+    readTokenPayload(survivingSecret) shouldBe "incumbent-sentinel-token"
 
   // ---------- per-pool resources + gated pod template ----------
 

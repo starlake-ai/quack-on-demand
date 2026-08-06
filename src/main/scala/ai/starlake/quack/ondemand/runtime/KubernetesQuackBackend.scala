@@ -362,7 +362,11 @@ final class KubernetesQuackBackend(
     // Which resources THIS call created, so partial-start cleanup never tears down a
     // Terminating incumbent's resources after a 409'd create.
     val created = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
-    val run     = IO.blocking {
+    // The incumbent's token value, captured before ensureTokenSecret's createOr overwrites
+    // it, so a failed start can restore it (see cleanupPartialStart).
+    val priorTokenSecretValue =
+      new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
+    val run = IO.blocking {
       val token = LocalQuackBackend.randomToken()
       tokens.put(spec.nodeId, token)
 
@@ -370,11 +374,17 @@ final class KubernetesQuackBackend(
       // rejects a pod whose env.valueFrom references a missing Secret.
       // ensureTokenSecret also makes the bearer string recoverable after
       // manager restart.
-      val tokenSecretExisted =
-        client.secrets
-          .inNamespace(namespace)
-          .withName(tokenSecretNameFor(spec.nodeId))
-          .get() != null
+      val existingTokenSecret =
+        Option(
+          client.secrets
+            .inNamespace(namespace)
+            .withName(tokenSecretNameFor(spec.nodeId))
+            .get()
+        )
+      val tokenSecretExisted = existingTokenSecret.isDefined
+      // Same value discoverExisting would recover on a manager restart -- captured now so a
+      // failed start can put it back rather than leaving the rotated value in place.
+      existingTokenSecret.foreach(s => priorTokenSecretValue.set(readTokenFromSecret(s)))
       ensureTokenSecret(spec.nodeId, token)
       // An overwritten pre-existing Secret must survive cleanup (it may be an incumbent's
       // live credentials, e.g. a racing start against a still-running node).
@@ -424,8 +434,12 @@ final class KubernetesQuackBackend(
     // nodeId, and the next reconcile respawn hits an already-exists
     // conflict on pod create -- the pool never recovers.
     run
-      .onError { case e => cleanupPartialStart(spec, e.toString, created) }
-      .onCancel(cleanupPartialStart(spec, "start cancelled", created))
+      .onError { case e =>
+        cleanupPartialStart(spec, e.toString, created, priorTokenSecretValue.get())
+      }
+      .onCancel(
+        cleanupPartialStart(spec, "start cancelled", created, priorTokenSecretValue.get())
+      )
 
   /** Create the pod, absorbing one 409 conflict against a Terminating twin: poll (bounded by
     * `stopTimeoutSec`) until the old pod object is gone, then create again. A second failure
@@ -473,6 +487,13 @@ final class KubernetesQuackBackend(
     * this call never created them, so `created` never marks them, so cleanup leaves them alone.
     * Every delete is swallowed and logged so cleanup can never mask the original spawn failure.
     *
+    * The token Secret needs one more step than a plain "leave it alone": when it pre-existed (not
+    * in `created`), `ensureTokenSecret` still overwrote its value in place before the pod create
+    * failed, so the incumbent pod's still-live env now points at a Secret holding this failed
+    * attempt's token instead of its own. `priorTokenSecretValue` carries the value `start` captured
+    * before that overwrite; restoring it here is what keeps `discoverExisting` matching the
+    * incumbent's token after a manager restart.
+    *
     * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left out of the `created`
     * gate and never deleted here: it is shared by every pod of the pool, so deleting it on one
     * node's failure could break sibling pods that reference it. It is GC'd by [[stop]] when the
@@ -481,7 +502,8 @@ final class KubernetesQuackBackend(
   private def cleanupPartialStart(
       spec: NodeSpec,
       reason: String,
-      created: java.util.Set[String]
+      created: java.util.Set[String],
+      priorTokenSecretValue: Option[String]
   ): IO[Unit] = IO.blocking {
     val mine = created.asScala.toSet
     logger.warn(
@@ -499,6 +521,14 @@ final class KubernetesQuackBackend(
     if mine("tokenSecret") then
       deleteQuietly("token secret", tokenSecretNameFor(spec.nodeId)) {
         client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(spec.nodeId)).delete()
+      }
+    else
+      // Pre-existing Secret this call rotated: the incumbent pod's env still carries the
+      // pre-rotation token, so discoverExisting must keep matching it. Restore, don't delete.
+      priorTokenSecretValue.foreach { prior =>
+        deleteQuietly("token secret restore", tokenSecretNameFor(spec.nodeId)) {
+          ensureTokenSecret(spec.nodeId, prior)
+        }
       }
     if mine("objectStoreSecret") then
       deleteQuietly("object-store secret", objectStoreSecretNameFor(spec.nodeId)) {
