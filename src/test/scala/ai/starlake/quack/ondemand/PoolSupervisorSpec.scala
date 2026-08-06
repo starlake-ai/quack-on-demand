@@ -77,7 +77,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       nodes.put(spec.nodeId, n); n
     }
     def stop(key: PoolKey, id: String): IO[Unit] =
-      if failStops.contains(id) then IO.raiseError(new RuntimeException(s"apiserver 503 stopping $id"))
+      if failStops.contains(id) then
+        IO.raiseError(new RuntimeException(s"apiserver 503 stopping $id"))
       else IO { stopped += id; nodes.remove(id); () }
     def isAlive(id: String): Boolean = nodes.contains(id)
     def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
@@ -308,7 +309,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   // ---------- best-effort teardown ----------
 
-  "best-effort teardown" should "delete the node row even when backend.stop fails on scale-down" in:
+  "best-effort teardown" should "delete the row even when backend.stop fails on scale-down" in:
     val (sup, b, st) = freshSupervisorWithStore()
     sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
     val victim = sup.get(key).get.nodes.last.nodeId

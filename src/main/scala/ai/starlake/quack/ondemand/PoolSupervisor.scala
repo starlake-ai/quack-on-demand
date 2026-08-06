@@ -580,7 +580,7 @@ final class PoolSupervisor(
       // Crash-mid-suspend heal: suspendPool persists suspended=true BEFORE draining, so a crash in
       // that window reloads a suspended pool whose nodes are still alive. Drain-forget them the way
       // suspendPool would. No PoolSuspended re-emission (already announced); per-node NodeStopped
-      // events still flow through drainAndStop.
+      // events still flow through drainAndStop on each successful stop.
       drainAndForgetNodes(key, state.nodes) *>
         IO.delay {
           val updated = state.copy(nodes = Nil)
