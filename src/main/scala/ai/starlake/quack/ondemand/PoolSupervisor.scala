@@ -1750,8 +1750,10 @@ final class PoolSupervisor(
           ) *>
           IO.blocking {
             poolIdByKey.get(key).foreach { pid =>
-              // Sweep DB-side rows the in-memory state never saw (crash orphans, peer
-              // replicas) so the pool-row delete can't hit the FK RESTRICT.
+              // Sweep DB-side rows the in-memory state never saw (crash orphans from a
+              // failed teardown) so the pool-row delete can't hit the FK RESTRICT. A
+              // stray row backed by a live pod loses its row without a stop; reconcile
+              // or a manual sweep reaps the pod.
               store.deleteNodesForPool(pid)
               store.deletePool(pid)
               poolRows.remove(pid)
