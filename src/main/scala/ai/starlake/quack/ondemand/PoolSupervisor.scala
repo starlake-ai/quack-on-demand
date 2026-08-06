@@ -1089,11 +1089,20 @@ final class PoolSupervisor(
                   SupervisorError.NotFound(s"tenant-db '$tenantDbName' not found in tenant '$tn'")
                 )
               case Some(td) =>
-                val activePools = poolRows.values.filter(_.tenantDbId == td.id).toList
-                if activePools.nonEmpty then
+                // The store is the authoritative source, not just the in-memory cache: a DB-only
+                // stray pool row (crash orphan, or a peer replica's fresh pool the LISTEN/NOTIFY
+                // hasn't propagated yet) would pass an in-memory-only guard and then blow up on
+                // store.deleteTenantDb's FK RESTRICT (qodstate_pool.tenant_db_id) as a bodyless
+                // 500. Union both sources and fail closed - a DB-only row may be a live peer's
+                // pool, never sweep it here.
+                val activePoolIds =
+                  poolRows.values.filter(_.tenantDbId == td.id).map(_.id).toSet ++
+                    store.listPools(td.id).map(_.id).toSet
+                if activePoolIds.nonEmpty then
                   Left(
                     SupervisorError.Conflict(
-                      s"tenant-db '$tenantDbName' has ${activePools.size} active pool(s); stop them first"
+                      s"tenant-db '$tenantDbName' has ${activePoolIds.size} pool(s) " +
+                        "(including any not yet visible in memory); stop them first"
                     )
                   )
                 else

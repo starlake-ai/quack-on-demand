@@ -725,8 +725,54 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
     out.isLeft shouldBe true
-    out.swap.toOption.get.message should include("active pool")
+    out.swap.toOption.get.message should include("pool")
     admin.dropped.toList shouldBe Nil
+
+  it should "refuse the delete (Conflict, not a store exception) when a stray pool row exists " +
+    "only in the store, not yet in memory" in:
+    // A DB-only stray pool row is a crash orphan or a peer replica's fresh pool the
+    // LISTEN/NOTIFY hasn't propagated yet. Before this fix the guard read only the in-memory
+    // poolRows cache, missed it, and store.deleteTenantDb(td.id) blew up on the
+    // qodstate_pool.tenant_db_id FK RESTRICT -- a bodyless 500 instead of an honest 409.
+    val (sup, admin, st) = {
+      val admin = new RecordingDbAdmin
+      val st    = new InMemoryControlPlaneStore()
+      val sup   = new PoolSupervisor(
+        fakeBackend(), new NodeLoadTracker, st,
+        defaultMetastore = Map.empty, dbAdmin = admin
+      )
+      sup.createTenant(Tenant("acme")).unsafeRunSync()
+      sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+      (sup, admin, st)
+    }
+    val td = st.snapshot().tenantDbs.head
+    // Seed the stray pool row directly via the store -- never through sup.createPool, so the
+    // in-memory poolRows cache never sees it.
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "stray-pool-id",
+        tenantId = td.tenantId,
+        tenantDbId = td.id,
+        name = "stray",
+        size = 1,
+        distribution = RoleDistribution(0, 0, 1)
+      )
+    )
+
+    val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
+    out shouldBe a[Left[_, _]]
+    out.swap.toOption.get shouldBe a[SupervisorError.Conflict]
+    out.swap.toOption.get.message should include("pool")
+    admin.dropped.toList shouldBe Nil
+    // Row untouched: no FK exception was raised or swallowed.
+    st.snapshot().tenantDbs.map(_.id) should contain(td.id)
+
+  it should "still delete when there are no pools at all (happy path unaffected)" in:
+    val (sup, admin) = supWithAdmin()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup.deleteTenantDb("acme", "acme_default").unsafeRunSync() shouldBe Right(())
+    admin.dropped.toList shouldBe List("acme_default")
 
   // ---------- Per-tenant-db metastore + dataPath ----------
 
