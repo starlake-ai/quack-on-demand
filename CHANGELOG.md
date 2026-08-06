@@ -14,7 +14,8 @@
   invariant). `KubernetesQuackBackend.stop` waits for actual pod deletion (new
   `k8s.stopTimeoutSec` / `QOD_K8S_STOP_TIMEOUT_SEC`, default 60) while `start` retries a
   create that 409s against a Terminating twin, no longer tears down a pre-existing incumbent's
-  Service/Secrets on a failed start, and creates the per-node Service idempotently (an
+  Service/Secrets on a failed start (the incumbent's token-Secret value is restored too, so
+  manager-restart adoption keeps authenticating), and creates the per-node Service idempotently (an
   out-of-band pod death can leave the Service behind; a respawn on the same node id updates it
   in place instead of 409ing). `database/update` rolls now report per-node failures instead of
   aborting with a bodyless 500, and `node/restart` maps backend errors to a structured 502. The
