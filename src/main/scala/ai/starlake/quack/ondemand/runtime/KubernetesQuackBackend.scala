@@ -370,25 +370,39 @@ final class KubernetesQuackBackend(
       // rejects a pod whose env.valueFrom references a missing Secret.
       // ensureTokenSecret also makes the bearer string recoverable after
       // manager restart.
+      val tokenSecretExisted =
+        client.secrets
+          .inNamespace(namespace)
+          .withName(tokenSecretNameFor(spec.nodeId))
+          .get() != null
       ensureTokenSecret(spec.nodeId, token)
-      created.add("tokenSecret")
+      // An overwritten pre-existing Secret must survive cleanup (it may be an incumbent's
+      // live credentials, e.g. a racing start against a still-running node).
+      if !tokenSecretExisted then created.add("tokenSecret")
       if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
       if spec.objectStoreSql.nonEmpty then
+        val objectStoreSecretExisted = client.secrets
+          .inNamespace(namespace)
+          .withName(objectStoreSecretNameFor(spec.nodeId))
+          .get() != null
         ensureObjectStoreSecret(spec.nodeId, spec.objectStoreSql)
-        created.add("objectStoreSecret")
+        // Same reasoning as the token Secret above: don't roll back an incumbent's Secret.
+        if !objectStoreSecretExisted then created.add("objectStoreSecret")
 
       val pod        = buildPod(spec, token)
       val createdPod = createPodRetrying409(pod, spec.nodeId)
       created.add("pod")
       waitReady(createdPod)
 
-      val svc = buildService(spec)
+      val svc        = buildService(spec)
+      val svcExisted = client.services.inNamespace(namespace).withName(spec.nodeId).get() != null
       // Out-of-band pod death (e.g. an EC2 node-group replacement) leaves the Service
       // behind even though the Pod is gone; a respawn on the same deterministic nodeId
       // must not 409 on a Service that's still there, so this create is create-or-replace
-      // just like the ensure*Secret helpers below.
+      // just like the ensure*Secret helpers above. Same reasoning as the token Secret: an
+      // overwritten pre-existing Service must survive cleanup (it may be an incumbent's).
       client.services.inNamespace(namespace).resource(svc).createOr(o => o.update())
-      created.add("service")
+      if !svcExisted then created.add("service")
 
       RunningNode(
         nodeId = spec.nodeId,

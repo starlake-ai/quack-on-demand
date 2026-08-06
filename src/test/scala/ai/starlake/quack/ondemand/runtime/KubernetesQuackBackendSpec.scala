@@ -667,6 +667,44 @@ class KubernetesQuackBackendSpec
     // The incumbent pod must survive - cleanup only touches what THIS call created.
     server.getClient.pods.inNamespace("default").withName("quack-race-2").get() should not be null
 
+  it should "not delete an incumbent's pre-existing token Secret when a racing start fails" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      stopTimeoutSec = 1
+    )
+    val key  = PoolKey("acme", "acme_default", "sales")
+    val spec =
+      NodeSpec(key, "quack-race-3", Role.Dual, metastore = Map("pgHost" -> "pg"), s3 = Map.empty)
+    backend.start(spec).unsafeRunSync() // incumbent pod, service and token Secret, stays put
+
+    // Overwrite the incumbent's token Secret with a known sentinel value so the final
+    // assertion pins "this pre-existing Secret survived", not just "some Secret exists".
+    val meta = new ObjectMeta()
+    meta.setName(tokenSecretName("quack-race-3"))
+    val sentinelData = new java.util.HashMap[String, String]()
+    sentinelData.put(KubernetesQuackBackend.TokenSecretKey, "incumbent-sentinel-token")
+    val sentinel = new io.fabric8.kubernetes.api.model.Secret()
+    sentinel.setMetadata(meta)
+    sentinel.setStringData(sentinelData)
+    server.getClient.secrets.inNamespace("default").resource(sentinel).createOr(r => r.update())
+
+    // Second start: create 409s, incumbent never goes away, retry re-409s -> start fails.
+    an[Exception] should be thrownBy backend.start(spec).unsafeRunSync()
+
+    // The incumbent's token Secret must survive - ensureTokenSecret's createOr overwrote it
+    // in place during the failed attempt, but it pre-existed this call, so it must never be
+    // in the "created" gate and cleanup must leave it alone.
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName(tokenSecretName("quack-race-3"))
+      .get() should not be null
+
   // ---------- per-pool resources + gated pod template ----------
 
   private val ns       = "default"
