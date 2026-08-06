@@ -561,6 +561,54 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     st.listNodes(pid).size shouldBe 2
     sup.get(key).get.nodes.size shouldBe 2
 
+  it should "fall back to the flat distribution in spawnFromDistribution when the cached " +
+    "cohort plan disagrees with the authoritative target" in:
+    // Fix 2 makes the empty-pool spawn gate (state.nodes.isEmpty && distribution.total > 0) fire
+    // off the authoritative, store-refreshed distribution -- but spawnFromDistribution's PLAN
+    // still comes from the poolRows cache's authored cohorts, which restore() only refreshes on
+    // a full rehydrate. A store-only distribution bump (peer scale-up, or any write this
+    // replica's poolRows cache hasn't caught up to) leaves the gate authoritative while the plan
+    // stays stale, so cohortPlan.size (from the old cohorts) would silently disagree with the new
+    // target -- including going to 0, per the reviewer's repro. Assert the fallback: a flat,
+    // placement-less spawn to the authoritative total instead.
+    val (sup, b, st) = freshSupervisorWithStore()
+    val td            = st.snapshot().tenantDbs.head
+    // Seed a pool row directly in the store with an authored single-node cohort and NO node rows
+    // (the "fresh YAML bootstrap" shape spawnFromDistribution exists for), then restore() to
+    // rehydrate `pools` + `poolRows` from it in one consistent shot.
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "p-cohort-mismatch",
+        tenantId = td.tenantId,
+        tenantDbId = td.id,
+        name = key.pool,
+        size = 1,
+        distribution = RoleDistribution(0, 0, 1),
+        cohorts = List(
+          ai.starlake.quack.model.PoolCohort(
+            ai.starlake.quack.model.NodePlacement.empty,
+            RoleDistribution(0, 0, 1)
+          )
+        )
+      )
+    )
+    sup.restore()
+    sup.get(key).map(_.nodes) shouldBe Some(Nil) // zero nodes, as authored
+
+    // Now bump ONLY the persisted row's distribution, exactly the way a peer's write (or any
+    // update this replica's poolRows cache missed) would -- poolRows keeps the stale 1-node
+    // cohort, the store row now targets 3.
+    val persisted = st.snapshot().pools.head
+    st.upsertPool(persisted.copy(size = 3, distribution = RoleDistribution(0, 0, 3)))
+
+    sup.reconcile().unsafeRunSync()
+
+    // GREEN (fixed): the authoritative target (3) wins over the stale cohort plan (1) instead of
+    // silently spawning 1 node's worth (or 0, if the sizes disagreed the other way).
+    sup.get(key).get.nodes.size shouldBe 3
+    b.specs.size shouldBe 3
+    st.listNodes("p-cohort-mismatch").size shouldBe 3
+
   "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
     // Repro for "node stuck in draining after drain + rescale": draining a node
     // (force=false) sets draining=true and deletes its store row but leaves the
@@ -644,8 +692,38 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val sup = freshSupervisor()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenant("acme").unsafeRunSync()
-    out.left.toOption.map(_.message).getOrElse("") should include("active pool")
+    out.swap.toOption.get shouldBe a[SupervisorError.Conflict]
+    out.left.toOption.map(_.message).getOrElse("") should include("stop them first")
     sup.getTenant("acme") shouldBe defined
+
+  it should "refuse the delete (Conflict, not a store exception) when a stray pool row exists " +
+    "only in the store, not yet in memory" in:
+    // Symmetric with deleteTenantDb's stray-row regression: a DB-only pool row (crash orphan, or
+    // a peer replica's fresh pool the LISTEN/NOTIFY hasn't propagated yet) must not pass an
+    // in-memory-only guard and then blow up on store.deleteTenantDb's FK RESTRICT partway through
+    // deleteTenant's per-tenant-db loop -- that would be both a bodyless 500 and a non-atomic
+    // partial deletion (some tenant-dbs gone, others not, tenant itself still there).
+    val (sup, _, st) = freshSupervisorWithStore()
+    val td = st.snapshot().tenantDbs.head
+    // Seed the stray pool row directly via the store -- never through sup.createPool, so the
+    // in-memory poolRows cache never sees it.
+    st.upsertPool(
+      ai.starlake.quack.model.Pool(
+        id = "stray-pool-id",
+        tenantId = td.tenantId,
+        tenantDbId = td.id,
+        name = "stray",
+        size = 1,
+        distribution = RoleDistribution(0, 0, 1)
+      )
+    )
+
+    val out = sup.deleteTenant("acme").unsafeRunSync()
+    out.swap.toOption.get shouldBe a[SupervisorError.Conflict]
+    out.swap.toOption.get.message should include("stop them first")
+    sup.getTenant("acme") shouldBe defined
+    // Nothing partially torn down: the tenant-db row is untouched.
+    st.snapshot().tenantDbs.map(_.id) should contain(td.id)
 
   it should "cascade-delete tenant-dbs (no pools) when deleting the tenant" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -760,8 +838,8 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
-    out.isLeft shouldBe true
-    out.swap.toOption.get.message should include("pool")
+    out.swap.toOption.get shouldBe a[SupervisorError.Conflict]
+    out.swap.toOption.get.message should include("stop them first")
     admin.dropped.toList shouldBe Nil
 
   it should "refuse the delete (Conflict, not a store exception) when a stray pool row exists " +
@@ -798,7 +876,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val out = sup.deleteTenantDb("acme", "acme_default").unsafeRunSync()
     out shouldBe a[Left[_, _]]
     out.swap.toOption.get shouldBe a[SupervisorError.Conflict]
-    out.swap.toOption.get.message should include("pool")
+    out.swap.toOption.get.message should include("stop them first")
     admin.dropped.toList shouldBe Nil
     // Row untouched: no FK exception was raised or swallowed.
     st.snapshot().tenantDbs.map(_.id) should contain(td.id)

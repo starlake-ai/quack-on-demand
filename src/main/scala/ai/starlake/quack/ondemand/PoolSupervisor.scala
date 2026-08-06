@@ -695,11 +695,20 @@ final class PoolSupervisor(
     */
   private def spawnFromDistribution(key: PoolKey, state: PoolState): IO[PoolState] =
     val poolEntity = poolIdByKey.get(key).flatMap(poolRows.get)
-    val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] = poolEntity match
+    val cohortPlan: List[(ai.starlake.quack.model.Role, NodePlacement)] = poolEntity match
       case Some(p) =>
         p.effectiveCohorts.flatMap(c => c.distribution.asRoleList.map(r => (r, c.placement)))
       case None =>
         state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
+    // The cohort plan rides the poolRows cache, which can lag `state.distribution` (refreshed
+    // in-lock, authoritatively, by reconcilePoolUnlocked). A stale cohort plan whose total
+    // disagrees with the target would otherwise spawn the wrong node count - including zero -
+    // and log a misleading "spawned 0 node(s)". Fall back to the flat, placement-less
+    // distribution when they disagree: the gate (this method firing at all) and the plan it
+    // builds must share one source of truth.
+    val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
+      if cohortPlan.size == state.distribution.total then cohortPlan
+      else state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
     val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
       specFromState(
         key,
@@ -946,12 +955,21 @@ final class PoolSupervisor(
       getTenant(name) match
         case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
         case Some(t) =>
-          val tdbs    = tenantDbs.values.filter(_.tenantId == t.id).toList
-          val poolsOf = tdbs.flatMap(td => poolRows.values.filter(_.tenantDbId == td.id))
-          if poolsOf.nonEmpty then
+          val tdbs = tenantDbs.values.filter(_.tenantId == t.id).toList
+          // Symmetric with deleteTenantDb's guard: the in-memory poolRows cache alone can miss a
+          // DB-only stray pool row (crash orphan, or a peer replica's fresh pool the LISTEN/NOTIFY
+          // hasn't propagated yet), which would otherwise pass this guard and then hit
+          // store.deleteTenantDb's FK RESTRICT partway through the per-tenant-db delete loop below
+          // - a bodyless 500 AND a non-atomic partial deletion. Union both sources across every
+          // tenant-db and fail closed. Same TOCTOU caveat as deleteTenantDb: read-then-delete is
+          // not transacted.
+          val activePoolIds =
+            tdbs.flatMap(td => poolRows.values.filter(_.tenantDbId == td.id).map(_.id)).toSet ++
+              tdbs.flatMap(td => store.listPools(td.id).map(_.id)).toSet
+          if activePoolIds.nonEmpty then
             Left(
               SupervisorError.Conflict(
-                s"tenant '$name' has ${poolsOf.size} active pool(s); stop them first"
+                s"tenant '$name' has ${activePoolIds.size} pool(s); stop them first"
               )
             )
           else
@@ -1106,15 +1124,16 @@ final class PoolSupervisor(
                 // hasn't propagated yet) would pass an in-memory-only guard and then blow up on
                 // store.deleteTenantDb's FK RESTRICT (qodstate_pool.tenant_db_id) as a bodyless
                 // 500. Union both sources and fail closed - a DB-only row may be a live peer's
-                // pool, never sweep it here.
+                // pool, never sweep it here. This read-then-delete pair is not transacted, so a
+                // microseconds-wide TOCTOU window against a concurrent pool insert remains by
+                // design; the FK RESTRICT is the backstop if that window is ever hit.
                 val activePoolIds =
                   poolRows.values.filter(_.tenantDbId == td.id).map(_.id).toSet ++
                     store.listPools(td.id).map(_.id).toSet
                 if activePoolIds.nonEmpty then
                   Left(
                     SupervisorError.Conflict(
-                      s"tenant-db '$tenantDbName' has ${activePoolIds.size} pool(s) " +
-                        "(including any not yet visible in memory); stop them first"
+                      s"tenant-db '$tenantDbName' has ${activePoolIds.size} pool(s); stop them first"
                     )
                   )
                 else
