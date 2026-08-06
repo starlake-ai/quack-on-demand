@@ -485,7 +485,10 @@ final class KubernetesQuackBackend(
     tokens.remove(nodeId)
 
     // Federation-Secret GC is pure bookkeeping: a failure here (apiserver blip on the
-    // label-list) must not abort a stop whose pod delete already succeeded.
+    // label-list) must not abort a stop whose pod delete already succeeded. The pool key
+    // comes from the caller, never from pod labels, so the GC works when the pod is
+    // already gone; the filterNots drop the just-deleted pod (apiserver propagation lag)
+    // and Terminating siblings.
     try
       val remaining = client.pods
         .inNamespace(namespace)
