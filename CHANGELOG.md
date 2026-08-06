@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.1
+
+- **K8s registry-drift hardening.** The pod set and the `qodstate_node` registry now converge
+  instead of wedging when they drift (node-group replacement, crash mid-teardown, pool
+  delete/recreate): teardown stops are best-effort (a dead pod or apiserver error can no
+  longer block row cleanup; the warn names the possibly-leaked pod), reconcile gets real k8s
+  liveness via one labeled pod-list per pool (missing pods respawn up to the pool's
+  distribution; DEAD rows beyond that distribution are pruned every tick, while a live-pod
+  overage is left alone and only logged as a warn - an HA replica with a stale, lagging
+  distribution must never stop and delete healthy pods), and `pool/delete` and manifest
+  imports sweep DB-side node rows before the pool row (FK RESTRICT kept as the last-line
+  invariant). `KubernetesQuackBackend.stop` waits for actual pod deletion (new
+  `k8s.stopTimeoutSec` / `QOD_K8S_STOP_TIMEOUT_SEC`, default 60) while `start` retries a
+  create that 409s against a Terminating twin, no longer tears down a pre-existing incumbent's
+  Service/Secrets on a failed start, and creates the per-node Service idempotently (an
+  out-of-band pod death can leave the Service behind; a respawn on the same node id updates it
+  in place instead of 409ing). `database/update` rolls now report per-node failures instead of
+  aborting with a bodyless 500, and `node/restart` maps backend errors to a structured 502. The
+  federation Secret is GC'd even when the pool's last pod is already gone.
+
 ## 0.6.0
 
 - **Cache-aware query routing (directory-lite).** Repeat queries over the same tables stick to

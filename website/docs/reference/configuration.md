@@ -161,6 +161,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.k8s.serviceType` | `QOD_K8S_SERVICE_TYPE` | `ClusterIP` |  | Kubernetes Service type fronting node pods. |
 | `quack-on-demand.k8s.quackPort` | `QOD_K8S_QUACK_PORT` | `8080` |  | Container port exposing each node's /quack endpoint. |
 | `quack-on-demand.k8s.startupTimeoutSec` | `QOD_K8S_STARTUP_TIMEOUT_SEC` | `120` |  | Seconds to wait for a spawned node pod to become ready. |
+| `quack-on-demand.k8s.stopTimeoutSec` | `QOD_K8S_STOP_TIMEOUT_SEC` | `60` |  | Seconds stop() waits for a deleted node pod to actually disappear before proceeding. |
 | `quack-on-demand.k8s.podLabel` | `QOD_K8S_POD_LABEL` | `managed-by=quack-on-demand` |  | Label selector that identifies manager-owned node pods. |
 | `quack-on-demand.k8s.podTemplateEnabled` | `QOD_POD_TEMPLATE_ENABLED` | `false` |  | Allow superusers to supply a full Pod-manifest YAML template for a pool's node pods. Off by default; raw manifests are cluster-level power. |
 | `quack-on-demand.k8s.runAsUser` | `QOD_K8S_RUN_AS_USER` | `1000` |  | Pod-level runAsUser/fsGroup applied to spawned node pods. A pod template's own securityContext.runAsUser (if set) wins over this default. |
