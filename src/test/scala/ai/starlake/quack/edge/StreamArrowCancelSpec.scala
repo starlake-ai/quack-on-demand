@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
@@ -39,7 +39,7 @@ class StreamArrowCancelSpec extends AnyFlatSpec with Matchers:
         )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String)    = IO { n.remove(id); () }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
       def isAlive(id: String) = n.contains(id)
       def discoverExisting()  = IO.pure(n.values.toList)
       def cleanup()           = IO(n.clear())

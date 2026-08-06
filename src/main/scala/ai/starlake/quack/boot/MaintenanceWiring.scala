@@ -84,7 +84,7 @@ final class MaintenanceWiring(
                             s"${maintenance.nodeReadyTimeoutSec}s; stopping it"
                         )
                       ) *> backend
-                        .stop(node.nodeId)
+                        .stop(node.poolKey, node.nodeId)
                         .handleErrorWith(_ => IO.unit)
                         .as(None)
                   }
@@ -97,7 +97,7 @@ final class MaintenanceWiring(
                 ).as(None)
               }
           case None => IO.pure(None),
-      stop = id => backend.stop(id).handleErrorWith(_ => IO.unit),
+      stop = node => backend.stop(node.poolKey, node.nodeId).handleErrorWith(_ => IO.unit),
       exec = (node, sql) =>
         adapter.send(node, sql, session = None, recordLoad = false).map {
           case QuackResponse.Ok(r, _, close) =>

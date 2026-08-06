@@ -237,6 +237,30 @@ class KubernetesQuackBackendSpec
     ref.getName shouldBe FedName
     ref.getKey shouldBe KubernetesQuackBackend.FederationSecretKey
 
+  it should "GC the federation Secret on stop even when the pod is already gone" in:
+    val backend = fedBackend
+    val key     = PoolKey("acme", "acme_default", "sales")
+    val spec    = NodeSpec(
+      key,
+      "quack-fed-gone",
+      Role.Dual,
+      metastore = Map("pgHost" -> "pg"),
+      s3 = Map.empty,
+      extraSetupSql = "CREATE SECRET s (TYPE S3);"
+    )
+    backend.start(spec).unsafeRunSync()
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName("qod-fedsql-acme-acme-default-sales")
+      .get() should not be null
+    // Pod vanishes out-of-band (node-group replacement).
+    server.getClient.pods.inNamespace("default").withName("quack-fed-gone").delete()
+    backend.stop(key, "quack-fed-gone").unsafeRunSync()
+    server.getClient.secrets
+      .inNamespace("default")
+      .withName("qod-fedsql-acme-acme-default-sales")
+      .get() shouldBe null
+
   it should "skip the Secret + env entry entirely when extraSetupSql is empty" in:
     val backend = fedBackend
     val node    = backend
@@ -273,7 +297,7 @@ class KubernetesQuackBackendSpec
 
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
 
-    backend.stop("quack-fed-only-1").unsafeRunSync()
+    backend.stop(FedKey, "quack-fed-only-1").unsafeRunSync()
 
     server.getClient.secrets.inNamespace("default").withName(FedName).get() shouldBe null
 
@@ -304,7 +328,7 @@ class KubernetesQuackBackendSpec
       )
       .unsafeRunSync()
 
-    backend.stop("quack-fed-a").unsafeRunSync()
+    backend.stop(FedKey, "quack-fed-a").unsafeRunSync()
 
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
 
@@ -409,7 +433,7 @@ class KubernetesQuackBackendSpec
       .withName(objectStoreSecretName("quack-store-2"))
       .get() should not be null
 
-    backend.stop("quack-store-2").unsafeRunSync()
+    backend.stop(FedKey, "quack-store-2").unsafeRunSync()
 
     server.getClient.secrets
       .inNamespace("default")
@@ -475,7 +499,7 @@ class KubernetesQuackBackendSpec
       .withName(tokenSecretName("quack-tok-2"))
       .get() should not be null
 
-    backend.stop("quack-tok-2").unsafeRunSync()
+    backend.stop(FedKey, "quack-tok-2").unsafeRunSync()
 
     server.getClient.secrets
       .inNamespace("default")

@@ -18,7 +18,7 @@ import java.time.Instant
 final class MaintenanceRunner(
     store: ControlPlaneStore,
     spawn: (String, String) => IO[Option[RunningNode]], // (tenant, tenantDb) -> node
-    stop: String => IO[Unit],                           // nodeId
+    stop: RunningNode => IO[Unit],
     exec: (RunningNode, String) => IO[Either[String, Unit]],
     snapshotsOlderThan: (String, String, Instant) => List[Long],
     pinnedSnapshotsOf: (String, String) => Set[Long],
@@ -53,7 +53,7 @@ final class MaintenanceRunner(
         case Some(node) =>
           IO.blocking(store.heartbeatMaintenanceRun(run.id, RunCounters())) *>
             chain(run, node, startedAt)
-              .guarantee(stop(node.nodeId).handleErrorWith(_ => IO.unit))
+              .guarantee(stop(node).handleErrorWith(_ => IO.unit))
               .handleErrorWith { t =>
                 // Defensive: a synchronous throw from an injected lookup escapes the
                 // step-level Left handling; still record + audit the finished run.

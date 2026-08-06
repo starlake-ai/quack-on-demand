@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime.testkit
 
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import cats.effect.IO
 
@@ -38,7 +38,7 @@ final class StubQuackBackend(
     )
     nodes.put(spec.nodeId, n); n
   }
-  def stop(id: String): IO[Unit]                = IO { nodes.remove(id); () }
+  def stop(key: PoolKey, id: String): IO[Unit]  = IO { nodes.remove(id); () }
   def isAlive(id: String): Boolean              = nodes.contains(id)
   def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
   def cleanup(): IO[Unit]                       = IO(nodes.clear())
@@ -76,7 +76,7 @@ object StubQuackBackend:
             maxConcurrent = s.maxConcurrent
           )
         )
-      def stop(id: String): IO[Unit]                = IO.unit
+      def stop(key: PoolKey, id: String): IO[Unit]  = IO.unit
       def isAlive(id: String): Boolean              = true
       def discoverExisting(): IO[List[RunningNode]] = IO.pure(Nil)
       def cleanup(): IO[Unit]                       = IO.unit

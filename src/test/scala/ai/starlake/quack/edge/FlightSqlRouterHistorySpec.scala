@@ -52,7 +52,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
         )
         n.put(s.nodeId, r); r
       }
-      def stop(id: String)    = IO { n.remove(id); () }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
       def isAlive(id: String) = n.contains(id)
       def discoverExisting()  = IO.pure(n.values.toList)
       def cleanup()           = IO(n.clear())

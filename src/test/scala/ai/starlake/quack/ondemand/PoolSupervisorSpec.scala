@@ -69,7 +69,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
         Some(1L), None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
       nodes.put(spec.nodeId, n); n
     }
-    def stop(id: String): IO[Unit] = IO { stopped += id; nodes.remove(id); () }
+    def stop(key: PoolKey, id: String): IO[Unit] = IO { stopped += id; nodes.remove(id); () }
     def isAlive(id: String): Boolean = nodes.contains(id)
     def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
     def cleanup(): IO[Unit] = IO { nodes.clear() }

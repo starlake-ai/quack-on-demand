@@ -1,11 +1,15 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import cats.effect.IO
 
 trait QuackBackend:
   def start(spec: NodeSpec): IO[RunningNode]
-  def stop(nodeId: String): IO[Unit]
+
+  /** Stop the node's runtime resources. `key` is passed by the caller (the supervisor always knows
+    * it) so backends never have to read it back off a possibly-already-deleted resource.
+    */
+  def stop(key: PoolKey, nodeId: String): IO[Unit]
   def isAlive(nodeId: String): Boolean
   def discoverExisting(): IO[List[RunningNode]]
   def cleanup(): IO[Unit]
@@ -22,3 +26,9 @@ trait QuackBackend:
     * adopted nodes (K8s - pods live on the apiserver) can no-op.
     */
   def adopt(node: RunningNode): IO[Unit] = IO.unit
+
+  /** Node ids with a live runtime for `key`, or None when the backend cannot enumerate (local
+    * mode, or a transient apiserver error). Reconcile treats None as "fall back to the pid/socket
+    * probe" and never prunes or respawns on it.
+    */
+  def liveNodeIds(key: PoolKey): IO[Option[Set[String]]] = IO.pure(None)

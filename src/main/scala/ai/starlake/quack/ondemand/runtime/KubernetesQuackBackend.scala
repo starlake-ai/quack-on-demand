@@ -458,11 +458,7 @@ final class KubernetesQuackBackend(
       case e: Throwable =>
         logger.warn(s"partial-start cleanup: failed to delete $kind $name: ${e.getMessage}")
 
-  def stop(nodeId: String): IO[Unit] = IO.blocking {
-    // Capture the pod's pool labels before delete -- after the API call
-    // the pod object may be gone or in a Terminating state.
-    val poolKeyOpt = readPoolKey(nodeId)
-
+  def stop(key: PoolKey, nodeId: String): IO[Unit] = IO.blocking {
     client.services.inNamespace(namespace).withName(nodeId).delete()
     client.pods.inNamespace(namespace).withName(nodeId).delete()
     // Token and object-store Secrets both track the pod 1:1, so we can drop
@@ -473,47 +469,29 @@ final class KubernetesQuackBackend(
     client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(nodeId)).delete()
     tokens.remove(nodeId)
 
-    // If this was the last live pod for the pool, GC the federation
-    // Secret. Filter out the just-deleted pod (still in the list if the
-    // apiserver hasn't propagated yet) and anything in Terminating
-    // state. The Secret is created lazily on start so its absence here
-    // is normal for pools with no federation -- the delete() call is
-    // idempotent and returns false for missing.
-    poolKeyOpt.foreach { key =>
-      val remaining = client.pods
+    // If this was the last live pod for the pool, GC the federation Secret.
+    // The pool key comes from the caller, never from the pod's labels: the pod
+    // may already be gone (node-group replacement) and the Secret must still
+    // be GC'd. Filter out the just-deleted pod (still in the list if the
+    // apiserver hasn't propagated yet) and anything in Terminating state.
+    val remaining = client.pods
+      .inNamespace(namespace)
+      .withLabel("quack-tenant", key.tenant)
+      .withLabel("quack-tenant-db", key.tenantDb)
+      .withLabel("quack-pool", key.pool)
+      .list()
+      .getItems
+      .asScala
+      .toList
+      .filterNot(p => p.getMetadata.getName == nodeId)
+      .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
+    if remaining.isEmpty then
+      client.secrets
         .inNamespace(namespace)
-        .withLabel("quack-tenant", key.tenant)
-        .withLabel("quack-tenant-db", key.tenantDb)
-        .withLabel("quack-pool", key.pool)
-        .list()
-        .getItems
-        .asScala
-        .toList
-        .filterNot(p => p.getMetadata.getName == nodeId)
-        .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
-      if remaining.isEmpty then
-        client.secrets
-          .inNamespace(namespace)
-          .withName(secretNameFor(key))
-          .delete()
-    }
+        .withName(secretNameFor(key))
+        .delete()
     ()
   }
-
-  /** Reconstruct a [[PoolKey]] from a pod's labels. Returns `None` if the pod is gone or its label
-    * set is incomplete (older labelling scheme or hand-edited pod).
-    */
-  private def readPoolKey(nodeId: String): Option[PoolKey] =
-    Option(client.pods.inNamespace(namespace).withName(nodeId).get()).flatMap { p =>
-      val labels = Option(p.getMetadata.getLabels)
-        .map(_.asScala)
-        .getOrElse(scala.collection.mutable.Map.empty)
-      for
-        tenant   <- labels.get("quack-tenant")
-        tenantDb <- labels.get("quack-tenant-db")
-        pool     <- labels.get("quack-pool")
-      yield PoolKey(tenant, tenantDb, pool)
-    }
 
   /** K8s Secret name for a pool's federation SQL. Hyphenizes the underscore on every segment
     * (tenant / tenantDb / pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]

@@ -521,7 +521,7 @@ final class PoolSupervisor(
     * site routes through here, as with [[startNodeEmitting]].
     */
   private def stopNodeEmitting(key: PoolKey, nodeId: String, reason: String): IO[Unit] =
-    backend.stop(nodeId) <*
+    backend.stop(key, nodeId) <*
       IO(events.emit(ManagerEvent.NodeStopped(key.tenant, key.tenantDb, key.pool, nodeId, reason)))
 
   private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =

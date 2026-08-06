@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.{NodeSpec, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import cats.effect.IO
 
 import java.lang.{ProcessBuilder => JProcessBuilder}
@@ -78,7 +78,7 @@ final class LocalQuackBackend(
     )
   }
 
-  def stop(nodeId: String): IO[Unit] = IO.blocking {
+  def stop(key: PoolKey, nodeId: String): IO[Unit] = IO.blocking {
     processes.remove(nodeId) match
       case Some(p) =>
         LocalQuackBackend.terminate(p.pid(), force = false)

@@ -47,7 +47,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
     val runner = new MaintenanceRunner(
       store = store,
       spawn = (_, _) => IO { started += 1; Some(node) },
-      stop = id => IO { stopped = stopped :+ id },
+      stop = node => IO { stopped = stopped :+ node.nodeId },
       exec = (_, sql) =>
         IO {
           executed = executed :+ sql
@@ -228,7 +228,7 @@ class MaintenanceRunnerSpec extends AnyFlatSpec with Matchers:
       val runner = new MaintenanceRunner(
         store = store,
         spawn = (_, _) => IO.pure(Some(node)),
-        stop = id => IO { stopped = stopped :+ id },
+        stop = node => IO { stopped = stopped :+ node.nodeId },
         exec = (_, sql) => IO { executed = executed :+ sql; Right(()) },
         snapshotsOlderThan = (_, _, _) => List(1L, 2L, 3L, 4L),
         pinnedSnapshotsOf = (_, _) => Set.empty,

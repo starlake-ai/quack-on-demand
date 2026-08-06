@@ -21,13 +21,13 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       node.port should (be >= 23000 and be <= 23010)
       node.pid.isDefined shouldBe true
       backend.isAlive("node-1") shouldBe true
-    finally backend.stop("node-1").unsafeRunSync()
+    finally backend.stop(PoolKey("t", "t_default", "p"), "node-1").unsafeRunSync()
 
   it should "release the port on stop" in:
     val backend = new LocalQuackBackend(23020, 23021, commandFor = (_, _, _) => sleepCmd(30))
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
     backend.start(spec).unsafeRunSync()
-    backend.stop("node-2").unsafeRunSync()
+    backend.stop(PoolKey("t", "t_default", "p"), "node-2").unsafeRunSync()
     backend.isAlive("node-2") shouldBe false
 
   it should "carry NodeSpec.maxConcurrent through to RunningNode" in:
@@ -42,7 +42,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
     )
     val node = backend.start(spec).unsafeRunSync()
     try node.maxConcurrent shouldBe 5
-    finally backend.stop("node-3").unsafeRunSync()
+    finally backend.stop(PoolKey("t", "t_default", "p"), "node-3").unsafeRunSync()
 
   it should "propagate defaultMetastore + NodeSpec.metastore as env vars (spec overrides default)" in:
     val capture = java.io.File.createTempFile("env-capture-", ".txt")
@@ -69,7 +69,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       out should include("pgHost=override-host") // spec wins
       out should include("pgUser=default-user")  // default fills gap
       out should include("dbName=specdb")        // spec-only key
-    finally backend.stop("node-env").unsafeRunSync()
+    finally backend.stop(PoolKey("t", "t_default", "p"), "node-env").unsafeRunSync()
 
   it should "emit objectStoreSql as an env var when the spec carries one, and omit it when empty" in:
     val capture = java.io.File.createTempFile("env-capture-objsql-", ".txt")
@@ -93,7 +93,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
       val out = java.nio.file.Files.readString(capture.toPath)
       out should include("objectStoreSql=CREATE OR REPLACE SECRET qod_db_store")
-    finally backend.stop("node-objsql").unsafeRunSync()
+    finally backend.stop(PoolKey("t", "t_default", "p"), "node-objsql").unsafeRunSync()
 
     val capture2 = java.io.File.createTempFile("env-capture-objsql-empty-", ".txt")
     capture2.deleteOnExit()
@@ -110,7 +110,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       while capture2.length() == 0 && System.currentTimeMillis() < deadline2 do Thread.sleep(50)
       val out2 = java.nio.file.Files.readString(capture2.toPath)
       out2 should not include "objectStoreSql="
-    finally backend2.stop("node-noobjsql").unsafeRunSync()
+    finally backend2.stop(PoolKey("t", "t_default", "p"), "node-noobjsql").unsafeRunSync()
 
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling
