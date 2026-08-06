@@ -476,6 +476,55 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.specs.size shouldBe spawnsBefore
     sup.get(key).get.nodes.size shouldBe 2
 
+  it should "not prune rows over target when liveNodeIds is None" in:
+    // The prune gate: without an authoritative membership answer reconcile heals NOTHING, even
+    // when the row count exceeds the target. Pruning on a pid+socket probe alone would let an
+    // apiserver blip (or a node still binding its port) delete rows that back live pods.
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None
+    b.liveIds = None
+    sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val pid = st.snapshot().pools.head.id
+    st.upsertNode(
+      RunningNode(
+        "quack-acme-acme-default-sales-9",
+        key,
+        Role.Dual,
+        "127.0.0.1",
+        21999,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 4
+      ),
+      pid
+    )
+    val spawnsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe spawnsBefore
+    st.listNodes(pid).size shouldBe 3
+
+  it should "keep a live node that is over target (scale owns removing live nodes)" in:
+    // HA staleness guard: this replica's cached distribution can lag a scale-up another replica
+    // just committed, so a LIVE pod beyond target must never be deleted by reconcile. It is warned
+    // about and retained; only scale() removes live nodes.
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val liveId = sup.get(key).get.nodes.head.nodeId
+    val stray  = "quack-acme-acme-default-sales-9"
+    val pid    = st.snapshot().pools.head.id
+    st.upsertNode(
+      RunningNode(stray, key, Role.Dual, "127.0.0.1", 21999, "tok", None, None, Instant.EPOCH,
+        maxConcurrent = 4),
+      pid
+    )
+    b.liveIds = Some(Set(liveId, stray)) // the stray row has a live pod behind it
+    sup.reconcile().unsafeRunSync()
+    st.listNodes(pid).map(_.nodeId).sorted shouldBe List(liveId, stray).sorted
+    b.stopped should not contain stray
+
   "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
     // Repro for "node stuck in draining after drain + rescale": draining a node
     // (force=false) sets draining=true and deletes its store row but leaves the

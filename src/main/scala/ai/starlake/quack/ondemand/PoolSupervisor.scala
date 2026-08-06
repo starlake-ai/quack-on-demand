@@ -601,24 +601,38 @@ final class PoolSupervisor(
           case Some(_) => isReachable(n)
           case None    => live.fold(true)(_.contains(n.nodeId))
 
-        // Heal to target: rows beyond distribution.total are pruned (dead rows first, then newest -
-        // matching scale-down's takeRight convention); rows within target respawn below when their
-        // pod is gone. Pruning needs an authoritative membership answer, so it only runs when the
-        // backend could enumerate the pool (live.isDefined). A pid+socket probe is far weaker
-        // evidence - a local node still binding its port reads as dead - and must never DELETE a
-        // row; those keep the pre-existing respawn treatment.
+        // Heal to target: rows beyond distribution.total are pruned, but ONLY rows whose pod is
+        // authoritatively absent. Two guards, both deliberate:
+        //   1. pruning needs an authoritative membership answer, so it runs only when the backend
+        //      could enumerate the pool (live.isDefined). A pid+socket probe is far weaker evidence
+        //      - a local node still binding its port reads as dead - and must never DELETE a row;
+        //      those keep the pre-existing respawn treatment.
+        //   2. a LIVE node over target is never deleted here. Under HA this replica's cached
+        //      distribution can lag a scale-up another replica just committed, and deleting a
+        //      healthy pod on that stale target would take serving capacity down. A live overage
+        //      therefore leaks by design and is warned about once per pass; scale() owns removing
+        //      live nodes.
+        // Dead rows within target are not pruned either: they respawn in the fold below.
         val target      = state.distribution.total
         val excessCount = if live.isEmpty then 0 else (state.nodes.size - target).max(0)
-        val deadExcess  = state.nodes.filterNot(podAlive).take(excessCount)
-        val moreCount   = excessCount - deadExcess.size
-        val aliveExcess = state.nodes.filter(podAlive).takeRight(moreCount)
-        val excess      = deadExcess ++ aliveExcess
+        val excess      = state.nodes.filterNot(podAlive).take(excessCount)
         val keep        = state.nodes.filterNot(n => excess.exists(_.nodeId == n.nodeId))
+        val liveOverage = excessCount - excess.size
 
-        val pruneIO = excess.foldLeft(IO.unit) { (acc, n) =>
+        val overageWarn =
+          if liveOverage > 0 then
+            IO.delay(
+              logger.warn(
+                s"reconcile: $key has $liveOverage live node(s) beyond target=$target; " +
+                  "excess live nodes retained; scale the pool or stop the strays"
+              )
+            )
+          else IO.unit
+
+        val pruneIO = excess.foldLeft(overageWarn) { (acc, n) =>
           acc *>
             IO.delay(
-              logger.warn(s"reconcile: pruning excess node row $key/${n.nodeId} (target=$target)")
+              logger.warn(s"reconcile: pruning dead node row $key/${n.nodeId} (target=$target)")
             ) *>
             stopNodeBestEffort(key, n.nodeId, "reconcile-prune") *>
             IO.blocking(store.deleteNode(n.nodeId)) *>

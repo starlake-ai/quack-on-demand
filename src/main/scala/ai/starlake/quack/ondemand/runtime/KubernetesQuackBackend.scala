@@ -672,6 +672,7 @@ final class KubernetesQuackBackend(
     try
       val items = client.pods
         .inNamespace(namespace)
+        .withLabel(labelKey, labelValue)
         .withLabel("quack-tenant", key.tenant)
         .withLabel("quack-tenant-db", key.tenantDb)
         .withLabel("quack-pool", key.pool)
