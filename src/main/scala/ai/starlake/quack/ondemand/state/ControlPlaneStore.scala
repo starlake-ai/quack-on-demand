@@ -52,6 +52,11 @@ trait ControlPlaneStore:
   def listNodes(poolId: String): List[RunningNode]
   def deleteNode(nodeId: String): Unit
 
+  /** Delete every node row of `poolId`, including rows no in-memory state knows about (crash
+    * orphans, peer-replica writes). Lets deletePool succeed against the FK RESTRICT.
+    */
+  def deleteNodesForPool(poolId: String): Unit
+
   /** Operator-initiated quarantine on a single node. Distinct from the probe-managed healthy flag:
     * the probe never writes this, only quarantine/unquarantine do.
     */

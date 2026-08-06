@@ -416,6 +416,15 @@ final class PostgresControlPlaneStore(
   def deleteNode(nodeId: String): Unit =
     withConn(c => deleteById(c, "qodstate_node", "node_id", nodeId))
 
+  def deleteNodesForPool(poolId: String): Unit = withConn { c =>
+    val st = c.prepareStatement("DELETE FROM qodstate_node WHERE pool_id = ?")
+    try
+      st.setString(1, poolId)
+      st.executeUpdate()
+      ()
+    finally st.close()
+  }
+
   override def setNodeQuarantined(nodeId: String, quarantined: Boolean): Unit =
     withConn { c =>
       val st = c.prepareStatement("UPDATE qodstate_node SET quarantined = ? WHERE node_id = ?")

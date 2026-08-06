@@ -269,6 +269,25 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.listPools("tdb-1") shouldBe List(pool)
   }
 
+  it should "deleteNodesForPool: sweep every row of the pool and only that pool" in withStore {
+    store =>
+      store.upsertTenant(tenant)
+      store.upsertTenantDb(tenantDb)
+      val poolA = pool.copy(id = "pool-a", name = "pool-a")
+      val poolB = pool.copy(id = "pool-b", name = "pool-b")
+      store.upsertPool(poolA)
+      store.upsertPool(poolB)
+      store.upsertNode(node.copy(nodeId = "node-a1"), "pool-a")
+      store.upsertNode(node.copy(nodeId = "node-a2"), "pool-a")
+      store.upsertNode(node.copy(nodeId = "node-b1"), "pool-b")
+
+      store.deleteNodesForPool("pool-a")
+
+      store.listNodes("pool-a") shouldBe Nil
+      store.listNodes("pool-b").size shouldBe 1
+      noException should be thrownBy store.deletePool("pool-a")
+  }
+
   it should "allow ordered teardown: nodes, then pool, then tenant-db, then tenant" in withStore {
     store =>
       store.upsertTenant(tenant)

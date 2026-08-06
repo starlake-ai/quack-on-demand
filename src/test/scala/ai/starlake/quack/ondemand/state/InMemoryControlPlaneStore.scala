@@ -81,6 +81,12 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     nodes.remove(nodeId)
     nodeIndex.remove(nodeId)
 
+  def deleteNodesForPool(poolId: String): Unit =
+    nodeIndex.collect { case (nid, pid) if pid == poolId => nid }.foreach { nid =>
+      nodes.remove(nid)
+      nodeIndex.remove(nid)
+    }
+
   private val quarantinedNodes = scala.collection.concurrent.TrieMap.empty[String, Unit]
 
   override def setNodeQuarantined(nodeId: String, quarantined: Boolean): Unit =
