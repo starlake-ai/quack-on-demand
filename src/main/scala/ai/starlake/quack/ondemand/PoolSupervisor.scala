@@ -593,38 +593,75 @@ final class PoolSupervisor(
       // pool row but spawns no nodes). Spawn the full distribution via createPool's NodeSpec path.
       spawnFromDistribution(key, state)
     else
-      state.nodes
-        .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
-          acc.flatMap { kept =>
-            if isReachable(n) then backend.adopt(n).as(kept :+ n)
-            else
-              logger.warn(
-                s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
-                  "is dead; respawning"
-              )
-              val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
-              IO.delay(tracker.remove(n.nodeId)) *>
-                startNodeEmitting(key, respawnSpec(key, state, n))
-                  .flatMap { fresh =>
-                    // Re-apply the pre-remove quarantine so an operator quarantine survives a node
-                    // crash. Only automatic reconcile respawn preserves it; restartNode clears it.
-                    val restore: IO[Unit] =
-                      if wasQuarantined then IO.delay(tracker.setQuarantined(fresh.nodeId, true))
-                      else IO.unit
-                    poolIdByKey.get(key) match
-                      case Some(pid) =>
-                        IO.blocking(store.upsertNode(fresh, pid)) *> restore.as(kept :+ fresh)
-                      case None =>
-                        restore.as(kept :+ fresh)
-                  }
-          }
+      backend.liveNodeIds(key).flatMap { live =>
+        // pid-carrying nodes (local backend) keep the existing pid+socket probe; pid-less nodes
+        // (k8s) are live iff the labeled pod list contains them. live=None means the backend can't
+        // enumerate (local mode / apiserver blip): treat as alive, heal nothing.
+        def podAlive(n: RunningNode): Boolean = n.pid match
+          case Some(_) => isReachable(n)
+          case None    => live.fold(true)(_.contains(n.nodeId))
+
+        // Heal to target: rows beyond distribution.total are pruned (dead rows first, then newest -
+        // matching scale-down's takeRight convention); rows within target respawn below when their
+        // pod is gone. Pruning needs an authoritative membership answer, so it only runs when the
+        // backend could enumerate the pool (live.isDefined). A pid+socket probe is far weaker
+        // evidence - a local node still binding its port reads as dead - and must never DELETE a
+        // row; those keep the pre-existing respawn treatment.
+        val target      = state.distribution.total
+        val excessCount = if live.isEmpty then 0 else (state.nodes.size - target).max(0)
+        val deadExcess  = state.nodes.filterNot(podAlive).take(excessCount)
+        val moreCount   = excessCount - deadExcess.size
+        val aliveExcess = state.nodes.filter(podAlive).takeRight(moreCount)
+        val excess      = deadExcess ++ aliveExcess
+        val keep        = state.nodes.filterNot(n => excess.exists(_.nodeId == n.nodeId))
+
+        val pruneIO = excess.foldLeft(IO.unit) { (acc, n) =>
+          acc *>
+            IO.delay(
+              logger.warn(s"reconcile: pruning excess node row $key/${n.nodeId} (target=$target)")
+            ) *>
+            stopNodeBestEffort(key, n.nodeId, "reconcile-prune") *>
+            IO.blocking(store.deleteNode(n.nodeId)) *>
+            IO.delay(tracker.remove(n.nodeId))
         }
-        .flatMap { newNodes =>
-          if newNodes.zip(state.nodes).exists((a, b) => a ne b) then
-            val updated = state.copy(nodes = newNodes)
-            IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
-          else IO.pure(state)
-        }
+
+        pruneIO *>
+          keep
+            .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
+              acc.flatMap { kept =>
+                if podAlive(n) then backend.adopt(n).as(kept :+ n)
+                else
+                  logger.warn(
+                    s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
+                      "is dead; respawning"
+                  )
+                  val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
+                  IO.delay(tracker.remove(n.nodeId)) *>
+                    startNodeEmitting(key, respawnSpec(key, state, n))
+                      .flatMap { fresh =>
+                        // Re-apply the pre-remove quarantine so an operator quarantine survives a
+                        // node crash. Only automatic reconcile respawn preserves it; restartNode
+                        // clears it.
+                        val restore: IO[Unit] =
+                          if wasQuarantined then
+                            IO.delay(tracker.setQuarantined(fresh.nodeId, true))
+                          else IO.unit
+                        poolIdByKey.get(key) match
+                          case Some(pid) =>
+                            IO.blocking(store.upsertNode(fresh, pid)) *> restore.as(kept :+ fresh)
+                          case None =>
+                            restore.as(kept :+ fresh)
+                      }
+              }
+            }
+            .flatMap { newNodes =>
+              val changed = excess.nonEmpty || newNodes.zip(keep).exists((a, b) => a ne b)
+              if changed then
+                val updated = state.copy(nodes = newNodes)
+                IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
+              else IO.pure(state)
+            }
+      }
 
   /** Spawn the full distribution for a pool whose persisted state has no nodes yet. Mirrors
     * createPool's spawn block on an existing PoolState. Cohort placement is recovered from the

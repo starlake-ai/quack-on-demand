@@ -866,6 +866,26 @@ class KubernetesQuackBackendSpec
     val svc = server.getClient.services.inNamespace("default").withName("quack-sa1").get()
     svc.getSpec.getType shouldBe "NodePort"
 
+  it should "liveNodeIds lists only the pool's pods" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true
+    )
+    val keyA = PoolKey("acme", "acme_default", "sales")
+    val keyB = PoolKey("acme", "acme_default", "bi")
+    backend
+      .start(NodeSpec(keyA, "quack-live-a1", Role.Dual, metastore = Map.empty, s3 = Map.empty))
+      .unsafeRunSync()
+    backend
+      .start(NodeSpec(keyB, "quack-live-b1", Role.Dual, metastore = Map.empty, s3 = Map.empty))
+      .unsafeRunSync()
+    backend.liveNodeIds(keyA).unsafeRunSync() shouldBe Some(Set("quack-live-a1"))
+
   it should "leave serviceAccountName unset and default the Service type to ClusterIP" in:
     val backend = new KubernetesQuackBackend(
       client = server.getClient,

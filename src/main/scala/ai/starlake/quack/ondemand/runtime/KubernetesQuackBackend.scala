@@ -664,6 +664,33 @@ final class KubernetesQuackBackend(
   def isAlive(nodeId: String): Boolean =
     Option(client.pods.inNamespace(namespace).withName(nodeId).get()).exists(readPodReady)
 
+  /** One labeled pod-list per pool per reconcile pass (never a per-node GET storm). Terminating
+    * pods don't count as live. Fails OPEN (None) on any apiserver error: reconcile must not prune
+    * or respawn a whole pool because of a transient list failure.
+    */
+  override def liveNodeIds(key: PoolKey): IO[Option[Set[String]]] = IO.blocking {
+    try
+      val items = client.pods
+        .inNamespace(namespace)
+        .withLabel("quack-tenant", key.tenant)
+        .withLabel("quack-tenant-db", key.tenantDb)
+        .withLabel("quack-pool", key.pool)
+        .list()
+        .getItems
+        .asScala
+        .toList
+      Some(
+        items
+          .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
+          .map(_.getMetadata.getName)
+          .toSet
+      )
+    catch
+      case e: Throwable =>
+        logger.warn(s"liveNodeIds($key) failed; keeping current view: ${e.getMessage}")
+        None
+  }
+
   def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
     val pods = client.pods
       .inNamespace(namespace)

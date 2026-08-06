@@ -425,6 +425,57 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     b.specs.size shouldBe before // no respawn attempted for the blocked tenant-db's pool
   }
 
+  // ---------- reconcile: k8s registry drift (pid-less nodes) ----------
+
+  "reconcile on k8s" should "respawn a node whose pod is gone (within target)" in:
+    val (sup, b, _) = freshSupervisorWithStore()
+    b.spawnPid = None // k8s backend never has a pid
+    sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val ids = sup.get(key).get.nodes.map(_.nodeId)
+    b.liveIds = Some(Set(ids.head)) // second pod vanished with its EC2 node
+    val spawnsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe spawnsBefore + 1
+    b.specs.last.nodeId shouldBe ids.last
+    sup.get(key).get.nodes.size shouldBe 2
+
+  it should "prune rows beyond the target distribution" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val liveId = sup.get(key).get.nodes.head.nodeId
+    val pid    = st.snapshot().pools.head.id
+    // Orphan row from a failed scale-down: no pod behind it.
+    st.upsertNode(
+      RunningNode(
+        "quack-acme-acme-default-sales-9",
+        key,
+        Role.Dual,
+        "127.0.0.1",
+        21999,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 4
+      ),
+      pid
+    )
+    b.liveIds = Some(Set(liveId))
+    sup.reconcile().unsafeRunSync()
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(liveId)
+    st.listNodes(pid).map(_.nodeId) shouldBe List(liveId)
+
+  it should "leave k8s nodes alone when liveNodeIds is None (apiserver blip)" in:
+    val (sup, b, _) = freshSupervisorWithStore()
+    b.spawnPid = None
+    b.liveIds = None
+    sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val spawnsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+    b.specs.size shouldBe spawnsBefore
+    sup.get(key).get.nodes.size shouldBe 2
+
   "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
     // Repro for "node stuck in draining after drain + rescale": draining a node
     // (force=false) sets draining=true and deletes its store row but leaves the
