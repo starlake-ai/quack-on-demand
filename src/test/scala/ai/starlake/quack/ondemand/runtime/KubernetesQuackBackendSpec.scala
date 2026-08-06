@@ -275,6 +275,36 @@ class KubernetesQuackBackendSpec
       .withName("qod-fedsql-acme-acme-default-sales")
       .get() shouldBe null
 
+  it should "GC the Secret even when an unmanaged pod wears the pool labels" in:
+    val backend = fedBackend
+    backend
+      .start(
+        NodeSpec(
+          FedKey,
+          "quack-fed-gc-2",
+          Role.Dual,
+          metastore = Map.empty,
+          s3 = Map.empty,
+          extraSetupSql = FedSql
+        )
+      )
+      .unsafeRunSync()
+    // Foreign pod: carries the three quack-* pool labels but NOT the managed-by
+    // label. It must not count as a remaining pool member and keep the Secret alive.
+    val foreignMeta = new ObjectMeta()
+    foreignMeta.setName("foreign-observer")
+    val foreignLabels = new java.util.HashMap[String, String]()
+    foreignLabels.put("quack-tenant", FedKey.tenant)
+    foreignLabels.put("quack-tenant-db", FedKey.tenantDb)
+    foreignLabels.put("quack-pool", FedKey.pool)
+    foreignMeta.setLabels(foreignLabels)
+    val foreign = new Pod()
+    foreign.setMetadata(foreignMeta)
+    server.getClient.pods.inNamespace("default").resource(foreign).create()
+
+    backend.stop(FedKey, "quack-fed-gc-2").unsafeRunSync()
+    server.getClient.secrets.inNamespace("default").withName(FedName).get() shouldBe null
+
   it should "skip the Secret + env entry entirely when extraSetupSql is empty" in:
     val backend = fedBackend
     val node    = backend

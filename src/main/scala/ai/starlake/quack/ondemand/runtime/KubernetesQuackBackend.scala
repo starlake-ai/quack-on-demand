@@ -577,10 +577,13 @@ final class KubernetesQuackBackend(
     // label-list) must not abort a stop whose pod delete already succeeded. The pool key
     // comes from the caller, never from pod labels, so the GC works when the pod is
     // already gone; the filterNots drop the just-deleted pod (apiserver propagation lag)
-    // and Terminating siblings.
+    // and Terminating siblings. Only manager-owned pods count (managed-by label, matching
+    // liveNodeIds / discoverExisting): an unmanaged pod wearing the pool labels must not
+    // keep the Secret alive.
     try
       val remaining = client.pods
         .inNamespace(namespace)
+        .withLabel(labelKey, labelValue)
         .withLabel("quack-tenant", key.tenant)
         .withLabel("quack-tenant-db", key.tenantDb)
         .withLabel("quack-pool", key.pool)

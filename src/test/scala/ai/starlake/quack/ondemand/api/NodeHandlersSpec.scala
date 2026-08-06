@@ -14,7 +14,7 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{ControlPlaneStore, InMemoryControlPlaneStore}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -114,6 +114,64 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     val out    = h
       .restartNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
         None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
+    out.left.toOption.map(_._2.error) shouldBe Some("backend_error")
+
+  "quarantineNode" should "map a raised store error to 502, not a bodyless 500" in:
+    val backend = new StubQuackBackend()
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
+      .unsafeRunSync()
+    // Handler-side store raises on the quarantine write (simulated Postgres outage).
+    val failing = new ControlPlaneStore:
+      val inner = new InMemoryControlPlaneStore()
+      export inner.{setNodeQuarantined as _, *}
+      override def setNodeQuarantined(nodeId: String, quarantined: Boolean): Unit =
+        throw new RuntimeException("pg down")
+    val h      = new NodeHandlers(sup, tracker, failing, StateChangePublisher.noop)
+    val nodeId = sup.list().head.nodes.head.nodeId
+    val out    = h
+      .quarantineNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
+        None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
+    out.left.toOption.map(_._2.error) shouldBe Some("backend_error")
+    // Store-first ordering: the in-memory flag must not have been flipped.
+    tracker.snapshot(nodeId).quarantined shouldBe false
+
+  "setMaxConcurrent" should "map a raised store error to 502, not a bodyless 500" in:
+    val backend = new StubQuackBackend()
+    val tracker = new NodeLoadTracker
+    // Supervisor-side store raises on the node upsert once armed (post pool creation).
+    // Named class: an anonymous instance widens to ControlPlaneStore, hiding the flag.
+    final class FailingUpsertStore extends ControlPlaneStore:
+      val inner = new InMemoryControlPlaneStore()
+      export inner.{upsertNode as _, *}
+      @volatile var failUpsertNode                         = false
+      def upsertNode(n: RunningNode, poolId: String): Unit =
+        if failUpsertNode then throw new RuntimeException("pg down")
+        else inner.upsertNode(n, poolId)
+    val failingStore = new FailingUpsertStore
+    val sup          = new PoolSupervisor(backend, tracker, failingStore)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
+      .unsafeRunSync()
+    failingStore.failUpsertNode = true
+    val h =
+      new NodeHandlers(sup, tracker, new InMemoryControlPlaneStore(), StateChangePublisher.noop)
+    val nodeId = sup.list().head.nodes.head.nodeId
+    val out    = h
+      .setMaxConcurrent(SetMaxConcurrentRequest("acme", "acme_default", "sales", nodeId, 7), None)(
+        (_: String) => None
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)

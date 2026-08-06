@@ -19,6 +19,25 @@ final class NodeHandlers(
 ):
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
+  /** Map a raised store/backend error to a structured 502 instead of tapir's bodyless 500.
+    * `onRaised` runs before the mapping (audit hook); pass () for actions with no audit trail.
+    */
+  private def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: Out[A]): Out[A] =
+    io.attempt.map {
+      case Right(r) => r
+      case Left(t)  =>
+        onRaised
+        Left(
+          (
+            StatusCode.BadGateway,
+            ErrorResponse(
+              "backend_error",
+              s"$describe: ${Option(t.getMessage).getOrElse(t.toString)}"
+            )
+          )
+        )
+    }
+
   private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)(
       f: => IO[A]
   ): Out[A] =
@@ -43,21 +62,23 @@ final class NodeHandlers(
             )
           )
         else
-          sup
-            .setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max)
-            .map {
-              case Some(_) => Right(())
-              case None    =>
-                Left(
-                  (
-                    StatusCode.NotFound,
-                    ErrorResponse(
-                      "not_found",
-                      s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}"
+          raisedToBadGateway(s"setMaxConcurrent of ${req.nodeId} failed")(()) {
+            sup
+              .setMaxConcurrent(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId, req.max)
+              .map {
+                case Some(_) => Right(())
+                case None    =>
+                  Left(
+                    (
+                      StatusCode.NotFound,
+                      ErrorResponse(
+                        "not_found",
+                        s"node ${req.nodeId} not found in ${req.tenant}/${req.tenantDb}/${req.pool}"
+                      )
                     )
                   )
-                )
-            }
+              }
+          }
 
   private def setQuarantine(req: NodeOpRequest, apiKey: Option[String], quarantined: Boolean)(
       scopeOf: String => Option[SessionScope]
@@ -68,13 +89,17 @@ final class NodeHandlers(
         audit.rest(apiKey, "control-plane", action, "denied", target = Some(req.nodeId))
         IO.pure(Left(err))
       case None =>
-        withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
-          IO.blocking(store.setNodeQuarantined(req.nodeId, quarantined)) *>
-            IO.delay {
-              tracker.setQuarantined(req.nodeId, quarantined)
-              publish.topologyChanged()
-              audit.rest(apiKey, "control-plane", action, "ok", target = Some(req.nodeId))
-            }
+        raisedToBadGateway(s"$action of ${req.nodeId} failed")(
+          audit.rest(apiKey, "control-plane", action, "error", target = Some(req.nodeId))
+        ) {
+          withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {
+            IO.blocking(store.setNodeQuarantined(req.nodeId, quarantined)) *>
+              IO.delay {
+                tracker.setQuarantined(req.nodeId, quarantined)
+                publish.topologyChanged()
+                audit.rest(apiKey, "control-plane", action, "ok", target = Some(req.nodeId))
+              }
+          }
         }
 
   def quarantineNode(req: NodeOpRequest, apiKey: Option[String])(
@@ -99,33 +124,25 @@ final class NodeHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).attempt.map {
-          case Right(Right(())) =>
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.NodeRestart,
-              "ok",
-              target = Some(req.nodeId)
-            )
-            Right(())
-          case Right(Left(err)) =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
-          case Left(t) =>
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.NodeRestart,
-              "error",
-              target = Some(req.nodeId)
-            )
-            Left(
-              (
-                StatusCode.BadGateway,
-                ErrorResponse(
-                  "backend_error",
-                  s"restart of ${req.nodeId} failed: ${Option(t.getMessage).getOrElse(t.toString)}"
-                )
+        raisedToBadGateway(s"restart of ${req.nodeId} failed")(
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.NodeRestart,
+            "error",
+            target = Some(req.nodeId)
+          )
+        ) {
+          sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).map {
+            case Right(()) =>
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.NodeRestart,
+                "ok",
+                target = Some(req.nodeId)
               )
-            )
+              Right(())
+            case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          }
         }
