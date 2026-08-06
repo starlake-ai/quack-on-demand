@@ -619,6 +619,54 @@ class KubernetesQuackBackendSpec
     // ... but the shared federation Secret survives for the healthy sibling.
     server.getClient.secrets.inNamespace("default").withName(FedName).get() should not be null
 
+  // ---------- 409-on-create retry + created-only rollback ----------
+
+  it should "retry pod create while a same-name pod is terminating" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      stopTimeoutSec = 5
+    )
+    val key  = PoolKey("acme", "acme_default", "sales")
+    val spec =
+      NodeSpec(key, "quack-race-1", Role.Dual, metastore = Map("pgHost" -> "pg"), s3 = Map.empty)
+    // Incumbent occupies the deterministic name.
+    backend.start(spec).unsafeRunSync()
+    // Simulate the apiserver clearing the Terminating twin ~1s into the retry poll.
+    val reaper = new Thread(() => {
+      Thread.sleep(1000)
+      server.getClient.pods.inNamespace("default").withName("quack-race-1").delete()
+      ()
+    })
+    reaper.start()
+    noException should be thrownBy backend.start(spec).unsafeRunSync()
+    reaper.join()
+
+  it should "not delete a pod it did not create when start fails" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      stopTimeoutSec = 1
+    )
+    val key  = PoolKey("acme", "acme_default", "sales")
+    val spec =
+      NodeSpec(key, "quack-race-2", Role.Dual, metastore = Map("pgHost" -> "pg"), s3 = Map.empty)
+    backend.start(spec).unsafeRunSync() // incumbent, stays put
+    // Second start: create 409s, incumbent never goes away, retry re-409s -> start fails.
+    an[Exception] should be thrownBy backend.start(spec).unsafeRunSync()
+    // The incumbent pod must survive - cleanup only touches what THIS call created.
+    server.getClient.pods.inNamespace("default").withName("quack-race-2").get() should not be null
+
   // ---------- per-pool resources + gated pod template ----------
 
   private val ns       = "default"

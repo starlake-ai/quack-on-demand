@@ -359,7 +359,10 @@ final class KubernetesQuackBackend(
     svc
 
   def start(spec: NodeSpec): IO[RunningNode] =
-    val run = IO.blocking {
+    // Which resources THIS call created, so partial-start cleanup never tears down a
+    // Terminating incumbent's resources after a 409'd create.
+    val created = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+    val run     = IO.blocking {
       val token = LocalQuackBackend.randomToken()
       tokens.put(spec.nodeId, token)
 
@@ -368,15 +371,24 @@ final class KubernetesQuackBackend(
       // ensureTokenSecret also makes the bearer string recoverable after
       // manager restart.
       ensureTokenSecret(spec.nodeId, token)
+      created.add("tokenSecret")
       if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
-      if spec.objectStoreSql.nonEmpty then ensureObjectStoreSecret(spec.nodeId, spec.objectStoreSql)
+      if spec.objectStoreSql.nonEmpty then
+        ensureObjectStoreSecret(spec.nodeId, spec.objectStoreSql)
+        created.add("objectStoreSecret")
 
-      val pod     = buildPod(spec, token)
-      val created = client.pods.inNamespace(namespace).resource(pod).create()
-      waitReady(created)
+      val pod        = buildPod(spec, token)
+      val createdPod = createPodRetrying409(pod, spec.nodeId)
+      created.add("pod")
+      waitReady(createdPod)
 
       val svc = buildService(spec)
-      client.services.inNamespace(namespace).resource(svc).create()
+      // Out-of-band pod death (e.g. an EC2 node-group replacement) leaves the Service
+      // behind even though the Pod is gone; a respawn on the same deterministic nodeId
+      // must not 409 on a Service that's still there, so this create is create-or-replace
+      // just like the ensure*Secret helpers below.
+      client.services.inNamespace(namespace).resource(svc).createOr(o => o.update())
+      created.add("service")
 
       RunningNode(
         nodeId = spec.nodeId,
@@ -398,8 +410,25 @@ final class KubernetesQuackBackend(
     // nodeId, and the next reconcile respawn hits an already-exists
     // conflict on pod create -- the pool never recovers.
     run
-      .onError { case e => cleanupPartialStart(spec, e.toString) }
-      .onCancel(cleanupPartialStart(spec, "start cancelled"))
+      .onError { case e => cleanupPartialStart(spec, e.toString, created) }
+      .onCancel(cleanupPartialStart(spec, "start cancelled", created))
+
+  /** Create the pod, absorbing one 409 conflict against a Terminating twin: poll (bounded by
+    * `stopTimeoutSec`) until the old pod object is gone, then create again. A second failure
+    * propagates.
+    */
+  private def createPodRetrying409(pod: Pod, nodeId: String): Pod =
+    try client.pods.inNamespace(namespace).resource(pod).create()
+    catch
+      case e: io.fabric8.kubernetes.client.KubernetesClientException if e.getCode == 409 =>
+        logger.warn(
+          s"pod $nodeId create conflicted (terminating twin?); waiting up to ${stopTimeoutSec}s"
+        )
+        val deadline = System.nanoTime() + stopTimeoutSec.toLong * 1000000000L
+        while client.pods.inNamespace(namespace).withName(nodeId).get() != null
+          && System.nanoTime() < deadline
+        do Thread.sleep(500)
+        client.pods.inNamespace(namespace).resource(pod).create()
 
   private def waitReady(p: Pod): Unit =
     // fabric8's waitUntilCondition sits on a watch + readiness predicate
@@ -423,31 +452,47 @@ final class KubernetesQuackBackend(
     *
     * Deletes the Service, the Pod, the per-pod token Secret and the per-pod object-store Secret by
     * the exact names this call created (all derived from `spec.nodeId`, matching [[buildService]] /
-    * [[buildPod]] / [[tokenSecretNameFor]] / [[objectStoreSecretNameFor]]), so a subsequent
-    * reconcile respawns cleanly instead of colliding with an orphaned pod on the deterministic
-    * nodeId. Every delete is swallowed and logged so cleanup can never mask the original spawn
-    * failure.
+    * [[buildPod]] / [[tokenSecretNameFor]] / [[objectStoreSecretNameFor]]), gated by the `created`
+    * set this call's [[start]] populated as each resource actually came into existence. That gate
+    * is what keeps a 409'd pod create (Task 4: a Terminating incumbent still occupying the
+    * deterministic name) from having its rollback delete the incumbent's own pod/service/secrets --
+    * this call never created them, so `created` never marks them, so cleanup leaves them alone.
+    * Every delete is swallowed and logged so cleanup can never mask the original spawn failure.
     *
-    * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left in place: it is shared
-    * by every pod of the pool, so deleting it on one node's failure could break sibling pods that
-    * reference it. It is GC'd by [[stop]] when the pool's last pod goes away.
+    * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left out of the `created`
+    * gate and never deleted here: it is shared by every pod of the pool, so deleting it on one
+    * node's failure could break sibling pods that reference it. It is GC'd by [[stop]] when the
+    * pool's last pod goes away.
     */
-  private def cleanupPartialStart(spec: NodeSpec, reason: String): IO[Unit] = IO.blocking {
+  private def cleanupPartialStart(
+      spec: NodeSpec,
+      reason: String,
+      created: java.util.Set[String]
+  ): IO[Unit] = IO.blocking {
+    val mine = created.asScala.toSet
     logger.warn(
-      s"start() for pod ${spec.nodeId} failed ($reason); rolling back pod/service/token secret/object-store secret"
+      s"start() for pod ${spec.nodeId} failed ($reason); rolling back created resources: " +
+        mine.mkString(", ")
     )
-    deleteQuietly("service", spec.nodeId) {
-      client.services.inNamespace(namespace).withName(spec.nodeId).delete()
-    }
-    deleteQuietly("pod", spec.nodeId) {
-      client.pods.inNamespace(namespace).withName(spec.nodeId).delete()
-    }
-    deleteQuietly("token secret", tokenSecretNameFor(spec.nodeId)) {
-      client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(spec.nodeId)).delete()
-    }
-    deleteQuietly("object-store secret", objectStoreSecretNameFor(spec.nodeId)) {
-      client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(spec.nodeId)).delete()
-    }
+    if mine("service") then
+      deleteQuietly("service", spec.nodeId) {
+        client.services.inNamespace(namespace).withName(spec.nodeId).delete()
+      }
+    if mine("pod") then
+      deleteQuietly("pod", spec.nodeId) {
+        client.pods.inNamespace(namespace).withName(spec.nodeId).delete()
+      }
+    if mine("tokenSecret") then
+      deleteQuietly("token secret", tokenSecretNameFor(spec.nodeId)) {
+        client.secrets.inNamespace(namespace).withName(tokenSecretNameFor(spec.nodeId)).delete()
+      }
+    if mine("objectStoreSecret") then
+      deleteQuietly("object-store secret", objectStoreSecretNameFor(spec.nodeId)) {
+        client.secrets
+          .inNamespace(namespace)
+          .withName(objectStoreSecretNameFor(spec.nodeId))
+          .delete()
+      }
     tokens.remove(spec.nodeId)
     ()
   }
