@@ -328,6 +328,30 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     st.snapshot().pools shouldBe Nil
     st.snapshot().nodes shouldBe Nil
 
+  it should "sweep stray node rows the in-memory state never saw on deletePool" in:
+    val (sup, _, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val pid = st.snapshot().pools.head.id
+    // Crash-orphan: row exists, no pod, in-memory PoolState never saw it.
+    st.upsertNode(
+      RunningNode(
+        "quack-acme-acme-default-sales-9",
+        key,
+        Role.Dual,
+        "127.0.0.1",
+        21999,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 4
+      ),
+      pid
+    )
+    noException should be thrownBy sup.deletePool(key, force = true).unsafeRunSync()
+    st.snapshot().pools shouldBe Nil
+    st.snapshot().nodes shouldBe Nil
+
   // ---------- restartNode ----------
 
   "PoolSupervisor.restartNode" should "stop and respawn the node with the same id and clear quarantine" in {

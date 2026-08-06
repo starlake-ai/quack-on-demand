@@ -252,9 +252,17 @@ object ManifestImporter:
         )
         localDbs.values.toList.foreach { d =>
           if !keepDbNames.contains(d.name) then
+            // Pools do NOT cascade on the DB side (FK RESTRICT), so sweep them
+            // (and their node rows) before the tenant-db row itself.
+            poolsByDb
+              .get(d.id)
+              .foreach(_.values.toList.foreach { p =>
+                store.deleteNodesForPool(p.id)
+                store.deletePool(p.id)
+              })
             store.deleteTenantDb(d.id)
             localDbs.remove(d.name)
-            poolsByDb.remove(d.id) // cascades on the DB side
+            poolsByDb.remove(d.id)
         }
         mt.tenantDbs.foreach { mtd =>
           TenantDbKind.fromWire(mtd.kind) match
@@ -295,6 +303,7 @@ object ManifestImporter:
           val localPools = poolsByDb.getOrElseUpdate(d.id, scala.collection.mutable.Map.empty)
           localPools.values.toList.foreach { p =>
             if !keepPoolNames.contains(p.name) then
+              store.deleteNodesForPool(p.id)
               store.deletePool(p.id)
               localPools.remove(p.name)
           }

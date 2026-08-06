@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestImporterApplySpec.scala
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{PoolKey, Role, RunningNode, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import at.favre.lib.crypto.bcrypt.BCrypt
 import org.scalatest.flatspec.AnyFlatSpec
@@ -188,4 +188,97 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     res.swap.getOrElse(Nil).mkString("\n") should include("azure_account_key")
     // The offending row was NOT persisted.
     s.listTenantDbs("acme") shouldBe empty
+  }
+
+  it should "sweep node rows when an import drops a pool" in {
+    val s = new InMemoryControlPlaneStore()
+    // Seed: tenant + tenant-db + pool + one node row, as if a manager had run.
+    val m1 = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          tenantDbs = List(ManifestTenantDb(name = "acme_default", kind = "memory")),
+          pools = List(
+            ManifestPool(
+              name = "sales",
+              tenantDb = "acme_default",
+              roleDistribution = ManifestRoleDistribution(0, 0, 1)
+            )
+          )
+        )
+      )
+    )
+    ManifestImporter.apply(m1, s) shouldBe Right(())
+    val db  = s.snapshot().tenantDbs.find(_.name == "acme_default").get
+    val pid = s.listPools(db.id).head.id
+    s.upsertNode(
+      RunningNode(
+        "quack-acme-acme-default-sales-1",
+        PoolKey("acme", "acme_default", "sales"),
+        Role.Dual,
+        "127.0.0.1",
+        21900,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 4
+      ),
+      pid
+    )
+    // Re-import WITHOUT the pool: rows must be swept, not stranded or FK-blocked.
+    val m2 = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          tenantDbs = List(ManifestTenantDb(name = "acme_default", kind = "memory"))
+        )
+      )
+    )
+    ManifestImporter.apply(m2, s) shouldBe Right(())
+    s.listNodes(pid) shouldBe Nil
+    s.snapshot().pools shouldBe Nil
+  }
+
+  it should "delete a dropped tenant-db's pools (and their node rows) before the tenant-db row" in {
+    val s  = new InMemoryControlPlaneStore()
+    val m1 = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          tenantDbs = List(ManifestTenantDb(name = "acme_default", kind = "memory")),
+          pools = List(
+            ManifestPool(
+              name = "sales",
+              tenantDb = "acme_default",
+              roleDistribution = ManifestRoleDistribution(0, 0, 1)
+            )
+          )
+        )
+      )
+    )
+    ManifestImporter.apply(m1, s) shouldBe Right(())
+    val db  = s.snapshot().tenantDbs.find(_.name == "acme_default").get
+    val pid = s.listPools(db.id).head.id
+    s.upsertNode(
+      RunningNode(
+        "quack-acme-acme-default-sales-1",
+        PoolKey("acme", "acme_default", "sales"),
+        Role.Dual,
+        "127.0.0.1",
+        21900,
+        "tok",
+        None,
+        None,
+        Instant.EPOCH,
+        maxConcurrent = 4
+      ),
+      pid
+    )
+    // Re-import with the tenant but WITHOUT the tenant-db: today this hits the
+    // tenant-db FK because pools do NOT cascade.
+    val m2 = base.copy(tenants = List(ManifestTenant(name = "acme")))
+    ManifestImporter.apply(m2, s) shouldBe Right(())
+    s.snapshot().tenantDbs shouldBe Nil
+    s.snapshot().pools shouldBe Nil
   }

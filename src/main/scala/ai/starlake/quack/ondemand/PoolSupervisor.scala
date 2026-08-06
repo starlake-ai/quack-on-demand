@@ -1750,6 +1750,9 @@ final class PoolSupervisor(
           ) *>
           IO.blocking {
             poolIdByKey.get(key).foreach { pid =>
+              // Sweep DB-side rows the in-memory state never saw (crash orphans, peer
+              // replicas) so the pool-row delete can't hit the FK RESTRICT.
+              store.deleteNodesForPool(pid)
               store.deletePool(pid)
               poolRows.remove(pid)
             }
