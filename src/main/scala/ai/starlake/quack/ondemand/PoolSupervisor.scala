@@ -524,6 +524,20 @@ final class PoolSupervisor(
     backend.stop(key, nodeId) <*
       IO(events.emit(ManagerEvent.NodeStopped(key.tenant, key.tenantDb, key.pool, nodeId, reason)))
 
+  /** [[stopNodeEmitting]] that degrades a backend failure to a loud warn instead of raising:
+    * teardown paths must never let a dead pod (or an apiserver blip) block registry cleanup. The
+    * row deletion that follows at every call site stays strict - Postgres failures surface.
+    */
+  private def stopNodeBestEffort(key: PoolKey, nodeId: String, reason: String): IO[Unit] =
+    stopNodeEmitting(key, nodeId, reason).handleErrorWith { t =>
+      IO.delay(
+        logger.warn(
+          s"stop of $key/$nodeId failed: ${t.getMessage}; " +
+            "removing registry row anyway (possible leaked pod)"
+        )
+      )
+    }
+
   private def respawnSpec(key: PoolKey, state: PoolState, n: RunningNode): NodeSpec =
     specFromState(key, state, n.nodeId, n.role, placementForNodeId(key, n.nodeId), n.maxConcurrent)
 
@@ -1559,7 +1573,7 @@ final class PoolSupervisor(
           val stopRemoved =
             if force then
               toRemove.foldLeft(IO.unit)((acc, n) =>
-                acc *> stopNodeEmitting(key, n.nodeId, "scale-down")
+                acc *> stopNodeBestEffort(key, n.nodeId, "scale-down")
               )
             else
               toRemove.foldLeft(IO.unit) { (acc, n) =>
@@ -1722,7 +1736,7 @@ final class PoolSupervisor(
         val stopAll =
           if force then
             state.nodes.foldLeft(IO.unit)((acc, n) =>
-              acc *> stopNodeEmitting(key, n.nodeId, "pool-delete")
+              acc *> stopNodeBestEffort(key, n.nodeId, "pool-delete")
             )
           else
             state.nodes.foldLeft(IO.unit) { (acc, n) =>
@@ -1746,7 +1760,7 @@ final class PoolSupervisor(
           }
 
   private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
-    stopNodeEmitting(key, n.nodeId, reason)
+    stopNodeBestEffort(key, n.nodeId, reason)
 
   /** Drain-stop then forget each node (mark draining, [[drainAndStop]] with reason "suspend", then
     * delete the store row + tracker entry). Shared by [[suspendPool]] and reconcile's

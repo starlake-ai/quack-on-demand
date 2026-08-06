@@ -60,19 +60,29 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     * metastore that PoolSupervisor passes through. */
   private final class CapturingBackend extends QuackBackend:
     private val nodes = TrieMap.empty[String, RunningNode]
-    val specs   = scala.collection.mutable.ListBuffer.empty[NodeSpec]
-    val stopped = scala.collection.mutable.Set.empty[String]
+    val specs     = scala.collection.mutable.ListBuffer.empty[NodeSpec]
+    val stopped   = scala.collection.mutable.Set.empty[String]
+    /** Node ids whose stop raises (simulated apiserver failure). */
+    val failStops = scala.collection.mutable.Set.empty[String]
+    /** pid stamped on started nodes; None simulates the k8s backend. */
+    var spawnPid: Option[Long] = Some(1L)
+    /** liveNodeIds answer; None = cannot enumerate (default trait behavior). */
+    var liveIds: Option[Set[String]] = None
+
     def start(spec: NodeSpec): IO[RunningNode] = IO {
       specs += spec
       val n = RunningNode(spec.nodeId, spec.poolKey, spec.role,
         "127.0.0.1", 21000 + nodes.size, "tok-" + spec.nodeId,
-        Some(1L), None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
+        spawnPid, None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
       nodes.put(spec.nodeId, n); n
     }
-    def stop(key: PoolKey, id: String): IO[Unit] = IO { stopped += id; nodes.remove(id); () }
+    def stop(key: PoolKey, id: String): IO[Unit] =
+      if failStops.contains(id) then IO.raiseError(new RuntimeException(s"apiserver 503 stopping $id"))
+      else IO { stopped += id; nodes.remove(id); () }
     def isAlive(id: String): Boolean = nodes.contains(id)
     def discoverExisting(): IO[List[RunningNode]] = IO.pure(nodes.values.toList)
     def cleanup(): IO[Unit] = IO { nodes.clear() }
+    override def liveNodeIds(key: PoolKey): IO[Option[Set[String]]] = IO.pure(liveIds)
 
   private def fakeBackend(): QuackBackend = new CapturingBackend
 
@@ -100,6 +110,19 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       lockdownEnabled = lockdownEnabled
     )
     (sup, b)
+
+  /** Like freshSupervisorWithBackend but also hands back the store, for tests that seed or
+    * inspect rows the in-memory supervisor state never saw. */
+  private def freshSupervisorWithStore()
+      : (PoolSupervisor, CapturingBackend, InMemoryControlPlaneStore) =
+    val b   = new CapturingBackend
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, st, lockdownEnabled = false)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    (sup, b, st)
 
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 
@@ -282,6 +305,27 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 1, 1)).unsafeRunSync()
     sup.deletePool(key, force = true).unsafeRunSync()
     sup.get(key) shouldBe None
+
+  // ---------- best-effort teardown ----------
+
+  "best-effort teardown" should "delete the node row even when backend.stop fails on scale-down" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val victim = sup.get(key).get.nodes.last.nodeId
+    b.failStops += victim
+    val after = sup.scale(key, 1, RoleDistribution(0, 0, 1), force = true).unsafeRunSync()
+    after.size shouldBe 1
+    val pid = st.snapshot().pools.head.id
+    st.listNodes(pid).map(_.nodeId) should not contain victim
+
+  it should "delete the pool even when backend.stop fails" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.failStops += sup.get(key).get.nodes.head.nodeId
+    noException should be thrownBy sup.deletePool(key, force = true).unsafeRunSync()
+    sup.list() shouldBe Nil
+    st.snapshot().pools shouldBe Nil
+    st.snapshot().nodes shouldBe Nil
 
   // ---------- restartNode ----------
 
