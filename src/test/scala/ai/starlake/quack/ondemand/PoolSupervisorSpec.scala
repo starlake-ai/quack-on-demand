@@ -525,6 +525,42 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     st.listNodes(pid).map(_.nodeId).sorted shouldBe List(liveId, stray).sorted
     b.stopped should not contain stray
 
+  "reconcile heal" should
+    "read the target from the persisted pool row, not a stale in-memory distribution" in:
+    // Regression: reconcilePoolUnlocked's in-lock refresh re-read node rows from the store but
+    // took `distribution` from the in-memory `pools` cache. A peer replica's fresh scale-up (or
+    // any write this replica's cache hasn't caught up to via LISTEN/NOTIFY) leaves this replica
+    // computing a too-small target, so the heal below prunes a dead row the true target would
+    // have respawned instead -- self-heal never fires, the pool stays under target.
+    val (sup, b, st) = freshSupervisorWithStore()
+    b.spawnPid = None // k8s-style: liveNodeIds is the only membership signal
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync() // in-memory distribution total=1
+    val firstNodeId = sup.get(key).get.nodes.head.nodeId
+    val pid          = st.snapshot().pools.head.id
+
+    // Simulate the stale-low in-memory cache: the persisted row now carries total=2 (as a peer's
+    // scale-up would leave it), but `pools` in this process still has the createPool-time total=1.
+    val persistedRow = st.snapshot().pools.head
+    st.upsertPool(persistedRow.copy(size = 2, distribution = RoleDistribution(0, 0, 2)))
+
+    // A second node row exists (matching the scaled-up target) but its pod is dead.
+    val secondNodeId = PoolSupervisor.nodeId(key, 2)
+    st.upsertNode(
+      RunningNode(secondNodeId, key, Role.Dual, "127.0.0.1", 21998, "tok", None, None,
+        Instant.EPOCH, maxConcurrent = 4),
+      pid
+    )
+    b.liveIds = Some(Set(firstNodeId)) // second node is dead
+
+    val specsBefore = b.specs.size
+    sup.reconcile().unsafeRunSync()
+
+    // GREEN (fixed): target=2 read from the persisted row, so the dead second row is within
+    // target and gets RESPAWNED, not pruned.
+    b.specs.size shouldBe specsBefore + 1
+    st.listNodes(pid).size shouldBe 2
+    sup.get(key).get.nodes.size shouldBe 2
+
   "PoolSupervisor.scale" should "clear a stale draining flag when a drained node id is respawned" in {
     // Repro for "node stuck in draining after drain + rescale": draining a node
     // (force=false) sets draining=true and deletes its store row but leaves the

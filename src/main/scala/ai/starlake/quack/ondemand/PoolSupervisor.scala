@@ -462,8 +462,20 @@ final class PoolSupervisor(
       val current = pools.get(key).getOrElse(state)
       poolId(key) match
         case Some(pid) =>
-          val rows = store.listNodes(pid)
-          if rows.nonEmpty then current.copy(nodes = rows) else current
+          val rows      = store.listNodes(pid)
+          val withNodes = if rows.nonEmpty then current.copy(nodes = rows) else current
+          // The distribution above rides the in-memory `pools` cache, which can lag the
+          // persisted row (stale-low on a peer replica's fresh scale-up, or after a restore
+          // race). A too-small cached distribution makes the heal below compute a too-small
+          // target, pruning a dead row the true target would have respawned instead. Overlay
+          // the authoritative distribution from the store when the pool's row is found; keep
+          // the cached value otherwise (InMemory / no-row cases).
+          val storeRow =
+            poolRows
+              .get(pid)
+              .map(_.tenantDbId)
+              .flatMap(tid => store.listPools(tid).find(_.id == pid))
+          storeRow.fold(withNodes)(row => withNodes.copy(distribution = row.distribution))
         case None => current
     }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
 
