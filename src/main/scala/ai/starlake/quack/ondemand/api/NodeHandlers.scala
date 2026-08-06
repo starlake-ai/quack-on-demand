@@ -21,9 +21,11 @@ final class NodeHandlers(
 
   /** Map a raised store/backend error to a structured 502 instead of tapir's bodyless 500.
     * `onRaised` runs before the mapping (audit hook); pass () for actions with no audit trail.
+    * Post-mutation raises (audit sink, topology publish) also land here: a 502 for an applied
+    * mutation beats the bodyless 500 it replaced.
     */
-  private def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: Out[A]): Out[A] =
-    io.attempt.map {
+  private def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: => Out[A]): Out[A] =
+    IO.defer(io).attempt.map {
       case Right(r) => r
       case Left(t)  =>
         onRaised
@@ -89,7 +91,9 @@ final class NodeHandlers(
         audit.rest(apiKey, "control-plane", action, "denied", target = Some(req.nodeId))
         IO.pure(Left(err))
       case None =>
-        raisedToBadGateway(s"$action of ${req.nodeId} failed")(
+        raisedToBadGateway(
+          s"${if quarantined then "quarantine" else "unquarantine"} of ${req.nodeId} failed"
+        )(
           audit.rest(apiKey, "control-plane", action, "error", target = Some(req.nodeId))
         ) {
           withNode(req.tenant, req.tenantDb, req.pool, req.nodeId) {

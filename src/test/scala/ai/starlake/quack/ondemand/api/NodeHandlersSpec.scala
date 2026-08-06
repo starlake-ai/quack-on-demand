@@ -119,6 +119,16 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
     out.left.toOption.map(_._2.error) shouldBe Some("backend_error")
 
+  it should "keep NotFound as 404 for an unknown node (never the raised arm)" in:
+    val (sup, _, h) = fixture
+    val out         = h
+      .restartNode(NodeOpRequest("acme", "acme_default", "sales", "nope"), None)((_: String) =>
+        None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
+    out.left.toOption.map(_._2.error) shouldBe Some("not_found")
+
   "quarantineNode" should "map a raised store error to 502, not a bodyless 500" in:
     val backend = new StubQuackBackend()
     val tracker = new NodeLoadTracker
