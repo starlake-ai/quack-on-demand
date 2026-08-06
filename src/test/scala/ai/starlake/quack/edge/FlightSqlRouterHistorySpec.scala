@@ -53,9 +53,9 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
     }
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())

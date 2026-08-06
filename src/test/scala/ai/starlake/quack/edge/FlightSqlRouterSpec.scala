@@ -68,9 +68,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
@@ -297,9 +297,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
     val tracker = new NodeLoadTracker
     new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
 
@@ -414,9 +414,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
@@ -598,9 +598,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
     val sup2 = new PoolSupervisor(
       backend2,
       new NodeLoadTracker,
@@ -696,9 +696,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
     val tracker = new NodeLoadTracker
     val sup     = new ai.starlake.quack.ondemand.PoolSupervisor(
       backend,
@@ -895,9 +895,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tkr  = new NodeLoadTracker
     val sup2 = new PoolSupervisor(bknd, tkr, new InMemoryControlPlaneStore())
@@ -950,9 +950,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
@@ -1083,9 +1083,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
@@ -1238,9 +1238,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             n.put(s.nodeId, r); r
           }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
@@ -1467,9 +1467,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         n.put(s.nodeId, r); r
       }
       def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
-      def isAlive(id: String) = n.contains(id)
-      def discoverExisting()  = IO.pure(n.values.toList)
-      def cleanup()           = IO(n.clear())
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:

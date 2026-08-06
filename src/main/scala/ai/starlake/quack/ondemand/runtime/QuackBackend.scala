@@ -27,8 +27,8 @@ trait QuackBackend:
     */
   def adopt(node: RunningNode): IO[Unit] = IO.unit
 
-  /** Node ids with a live runtime for `key`, or None when the backend cannot enumerate (local
-    * mode, or a transient apiserver error). Reconcile treats None as "fall back to the pid/socket
-    * probe" and never prunes or respawns on it.
+  /** Node ids with a live runtime for `key`, or None when the backend cannot enumerate (local mode,
+    * or a transient apiserver error). Reconcile treats None as "fall back to the pid/socket probe"
+    * and never prunes or respawns on it.
     */
   def liveNodeIds(key: PoolKey): IO[Option[Set[String]]] = IO.pure(None)
