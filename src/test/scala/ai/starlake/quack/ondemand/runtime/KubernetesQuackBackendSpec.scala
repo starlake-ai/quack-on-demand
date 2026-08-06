@@ -44,6 +44,20 @@ class KubernetesQuackBackendSpec
       .withName(node.podName.get)
       .get() should not be null
 
+  it should "stop() waits out the pod delete and still succeeds when everything is already gone" in:
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = "default",
+      image = "starlakeai/quack:test",
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      stopTimeoutSec = 2
+    )
+    val key = PoolKey("acme", "acme_default", "sales")
+    noException should be thrownBy backend.stop(key, "quack-never-existed").unsafeRunSync()
+
   it should "forward QOD_S3_* env vars from the manager process to the spawned pod" in:
     val fakeEnv = Map(
       "QOD_S3_ENDPOINT"          -> "http://seaweedfs:8333",

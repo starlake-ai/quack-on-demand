@@ -43,7 +43,8 @@ object BootFactories extends LazyLogging:
         podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
         serviceAccount = mgrCfg.k8s.serviceAccount,
         serviceType = mgrCfg.k8s.serviceType,
-        runAsUser = mgrCfg.k8s.runAsUser
+        runAsUser = mgrCfg.k8s.runAsUser,
+        stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
       )
     case other => sys.error(s"unknown runtime: $other")
 

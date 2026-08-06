@@ -43,7 +43,10 @@ final class KubernetesQuackBackend(
     serviceType: String = "ClusterIP",
     // Pod-level runAsUser/fsGroup for the default security posture (see buildPod). A pod template's
     // own securityContext.runAsUser (if set) wins over this default.
-    runAsUser: Long = 1000L
+    runAsUser: Long = 1000L,
+    // Bound on stop()'s wait for the pod object to actually disappear (and on start()'s
+    // poll for a Terminating twin to clear before retrying a 409'd create).
+    stopTimeoutSec: Int = 60
 ) extends QuackBackend:
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -460,7 +463,19 @@ final class KubernetesQuackBackend(
 
   def stop(key: PoolKey, nodeId: String): IO[Unit] = IO.blocking {
     client.services.inNamespace(namespace).withName(nodeId).delete()
-    client.pods.inNamespace(namespace).withName(nodeId).delete()
+    // withTimeout makes fabric8 wait until the pod object is actually gone, so a
+    // delete-then-recreate roll (restartNode) can't 409 against its own Terminating
+    // twin. On timeout we proceed: the caller's teardown is best-effort and start()
+    // retries a 409'd create (Task 4).
+    try
+      client.pods
+        .inNamespace(namespace)
+        .withName(nodeId)
+        .withTimeout(stopTimeoutSec.toLong, java.util.concurrent.TimeUnit.SECONDS)
+        .delete()
+    catch
+      case _: io.fabric8.kubernetes.client.KubernetesClientTimeoutException =>
+        logger.warn(s"pod $nodeId still terminating after ${stopTimeoutSec}s; proceeding")
     // Token and object-store Secrets both track the pod 1:1, so we can drop
     // them right away. Idempotent on missing (e.g. an externally-stopped pod
     // whose Secrets a previous reconcile already cleaned up, or a pool with
@@ -469,27 +484,29 @@ final class KubernetesQuackBackend(
     client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(nodeId)).delete()
     tokens.remove(nodeId)
 
-    // If this was the last live pod for the pool, GC the federation Secret.
-    // The pool key comes from the caller, never from the pod's labels: the pod
-    // may already be gone (node-group replacement) and the Secret must still
-    // be GC'd. Filter out the just-deleted pod (still in the list if the
-    // apiserver hasn't propagated yet) and anything in Terminating state.
-    val remaining = client.pods
-      .inNamespace(namespace)
-      .withLabel("quack-tenant", key.tenant)
-      .withLabel("quack-tenant-db", key.tenantDb)
-      .withLabel("quack-pool", key.pool)
-      .list()
-      .getItems
-      .asScala
-      .toList
-      .filterNot(p => p.getMetadata.getName == nodeId)
-      .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
-    if remaining.isEmpty then
-      client.secrets
+    // Federation-Secret GC is pure bookkeeping: a failure here (apiserver blip on the
+    // label-list) must not abort a stop whose pod delete already succeeded.
+    try
+      val remaining = client.pods
         .inNamespace(namespace)
-        .withName(secretNameFor(key))
-        .delete()
+        .withLabel("quack-tenant", key.tenant)
+        .withLabel("quack-tenant-db", key.tenantDb)
+        .withLabel("quack-pool", key.pool)
+        .list()
+        .getItems
+        .asScala
+        .toList
+        .filterNot(p => p.getMetadata.getName == nodeId)
+        .filterNot(p => Option(p.getMetadata.getDeletionTimestamp).exists(_.nonEmpty))
+      if remaining.isEmpty then
+        client.secrets
+          .inNamespace(namespace)
+          .withName(secretNameFor(key))
+          .delete()
+        ()
+    catch
+      case e: Throwable =>
+        logger.warn(s"federation-secret GC for $key failed (non-fatal): ${e.getMessage}")
     ()
   }
 

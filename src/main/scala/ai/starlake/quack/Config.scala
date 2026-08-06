@@ -36,6 +36,12 @@ final case class K8sConfig(
     )
     startupTimeoutSec: Int,
     @field @ConfigField(
+      envVar = "QOD_K8S_STOP_TIMEOUT_SEC",
+      description =
+        "Seconds stop() waits for a deleted node pod to actually disappear before proceeding."
+    )
+    stopTimeoutSec: Int = 60,
+    @field @ConfigField(
       envVar = "QOD_K8S_POD_LABEL",
       description = "Label selector that identifies manager-owned node pods."
     )
