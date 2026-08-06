@@ -1,11 +1,21 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{
+  NodeSpec,
+  PoolKey,
+  Role,
+  RoleDistribution,
+  RunningNode,
+  Tenant,
+  TenantDbKind
+}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
+import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -81,6 +91,33 @@ class NodeHandlersSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
+
+  "restartNode" should "map a raised backend error to 502, not a bodyless 500" in:
+    val inner   = new StubQuackBackend()
+    val backend = new QuackBackend:
+      def start(spec: NodeSpec): IO[RunningNode]   = inner.start(spec)
+      def stop(key: PoolKey, id: String): IO[Unit] =
+        IO.raiseError(new RuntimeException("409: object is being deleted"))
+      def isAlive(id: String): Boolean              = inner.isAlive(id)
+      def discoverExisting(): IO[List[RunningNode]] = inner.discoverExisting()
+      def cleanup(): IO[Unit]                       = inner.cleanup()
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    sup
+      .createPool(PoolKey("acme", "acme_default", "sales"), RoleDistribution(0, 0, 1))
+      .unsafeRunSync()
+    val h =
+      new NodeHandlers(sup, tracker, new InMemoryControlPlaneStore(), StateChangePublisher.noop)
+    val nodeId = sup.list().head.nodes.head.nodeId
+    val out    = h
+      .restartNode(NodeOpRequest("acme", "acme_default", "sales", nodeId), None)((_: String) =>
+        None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadGateway)
+    out.left.toOption.map(_._2.error) shouldBe Some("backend_error")
 
   "health" should "report counts" in:
     val (sup, _, _) = fixture

@@ -99,8 +99,8 @@ final class NodeHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).map {
-          case Right(()) =>
+        sup.restartNode(PoolKey(req.tenant, req.tenantDb, req.pool), req.nodeId).attempt.map {
+          case Right(Right(())) =>
             audit.rest(
               apiKey,
               "control-plane",
@@ -109,5 +109,23 @@ final class NodeHandlers(
               target = Some(req.nodeId)
             )
             Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Right(Left(err)) =>
+            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+          case Left(t) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.NodeRestart,
+              "error",
+              target = Some(req.nodeId)
+            )
+            Left(
+              (
+                StatusCode.BadGateway,
+                ErrorResponse(
+                  "backend_error",
+                  s"restart of ${req.nodeId} failed: ${Option(t.getMessage).getOrElse(t.toString)}"
+                )
+              )
+            )
         }

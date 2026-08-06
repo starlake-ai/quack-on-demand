@@ -1241,6 +1241,17 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     backend.stopped.size shouldBe before + 2
   }
 
+  it should "collect a raised restart failure and keep rolling the remaining nodes" in {
+    val (sup, backend, dbName) = updateTenantDbFixture()
+    val firstId = sup.list().head.nodes.head.nodeId
+    backend.failStops += firstId // k8s apiserver error: restartNode RAISES, not Left
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("dbName" -> "acme_secret", "schemaName" -> "s2", "applicationName" -> "qod"))
+    )).unsafeRunSync().toOption.get
+    out.failedRestarts.map(_._1) shouldBe List(firstId)
+    out.restartedNodes.size shouldBe 1
+  }
+
   it should "Left on unknown tenant-db" in {
     val (sup, _, _) = updateTenantDbFixture()
     sup.updateTenantDb("acme", "acme_nope", TenantDbPatch()).unsafeRunSync().isLeft shouldBe true

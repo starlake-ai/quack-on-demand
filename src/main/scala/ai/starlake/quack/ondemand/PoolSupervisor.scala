@@ -1198,9 +1198,11 @@ final class PoolSupervisor(
                     targets.foldLeft(IO.pure((List.empty[String], List.empty[(String, String)]))) {
                       case (acc, (key, nodeId)) =>
                         acc.flatMap { case (ok, failed) =>
-                          restartNode(key, nodeId).map {
-                            case Right(()) => (ok :+ nodeId, failed)
-                            case Left(msg) => (ok, failed :+ (nodeId -> msg.message))
+                          restartNode(key, nodeId).attempt.map {
+                            case Right(Right(())) => (ok :+ nodeId, failed)
+                            case Right(Left(msg)) => (ok, failed :+ (nodeId -> msg.message))
+                            case Left(t)          =>
+                              (ok, failed :+ (nodeId -> Option(t.getMessage).getOrElse(t.toString)))
                           }
                         }
                     }
