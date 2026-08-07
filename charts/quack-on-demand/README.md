@@ -91,13 +91,13 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 
 ## Quack node image
 
-The chart's `quackNode.image` value points at the DuckDB Quack server image - a **different artifact** from the manager image, on a **separate release lifecycle**. The manager spawns one pod per Quack node and references this image in the pod spec.
+The chart's `quackNode.image` value points at the DuckDB Quack server image - a **different artifact** from the manager image. The manager spawns one pod per Quack node and references this image in the pod spec.
 
-The default is `starlakeai/quack-on-demand-node:latest-snapshot`, the moving alias the `quack-node-snapshot` GitHub Action publishes on every push to `main` that touches `docker/quack-node/**`. There is no pinned release yet (no `:0.x.y` tag); pin to a specific digest if you need reproducibility:
+The default is `starlakeai/quack-on-demand-node:latest-snapshot`, the moving alias the `quack-node-snapshot` GitHub Action publishes on every push to `main` that touches `docker/quack-node/**`. Since 0.6.1 every release also publishes the node image in lockstep with the manager, so pin the release tag matching your manager version for reproducible deploys:
 
 ```bash
 helm upgrade qod charts/quack-on-demand \
-  --set quackNode.image=starlakeai/quack-on-demand-node@sha256:<digest>
+  --set quackNode.image=starlakeai/quack-on-demand-node:0.6.1
 ```
 
 Override only when you need to point at a private registry or a custom build:
