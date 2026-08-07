@@ -14,6 +14,11 @@ name: quack-node-snapshot
 # push-by-digest, merged into a manifest list by the docker-merge job
 # at the end. Same shape as snapshot.yml's docker-build / docker-merge.
 #
+# SNAPSHOT tags only. Release tags (:X.Y.Z / :X.Y / :X / :latest) are
+# published by release.yml's node-docker-build / node-docker-merge jobs
+# from the release tag (since 2026-08-07; earlier releases had no node
+# release tag at all).
+#
 # Required repo secrets:
 #   DOCKERHUB_USERNAME   Docker Hub login
 #   DOCKER_PASSWORD      Docker Hub access token (RW)

@@ -7,8 +7,10 @@ name: release
 #                        from the vendored git binaries), sha256, artifact
 #   2. github-release  - the canonical jar channel: jar + .sha256 + notes
 #   3. pypi            - qod + qod-cli shim
-#   4. docker          - multi-arch image (matrix build + digest merge),
-#                        lifted from snapshot.yml and retagged for release
+#   4. docker          - multi-arch manager image (matrix build + digest
+#                        merge), lifted from snapshot.yml and retagged for
+#                        release; the NODE image (quack-on-demand-node) is
+#                        released the same way in lockstep (4c/4d)
 #   5. announce        - Discord #news (best effort)
 #   6. next-snapshot   - opens a PR bumping version.sbt to the next -SNAPSHOT
 #                        (a PR, not a push, so protected main needs no bot token)
@@ -50,6 +52,7 @@ concurrency:
 
 env:
   REGISTRY_IMAGE: starlakeai/quack-on-demand
+  NODE_REGISTRY_IMAGE: starlakeai/quack-on-demand-node
 
 jobs:
 
@@ -356,6 +359,131 @@ jobs:
 
       - name: Inspect manifest
         run: docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${{ needs.prepare.outputs.version }}"
+
+  # -----------------------------------------------------------------------
+  # 4c. Node image (data-plane pod): same digest-matrix + merge shape, built
+  #     from the tag checkout so operators get manager+node tags in lockstep.
+  #     Before 2026-08-07 the node image only ever had -SNAPSHOT tags (built
+  #     by quack-node-snapshot.yml off main pushes); releases now publish it
+  #     here. Artifact prefix is node-digests-* so the manager docker-merge's
+  #     digests-* glob cannot swallow these digests.
+  # -----------------------------------------------------------------------
+  node-docker-build:
+    # build-jar in needs: for the same no-half-release gate as the manager
+    # image (the node image does not contain the jar, but a release whose jar
+    # failed must not publish anything).
+    needs: [prepare, build-jar]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set platform pair env
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Docker metadata (labels only - tags applied in merge step)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.NODE_REGISTRY_IMAGE }}
+          labels: |
+            org.opencontainers.image.vendor=starlakeai
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=quack-on-demand-node
+            org.opencontainers.image.description=DuckDB Quack server pod image used by quack-on-demand's KubernetesQuackBackend.
+            org.opencontainers.image.url=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.source=https://github.com/starlake-ai/quack-on-demand
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/quack-node/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.NODE_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Shares the snapshot workflow's cache scope: same Dockerfile inputs.
+          cache-from: type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }}
+          cache-to:   type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -----------------------------------------------------------------------
+  # 4d. Merge the node image's per-arch digests under the release tags.
+  # -----------------------------------------------------------------------
+  node-docker-merge:
+    needs: [prepare, node-docker-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: node-digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          minor="$(echo "$version" | cut -d. -f1-2)"
+          major="$(echo "$version" | cut -d. -f1)"
+          docker buildx imagetools create \
+            -t "${{ env.NODE_REGISTRY_IMAGE }}:${version}" \
+            -t "${{ env.NODE_REGISTRY_IMAGE }}:${minor}" \
+            -t "${{ env.NODE_REGISTRY_IMAGE }}:${major}" \
+            -t "${{ env.NODE_REGISTRY_IMAGE }}:latest" \
+            $(printf '${{ env.NODE_REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect "${{ env.NODE_REGISTRY_IMAGE }}:${{ needs.prepare.outputs.version }}"
 
   # -----------------------------------------------------------------------
   # 5. Discord #news announcement (best effort, after the jar is public).
