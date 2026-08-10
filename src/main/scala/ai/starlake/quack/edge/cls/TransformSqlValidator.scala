@@ -91,6 +91,10 @@ object TransformSqlValidator:
     * subtypes) are flagged via the visitor and NOT recursed into so that we don't descend into
     * their internals and produce spurious column violations.
     */
+  // Parenthesis is deprecated in jsqlparser 5.x but kept defensively: dropping the
+  // case would skip traversal of a parenthesized subtree, and a missed subtree here
+  // is a CLS validation gap (an expression escaping the protected-column check).
+  @scala.annotation.nowarn("msg=class Parenthesis")
   private def walk(start: Expression)(visit: PartialFunction[Any, Unit]): Unit =
     val stack = scala.collection.mutable.Stack[Any](start)
     while stack.nonEmpty do

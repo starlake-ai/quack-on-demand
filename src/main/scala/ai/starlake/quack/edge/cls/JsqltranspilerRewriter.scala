@@ -143,7 +143,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           case _ => ()
         }
         Option(ps.getJoins).foreach(_.forEach { j =>
-          Option(j.getRightItem).foreach {
+          Option(j.getFromItem).foreach {
             case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
               derivedPolicies ++= deriveOuterPolicies(sub, policies)
               val (innerChanged, _) = applyPolicies(sub.getSelect, IndexedSeq.empty, policies)
@@ -238,7 +238,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     Option(ps.getJoins).foreach { joins =>
       val it = joins.iterator()
       while it.hasNext do
-        Option(it.next().getRightItem).foreach {
+        Option(it.next().getFromItem).foreach {
           case t: net.sf.jsqlparser.schema.Table                       => add(t)
           case s: net.sf.jsqlparser.statement.select.ParenthesedSelect => addSub(s)
           case _                                                       => ()
@@ -307,6 +307,10 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           if fromTables.size == 1 then fromTables.head._2 else ""
 
     /** Walk `expr` and return its replacement (same instance if nothing changed). */
+    // Parenthesis is deprecated in jsqlparser 5.x (ParenthesedExpressionList is the
+    // replacement, matched below) but the class still exists and dropping the case
+    // would silently skip rewriting any subtree the parser still wraps in it.
+    @scala.annotation.nowarn("msg=class Parenthesis")
     def visit(expr: Expression): Expression =
       expr match
         case col: net.sf.jsqlparser.schema.Column =>

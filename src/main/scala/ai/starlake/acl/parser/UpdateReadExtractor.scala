@@ -20,13 +20,13 @@ object UpdateReadExtractor:
     if where != null then v.visitExpression(where)
     // START JOINs (UPDATE t JOIN other ... before SET)
     Option(upd.getStartJoins).foreach(_.asScala.foreach { j =>
-      val ri = j.getRightItem
+      val ri = j.getFromItem
       if ri != null then v.visitFromItem(ri)
       Option(j.getOnExpressions).foreach(_.asScala.foreach(v.visitExpression))
     })
     // Regular JOINs (UPDATE ... FROM other JOIN ...)
     Option(upd.getJoins).foreach(_.asScala.foreach { j =>
-      val ri = j.getRightItem
+      val ri = j.getFromItem
       if ri != null then v.visitFromItem(ri)
       Option(j.getOnExpressions).foreach(_.asScala.foreach(v.visitExpression))
     })

@@ -18,7 +18,7 @@ object DeleteReadExtractor:
     Option(del.getUsingFromItemList).foreach(_.asScala.foreach(v.visitFromItem))
     // JOIN list
     Option(del.getJoins).foreach(_.asScala.foreach { j =>
-      val ri = j.getRightItem
+      val ri = j.getFromItem
       if ri != null then v.visitFromItem(ri)
       Option(j.getOnExpressions).foreach(_.asScala.foreach(v.visitExpression))
     })

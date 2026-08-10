@@ -7,7 +7,7 @@ import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.proc.DefaultJWTProcessor
 import com.typesafe.scalalogging.LazyLogging
 
-import java.net.URL
+import java.net.URI
 import java.util.Date
 
 /** Validates Bearer tokens from OIDC providers (Keycloak, Google, Azure AD, AWS Cognito) by
@@ -29,7 +29,7 @@ class OidcBearerAuthenticator(
   val name: String = providerName
 
   private val jwkSource: JWKSource[SecurityContext] =
-    JWKSourceBuilder.create[SecurityContext](new URL(jwksUrl)).build()
+    JWKSourceBuilder.create[SecurityContext](URI.create(jwksUrl).toURL()).build()
 
   private val jwtProcessor: DefaultJWTProcessor[SecurityContext] =
     val processor = new DefaultJWTProcessor[SecurityContext]()

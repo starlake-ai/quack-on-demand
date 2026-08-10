@@ -116,7 +116,7 @@ final class ColumnPolicyRewriter(
           case _                                 => ()
         }
         Option(ps.getJoins).foreach(_.asScala.foreach { j =>
-          Option(j.getRightItem).foreach {
+          Option(j.getFromItem).foreach {
             case t: net.sf.jsqlparser.schema.Table => indexTable(t, ctx, acc)
             case sub: ParenthesedSelect            => visitSel(sub.getSelect)
             case _                                 => ()

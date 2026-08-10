@@ -80,7 +80,7 @@ private[parser] class TableExtractorVisitor:
         val joins = fq.getJoins
         if joins != null then
           joins.asScala.foreach { j =>
-            val rightItem = j.getRightItem
+            val rightItem = j.getFromItem
             if rightItem != null then visitFromItem(rightItem)
             val onExpressions = j.getOnExpressions
             if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
@@ -99,7 +99,7 @@ private[parser] class TableExtractorVisitor:
     val joins = ps.getJoins
     if joins != null then
       joins.asScala.foreach { join =>
-        val rightItem = join.getRightItem
+        val rightItem = join.getFromItem
         if rightItem != null then visitFromItem(rightItem)
         // Visit ON expressions for subqueries
         val onExpressions = join.getOnExpressions
@@ -180,7 +180,7 @@ private[parser] class TableExtractorVisitor:
         val joins = pfi.getJoins
         if joins != null then
           joins.asScala.foreach { j =>
-            val ri = j.getRightItem
+            val ri = j.getFromItem
             if ri != null then visitFromItem(ri)
             val onExpressions = j.getOnExpressions
             if onExpressions != null then onExpressions.asScala.foreach(visitExpression)

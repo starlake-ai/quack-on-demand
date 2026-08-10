@@ -138,8 +138,8 @@ class RowPolicyRewriter(enabled: Boolean = true):
           case _                      => ()
         }
         Option(ps.getJoins).foreach(_.asScala.foreach { j =>
-          Option(j.getRightItem).foreach {
-            case t: Table               => j.setRightItem(maybeWrap(t, eff, ctx, values, changed))
+          Option(j.getFromItem).foreach {
+            case t: Table               => j.setFromItem(maybeWrap(t, eff, ctx, values, changed))
             case sub: ParenthesedSelect => rewriteSelect(sub.getSelect, eff, ctx, values, changed)
             case _                      => ()
           }

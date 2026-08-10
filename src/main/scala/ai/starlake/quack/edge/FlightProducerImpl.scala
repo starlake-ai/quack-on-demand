@@ -381,7 +381,7 @@ final class FlightProducerImpl(
               listener.error(toFlightException(f))
             case scala.util.Failure(t) =>
               listener.error(internalError("getStreamPreparedStatement re-execute", t))
-          }(scala.concurrent.ExecutionContext.global)
+          }(using scala.concurrent.ExecutionContext.global)
 
   // -----------------------------------------------------------------
   //  Metadata endpoints: each translates the Flight SQL request into a
