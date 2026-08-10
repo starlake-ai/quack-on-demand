@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.2
+
+- **DuckDB driver + node engine alignment.** duckdb_jdbc bumped 1.5.5.0 to 1.5.5.1
+  (driver-only patch: auto-close of the getResultSet result; engine stays 1.5.5). The
+  K8s node image now bakes DuckDB CLI 1.5.5 (it had lagged at 1.5.4 through the 1.5.5
+  cycle) and the pin-parity spec guards the Dockerfile so a future engine bump that
+  misses the node image fails the suite.
+- **Node image released in lockstep.** Every release now publishes
+  `starlakeai/quack-on-demand-node:<version>` (plus minor/major/latest tags) alongside
+  the manager image, built from the release tag. Before this, the node image only ever
+  had -SNAPSHOT tags; 0.6.1's node tag was minted retroactively from the
+  benchmark-validated snapshot digest. The Helm chart docs now recommend pinning the
+  release tag; the default stays latest-snapshot.
+
 ## 0.6.1
 
 - **K8s registry-drift hardening.** The pod set and the `qodstate_node` registry now converge
