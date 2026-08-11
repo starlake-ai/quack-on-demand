@@ -151,3 +151,41 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
       resp.headers().firstValue("Cache-Control").isPresent shouldBe false
     finally harness.shutdown()
   }
+
+  "a root mount with a diskDir" should "refuse a dot-segment path instead of resolving StaticFile.fromPath outside the mount root" in {
+    // Finding: bounded directory traversal via unnormalized `..` in pathInfo on
+    // disk-mode non-SPA static mounts (StaticFile.fromPath has no containment
+    // guard, unlike classpath mode's getResource).
+    val parent = Files.createTempDirectory("qod-www-disk-trav")
+    val root   = Files.createDirectory(parent.resolve("root"))
+    Files.writeString(root.resolve("index.html"), "<html><body>disk-index</body></html>")
+    Files.writeString(root.resolve("404.html"), "<html><body>disk-not-found</body></html>")
+    val outside = Files.createDirectory(parent.resolve("outside"))
+    Files.writeString(outside.resolve("index.html"), "escaped")
+    val harness = bootWith(
+      List(StaticMount("/", "/www-test", diskDir = Some(root.toString), spaFallback = false))
+    )
+    try
+      // Percent-encoded so java.net.URI / HttpClient send the ".." to the
+      // server verbatim instead of normalizing it away client-side.
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/%2e%2e/outside/")
+      resp.statusCode() shouldBe 404
+      resp.body() should include("disk-not-found")
+      resp.body() should not include "escaped"
+    finally harness.shutdown()
+  }
+
+  it should "resolve percent-encoded spaces in the directory-index candidate" in {
+    val dir = Files.createTempDirectory("qod-www-disk-space")
+    Files.writeString(dir.resolve("index.html"), "<html><body>disk-index</body></html>")
+    val ourTeam = Files.createDirectory(dir.resolve("our team"))
+    Files.writeString(ourTeam.resolve("index.html"), "www-space")
+    val harness = bootWith(
+      List(StaticMount("/", "/www-test", diskDir = Some(dir.toString), spaFallback = false))
+    )
+    try
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/our%20team/")
+      resp.statusCode() shouldBe 200
+      resp.body() should include("www-space")
+    finally harness.shutdown()
+  }

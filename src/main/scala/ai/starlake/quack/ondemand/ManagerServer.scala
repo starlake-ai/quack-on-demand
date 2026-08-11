@@ -691,30 +691,43 @@ final class ManagerServer(
           def page(name: String, req: Request[IO]) = diskRoot match
             case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
             case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
+          // Decoded path segments of the request's Router-translated remaining
+          // path (`pathInfo`, see the note on directoryIndexCandidate below).
+          // Decoding first means a percent-encoded dot-segment (`%2e%2e`) is
+          // caught the same as a literal `..`.
+          def decodedSegments(req: Request[IO]): Vector[String] =
+            req.pathInfo.segments.map(_.decoded())
+          // `.` or `..` anywhere in the decoded path is a directory-traversal
+          // attempt: in disk mode `page()` resolves through `StaticFile.fromPath`,
+          // which (unlike classpath mode's `getResource`) has no containment
+          // guard, so `FsPath(root) / "../../outside/index.html"` would resolve
+          // outside the mount root. Refuse it before a candidate is ever built.
+          def hasDotSegment(segments: Vector[String]): Boolean =
+            segments.exists(s => s == "." || s == "..")
           // Directory-index candidate for a request's Router-translated remaining
           // path (`pathInfo`, NOT `uri.path` - Router leaves the original request
           // path untouched and only adjusts the caret that `pathInfo` reads, so a
           // check against `uri.path` would only ever fire by accident for a "/"
-          // mount). "/" -> "index.html", "/pricing/" -> "pricing/index.html",
-          // "/no/such/page" -> "no/such/page/index.html" (a lookup that's expected
-          // to miss). Mirrors FileService's directory auto-resolution, which
+          // mount). Built from the DECODED segments (not `renderString`) so a
+          // percent-encoded separator resolves the same as a literal one, e.g.
+          // "/our%20team/" -> "our team/index.html". "/" -> "index.html",
+          // "/pricing/" -> "pricing/index.html", "/no/such/page" ->
+          // "no/such/page/index.html" (a lookup that's expected to miss).
+          // Mirrors FileService's directory auto-resolution, which
           // ResourceService does not provide for classpath-backed mounts.
-          def directoryIndexCandidate(req: Request[IO]): String =
-            val trimmed = req.pathInfo.renderString.stripPrefix("/").stripSuffix("/")
-            if trimmed.isEmpty then "index.html" else s"$trimmed/index.html"
+          def directoryIndexCandidate(segments: Vector[String]): String =
+            if segments.isEmpty then "index.html" else s"${segments.mkString("/")}/index.html"
           def notFoundPage(req: Request[IO]): IO[Response[IO]] =
             page("404.html", req)
               .map(_.withStatus(Status.NotFound))
               .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-          // A request is "extensionless" when its Router-translated remaining
-          // path (`pathInfo`, see the note above) is the mount root, or its
-          // last segment carries no `.`: `/pricing`, `/pricing/`,
-          // `/enroll/complete/`. Real static assets always carry a file
-          // extension, so extensionless requests never legitimately belong to
-          // `assets`.
-          def isExtensionless(req: Request[IO]): Boolean =
-            val trimmed = req.pathInfo.renderString.stripPrefix("/").stripSuffix("/")
-            trimmed.isEmpty || !trimmed.split("/").last.contains(".")
+          // A request is "extensionless" when its decoded segments are empty
+          // (the mount root), or the last segment carries no `.`: `/pricing`,
+          // `/pricing/`, `/enroll/complete/`. Real static assets always carry a
+          // file extension, so extensionless requests never legitimately belong
+          // to `assets`.
+          def isExtensionless(segments: Vector[String]): Boolean =
+            segments.isEmpty || !segments.last.contains(".")
           val mounted =
             if m.spaFallback then
               val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
@@ -731,8 +744,10 @@ final class ManagerServer(
               // before the directory-index fallback below ever gets a chance
               // - `assets <+> fallback` short-circuits on the first match.
               val pages: HttpRoutes[IO] = HttpRoutes.of[IO] {
-                case req if isExtensionless(req) =>
-                  page(directoryIndexCandidate(req), req).getOrElseF(notFoundPage(req))
+                case req if isExtensionless(decodedSegments(req)) =>
+                  val segments = decodedSegments(req)
+                  if hasDotSegment(segments) then notFoundPage(req)
+                  else page(directoryIndexCandidate(segments), req).getOrElseF(notFoundPage(req))
               }
               val notFound: HttpRoutes[IO] = HttpRoutes.of[IO](req => notFoundPage(req))
               Router(m.urlPrefix -> (pages <+> assets <+> notFound))
