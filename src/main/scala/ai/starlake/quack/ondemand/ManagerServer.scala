@@ -662,29 +662,36 @@ final class ManagerServer(
     // mounts (marketing pages) 404 for real instead of swallowing unmatched
     // paths into index.html.
     val moduleStatic: HttpRoutes[IO] =
-      moduleStaticMounts.foldLeft(HttpRoutes.empty[IO]) { (acc, m) =>
-        val diskRoot: Option[String] =
-          m.diskDir.filter(d => java.nio.file.Files.isDirectory(java.nio.file.Paths.get(d)))
-        val assets = diskRoot match
-          case Some(root) =>
-            staticcontent.fileService[IO](FileService.Config(root))
-          case None =>
-            staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
-        def page(name: String, req: Request[IO]) = diskRoot match
-          case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
-          case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
-        val fallback: HttpRoutes[IO] =
-          if m.spaFallback then
-            HttpRoutes.of[IO] { req =>
-              page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-            }
-          else
-            HttpRoutes.of[IO] { req =>
-              page("404.html", req)
-                .map(_.withStatus(Status.NotFound))
-                .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-            }
-        acc <+> Router(m.urlPrefix -> (assets <+> fallback))
+      moduleStaticMounts.sortBy(m => -m.urlPrefix.length).foldLeft(HttpRoutes.empty[IO]) {
+        (acc, m) =>
+          val diskRoot: Option[String] =
+            m.diskDir.filter(d => java.nio.file.Files.isDirectory(java.nio.file.Paths.get(d)))
+          val assets = diskRoot match
+            case Some(root) =>
+              staticcontent.fileService[IO](FileService.Config(root))
+            case None =>
+              staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
+          def page(name: String, req: Request[IO]) = diskRoot match
+            case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
+            case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
+          val fallback: HttpRoutes[IO] =
+            if m.spaFallback then
+              HttpRoutes.of[IO] { req =>
+                page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+              }
+            else
+              HttpRoutes.of[IO] { req =>
+                // The mount's own root still resolves to index.html; every other
+                // unmatched path under a non-SPA mount is a real 404 (marketing
+                // pages must not soft-404 into the index).
+                if req.uri.path == Uri.Path.Root then
+                  page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+                else
+                  page("404.html", req)
+                    .map(_.withStatus(Status.NotFound))
+                    .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+              }
+          acc <+> Router(m.urlPrefix -> (assets <+> fallback))
       }
 
     // Redirect the bare root (`/`) to `/ui/` so visiting the manager host

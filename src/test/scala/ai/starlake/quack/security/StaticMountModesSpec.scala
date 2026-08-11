@@ -48,3 +48,42 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
       resp.body() should include("www-index")
     finally harness.shutdown()
   }
+
+  "a root mount with spaFallback=false" should "serve index at / and a real 404 elsewhere" in {
+    val harness = bootWith(List(StaticMount("/", "/www-test", spaFallback = false)))
+    try
+      val root = get(harness.httpClient, s"${harness.baseUrl}/")
+      root.statusCode() shouldBe 200
+      root.body() should include("www-index")
+
+      val missing = get(harness.httpClient, s"${harness.baseUrl}/no/such/page")
+      missing.statusCode() shouldBe 404
+      missing.body() should include("www-not-found")
+    finally harness.shutdown()
+  }
+
+  it should "lose to longer-prefix mounts regardless of declaration order" in {
+    val harness = bootWith(
+      List(
+        StaticMount("/", "/www-test", spaFallback = false),
+        StaticMount("/portal", "/portal-test")
+      )
+    )
+    try
+      val portal = get(harness.httpClient, s"${harness.baseUrl}/portal/")
+      portal.statusCode() shouldBe 200
+      portal.body() should include("portal-index")
+    finally harness.shutdown()
+  }
+
+  "the bare root with no root mount" should "still redirect to /ui/" in {
+    val harness = bootWith(List(StaticMount("/portal", "/portal-test")))
+    try
+      // SecurityHttpHelpers' client uses HttpClient.newHttpClient(), whose
+      // default redirect policy is NEVER, so the 302 itself is observable
+      // instead of being auto-followed.
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/")
+      resp.statusCode() shouldBe 302
+      resp.headers().firstValue("Location").get() shouldBe "/ui/"
+    finally harness.shutdown()
+  }
