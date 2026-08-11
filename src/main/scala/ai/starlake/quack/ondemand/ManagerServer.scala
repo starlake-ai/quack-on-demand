@@ -674,6 +674,17 @@ final class ManagerServer(
           def page(name: String, req: Request[IO]) = diskRoot match
             case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
             case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
+          // Directory-index candidate for a request's Router-translated remaining
+          // path (`pathInfo`, NOT `uri.path` - Router leaves the original request
+          // path untouched and only adjusts the caret that `pathInfo` reads, so a
+          // check against `uri.path` would only ever fire by accident for a "/"
+          // mount). "/" -> "index.html", "/pricing/" -> "pricing/index.html",
+          // "/no/such/page" -> "no/such/page/index.html" (a lookup that's expected
+          // to miss). Mirrors FileService's directory auto-resolution, which
+          // ResourceService does not provide for classpath-backed mounts.
+          def directoryIndexCandidate(req: Request[IO]): String =
+            val trimmed = req.pathInfo.renderString.stripPrefix("/").stripSuffix("/")
+            if trimmed.isEmpty then "index.html" else s"$trimmed/index.html"
           val fallback: HttpRoutes[IO] =
             if m.spaFallback then
               HttpRoutes.of[IO] { req =>
@@ -681,15 +692,15 @@ final class ManagerServer(
               }
             else
               HttpRoutes.of[IO] { req =>
-                // The mount's own root still resolves to index.html; every other
-                // unmatched path under a non-SPA mount is a real 404 (marketing
-                // pages must not soft-404 into the index).
-                if req.uri.path == Uri.Path.Root then
-                  page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-                else
+                // Every unmatched path under a non-SPA mount first tries its own
+                // directory index (covers both the mount's root and nested
+                // directory-index pages like /pricing/ or /enroll/complete/);
+                // only a genuine miss falls through to the real 404.
+                page(directoryIndexCandidate(req), req).getOrElseF(
                   page("404.html", req)
                     .map(_.withStatus(Status.NotFound))
                     .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+                )
               }
           acc <+> Router(m.urlPrefix -> (assets <+> fallback))
       }

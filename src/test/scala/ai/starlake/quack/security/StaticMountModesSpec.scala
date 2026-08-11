@@ -62,6 +62,28 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
     finally harness.shutdown()
   }
 
+  it should "resolve nested directory-index pages on classpath-backed mounts" in {
+    val harness = bootWith(List(StaticMount("/", "/www-test", spaFallback = false)))
+    try
+      val pricing = get(harness.httpClient, s"${harness.baseUrl}/pricing/")
+      pricing.statusCode() shouldBe 200
+      pricing.body() should include("www-pricing")
+    finally harness.shutdown()
+  }
+
+  "a non-root mount with spaFallback=false" should "serve its own index and a real 404" in {
+    val harness = bootWith(List(StaticMount("/legal", "/www-test", spaFallback = false)))
+    try
+      val index = get(harness.httpClient, s"${harness.baseUrl}/legal/")
+      index.statusCode() shouldBe 200
+      index.body() should include("www-index")
+
+      val missing = get(harness.httpClient, s"${harness.baseUrl}/legal/no/such")
+      missing.statusCode() shouldBe 404
+      missing.body() should include("www-not-found")
+    finally harness.shutdown()
+  }
+
   it should "lose to longer-prefix mounts regardless of declaration order" in {
     val harness = bootWith(
       List(
