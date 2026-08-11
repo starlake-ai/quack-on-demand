@@ -661,6 +661,23 @@ final class ManagerServer(
     // content); classpath resources are the fallback. spaFallback=false
     // mounts (marketing pages) 404 for real instead of swallowing unmatched
     // paths into index.html.
+    // CDN contract for marketing (non-SPA) mounts: hashed Vite assets are
+    // immutable, pages revalidate within minutes, 404s are never cached.
+    // See the enrollment-website design spec (qod-hosted docs) D4.
+    val hashedAsset = raw".*/assets/[^/]+-[A-Za-z0-9_]{8,}\.[a-z0-9]+".r
+    def withMarketingCacheHeaders(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+      cats.data.Kleisli { (req: Request[IO]) =>
+        routes(req).map { resp =>
+          val cc =
+            if resp.status == Status.NotFound then "no-store"
+            else if hashedAsset.matches(req.uri.path.renderString) then
+              "public, max-age=31536000, immutable"
+            else "public, max-age=300, stale-while-revalidate=600"
+          resp.putHeaders(
+            org.http4s.Header.Raw(org.typelevel.ci.CIString("Cache-Control"), cc)
+          )
+        }
+      }
     val moduleStatic: HttpRoutes[IO] =
       moduleStaticMounts.sortBy(m => -m.urlPrefix.length).foldLeft(HttpRoutes.empty[IO]) {
         (acc, m) =>
@@ -702,7 +719,8 @@ final class ManagerServer(
                     .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
                 )
               }
-          acc <+> Router(m.urlPrefix -> (assets <+> fallback))
+          val mounted = Router(m.urlPrefix -> (assets <+> fallback))
+          acc <+> (if m.spaFallback then mounted else withMarketingCacheHeaders(mounted))
       }
 
     // Redirect the bare root (`/`) to `/ui/` so visiting the manager host

@@ -109,3 +109,28 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
       resp.headers().firstValue("Location").get() shouldBe "/ui/"
     finally harness.shutdown()
   }
+
+  "cache headers on a non-SPA mount" should "mark hashed assets immutable" in {
+    val harness = bootWith(List(StaticMount("/", "/www-test", spaFallback = false)))
+    try
+      val asset = get(harness.httpClient, s"${harness.baseUrl}/assets/app-a1b2c3d4.js")
+      asset.statusCode() shouldBe 200
+      asset.headers().firstValue("Cache-Control").get() shouldBe
+        "public, max-age=31536000, immutable"
+
+      val page = get(harness.httpClient, s"${harness.baseUrl}/")
+      page.headers().firstValue("Cache-Control").get() shouldBe
+        "public, max-age=300, stale-while-revalidate=600"
+
+      val missing = get(harness.httpClient, s"${harness.baseUrl}/no/such/page")
+      missing.headers().firstValue("Cache-Control").get() shouldBe "no-store"
+    finally harness.shutdown()
+  }
+
+  "cache headers" should "not be added to SPA mounts" in {
+    val harness = bootWith(List(StaticMount("/portal", "/portal-test")))
+    try
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/portal/")
+      resp.headers().firstValue("Cache-Control").isPresent shouldBe false
+    finally harness.shutdown()
+  }
