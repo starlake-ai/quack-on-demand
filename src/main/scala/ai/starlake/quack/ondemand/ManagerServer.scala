@@ -13,13 +13,15 @@ import cats.effect.{IO, Resource}
 import cats.implicits._
 import com.comcast.ip4s.{Host, Port}
 import com.typesafe.scalalogging.LazyLogging
-import org.http4s.{HttpRoutes, Method, Response, StaticFile, Status, Uri}
+import org.http4s.{HttpRoutes, Method, Request, Response, StaticFile, Status, Uri}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.headers.Location
 import org.http4s.server.{staticcontent, Router}
+import org.http4s.server.staticcontent.FileService
 import org.typelevel.ci.CIString
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
+import fs2.io.file.{Path => FsPath}
 
 final class ManagerServer(
     cfg: ManagerConfig,
@@ -654,15 +656,34 @@ final class ManagerServer(
     val uiRoutes = Router("/ui" -> (uiAssets <+> spaFallback))
 
     // Module static mounts (SPI): same shape as the /ui mount above, one per
-    // registered ai.starlake.quack.spi.StaticMount.
+    // registered ai.starlake.quack.spi.StaticMount. A mount with a diskDir
+    // that exists on disk is served from the filesystem (live-updatable
+    // content); classpath resources are the fallback. spaFallback=false
+    // mounts (marketing pages) 404 for real instead of swallowing unmatched
+    // paths into index.html.
     val moduleStatic: HttpRoutes[IO] =
       moduleStaticMounts.foldLeft(HttpRoutes.empty[IO]) { (acc, m) =>
-        val assets = staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
-        val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
-          StaticFile
-            .fromResource[IO](s"${m.classpathDir}/index.html", Some(req))
-            .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-        }
+        val diskRoot: Option[String] =
+          m.diskDir.filter(d => java.nio.file.Files.isDirectory(java.nio.file.Paths.get(d)))
+        val assets = diskRoot match
+          case Some(root) =>
+            staticcontent.fileService[IO](FileService.Config(root))
+          case None =>
+            staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
+        def page(name: String, req: Request[IO]) = diskRoot match
+          case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
+          case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
+        val fallback: HttpRoutes[IO] =
+          if m.spaFallback then
+            HttpRoutes.of[IO] { req =>
+              page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+            }
+          else
+            HttpRoutes.of[IO] { req =>
+              page("404.html", req)
+                .map(_.withStatus(Status.NotFound))
+                .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+            }
         acc <+> Router(m.urlPrefix -> (assets <+> fallback))
       }
 
