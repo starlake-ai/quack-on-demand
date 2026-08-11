@@ -127,6 +127,23 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
     finally harness.shutdown()
   }
 
+  "an extensionless zero-byte file on a non-SPA mount" should "still 404, not be served as 200-empty" in {
+    // Pins the live-smoke jar bug: `sbt assembly` packs zero-byte directory
+    // entries into the classpath jar, and http4s' resourceServiceBuilder
+    // matched a bare-directory request against one and served it as a 200
+    // with an empty body, ahead of the directory-index fallback. `blank` is a
+    // real zero-byte extensionless file, which reproduces the same "assets
+    // wins over pages" ordering bug on plain file: classpath URLs too - pre-fix
+    // this asserts 200-empty, post-fix the pages route owns it and 404s.
+    val harness = bootWith(List(StaticMount("/", "/www-test", spaFallback = false)))
+    try
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/blank")
+      resp.statusCode() shouldBe 404
+      resp.body() should include("www-not-found")
+      resp.headers().firstValue("Cache-Control").get() shouldBe "no-store"
+    finally harness.shutdown()
+  }
+
   "cache headers" should "not be added to SPA mounts" in {
     val harness = bootWith(List(StaticMount("/portal", "/portal-test")))
     try

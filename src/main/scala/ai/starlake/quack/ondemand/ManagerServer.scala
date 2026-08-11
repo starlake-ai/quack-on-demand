@@ -702,24 +702,40 @@ final class ManagerServer(
           def directoryIndexCandidate(req: Request[IO]): String =
             val trimmed = req.pathInfo.renderString.stripPrefix("/").stripSuffix("/")
             if trimmed.isEmpty then "index.html" else s"$trimmed/index.html"
-          val fallback: HttpRoutes[IO] =
+          def notFoundPage(req: Request[IO]): IO[Response[IO]] =
+            page("404.html", req)
+              .map(_.withStatus(Status.NotFound))
+              .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+          // A request is "extensionless" when its Router-translated remaining
+          // path (`pathInfo`, see the note above) is the mount root, or its
+          // last segment carries no `.`: `/pricing`, `/pricing/`,
+          // `/enroll/complete/`. Real static assets always carry a file
+          // extension, so extensionless requests never legitimately belong to
+          // `assets`.
+          def isExtensionless(req: Request[IO]): Boolean =
+            val trimmed = req.pathInfo.renderString.stripPrefix("/").stripSuffix("/")
+            trimmed.isEmpty || !trimmed.split("/").last.contains(".")
+          val mounted =
             if m.spaFallback then
-              HttpRoutes.of[IO] { req =>
+              val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
                 page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
               }
+              Router(m.urlPrefix -> (assets <+> fallback))
             else
-              HttpRoutes.of[IO] { req =>
-                // Every unmatched path under a non-SPA mount first tries its own
-                // directory index (covers both the mount's root and nested
-                // directory-index pages like /pricing/ or /enroll/complete/);
-                // only a genuine miss falls through to the real 404.
-                page(directoryIndexCandidate(req), req).getOrElseF(
-                  page("404.html", req)
-                    .map(_.withStatus(Status.NotFound))
-                    .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
-                )
+              // Extensionless requests are routed to the page/404 lookup
+              // BEFORE `assets`, so `assets` never sees them. This closes a
+              // jar-packaging bug: `sbt assembly` packs zero-byte directory
+              // entries (e.g. `www/pricing/`) into the classpath jar, and
+              // http4s' resourceServiceBuilder matches a bare-directory GET
+              // against that entry and serves it as a 200 with an empty body,
+              // before the directory-index fallback below ever gets a chance
+              // - `assets <+> fallback` short-circuits on the first match.
+              val pages: HttpRoutes[IO] = HttpRoutes.of[IO] {
+                case req if isExtensionless(req) =>
+                  page(directoryIndexCandidate(req), req).getOrElseF(notFoundPage(req))
               }
-          val mounted = Router(m.urlPrefix -> (assets <+> fallback))
+              val notFound: HttpRoutes[IO] = HttpRoutes.of[IO](req => notFoundPage(req))
+              Router(m.urlPrefix -> (pages <+> assets <+> notFound))
           acc <+> (if m.spaFallback then mounted else withMarketingCacheHeaders(mounted))
       }
 
