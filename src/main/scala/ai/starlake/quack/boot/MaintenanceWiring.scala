@@ -121,35 +121,44 @@ final class MaintenanceWiring(
     if maintenance.enabled then scheduler.start
     else IO.unit.start
 
-  /** Drain loop: while leader and below maxConcurrent in-flight, claim queued runs and fork each
-    * execution under the tenant-db's __maint advisory lock so two replicas (or a replica and a
-    * stray retry) never run the same lake at once. The tick keeps claiming until the queue is empty
-    * or capacity is reached, so tickSec only spaces empty polls.
+  private val inFlight = new java.util.concurrent.atomic.AtomicInteger(0)
+
+  /** One drain pass: while leader and below maxConcurrent in-flight, claim queued runs and fork
+    * each execution under the tenant-db's __maint advisory lock so two replicas (or a replica and a
+    * stray retry) never run the same lake at once. Keeps claiming until the queue is empty or
+    * capacity is reached, so `tickSec` (in [[drainFiber]]) only spaces empty polls.
+    *
+    * IO.defer around the leader check: `drainFiber` binds this to a single IO value once (see its
+    * `foreverM`), so the leadership (and in-flight) branch must be re-evaluated on every run rather
+    * than baked in at construction time -- otherwise a replica that boots before winning the
+    * advisory lock latches "not leader" forever, and one that boots as leader keeps draining after
+    * demotion. Mirrors [[AutoscaleWiring.sweep]].
     */
-  def drainFiber: IO[FiberIO[Unit]] =
-    val inFlight            = new java.util.concurrent.atomic.AtomicInteger(0)
-    def drainTick: IO[Unit] =
-      if !isLeader() then IO.unit
-      else if inFlight.get() >= maintenance.maxConcurrent then IO.unit
-      else
-        IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
-          case None      => IO.unit
-          case Some(run) =>
-            inFlight.incrementAndGet()
-            poolLocks
-              .withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
-                runner.executeRun(run)
-              }
-              .guarantee(IO.delay(inFlight.decrementAndGet()).void)
-              .handleErrorWith(t =>
-                IO.delay(
-                  logger.error(
-                    s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
-                  )
+  private[boot] def drainTick: IO[Unit] = IO.defer {
+    if !isLeader() then IO.unit
+    else if inFlight.get() >= maintenance.maxConcurrent then IO.unit
+    else
+      IO.blocking(store.claimQueuedMaintenanceRun()).flatMap {
+        case None      => IO.unit
+        case Some(run) =>
+          inFlight.incrementAndGet()
+          poolLocks
+            .withLock(PoolKey(run.tenant, run.tenantDb, "__maint")) {
+              runner.executeRun(run)
+            }
+            .guarantee(IO.delay(inFlight.decrementAndGet()).void)
+            .handleErrorWith(t =>
+              IO.delay(
+                logger.error(
+                  s"maintenance run ${run.id} (${run.tenant}/${run.tenantDb}) failed: ${t.getMessage}"
                 )
               )
-              .start *> drainTick
-        }
+            )
+            .start *> drainTick
+      }
+  }
+
+  def drainFiber: IO[FiberIO[Unit]] =
     if maintenance.enabled then
       (drainTick
         .handleErrorWith(e =>

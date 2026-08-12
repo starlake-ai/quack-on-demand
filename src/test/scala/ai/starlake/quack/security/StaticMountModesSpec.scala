@@ -98,6 +98,15 @@ class StaticMountModesSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
     finally harness.shutdown()
   }
 
+  "a zero-module boot (no hosted jar, no static mounts at all)" should "redirect the home page to /ui/" in {
+    val harness = bootWith(Nil)
+    try
+      val resp = get(harness.httpClient, s"${harness.baseUrl}/")
+      resp.statusCode() shouldBe 302
+      resp.headers().firstValue("Location").get() shouldBe "/ui/"
+    finally harness.shutdown()
+  }
+
   "the bare root with no root mount" should "still redirect to /ui/" in {
     val harness = bootWith(List(StaticMount("/portal", "/portal-test")))
     try
