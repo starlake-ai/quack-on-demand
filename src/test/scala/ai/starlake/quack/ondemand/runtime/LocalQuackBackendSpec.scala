@@ -44,13 +44,12 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
     try node.maxConcurrent shouldBe 5
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-3").unsafeRunSync()
 
-  it should "propagate defaultMetastore + NodeSpec.metastore as env vars (spec overrides default)" in:
+  it should "propagate NodeSpec.metastore as env vars with no backend-level defaults overlay" in:
     val capture = java.io.File.createTempFile("env-capture-", ".txt")
     capture.deleteOnExit()
     val backend = new LocalQuackBackend(
       min = 23040,
       max = 23041,
-      defaultMetastore = Map("pgHost" -> "default-host", "pgUser" -> "default-user"),
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
     )
     val spec = NodeSpec(
@@ -66,10 +65,40 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers:
       val deadline = System.currentTimeMillis() + 3000
       while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
       val out = java.nio.file.Files.readString(capture.toPath)
-      out should include("pgHost=override-host") // spec wins
-      out should include("pgUser=default-user")  // default fills gap
-      out should include("dbName=specdb")        // spec-only key
+      out should include("pgHost=override-host") // spec.metastore is the sole source
+      out should include("dbName=specdb")
+      // Regression for the backend-overlay bug: LocalQuackBackend no longer
+      // takes a `defaultMetastore` constructor param, so nothing can
+      // resurrect a key `PoolSupervisor.effectiveMetastoreFor` deliberately
+      // dropped (e.g. `dataPath` on a pathless duckdb-file / in-memory node).
+      // A key absent from spec.metastore must stay absent from the node env.
+      out should not include "pgUser="
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-env").unsafeRunSync()
+
+  it should "omit a key spec.metastore does not carry (e.g. dataPath dropped by effectiveMetastoreFor)" in:
+    val capture = java.io.File.createTempFile("env-capture-nodatapath-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23042,
+      max = 23043,
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    // Mirrors what effectiveMetastoreFor produces for a pathless duckdb-file
+    // tenant-db: dataPath removed entirely, not merely blank.
+    val spec = NodeSpec(
+      PoolKey("t", "t_default", "p"),
+      "node-nodatapath",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "dbName" -> "specdb"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      out should not include "dataPath="
+    finally backend.stop(PoolKey("t", "t_default", "p"), "node-nodatapath").unsafeRunSync()
 
   it should "emit objectStoreSql as an env var when the spec carries one, and omit it when empty" in:
     val capture = java.io.File.createTempFile("env-capture-objsql-", ".txt")

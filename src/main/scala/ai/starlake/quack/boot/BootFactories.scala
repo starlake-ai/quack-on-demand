@@ -27,7 +27,6 @@ object BootFactories extends LazyLogging:
       new LocalQuackBackend(
         mgrCfg.minPort,
         mgrCfg.maxPort,
-        mgrCfg.defaultMetastore.asMap,
         commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
       )
     case "kubernetes" | "k8s" =>
@@ -39,7 +38,6 @@ object BootFactories extends LazyLogging:
         mgrCfg.k8s.quackPort,
         mgrCfg.k8s.podLabel,
         mgrCfg.k8s.startupTimeoutSec,
-        mgrCfg.defaultMetastore.asMap,
         podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
         serviceAccount = mgrCfg.k8s.serviceAccount,
         serviceType = mgrCfg.k8s.serviceType,

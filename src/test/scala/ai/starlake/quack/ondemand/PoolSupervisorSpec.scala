@@ -904,6 +904,11 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     spec.metastore("pgHost") shouldBe "tenant-host"
     spec.metastore("pgPort") shouldBe "5432"
     spec.metastore("shared") shouldBe "tenant-val"
+    // Backend-seam pin for the backend-overlay fix: the dataPath the
+    // CapturingBackend actually receives on NodeSpec.metastore must be the
+    // tenant-db's own field, not something a backend-level defaults overlay
+    // could have swapped in or resurrected.
+    spec.metastore("dataPath") shouldBe "/data/acme_default"
 
   "PoolSupervisor.effectiveMetastoreFor" should
     "return the tenant-db's dataPath when multiple tenant-dbs coexist" in:
@@ -926,14 +931,169 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.effectiveMetastoreFor("eu", "eu_default")("dataPath") shouldBe "/data/eu-west"
     sup.effectiveMetastoreFor("us", "us_default")("dataPath") shouldBe "s3://us-east-data/"
 
-  it should "fall back to the global default when the tenant-db has no override" in:
+  /** Supervisor whose store already carries `(tenant acme, tenant-db)`, hydrated through
+    * `restore()`. Needed for the tenant-db shapes `createTenantDb`'s validator refuses at the REST
+    * boundary (a duckdb-file row with no dataPath at all, a memory row carrying an explicit
+    * metastore) but that DO reach the in-memory cache via manifest import, config import, or a
+    * legacy persisted row. */
+  private def supWithSeededTenantDb(
+      defaults: Map[String, String],
+      kind: TenantDbKind,
+      metastore: Map[String, String],
+      dataPath: String,
+      tdName: String = "acme_default"
+  ): (PoolSupervisor, CapturingBackend) =
+    val st      = new InMemoryControlPlaneStore()
+    val backend = new CapturingBackend
+    val sup = new PoolSupervisor(
+      backend, new NodeLoadTracker, st,
+      defaultMetastore = defaults
+    )
+    st.upsertTenant(Tenant("acme", "acme"))
+    st.upsertTenantDb(
+      ai.starlake.quack.model.TenantDb(
+        id = "td-seed", tenantId = "acme", name = tdName,
+        kind = kind, metastore = metastore, dataPath = dataPath
+      )
+    )
+    sup.restore()
+    (sup, backend)
+
+  /** Manager default: a DuckLake DIRECTORY plus the bootstrap tenant-db's own naming. Inheriting
+    * any of it into a duckdb-file / memory tenant-db is the bug the cases below pin. */
+  private val bugDefaults: Map[String, String] =
+    Map("dataPath" -> "./ducklake/tpch", "dbName" -> "tpch", "schemaName" -> "main")
+
+  it should "honor the duckdb-file tenant-db's dataPath FIELD instead of the default directory" in:
+    // Regression: the ATTACH in spawn-quack-node.sh's duckdb-file branch expects a .duckdb FILE.
+    // Inheriting the manager default (a DuckLake directory) made every node fail with
+    // "Is a directory" and never acquire its catalog.
     val sup = new PoolSupervisor(
       new CapturingBackend, new NodeLoadTracker, new InMemoryControlPlaneStore(),
-      defaultMetastore = Map("dataPath" -> "/data/global")
+      defaultMetastore = bugDefaults
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default",
+      TenantDbKind.DuckDbFile,
+      Map("dbName" -> "acme_default", "schemaName" -> "main"),
+      dataPath = "/data/acme_default.duckdb"
+    ).unsafeRunSync()
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff("dataPath")   shouldBe "/data/acme_default.duckdb"
+    eff("dbName")     shouldBe "acme_default"
+    eff("schemaName") shouldBe "main"
+
+  it should "default a duckdb-file tenant-db's dbName to the tenant-db name, not the default" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckDbFile,
+      metastore = Map("schemaName" -> "main"),
+      dataPath  = "/data/acme_default.duckdb"
+    )
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff("dbName")   shouldBe "acme_default"
+    eff("dataPath") shouldBe "/data/acme_default.duckdb"
+
+  it should "drop dataPath entirely for a duckdb-file tenant-db with no path anywhere" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckDbFile,
+      metastore = Map("schemaName" -> "main"),
+      dataPath  = ""
+    )
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff.contains("dataPath") shouldBe false
+    eff("dbName")            shouldBe "acme_default"
+
+  it should "let an explicit metastore dataPath/dbName win for a duckdb-file tenant-db" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckDbFile,
+      metastore = Map("dataPath" -> "/explicit/file.duckdb", "dbName" -> "explicit_db",
+        "schemaName" -> "main"),
+      dataPath  = ""
+    )
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff("dataPath") shouldBe "/explicit/file.duckdb"
+    eff("dbName")   shouldBe "explicit_db"
+
+  it should "resolve a memory tenant-db to the built-in `memory` catalog with no dataPath" in:
+    // Regression: inheriting the default dbName made Main's health probe run
+    // `CREATE SCHEMA IF NOT EXISTS tpch.main` on a node that only has the `memory` catalog,
+    // so the probe failed on every tick and the node stayed permanently unroutable.
+    val sup = new PoolSupervisor(
+      new CapturingBackend, new NodeLoadTracker, new InMemoryControlPlaneStore(),
+      defaultMetastore = bugDefaults
     )
     sup.createTenant(Tenant("legacy")).unsafeRunSync()
     sup.createTenantDb("legacy", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    sup.effectiveMetastoreFor("legacy", "legacy_default")("dataPath") shouldBe "/data/global"
+    val eff = sup.effectiveMetastoreFor("legacy", "legacy_default")
+    eff.contains("dataPath") shouldBe false
+    eff("dbName")            shouldBe "memory"
+    eff("schemaName")        shouldBe "main"
+
+  it should "let an explicit metastore dbName win for a memory tenant-db, still without dataPath" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.InMemory,
+      metastore = Map("dbName" -> "explicit_mem", "dataPath" -> "/ignored"),
+      dataPath  = "/also-ignored"
+    )
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff("dbName")            shouldBe "explicit_mem"
+    eff.contains("dataPath") shouldBe false
+
+  it should "leave the DuckLake derivation untouched (sibling dataPath + composed dbName)" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckLake,
+      metastore = Map("pgHost" -> "h", "pgPort" -> "5432", "pgUser" -> "u",
+        "pgPassword" -> "s", "schemaName" -> "main"),
+      dataPath  = ""
+    )
+    val eff = sup.effectiveMetastoreFor("acme", "acme_default")
+    eff("dbName")   shouldBe "acme_default"
+    eff("dataPath") shouldBe "./ducklake/acme_default"
+
+  it should "keep honoring an explicit DuckLake dataPath field" in:
+    val (sup, _) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckLake,
+      metastore = Map("pgHost" -> "h", "pgPort" -> "5432", "pgUser" -> "u",
+        "pgPassword" -> "s", "schemaName" -> "main"),
+      dataPath  = "s3://bucket/acme_default"
+    )
+    sup.effectiveMetastoreFor("acme", "acme_default")("dataPath") shouldBe
+      "s3://bucket/acme_default"
+
+  // ---------- Backend seam: the residual metastore shape actually reaches NodeSpec ----------
+  //
+  // The tests above pin `effectiveMetastoreFor`'s output directly. The bug this fixes lived one
+  // layer further out: both QuackBackend impls re-overlaid `defaultMetastore` on top of
+  // `spec.metastore` inside `start()`, which could resurrect a key `effectiveMetastoreFor`
+  // deliberately dropped before the backend ever saw it. These cases go through `createPool` so
+  // `CapturingBackend.specs` records exactly what a real backend's `start(spec)` would receive.
+
+  it should
+    "carry NO dataPath key on the captured NodeSpec for a seeded pathless duckdb-file tenant-db" in:
+    val (sup, backend) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckDbFile,
+      metastore = Map("schemaName" -> "main"),
+      dataPath  = ""
+    )
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val spec = backend.specs.head
+    spec.metastore.contains("dataPath") shouldBe false
+    spec.metastore("dbName") shouldBe "acme_default"
+
+  it should
+    "let the tenant-db's dataPath FIELD win over its metastore map entry on the captured NodeSpec" in:
+    // Minor 4a from review: td.dataPath and td.metastore("dataPath") both set, to DIFFERENT
+    // values. effectiveMetastoreFor's DuckDbFile branch checks td.dataPath first, so the field
+    // must be what reaches the backend, not the map entry.
+    val (sup, backend) = supWithSeededTenantDb(
+      bugDefaults, TenantDbKind.DuckDbFile,
+      metastore = Map("dataPath" -> "/map/loses.duckdb", "dbName" -> "acme_default",
+        "schemaName" -> "main"),
+      dataPath  = "/field/wins.duckdb"
+    )
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val spec = backend.specs.head
+    spec.metastore("dataPath") shouldBe "/field/wins.duckdb"
 
   // ---------- NodeSpec.objectStoreSql (per-db object-store CREATE SECRET) ----------
 

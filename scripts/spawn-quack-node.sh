@@ -90,8 +90,26 @@ CREATE OR REPLACE SECRET quack_azure (
     ;;
 esac
 
-if [[ "$kind" != "memory" && "$IS_REMOTE" == "0" ]]; then
-  mkdir -p "$dataPath"
+# mkdir behaviour differs by kind: for `ducklake`, dataPath is a parquet
+# DIRECTORY, so mkdir -p on the path itself is correct. For `duckdb-file`,
+# dataPath is a .duckdb FILE path - mkdir -p on the path itself would create
+# a directory there and the later `ATTACH '$dataPath'` fails with "Is a
+# directory"; only the parent directory needs to exist. For `memory`, there
+# is no on-disk path at all.
+if [[ "$IS_REMOTE" == "0" ]]; then
+  case "$kind" in
+    ducklake)
+      mkdir -p "$dataPath"
+      ;;
+    duckdb-file)
+      if [[ -n "$dataPath" ]]; then
+        mkdir -p "$(dirname "$dataPath")"
+      fi
+      ;;
+    memory)
+      : # no on-disk dataPath to create
+      ;;
+  esac
 fi
 
 # Resolve the duckdb CLI. $DUCKDB_BIN wins (an absolute path the launcher sets to

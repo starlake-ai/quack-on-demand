@@ -121,8 +121,29 @@ CREATE OR REPLACE SECRET quack_azure (
   }
 }
 
-if ($kind -ne 'memory' -and -not $isRemote) {
-  New-Item -ItemType Directory -Force -Path $dataPath | Out-Null
+# New-Item behaviour differs by kind: for `ducklake`, dataPath is a parquet
+# DIRECTORY, so creating the path itself is correct. For `duckdb-file`,
+# dataPath is a .duckdb FILE path - creating a directory at that exact path
+# would make the later `ATTACH '$dataPath'` fail ("Is a directory" / file
+# already exists as a directory); only the parent directory needs to exist.
+# For `memory`, there is no on-disk path at all. Mirrors spawn-quack-node.sh.
+if (-not $isRemote) {
+  switch ($kind) {
+    'ducklake' {
+      New-Item -ItemType Directory -Force -Path $dataPath | Out-Null
+    }
+    'duckdb-file' {
+      if (-not [string]::IsNullOrEmpty($dataPath)) {
+        $parent = Split-Path -Path $dataPath -Parent
+        if (-not [string]::IsNullOrEmpty($parent)) {
+          New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+      }
+    }
+    'memory' {
+      # no on-disk dataPath to create
+    }
+  }
 }
 
 # Resolve the DuckDB CLI. $env:DUCKDB_BIN wins; otherwise the first `duckdb`
