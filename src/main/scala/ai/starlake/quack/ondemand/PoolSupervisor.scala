@@ -1326,6 +1326,9 @@ final class PoolSupervisor(
       podTemplateYaml: String = "",
       // Per-pool lockdown override persisted at create time. None = inherit.
       lockdown: Option[Boolean] = None,
+      // Owner-declared scale-out band, persisted at create time. Both None = fixed size.
+      minNodes: Option[Int] = None,
+      maxNodes: Option[Int] = None,
       gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
@@ -1414,7 +1417,9 @@ final class PoolSupervisor(
                   cpu = cpu,
                   memory = memory,
                   podTemplateYaml = podTemplateYaml,
-                  lockdown = lockdown
+                  lockdown = lockdown,
+                  minNodes = minNodes,
+                  maxNodes = maxNodes
                 )
                 IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
                   poolRows.put(poolEntity.id, poolEntity)
@@ -1509,6 +1514,44 @@ final class PoolSupervisor(
     */
   def effectiveLockdown(key: PoolKey): Boolean =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
+
+  /** The owner-declared scale-out band, resolved from the persisted row (the band stays out of
+    * PoolState on purpose, like lockdown). None = pool unknown OR fixed size.
+    */
+  def autoscaleBand(key: PoolKey): Option[(Int, Int)] =
+    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(p => p.minNodes.zip(p.maxNodes))
+
+  /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
+    * lock), mirroring [[setPoolLockdown]]. Does NOT validate the band shape (min < max, size inside
+    * the band, hardCap): that is the handler's job via `AutoscaleBand.validate`. Some sets the
+    * band, None clears it back to fixed size.
+    */
+  def setPoolAutoscale(
+      key: PoolKey,
+      band: Option[(Int, Int)]
+  ): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key) {
+      IO.blocking {
+        withCacheRecovery("setPoolAutoscale") {
+          pools.get(key) match
+            case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
+            case Some(_) =>
+              poolIdByKey.get(key).flatMap(poolRows.get) match
+                case None =>
+                  Left(
+                    SupervisorError.Internal(
+                      s"pool entity missing for $key (control-plane out of sync)"
+                    )
+                  )
+                case Some(p) =>
+                  val updated = p.copy(minNodes = band.map(_._1), maxNodes = band.map(_._2))
+                  store.upsertPool(updated)
+                  poolRows.put(updated.id, updated)
+                  publish.topologyChanged()
+                  Right(updated)
+        }
+      }
+    }
 
   /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
     * lock): either the persist lands before reconcile builds a NodeSpec off
@@ -1613,7 +1656,8 @@ final class PoolSupervisor(
       targetSize: Int,
       newDist: RoleDistribution,
       force: Boolean,
-      gateBypass: Boolean = false
+      gateBypass: Boolean = false,
+      reason: String = "manual"
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
     val from = get(key).map(_.distribution.total).getOrElse(0)
@@ -1630,9 +1674,18 @@ final class PoolSupervisor(
       case Left(reason) =>
         IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
       case Right(()) =>
-        locks.withLock(key) {
-          withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
-        }
+        locks
+          .withLock(key) {
+            withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
+          }
+          .flatTap { nodes =>
+            IO(
+              events.emit(
+                ManagerEvent
+                  .PoolScaled(key.tenant, key.tenantDb, key.pool, from, nodes.size, reason)
+              )
+            )
+          }
     }
 
   private def scaleUnlocked(

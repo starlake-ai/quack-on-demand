@@ -96,6 +96,10 @@ Once a tenant is live, these are the one-liners reached for most often:
 qod pool scale --tenant initech --db initech_analytics --pool bi \
   --target-size 4 --writeonly 1 --readonly 2 --dual 1
 
+# Let the pool size itself between 2 and 6 nodes with demand (omit both bounds to clear)
+qod pool set-autoscale --tenant initech --db initech_analytics --pool bi \
+  --min-nodes 2 --max-nodes 6
+
 # Pull one misbehaving node out of routing rotation without stopping it
 qod node quarantine --tenant initech --db initech_analytics --pool bi --node-id <NODE_ID>
 
@@ -106,4 +110,4 @@ qod maintenance run --tenant initech --db initech_analytics
 qod audit list --tenant initech --limit 20
 ```
 
-See the [Command reference](/cli/reference) for every noun and verb, including federation, manifest export/import, and time-travel catalog browsing.
+See the [Command reference](/cli/reference) for every noun and verb, including federation, manifest export/import, and time-travel catalog browsing, and [Autoscaling pools](/operating/autoscaling) for what the band does once it is set.

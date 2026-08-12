@@ -258,8 +258,8 @@ final class PostgresControlPlaneStore(
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
         |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |   cpu, memory, pod_template_yaml, suspended, lockdown)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
+        |   cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -277,7 +277,9 @@ final class PostgresControlPlaneStore(
         |  memory                  = EXCLUDED.memory,
         |  pod_template_yaml       = EXCLUDED.pod_template_yaml,
         |  suspended               = EXCLUDED.suspended,
-        |  lockdown                = EXCLUDED.lockdown""".stripMargin
+        |  lockdown                = EXCLUDED.lockdown,
+        |  min_nodes               = EXCLUDED.min_nodes,
+        |  max_nodes               = EXCLUDED.max_nodes""".stripMargin
     )
     try
       ps.setString(1, p.id)
@@ -302,6 +304,12 @@ final class PostgresControlPlaneStore(
       p.lockdown match
         case Some(v) => ps.setBoolean(18, v)
         case None    => ps.setNull(18, Types.BOOLEAN)
+      p.minNodes match
+        case Some(v) => ps.setInt(19, v)
+        case None    => ps.setNull(19, Types.INTEGER)
+      p.maxNodes match
+        case Some(v) => ps.setInt(20, v)
+        case None    => ps.setNull(20, Types.INTEGER)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -311,7 +319,7 @@ final class PostgresControlPlaneStore(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
         |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |       cpu, memory, pod_template_yaml, suspended, lockdown
+        |       cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -349,8 +357,60 @@ final class PostgresControlPlaneStore(
       podTemplateYaml = Option(rs.getString("pod_template_yaml")).getOrElse(""),
       // Column added in changeset 0024; NULL = inherit the global flag.
       lockdown =
-        Option(rs.getObject("lockdown")).map(_.asInstanceOf[java.lang.Boolean].booleanValue)
+        Option(rs.getObject("lockdown")).map(_.asInstanceOf[java.lang.Boolean].booleanValue),
+      // Columns added in changeset 0025; NULL = fixed-size pool (no band).
+      minNodes = Option(rs.getObject("min_nodes")).map(_.asInstanceOf[Number].intValue),
+      maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue)
     )
+
+  // ---------------- Pool load (autoscale demand buckets) ----------------
+
+  def addPoolLoad(
+      poolId: String,
+      bucketStart: java.time.Instant,
+      statements: Long,
+      totalDurationMs: Long
+  ): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_pool_load (pool_id, bucket_start, statements, total_duration_ms)
+        |VALUES (?, ?, ?, ?)
+        |ON CONFLICT (pool_id, bucket_start) DO UPDATE SET
+        |  statements        = qodstate_pool_load.statements + EXCLUDED.statements,
+        |  total_duration_ms = qodstate_pool_load.total_duration_ms + EXCLUDED.total_duration_ms""".stripMargin
+    )
+    try
+      ps.setString(1, poolId)
+      ps.setTimestamp(2, Timestamp.from(bucketStart))
+      ps.setLong(3, statements)
+      ps.setLong(4, totalDurationMs)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def poolLoadWindow(from: java.time.Instant): Map[String, (Long, Long)] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT pool_id, SUM(statements) AS s, SUM(total_duration_ms) AS d
+        |FROM qodstate_pool_load WHERE bucket_start >= ? GROUP BY pool_id""".stripMargin
+    )
+    try
+      ps.setTimestamp(1, Timestamp.from(from))
+      val rs = ps.executeQuery()
+      try
+        val out = Map.newBuilder[String, (Long, Long)]
+        while rs.next() do out += rs.getString("pool_id") -> (rs.getLong("s"), rs.getLong("d"))
+        out.result()
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def purgePoolLoad(olderThan: java.time.Instant): Int = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_pool_load WHERE bucket_start < ?")
+    try
+      ps.setTimestamp(1, Timestamp.from(olderThan))
+      ps.executeUpdate()
+    finally ps.close()
+  }
 
   // ---------------- Node ----------------
 
@@ -1343,7 +1403,7 @@ final class PostgresControlPlaneStore(
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(

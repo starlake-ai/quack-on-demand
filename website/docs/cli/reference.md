@@ -46,6 +46,7 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 | `qod pool stop` | Stop a pool's nodes. |
 | `qod pool delete` | Delete a pool. |
 | `qod pool set-disabled` | Enable or disable a pool. |
+| `qod pool set-autoscale` | Set or clear a pool's autoscale band (omit both bounds to clear). |
 | `qod pool set-resources` | Set CPU/memory requests for a pool's nodes. |
 | `qod pool set-pod-template` | Set the Kubernetes pod template YAML for a pool. |
 

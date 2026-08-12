@@ -69,6 +69,32 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     pools.remove(id)
     poolPermissions.values.filter(_.poolId.contains(id)).foreach(p => poolPermissions.remove(p.id))
 
+  // ---------------- Pool load (autoscale demand buckets) ----------------
+  private val poolLoad =
+    scala.collection.concurrent.TrieMap.empty[(String, Instant), (Long, Long)]
+
+  def addPoolLoad(
+      poolId: String,
+      bucketStart: Instant,
+      statements: Long,
+      totalDurationMs: Long
+  ): Unit =
+    poolLoad.updateWith((poolId, bucketStart)) {
+      case Some((s, d)) => Some((s + statements, d + totalDurationMs))
+      case None         => Some((statements, totalDurationMs))
+    }
+    ()
+
+  def poolLoadWindow(from: Instant): Map[String, (Long, Long)] =
+    poolLoad.toList
+      .filter { case ((_, b), _) => !b.isBefore(from) }
+      .groupMapReduce(_._1._1)(_._2)((a, b) => (a._1 + b._1, a._2 + b._2))
+
+  def purgePoolLoad(olderThan: Instant): Int =
+    val victims = poolLoad.keys.filter(_._2.isBefore(olderThan)).toList
+    victims.foreach(poolLoad.remove)
+    victims.size
+
   // node_id -> pool_id index (matches the Postgres FK shape).
   private val nodeIndex = TrieMap.empty[String, String]
 

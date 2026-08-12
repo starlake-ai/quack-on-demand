@@ -1,0 +1,16 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0025-qodstate-pool-autoscale-band
+      author: quack-on-demand
+      changes:
+        # Owner-declared demand scale-out band. Both NULL = fixed-size pool
+        # (exact pre-0025 behavior). Set together or not at all; REST validates.
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: min_nodes
+                  type: INT
+              - column:
+                  name: max_nodes
+                  type: INT

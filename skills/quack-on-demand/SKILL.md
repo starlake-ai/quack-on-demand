@@ -135,6 +135,45 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/resume \
 # (bounded by PROXY_RESUME_HOLD_TIMEOUT_SEC, default 60s). A stopped pool
 # (pool/stop) stays down; a disabled pool is never auto-woken.
 
+# Autoscale band: declare minNodes/maxNodes and the manager adds/removes READONLY
+# nodes with demand, never leaving the band. Both bounds together or neither.
+# Rules: 1 <= min <= max <= QOD_AUTOSCALE_HARD_CAP (16); min must cover the
+# write-capable nodes (writeonly + dual); the CURRENT size must sit inside the
+# band (so a stopped pool, size 0, cannot take one - scale it up first); a pool
+# with authored cohorts cannot be elastic. Violations return 400 invalid_band.
+# Create a pool with a band:
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":2,
+       "roleDistribution":{"writeonly":1,"readonly":1,"dual":0},
+       "minNodes":2,"maxNodes":6}'
+
+# Set (or change) the band on an existing pool
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setAutoscale \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","minNodes":2,"maxNodes":6}'
+
+# Clear the band (omit BOTH bounds) - the pool goes back to a fixed size
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setAutoscale \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
+
+# CLI equivalents
+qod pool create --tenant acme --db acme_tpch --pool bi --size 2 \
+  --writeonly 1 --readonly 1 --min-nodes 2 --max-nodes 6
+qod pool set-autoscale --tenant acme --db acme_tpch --pool bi --min-nodes 2 --max-nodes 6
+qod pool set-autoscale --tenant acme --db acme_tpch --pool bi   # clears it
+
+# pool/scale on a banded pool refuses a targetSize outside [min, max] with
+# 400 outside_band ("adjust the band first via pool/setAutoscale") - the next
+# sweep would just undo it. Widen or clear the band, then scale.
+# To pin a pool: set minNodes == maxNodes. That is a legal band meaning "hold
+# exactly this size, never scale", and it keeps manual scaling constrained to
+# that size. To stop the sweep manager-wide: QOD_AUTOSCALE_ENABLED=false (bands
+# stay recorded and are simply not acted on). Actions land in the audit log with
+# actor "autoscale" and in the manager log as
+# "autoscale: acme/acme_tpch/bi out 2 -> 3 util=0.91".
+
 # Delete a pool: stops nodes AND removes the pool from the registry
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
   -H 'Content-Type: application/json' \

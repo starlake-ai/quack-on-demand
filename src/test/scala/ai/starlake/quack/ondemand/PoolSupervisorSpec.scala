@@ -210,6 +210,35 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1), lockdown = Some(true)).unsafeRunSync()
     backend.specs.last.lockdownSql should include("SET autoinstall_known_extensions = false")
 
+  // ---- autoscaleBand / setPoolAutoscale: owner-declared scale-out band ----
+
+  "PoolSupervisor.autoscaleBand" should "persist and expose the autoscale band" in:
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3))
+      .unsafeRunSync()
+    sup.autoscaleBand(key) shouldBe Some((1, 3))
+
+  it should "return None for a fixed-size pool" in:
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 0)).unsafeRunSync()
+    sup.autoscaleBand(key) shouldBe None
+
+  "PoolSupervisor.setPoolAutoscale" should "set and clear the band" in:
+    val sup = freshSupervisor()
+    sup.createPool(key, RoleDistribution(0, 1, 0)).unsafeRunSync()
+    sup.autoscaleBand(key) shouldBe None
+    sup.setPoolAutoscale(key, Some((1, 4))).unsafeRunSync().isRight shouldBe true
+    sup.autoscaleBand(key) shouldBe Some((1, 4))
+    sup.setPoolAutoscale(key, None).unsafeRunSync().isRight shouldBe true
+    sup.autoscaleBand(key) shouldBe None
+
+  it should "return Left for an unknown pool" in:
+    val sup = freshSupervisor()
+    sup
+      .setPoolAutoscale(PoolKey("no", "such", "pool"), Some((1, 2)))
+      .unsafeRunSync()
+      .isLeft shouldBe true
+
   // ---- initSql: free-form per-pool SQL prepended to the federation blob ----
   //
   // Operators set things like `SET memory_limit='8GB';` or `INSTALL httpfs;`

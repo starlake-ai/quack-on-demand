@@ -46,6 +46,7 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
     decode[CreatePoolRequest](json) shouldBe Right(
       CreatePoolRequest("acme", "acme_db", "bi", 1, RoleDistribution(0, 0, 1))
     )
+    decode[CreatePoolRequest](json).map(r => (r.minNodes, r.maxNodes)) shouldBe Right((None, None))
 
   it should "round-trip with every non-default field populated" in:
     val req = CreatePoolRequest(
@@ -69,9 +70,44 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
       initSql = Some("INSTALL httpfs"),
       cpu = "2",
       memory = "4Gi",
-      podTemplateYaml = "metadata: {}"
+      podTemplateYaml = "metadata: {}",
+      minNodes = Some(1),
+      maxNodes = Some(4)
     )
     decode[CreatePoolRequest](req.asJson.noSpaces) shouldBe Right(req)
+
+  // ----- SetPoolAutoscaleRequest: one-sided and absent bands ---------------
+
+  "SetPoolAutoscaleRequest" should "default both band bounds to None when absent" in:
+    decode[SetPoolAutoscaleRequest]("""{"tenant":"a","tenantDb":"d","pool":"p"}""") shouldBe
+      Right(SetPoolAutoscaleRequest("a", "d", "p"))
+
+  it should "round-trip a populated band" in:
+    val req = SetPoolAutoscaleRequest("a", "d", "p", Some(1), Some(4))
+    decode[SetPoolAutoscaleRequest](req.asJson.noSpaces) shouldBe Right(req)
+
+  // ----- PoolResponse: band mirror ----------------------------------------
+
+  // PoolResponse derives a strict codec, so the absent-field case is built by
+  // dropping the two band keys from a full encoding rather than by hand-writing
+  // a minimal object (every non-Option field stays required).
+  "PoolResponse" should "default the band to None when the keys are absent from the wire" in:
+    val json = PoolResponse("acme", "acme_db", "bi", Nil, "ready").asJson
+      .mapObject(_.remove("minNodes").remove("maxNodes"))
+      .noSpaces
+    decode[PoolResponse](json).map(r => (r.minNodes, r.maxNodes)) shouldBe Right((None, None))
+
+  it should "round-trip a populated band" in:
+    val resp = PoolResponse(
+      tenant = "acme",
+      tenantDb = "acme_db",
+      pool = "bi",
+      nodes = Nil,
+      status = "ready",
+      minNodes = Some(1),
+      maxNodes = Some(4)
+    )
+    decode[PoolResponse](resp.asJson.noSpaces) shouldBe Right(resp)
 
   // ----- Pool ops: force defaults to false --------------------------------
 

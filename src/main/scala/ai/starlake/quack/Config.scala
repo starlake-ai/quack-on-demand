@@ -469,6 +469,7 @@ final case class ManagerConfig(
     maintenance: MaintenanceConfig = MaintenanceConfig(),
     catalog: CatalogConfig = CatalogConfig(),
     routing: RoutingConfig = RoutingConfig(),
+    autoscale: AutoscaleConfig = AutoscaleConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
@@ -504,6 +505,86 @@ final case class RoutingConfig(
     )
     directoryMaxTables: Int = 4096
 )
+
+/** Demand scale-out between a pool's owner-declared min/max band. Policy lives in core; per-pool
+  * participation requires an explicit band, so the sweep is inert on fresh installs. Two levels of
+  * opt-out: `enabled = false` stops the sweep manager-wide, and a pool opts out on its own by
+  * declaring `minNodes == maxNodes` (hold that size, never scale) or by carrying no band at all.
+  * See docs/superpowers/specs/2026-08-11-demand-scale-out-policy-design.md.
+  */
+final case class AutoscaleConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_ENABLED",
+      description = "Global kill switch for the demand scale-out sweep."
+    )
+    enabled: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_SWEEP_SEC",
+      description = "Sweep interval in seconds; clamped to a 30s floor."
+    )
+    sweepSeconds: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_WINDOW_MINUTES",
+      description = "Load window W for the Little's-law concurrency estimate."
+    )
+    windowMinutes: Int = 5,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_HIGH_WATERMARK",
+      description = "Scale-out utilization threshold."
+    )
+    highWatermark: Double = 0.8,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_LOW_WATERMARK",
+      description = "Scale-in utilization threshold; must be < highWatermark."
+    )
+    lowWatermark: Double = 0.3,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_OUT_STREAK",
+      description = "Consecutive sweeps above highWatermark before adding a reader."
+    )
+    outStreak: Int = 2,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_IN_STREAK",
+      description = "Consecutive sweeps below lowWatermark before removing a reader."
+    )
+    inStreak: Int = 10,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_OUT_COOLDOWN_SEC",
+      description = "Per-pool cooldown after any scale action or resume before scaling out."
+    )
+    scaleOutCooldownSec: Int = 180,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_IN_COOLDOWN_SEC",
+      description = "Per-pool cooldown after any scale action before scaling in."
+    )
+    scaleInCooldownSec: Int = 600,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_ASSUMED_CONCURRENCY",
+      description = "Capacity contribution of a node with maxConcurrent = 0 (unlimited)."
+    )
+    assumedConcurrencyPerNode: Int = 4,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_HARD_CAP",
+      description = "Upper bound on maxNodes at validation time; a typo guard, not a quota."
+    )
+    hardCap: Int = 16,
+    @field @ConfigField(
+      envVar = "QOD_AUTOSCALE_FAILURE_BACKOFF_SWEEPS",
+      description = "Sweeps to skip a pool after 3 consecutive scale failures."
+    )
+    failureBackoffSweeps: Int = 5
+):
+  require(lowWatermark < highWatermark, "autoscale: lowWatermark must be < highWatermark")
+  require(outStreak >= 1, "autoscale: outStreak must be >= 1")
+  require(inStreak >= 1, "autoscale: inStreak must be >= 1")
+  require(windowMinutes >= 1, "autoscale: windowMinutes must be >= 1")
+  require(scaleOutCooldownSec >= 0, "autoscale: scaleOutCooldownSec must be >= 0")
+  require(scaleInCooldownSec >= 0, "autoscale: scaleInCooldownSec must be >= 0")
+  require(failureBackoffSweeps >= 1, "autoscale: failureBackoffSweeps must be >= 1")
+  require(assumedConcurrencyPerNode >= 0, "autoscale: assumedConcurrencyPerNode must be >= 0")
+  require(hardCap >= 1, "autoscale: hardCap must be >= 1")
+  def sweepInterval: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(math.max(30, sweepSeconds)).seconds
 
 final case class FlightConfig(
     @field @ConfigField(envVar = "PROXY_HOST", description = "FlightSQL edge bind address.")

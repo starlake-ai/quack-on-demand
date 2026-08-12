@@ -41,6 +41,18 @@ object ManagerEvent:
   final case class PoolResumed(tenant: String, tenantDb: String, pool: String, reason: String)
       extends ManagerEvent
 
+  /** A pool's node count changed through scale (manual REST call or the autoscale sweep). Emitted
+    * after the mutation commits. `reason` is "manual" or "autoscale".
+    */
+  final case class PoolScaled(
+      tenant: String,
+      tenantDb: String,
+      pool: String,
+      fromSize: Int,
+      toSize: Int,
+      reason: String
+  ) extends ManagerEvent
+
   /** A new session was established. `via` identifies the entry point:
     *   - `"flightsql"`: an Arrow FlightSQL handshake.
     *   - `"rest"`: a REST password login (`AuthHandlers.login`).
@@ -56,3 +68,9 @@ trait ManagerEventSink:
 
 object ManagerEventSink:
   val noop: ManagerEventSink = (_: ManagerEvent) => ()
+
+  /** Delivers each event to every sink in order. Sinks must not throw (the routing hot path calls
+    * emit inline); no error isolation is added here.
+    */
+  def fanout(sinks: ManagerEventSink*): ManagerEventSink =
+    (e: ManagerEvent) => sinks.foreach(_.emit(e))

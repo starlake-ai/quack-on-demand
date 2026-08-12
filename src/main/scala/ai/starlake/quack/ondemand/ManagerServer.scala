@@ -558,6 +558,9 @@ final class ManagerServer(
       PoolEndpoints.setPoolLockdown.serverLogic { case (req, token) =>
         pools.setLockdown(req, token)(sessions.scopeOf)
       },
+      PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
+        pools.setPoolAutoscale(req, token)(sessions.scopeOf)
+      },
       NodeEndpoints.setMaxConcurrent.serverLogic { case (req, token) =>
         nodes.setMaxConcurrent(req, token)(sessions.scopeOf)
       },

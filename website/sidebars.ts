@@ -56,6 +56,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'operating/tenants-databases',
             'operating/pools-cohorts',
+            'operating/autoscaling',
             'operating/federation',
           ],
         },

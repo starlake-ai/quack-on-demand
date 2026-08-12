@@ -88,6 +88,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
+  given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -110,6 +111,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]          = deriveReader[CatalogConfig]
   given ConfigReader[RoutingConfig]          = deriveReader[RoutingConfig]
+  given ConfigReader[AutoscaleConfig]        = deriveReader[AutoscaleConfig]
   given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
@@ -279,7 +281,11 @@ object Main extends IOApp with LazyLogging:
     val placementDirectory =
       new ai.starlake.quack.route.PlacementDirectory(mgrCfg.routing.directoryMaxTables)
     val localityTracker = new ai.starlake.quack.route.LocalityTracker()
-    val sup             = new PoolSupervisor(
+    // In-process demand buckets for the autoscale sweep. Fed from the router's
+    // StatementExecuted events; drained (and flushed to Postgres) by AutoscaleWiring
+    // on every replica, since each edge only sees the statements it served.
+    val poolLoadStats = new ai.starlake.quack.route.PoolLoadStats()
+    val sup           = new PoolSupervisor(
       backend,
       tracker,
       store,
@@ -371,6 +377,7 @@ object Main extends IOApp with LazyLogging:
       tracker,
       engineStatsTracker,
       mgrCfg.k8s.podTemplateEnabled,
+      autoscaleHardCap = mgrCfg.autoscale.hardCap,
       audit = auditRecorder
     )
     val nodes   = new NodeHandlers(sup, tracker, store, publisher, audit = auditRecorder)
@@ -629,7 +636,15 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
-        events = moduleEventBus.sink,
+        // The load-stats sink goes FIRST: fanout has no error isolation, so a module
+        // sink that throws must not be able to starve the autoscale demand signal.
+        // Invariant: poolLoadStats.sink is ONLY wired when the autoscale sweep runs,
+        // because that sweep is its sole drainer -- feeding it with autoscale disabled
+        // would grow the per-(pool, minute) bucket map without bound.
+        events =
+          if mgrCfg.autoscale.enabled then
+            ai.starlake.quack.spi.ManagerEventSink.fanout(poolLoadStats.sink, moduleEventBus.sink)
+          else moduleEventBus.sink,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
         lockdownFor = sup.effectiveLockdown,
@@ -1004,6 +1019,47 @@ object Main extends IOApp with LazyLogging:
                 val maintenanceSchedulerFiber = maintenanceWiring.schedulerFiber
                 val maintenanceDrainFiber     = maintenanceWiring.drainFiber
 
+                val autoscaleWiring = new ai.starlake.quack.boot.AutoscaleWiring(
+                  cfg = mgrCfg.autoscale,
+                  views = () =>
+                    ai.starlake.quack.boot.AutoscaleWiringSupport
+                      .views(sup, store, mgrCfg.autoscale),
+                  flushLocal = () =>
+                    poolLoadStats.drainClosed().foreach { case ((key, bucketMs), s) =>
+                      sup
+                        .poolId(key)
+                        .foreach(id =>
+                          store.addPoolLoad(
+                            id,
+                            java.time.Instant.ofEpochMilli(bucketMs),
+                            s.statements,
+                            s.totalDurationMs
+                          )
+                        )
+                    },
+                  purge =
+                    () => store.purgePoolLoad(java.time.Instant.now().minusSeconds(3600)): Unit,
+                  // Both directions are the same supervisor call: scale() takes the
+                  // target size and the new distribution the decision core computed.
+                  // force = false keeps the quota gate and the pool lock in play, so a
+                  // rejected scale surfaces as a Left the wiring counts as a failure.
+                  scale = { a =>
+                    val (k, t, d) = a match
+                      case ai.starlake.quack.ondemand.autoscale.AutoscaleAction
+                            .ScaleOut(k, t, d) =>
+                        (k, t, d)
+                      case ai.starlake.quack.ondemand.autoscale.AutoscaleAction.ScaleIn(k, t, d) =>
+                        (k, t, d)
+                    sup.scale(k, t, d, force = false, reason = "autoscale").attempt.map {
+                      case Right(_) => Right(())
+                      case Left(e)  => Left(Option(e.getMessage).getOrElse(e.toString))
+                    }
+                  },
+                  isLeader = () => coordinator.forall(_.isLeader),
+                  audit = auditRecorder
+                )
+                val autoscaleFiber = autoscaleWiring.fiber
+
                 // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
                 val coordinatorFiber = coordinator match
                   case Some(c) => c.loop.start
@@ -1071,17 +1127,20 @@ object Main extends IOApp with LazyLogging:
                             rollupFiber.flatMap { rlFiber =>
                               maintenanceSchedulerFiber.flatMap { msFiber =>
                                 maintenanceDrainFiber.flatMap { mdFiber =>
-                                  moduleDispatcherFibers.flatMap { modDispFibers =>
-                                    moduleSingletonFibers.flatMap { modSingFibers =>
-                                      IO.never[Unit]
-                                        .guarantee(
-                                          fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                            hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                            rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
-                                            modDispFibers.traverse_(_.cancel) *>
-                                            modSingFibers.traverse_(_.cancel) *>
-                                            gracefulShutdown
-                                        )
+                                  autoscaleFiber.flatMap { asFiber =>
+                                    moduleDispatcherFibers.flatMap { modDispFibers =>
+                                      moduleSingletonFibers.flatMap { modSingFibers =>
+                                        IO.never[Unit]
+                                          .guarantee(
+                                            fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                              hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                              rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
+                                              asFiber.cancel *>
+                                              modDispFibers.traverse_(_.cancel) *>
+                                              modSingFibers.traverse_(_.cancel) *>
+                                              gracefulShutdown
+                                          )
+                                      }
                                     }
                                   }
                                 }

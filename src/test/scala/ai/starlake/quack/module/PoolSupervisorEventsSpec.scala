@@ -129,3 +129,30 @@ class PoolSupervisorEventsSpec extends AnyFlatSpec with Matchers:
     tenantDeletedIdx should be >= 0
     dbDeletedIdx should be < tenantDeletedIdx
   }
+
+  it should "emit PoolScaled with fromSize, toSize and reason after a resize" in {
+    val sup = new PoolSupervisor(
+      new StubQuackBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      events = sink
+    )
+
+    val tenant = sup.createTenant(Tenant("scaleup")).unsafeRunSync().toOption.get
+    val td     = sup
+      .createTenantDb("scaleup", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+      .toOption
+      .get
+    val key = PoolKey("scaleup", td.name, "sales")
+    sup.createPool(key, RoleDistribution(0, 1, 0)).unsafeRunSync()
+    received.clear()
+
+    sup
+      .scale(key, targetSize = 2, RoleDistribution(0, 2, 0), force = false, reason = "autoscale")
+      .unsafeRunSync()
+
+    received.asScala.toList should contain(
+      ManagerEvent.PoolScaled(key.tenant, key.tenantDb, key.pool, 1, 2, "autoscale")
+    )
+  }

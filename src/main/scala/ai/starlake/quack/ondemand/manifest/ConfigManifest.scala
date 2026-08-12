@@ -85,7 +85,13 @@ final case class ManifestPool(
     // (default) | "on" | "off". Decoded to Pool.lockdown (Option[Boolean]) via
     // LockdownTriState.parse on import. Defaulted so pre-lockdown YAMLs decode
     // unchanged as "inherit" (= no override).
-    lockdown: String = "inherit"
+    lockdown: String = "inherit",
+    // Owner-declared demand scale-out band, round-tripped verbatim from
+    // Pool.minNodes/maxNodes. Both None (the default) decode as a fixed-size
+    // pool, so pre-autoscale YAMLs decode unchanged. Set together or not at
+    // all; AutoscaleBand.validate enforces that on import.
+    minNodes: Option[Int] = None,
+    maxNodes: Option[Int] = None
 )
 
 final case class ManifestTenant(

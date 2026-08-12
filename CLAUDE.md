@@ -75,6 +75,24 @@ reason `rest | query | module`; idle-detection policy lives in the hosted
 module, never in core. See
 docs/superpowers/specs/2026-07-18-pool-suspend-resume-design.md.
 
+### Demand scale-out (owner-declared band)
+
+Pools with `minNodes`/`maxNodes` set (create-time or `POST /api/pool/setAutoscale`)
+gain readers under sustained load and shed them when quiet, never leaving the
+band; writers are never touched and scale-in stops at `minNodes` (zero stays
+hibernation's job). Load signal: StatementExecuted -> per-pool 1-minute buckets
+(`PoolLoadStats`) flushed upsert-add by every replica to `qodstate_pool_load`;
+the HA leader decides (`Autoscale.decide`, pure) and acts through
+`PoolSupervisor.scale(reason = "autoscale")`, so quota gating applies. Config
+under `quack-on-demand.autoscale` (env `QOD_AUTOSCALE_*`); `enabled` (default
+true, env `QOD_AUTOSCALE_ENABLED`) is the manager-wide kill switch and the sweep
+is inert without a band anyway. `minNodes == maxNodes` is a legal band that holds
+the pool at exactly that size (the per-pool way to opt out). With the switch off
+Main does not wire `PoolLoadStats` into the router's event sink at all, since the
+sweep is that sink's sole drainer. Manual scale outside the band is refused
+(`outside_band`).
+See docs/superpowers/specs/2026-08-11-demand-scale-out-policy-design.md.
+
 ### HA mode (opt-in, Kubernetes only)
 
 `QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N active-active managers.

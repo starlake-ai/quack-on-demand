@@ -5,6 +5,12 @@ import xerial.sbt.Sonatype.sonatypeCentralHost
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
+// pureconfig's Mirror-based deriveReader macro recurses once per ManagerConfig
+// field; the scala3 compiler default (-Xmax-inlines:32) is exceeded once
+// ManagerConfig grows past ~28 fields (hit adding AutoscaleConfig). Bump with
+// headroom rather than re-tuning on every future config block.
+ThisBuild / scalacOptions += "-Xmax-inlines:64"
+
 // ----- Sonatype Central Portal publishing (snapshot + release-ready) -----
 // The published artifact is the assembly uber-jar - quack-on-demand is an
 // app, not an embed-style library, so consumers run `java -jar` rather
