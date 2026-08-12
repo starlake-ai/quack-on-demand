@@ -53,3 +53,7 @@ databaseChangeLog:
       file: db/changelog/0023-pool-suspended.yaml
   - include:
       file: db/changelog/0024-pool-lockdown.yaml
+  - include:
+      file: db/changelog/0025-pool-autoscale-band.yaml
+  - include:
+      file: db/changelog/0026-pool-load.yaml

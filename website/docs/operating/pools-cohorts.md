@@ -38,6 +38,7 @@ qod pool create --tenant acme --db acme_sales --pool bi --size 3 \
 | `idleTimeoutSec` | `-1` | Per-pool idle-timeout setting, persisted on the pool. `-1` means unset. It is recorded on `qodstate_pool` and surfaced back on reads; no automatic idle-shutdown loop acts on it today. |
 | `maxConcurrentPerNode` | `0` | Per-node concurrency cap used for capacity-aware routing. `0` means unbounded. |
 | `cohorts` | `[]` | Optional Kubernetes placement plan (see below). Empty schedules every node with no constraint. |
+| `minNodes` / `maxNodes` | unset | Optional [autoscale band](/operating/autoscaling). Set both or neither; when set, the pool sizes itself within those bounds. Cannot be combined with `cohorts`. |
 | `disabled` | `false` | When true the pool is spawned warm but the edge rejects fresh handshakes until it is enabled. |
 
 The pool inherits its metastore (Postgres connection and data path) from the tenant-db; you do not pass storage config on `pool/create`.
@@ -63,6 +64,8 @@ qod pool stop --tenant acme --db acme_sales --pool bi
 ```
 
 A graceful stop (no `--force`) drains in-flight statements before terminating nodes. `--force` terminates immediately. The same `--force` flag applies when `scale` shrinks a pool.
+
+A pool can also size itself: declare a `minNodes`/`maxNodes` band and the manager adds and removes read nodes with demand, within those bounds. See [Autoscaling pools](/operating/autoscaling). A pool with a band refuses a manual `scale` outside it.
 
 ## Node pod sizing (Kubernetes)
 

@@ -36,7 +36,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       pool: String = "sales",
       size: Int = 2,
       dist: RoleDistribution = RoleDistribution(0, 1, 1),
-      maxConcurrentPerNode: Int = 0
+      maxConcurrentPerNode: Int = 0,
+      minNodes: Option[Int] = None,
+      maxNodes: Option[Int] = None
   ): CreatePoolRequest =
     CreatePoolRequest(
       tenant = "acme",
@@ -44,7 +46,24 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       pool = pool,
       size = size,
       roleDistribution = dist,
-      maxConcurrentPerNode = maxConcurrentPerNode
+      maxConcurrentPerNode = maxConcurrentPerNode,
+      minNodes = minNodes,
+      maxNodes = maxNodes
+    )
+
+  private def scaleReq(
+      pool: String = "sales",
+      targetSize: Int = 2,
+      dist: RoleDistribution = RoleDistribution(0, 1, 1),
+      force: Boolean = false
+  ): ScalePoolRequest =
+    ScalePoolRequest(
+      tenant = "acme",
+      tenantDb = "acme_default",
+      pool = pool,
+      targetSize = targetSize,
+      roleDistribution = dist,
+      force = force
     )
 
   "createPool" should "create a pool and return node info with maxConcurrent" in:
@@ -485,3 +504,148 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .get
     resp.suspended shouldBe true
     resp.nodes shouldBe empty
+
+  // Task 8: owner-declared autoscale band on the REST surface
+
+  "createPool with a band" should "reject a one-sided band on create" in:
+    val h   = freshHandlers
+    val out = h
+      .createPool(req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1)), None)(
+        (_: String) => None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
+
+  it should "reject a band with authored cohorts (scaling clears cohorts)" in:
+    val h = freshHandlers
+    val r = req(size = 2, dist = RoleDistribution(0, 2, 0), minNodes = Some(1), maxNodes = Some(4))
+      .copy(cohorts =
+        List(
+          PoolCohortDto(
+            placement = NodePlacementDto(nodeSelector = Map("zone" -> "a")),
+            distribution = RoleDistribution(0, 2, 0)
+          )
+        )
+      )
+    val out = h.createPool(r, None)((_: String) => None).unsafeRunSync()
+    out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
+
+  it should "create an elastic pool and report its band" in:
+    val h   = freshHandlers
+    val out = h
+      .createPool(
+        req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.toOption.map(r => (r.minNodes, r.maxNodes)) shouldBe Some((Some(1), Some(3)))
+
+  "scalePool" should "refuse a manual scale outside the band with the band in the message" in:
+    val h = freshHandlers
+    h.createPool(
+      req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
+      None
+    )((_: String) => None)
+      .unsafeRunSync()
+    val out = h
+      .scalePool(scaleReq(targetSize = 5, dist = RoleDistribution(0, 5, 0)), None)((_: String) =>
+        None
+      )
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
+    out.left.toOption.map(_._2.error) shouldBe Some("outside_band")
+    out.left.toOption.map(_._2.message).getOrElse("") should include("[1, 3]")
+
+  it should "allow a manual scale inside the band" in:
+    val h = freshHandlers
+    h.createPool(
+      req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
+      None
+    )((_: String) => None)
+      .unsafeRunSync()
+    val out = h
+      .scalePool(scaleReq(targetSize = 3, dist = RoleDistribution(0, 3, 0)), None)((_: String) =>
+        None
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+
+  "setPoolAutoscale" should "set and clear the band" in:
+    val h = freshHandlers
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)((_: String) => None)
+      .unsafeRunSync()
+    val set = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    set.toOption.flatMap(_.minNodes) shouldBe Some(1)
+    set.toOption.flatMap(_.maxNodes) shouldBe Some(4)
+    val cleared = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "sales", None, None),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    cleared.toOption.flatMap(_.minNodes) shouldBe None
+    cleared.toOption.flatMap(_.maxNodes) shouldBe None
+
+  it should "reject a band that does not cover the pool's current size" in:
+    val h = freshHandlers
+    h.createPool(req(size = 2, dist = RoleDistribution(0, 2, 0)), None)((_: String) => None)
+      .unsafeRunSync()
+    val out = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(3), Some(5)),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
+    out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
+
+  it should "reject a band on a pool with authored cohorts (scaling clears cohorts)" in:
+    val h = freshHandlers
+    h.createPool(
+      req(size = 2, dist = RoleDistribution(0, 2, 0)).copy(cohorts =
+        List(
+          PoolCohortDto(
+            placement = NodePlacementDto(nodeSelector = Map("zone" -> "a")),
+            distribution = RoleDistribution(0, 2, 0)
+          )
+        )
+      ),
+      None
+    )((_: String) => None)
+      .unsafeRunSync()
+    val out = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
+    out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
+
+  it should "404 on an unknown pool" in:
+    val h   = freshHandlers
+    val out = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "nope", Some(1), Some(4)),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
+    out.left.toOption.map(_._2.error) shouldBe Some("not_found")
+
+  it should "403 for a foreign-tenant session" in:
+    val h = freshHandlers
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)((_: String) => None)
+      .unsafeRunSync()
+    val out = h
+      .setPoolAutoscale(
+        SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
+        Some("tok")
+      )(_ => Some(tenantScope("globex")))
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)

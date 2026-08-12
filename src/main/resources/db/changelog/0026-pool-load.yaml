@@ -1,0 +1,32 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0026-qodstate-pool-load
+      author: quack-on-demand
+      changes:
+        # Per-pool 1-minute demand buckets for the autoscale sweep. Written
+        # upsert-add by every replica; read summed by the HA leader; purged
+        # after an hour. No FK to qodstate_pool: rows of a deleted pool age
+        # out on their own within the retention window.
+        - createTable:
+            tableName: qodstate_pool_load
+            columns:
+              - column:
+                  name: pool_id
+                  type: TEXT
+                  constraints: { nullable: false }
+              - column:
+                  name: bucket_start
+                  type: TIMESTAMPTZ
+                  constraints: { nullable: false }
+              - column:
+                  name: statements
+                  type: BIGINT
+                  constraints: { nullable: false }
+              - column:
+                  name: total_duration_ms
+                  type: BIGINT
+                  constraints: { nullable: false }
+        - addPrimaryKey:
+            tableName: qodstate_pool_load
+            columnNames: pool_id, bucket_start
+            constraintName: pk_qodstate_pool_load

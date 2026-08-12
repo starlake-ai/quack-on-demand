@@ -90,8 +90,26 @@ CREATE OR REPLACE SECRET quack_azure (
     ;;
 esac
 
-if [[ "$kind" != "memory" && "$IS_REMOTE" == "0" ]]; then
-  mkdir -p "$dataPath"
+# mkdir behaviour differs by kind: for `ducklake`, dataPath is a parquet
+# DIRECTORY, so mkdir -p on the path itself is correct. For `duckdb-file`,
+# dataPath is a .duckdb FILE path - mkdir -p on the path itself would create
+# a directory there and the later `ATTACH '$dataPath'` fails with "Is a
+# directory"; only the parent directory needs to exist. For `memory`, there
+# is no on-disk path at all.
+if [[ "$IS_REMOTE" == "0" ]]; then
+  case "$kind" in
+    ducklake)
+      mkdir -p "$dataPath"
+      ;;
+    duckdb-file)
+      if [[ -n "$dataPath" ]]; then
+        mkdir -p "$(dirname "$dataPath")"
+      fi
+      ;;
+    memory)
+      : # no on-disk dataPath to create
+      ;;
+  esac
 fi
 
 # Resolve the duckdb CLI. $DUCKDB_BIN wins (an absolute path the launcher sets to
@@ -159,6 +177,63 @@ if [[ -n "$PROXY_URL" ]]; then
   PROXY_SQL="SET http_proxy = '$HOSTPORT';"
 fi
 
+# Cgroup-aware memory_limit / threads, K8s pods only (no-op elsewhere).
+#
+# DuckDB's own defaults read the HOST, not the container: memory_limit
+# defaults to ~80% of host RAM (ignores the cgroup limit a K8s
+# `resources.limits.memory` actually sets), and threads defaults to the
+# CPU count visible via affinity, which K8s's CFS-quota-based
+# `resources.limits.cpu` does not reduce (that throttles time slices, it
+# doesn't shrink the visible core count without the rarely-used "static"
+# CPU manager policy). Left alone, a pod sized smaller than the node
+# either gets OOM-killed by the kernel once it exceeds its real cgroup
+# limit (DuckDB never thought it was close, so it never spilled), or
+# oversubscribes worker threads onto a fraction of a CPU's worth of
+# actual CFS-granted time. Reading the cgroup files directly - rather
+# than threading a new cpu/memory env var through both backends - stays
+# correct for any pool size (fixed tier or custom) with no new plumbing.
+# Same pattern as the SF>=10 fix in _load-common.sh's
+# cgroup_memory_bytes/default_memory_limit, but tuned differently: that
+# script shares its cgroup with the manager JVM during a local demo load
+# (hence a conservative 40%), whereas a node pod runs nothing but DuckDB,
+# so 85% (in line with general DuckDB memory-tuning guidance) is safe.
+# `/duckdb-tmp` is the emptyDir KubernetesQuackBackend already mounts on
+# every pod for `readOnlyRootFilesystem` compatibility; only point
+# temp_directory at it when it actually exists so LocalQuackBackend (no
+# such mount, no meaningful cgroup either) is unaffected.
+RESOURCE_SQL=""
+if [[ -r /sys/fs/cgroup/memory.max ]]; then
+  MEM_BYTES="$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"        # cgroup v2
+elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+  MEM_BYTES="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)"  # cgroup v1
+else
+  MEM_BYTES=""
+fi
+if [[ "$MEM_BYTES" =~ ^[0-9]+$ ]] && (( MEM_BYTES > 0 && MEM_BYTES < 9000000000000000000 )); then
+  MEM_MIB=$(( MEM_BYTES / 1024 / 1024 * 85 / 100 ))
+  (( MEM_MIB < 256 )) && MEM_MIB=256
+  RESOURCE_SQL+="SET memory_limit = '${MEM_MIB}MiB';"$'\n'
+fi
+if [[ -d /duckdb-tmp && -w /duckdb-tmp ]]; then
+  RESOURCE_SQL+="SET temp_directory = '/duckdb-tmp';"$'\n'
+fi
+if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+  read -r CPU_QUOTA CPU_PERIOD < /sys/fs/cgroup/cpu.max              # cgroup v2: "<quota> <period>"
+  if [[ "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_PERIOD" -gt 0 ]]; then
+    CPU_THREADS=$(( (CPU_QUOTA + CPU_PERIOD - 1) / CPU_PERIOD ))     # ceil(quota / period)
+    (( CPU_THREADS < 1 )) && CPU_THREADS=1
+    RESOURCE_SQL+="SET threads = ${CPU_THREADS};"$'\n'
+  fi
+elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us && -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]]; then
+  CPU_QUOTA="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)"   # cgroup v1
+  CPU_PERIOD="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)"
+  if [[ "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_PERIOD" -gt 0 ]]; then
+    CPU_THREADS=$(( (CPU_QUOTA + CPU_PERIOD - 1) / CPU_PERIOD ))
+    (( CPU_THREADS < 1 )) && CPU_THREADS=1
+    RESOURCE_SQL+="SET threads = ${CPU_THREADS};"$'\n'
+  fi
+fi
+
 # Feed init SQL. Per-kind branching below:
 #   ducklake    - INSTALL/ATTACH the DuckLake catalog via a per-dbname
 #                 pg_advisory_lock to serialize first-time
@@ -174,6 +249,12 @@ fi
 # kind=duckdb-file skip DuckLake-specific setup entirely.
 INIT_SQL=""
 INIT_SQL+="$PROXY_SQL"$'\n'
+# Cgroup-derived memory_limit / temp_directory / threads (see above) run
+# right after the proxy settings and before dbInitSql, so an operator's
+# own "SET memory_limit=..." / "SET threads=..." in dbInitSql or
+# extraSetupSql still wins - DuckDB's SET is a plain reassignment, so the
+# later statement is the one that sticks.
+INIT_SQL+="$RESOURCE_SQL"
 # Per-database init SQL (tenant-db initSql, `dbInitSql` env var). Runs BEFORE
 # the quack extension is installed/loaded and before the catalog ATTACH, right
 # after the proxy settings, so engine-level defaults (SET memory_limit,

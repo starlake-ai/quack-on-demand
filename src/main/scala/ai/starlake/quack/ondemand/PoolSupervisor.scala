@@ -209,24 +209,48 @@ final class PoolSupervisor(
 
   // ---------- Bootstrap / replay ----------
 
-  /** Per-tenant-db naming, applied ONLY to `kind=ducklake` (where each tenant-db is its own
-    * Postgres database named after `td.name`, with parquet alongside at
-    * `parent(defaultDataPath)/td.name`). Operators override via `dbName`/`dataPath` in
-    * `td.metastore` or `td.dataPath`. For `duckdb-file` / `memory` the convention doesn't apply:
-    * fall through to `defaultMetastore ++ td.metastore`.
+  /** Per-tenant-db naming and data location, resolved per kind on top of `defaultMetastore ++
+    * td.metastore`. The manager default describes the BOOTSTRAP tenant-db (a DuckLake directory
+    * plus its own `dbName`), so inheriting it wholesale is wrong for every other kind.
+    *
+    *   - `ducklake`: each tenant-db is its own Postgres database named after `td.name`, with
+    *     parquet alongside at `parent(defaultDataPath)/td.name`. Operators override via
+    *     `dbName`/`dataPath` in `td.metastore` or `td.dataPath`.
+    *   - `duckdb-file`: `dataPath` is a FILE (the node script runs `ATTACH '$dataPath'`), never the
+    *     default DuckLake DIRECTORY, so it comes from `td.dataPath`, else `td.metastore`, else the
+    *     key is dropped entirely. `dbName` falls back to `td.name`, never to the default's (which
+    *     names an unrelated catalog).
+    *   - `memory`: `dataPath` is meaningless and is dropped. `dbName` falls back to DuckDB's
+    *     built-in `memory` catalog, so the health probe's `CREATE SCHEMA IF NOT EXISTS
+    *     <dbName>.<schemaName>` targets a catalog the node actually has instead of failing on every
+    *     tick and leaving the node unroutable.
+    *
+    * `schemaName` is left as the merge yields it for every kind (the default `main` is correct).
     */
   private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
     val merged = defaultMetastore ++ td.metastore
-    if td.kind != TenantDbKind.DuckLake then merged
-    else
-      val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
-      val rootData = defaultMetastore.getOrElse("dataPath", "")
-      val tdData   =
-        if td.dataPath.nonEmpty then td.dataPath
-        else if td.metastore.contains("dataPath") then td.metastore("dataPath")
-        else if rootData.isEmpty then ""
-        else PoolSupervisor.replaceLastSegment(rootData, td.name)
-      if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb
+    td.kind match
+      case TenantDbKind.DuckLake =>
+        val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
+        val rootData = defaultMetastore.getOrElse("dataPath", "")
+        val tdData   =
+          if td.dataPath.nonEmpty then td.dataPath
+          else if td.metastore.contains("dataPath") then td.metastore("dataPath")
+          else if rootData.isEmpty then ""
+          else PoolSupervisor.replaceLastSegment(rootData, td.name)
+        if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb
+
+      case TenantDbKind.DuckDbFile =>
+        val withDb = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
+        val tdData =
+          if td.dataPath.nonEmpty then td.dataPath
+          else td.metastore.getOrElse("dataPath", "")
+        if tdData.nonEmpty then withDb.updated("dataPath", tdData) else withDb.removed("dataPath")
+
+      case TenantDbKind.InMemory =>
+        merged
+          .updated("dbName", td.metastore.getOrElse("dbName", "memory"))
+          .removed("dataPath")
 
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
@@ -1302,6 +1326,9 @@ final class PoolSupervisor(
       podTemplateYaml: String = "",
       // Per-pool lockdown override persisted at create time. None = inherit.
       lockdown: Option[Boolean] = None,
+      // Owner-declared scale-out band, persisted at create time. Both None = fixed size.
+      minNodes: Option[Int] = None,
+      maxNodes: Option[Int] = None,
       gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
@@ -1390,7 +1417,9 @@ final class PoolSupervisor(
                   cpu = cpu,
                   memory = memory,
                   podTemplateYaml = podTemplateYaml,
-                  lockdown = lockdown
+                  lockdown = lockdown,
+                  minNodes = minNodes,
+                  maxNodes = maxNodes
                 )
                 IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
                   poolRows.put(poolEntity.id, poolEntity)
@@ -1485,6 +1514,44 @@ final class PoolSupervisor(
     */
   def effectiveLockdown(key: PoolKey): Boolean =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
+
+  /** The owner-declared scale-out band, resolved from the persisted row (the band stays out of
+    * PoolState on purpose, like lockdown). None = pool unknown OR fixed size.
+    */
+  def autoscaleBand(key: PoolKey): Option[(Int, Int)] =
+    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(p => p.minNodes.zip(p.maxNodes))
+
+  /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
+    * lock), mirroring [[setPoolLockdown]]. Does NOT validate the band shape (min < max, size inside
+    * the band, hardCap): that is the handler's job via `AutoscaleBand.validate`. Some sets the
+    * band, None clears it back to fixed size.
+    */
+  def setPoolAutoscale(
+      key: PoolKey,
+      band: Option[(Int, Int)]
+  ): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key) {
+      IO.blocking {
+        withCacheRecovery("setPoolAutoscale") {
+          pools.get(key) match
+            case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
+            case Some(_) =>
+              poolIdByKey.get(key).flatMap(poolRows.get) match
+                case None =>
+                  Left(
+                    SupervisorError.Internal(
+                      s"pool entity missing for $key (control-plane out of sync)"
+                    )
+                  )
+                case Some(p) =>
+                  val updated = p.copy(minNodes = band.map(_._1), maxNodes = band.map(_._2))
+                  store.upsertPool(updated)
+                  poolRows.put(updated.id, updated)
+                  publish.topologyChanged()
+                  Right(updated)
+        }
+      }
+    }
 
   /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
     * lock): either the persist lands before reconcile builds a NodeSpec off
@@ -1589,7 +1656,8 @@ final class PoolSupervisor(
       targetSize: Int,
       newDist: RoleDistribution,
       force: Boolean,
-      gateBypass: Boolean = false
+      gateBypass: Boolean = false,
+      reason: String = "manual"
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
     val from = get(key).map(_.distribution.total).getOrElse(0)
@@ -1606,9 +1674,18 @@ final class PoolSupervisor(
       case Left(reason) =>
         IO.raiseError(new ai.starlake.quack.spi.QuotaExceededException(reason))
       case Right(()) =>
-        locks.withLock(key) {
-          withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
-        }
+        locks
+          .withLock(key) {
+            withCacheRecoveryIO("scale")(scaleUnlocked(key, targetSize, newDist, force))
+          }
+          .flatTap { nodes =>
+            IO(
+              events.emit(
+                ManagerEvent
+                  .PoolScaled(key.tenant, key.tenantDb, key.pool, from, nodes.size, reason)
+              )
+            )
+          }
     }
 
   private def scaleUnlocked(

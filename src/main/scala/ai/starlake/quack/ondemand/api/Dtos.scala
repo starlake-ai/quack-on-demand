@@ -72,7 +72,15 @@ final case class CreatePoolRequest(
     memory: String = "",
     podTemplateYaml: String = "",
     // Per-pool node-lockdown override: "inherit" (default) | "on" | "off". See LockdownTriState.
-    lockdown: String = "inherit"
+    lockdown: String = "inherit",
+    /** Owner-declared demand scale-out band. Both bounds must be set together (one-sided is refused
+      * with 400 `invalid_band`); both absent = fixed size, the pool never autoscales. Validated by
+      * [[ai.starlake.quack.model.AutoscaleBand.validate]] against the requested distribution/size
+      * and the manager's `autoscale.hardCap`. Elastic pools cannot carry authored cohorts (scaling
+      * clears them).
+      */
+    minNodes: Option[Int] = None,
+    maxNodes: Option[Int] = None
 )
 
 final case class NodeInfo(
@@ -120,7 +128,10 @@ final case class PoolResponse(
     cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
     memory: String = "",                // Kubernetes memory request=limit; empty when unset
     lockdown: String = "inherit",       // stored tri-state override
-    lockdownEffective: Boolean = false  // tri-state resolved against the global flag
+    lockdownEffective: Boolean = false, // tri-state resolved against the global flag
+    // Owner-declared demand scale-out band; both None on a fixed-size pool.
+    minNodes: Option[Int] = None,
+    maxNodes: Option[Int] = None
 )
 
 final case class SetPoolResourcesRequest(
@@ -144,6 +155,18 @@ final case class SetPoolLockdownRequest(
     pool: String,
     // "inherit" | "on" | "off" - see [[ai.starlake.quack.model.LockdownTriState]]
     lockdown: String
+)
+
+/** Sets or clears the pool's demand scale-out band. Both bounds Some = set (validated against the
+  * pool's CURRENT distribution and size); both None = clear back to fixed size; one-sided is
+  * refused with 400 `invalid_band`.
+  */
+final case class SetPoolAutoscaleRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    minNodes: Option[Int] = None,
+    maxNodes: Option[Int] = None
 )
 
 final case class ScalePoolRequest(
@@ -1044,6 +1067,7 @@ object Dtos:
   given Codec[SetPoolResourcesRequest]  = deriveCodec
   given Codec[SetPoolTemplateRequest]   = deriveCodec
   given Codec[SetPoolLockdownRequest]   = deriveCodec
+  given Codec[SetPoolAutoscaleRequest]  = ConfiguredCodec.derived
   given Codec[PoolListResponse]         = deriveCodec
   given Codec[HealthResponse]           = deriveCodec
   given Codec[SetMaxConcurrentRequest]  = deriveCodec

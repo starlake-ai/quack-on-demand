@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
-import ai.starlake.quack.model.{LockdownTriState, PoolKey, QuantitySyntax}
+import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -14,6 +14,9 @@ final class PoolHandlers(
     tracker: NodeLoadTracker,
     engineStats: EngineStatsTracker = new EngineStatsTracker,
     podTemplateEnabled: Boolean = false,
+    // Upper bound accepted for maxNodes at validation time (autoscale.hardCap):
+    // a typo guard, not a quota.
+    autoscaleHardCap: Int = 16,
     audit: AuditRecorder = AuditRecorder.noop
 ):
 
@@ -36,6 +39,8 @@ final class PoolHandlers(
   private def respond(key: PoolKey): Option[PoolResponse] =
     sup.get(key).map { p =>
       val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
+      // Same pool-row resolution as the lockdown fields below; None on a fixed-size pool.
+      val band = sup.autoscaleBand(key)
       PoolResponse(
         tenant = key.tenant,
         tenantDb = key.tenantDb,
@@ -77,7 +82,9 @@ final class PoolHandlers(
         lockdown = LockdownTriState.render(
           sup.poolId(key).flatMap(sup.poolEntity).flatMap(_.lockdown)
         ),
-        lockdownEffective = sup.effectiveLockdown(key)
+        lockdownEffective = sup.effectiveLockdown(key),
+        minNodes = band.map(_._1),
+        maxNodes = band.map(_._2)
       )
     }
 
@@ -156,6 +163,19 @@ final class PoolHandlers(
       apiKey: Option[String],
       gateBypass: Boolean
   ): Out[PoolResponse] =
+    // Band shape (one-sided, min >= max, hardCap, write-capable floor, size inside
+    // the band) plus the cohort conflict: autoscaling rewrites the role
+    // distribution, which clears authored cohorts, so the two cannot be declared
+    // together.
+    val bandShapeErr =
+      AutoscaleBand
+        .validate(req.minNodes, req.maxNodes, req.roleDistribution, req.size, autoscaleHardCap)
+    val bandErr =
+      if req.minNodes.isDefined && req.cohorts.nonEmpty then
+        Some(
+          bandShapeErr.getOrElse("elastic pools cannot use authored cohorts (scaling clears them)")
+        )
+      else bandShapeErr
     LockdownTriState.parse(req.lockdown) match
       case Left(msg) =>
         IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
@@ -184,6 +204,15 @@ final class PoolHandlers(
               (
                 StatusCode.BadRequest,
                 ErrorResponse("invalid_distribution", "role counts do not sum to size")
+              )
+            )
+          )
+        else if bandErr.isDefined then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse("invalid_band", bandErr.getOrElse("invalid autoscale band"))
               )
             )
           )
@@ -234,6 +263,8 @@ final class PoolHandlers(
                       memory = req.memory,
                       podTemplateYaml = req.podTemplateYaml,
                       lockdown = lockdownValue,
+                      minNodes = req.minNodes,
+                      maxNodes = req.maxNodes,
                       gateBypass = gateBypass
                     )
                     .map(_ =>
@@ -307,40 +338,67 @@ final class PoolHandlers(
                   )
                 )
               )
+            // A pool with a declared band stays inside it: a manual scale outside
+            // would be undone by the next autoscale sweep, so refuse it and point
+            // at the band editor instead.
             else
-              sup
-                .scale(
-                  key,
-                  req.targetSize,
-                  req.roleDistribution,
-                  req.force,
-                  gateBypass = gateBypass
-                )
-                .attempt
-                .flatMap {
-                  case Left(q: ai.starlake.quack.spi.QuotaExceededException) =>
-                    IO.pure(
-                      Left((StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason)))
-                    )
-                  case Left(t)  => IO.raiseError(t)
-                  case Right(_) =>
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      AuditActions.PoolScale,
-                      "ok",
-                      tenant = Some(req.tenant),
-                      target = Some(key.toString),
-                      detail = Map("targetSize" -> req.targetSize.toString)
-                    )
-                    IO.pure(
-                      Right(
-                        respond(key).getOrElse(
-                          PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+              sup.autoscaleBand(key) match
+                case Some((mn, mx)) if req.targetSize < mn || req.targetSize > mx =>
+                  IO.pure(
+                    Left(
+                      (
+                        StatusCode.BadRequest,
+                        ErrorResponse(
+                          "outside_band",
+                          s"targetSize ${req.targetSize} is outside the autoscale band " +
+                            s"[$mn, $mx]; adjust the band first via pool/setAutoscale"
                         )
                       )
                     )
-                }
+                  )
+                case _ =>
+                  sup
+                    .scale(
+                      key,
+                      req.targetSize,
+                      req.roleDistribution,
+                      req.force,
+                      gateBypass = gateBypass
+                    )
+                    .attempt
+                    .flatMap {
+                      case Left(q: ai.starlake.quack.spi.QuotaExceededException) =>
+                        IO.pure(
+                          Left(
+                            (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason))
+                          )
+                        )
+                      case Left(t)  => IO.raiseError(t)
+                      case Right(_) =>
+                        audit.rest(
+                          apiKey,
+                          "control-plane",
+                          AuditActions.PoolScale,
+                          "ok",
+                          tenant = Some(req.tenant),
+                          target = Some(key.toString),
+                          detail = Map("targetSize" -> req.targetSize.toString)
+                        )
+                        IO.pure(
+                          Right(
+                            respond(key).getOrElse(
+                              PoolResponse(
+                                req.tenant,
+                                req.tenantDb,
+                                req.pool,
+                                Nil,
+                                "ready",
+                                Map.empty
+                              )
+                            )
+                          )
+                        )
+                    }
 
   def stopPool(req: StopPoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -717,4 +775,79 @@ final class PoolHandlers(
                           )
                         )
                   }
+            }
+
+  /** Sets or clears the pool's demand scale-out band. Both bounds absent clears it back to a fixed
+    * size; a declared band is validated against the pool's CURRENT distribution and size, so an
+    * operator whose band would exclude today's size scales the pool first, then declares the band.
+    * The write itself does NOT move any node: the sweep converges the pool on its next tick.
+    */
+  def setPoolAutoscale(req: SetPoolAutoscaleRequest, apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.PoolSetAutoscale,
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
+        val key     = PoolKey(req.tenant, req.tenantDb, req.pool)
+        val bandErr = (req.minNodes, req.maxNodes) match
+          case (None, None) => None // clear
+          case _            =>
+            sup.get(key) match
+              // Unknown pool: skip validation and let the supervisor answer with
+              // its NotFound, so a bad key never leaks as a 400 band error.
+              case None     => None
+              case Some(st) =>
+                val poolEntityCohorts =
+                  sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
+                if poolEntityCohorts.nonEmpty then
+                  Some("elastic pools cannot use authored cohorts (scaling clears them)")
+                else
+                  AutoscaleBand.validate(
+                    req.minNodes,
+                    req.maxNodes,
+                    st.distribution,
+                    st.distribution.total,
+                    autoscaleHardCap
+                  )
+        bandErr match
+          case Some(msg) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_band", msg))))
+          case None =>
+            sup.setPoolAutoscale(key, req.minNodes.zip(req.maxNodes)).map {
+              case Left(err: SupervisorError.NotFound) =>
+                Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+              case Left(err) =>
+                Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
+              case Right(_) =>
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.PoolSetAutoscale,
+                  "ok",
+                  tenant = Some(req.tenant),
+                  target = Some(key.toString),
+                  detail = Map(
+                    "band" -> req.minNodes
+                      .zip(req.maxNodes)
+                      .map((mn, mx) => s"[$mn, $mx]")
+                      .getOrElse("cleared")
+                  )
+                )
+                respond(key) match
+                  case Some(r) => Right(r)
+                  case None    =>
+                    Left(
+                      (
+                        StatusCode.NotFound,
+                        ErrorResponse("not_found", s"pool $key disappeared after update")
+                      )
+                    )
             }

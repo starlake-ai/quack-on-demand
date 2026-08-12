@@ -2,6 +2,7 @@
 package ai.starlake.quack.ondemand.manifest
 
 import ai.starlake.quack.model.{
+  AutoscaleBand,
   FederatedSecret,
   FederatedSource,
   LockdownTriState,
@@ -107,6 +108,21 @@ object ManifestImporter:
         LockdownTriState.parse(p.lockdown).left.foreach { msg =>
           errs += s"tenant '${t.name}' pool '${p.name}': $msg"
         }
+        // Reject a malformed demand scale-out band (one-sided, inverted,
+        // below the write-capable floor, over the hard cap, or outside the
+        // declared size) the same way -- accumulate rather than throw. The
+        // manifest has no operator-configured autoscale.hardCap, so the
+        // importer admits any cap the pool's own size satisfies.
+        val dist = RoleDistribution(
+          writeonly = p.roleDistribution.writeonly,
+          readonly = p.roleDistribution.readonly,
+          dual = p.roleDistribution.dual
+        )
+        AutoscaleBand
+          .validate(p.minNodes, p.maxNodes, dist, size = dist.total, hardCap = Int.MaxValue)
+          .foreach { msg =>
+            errs += s"tenant '${t.name}' pool '${p.name}': $msg"
+          }
         // Per-cohort sums must match the pool's roleDistribution and total.
         if p.cohorts.nonEmpty then
           val sumW = p.cohorts.map(_.distribution.writeonly).sum
@@ -357,7 +373,9 @@ object ManifestImporter:
               podTemplateYaml = mp.podTemplateYaml,
               // validate() already rejected any non-tri-state value, so this
               // parse cannot fail here; None (inherit) on the impossible miss.
-              lockdown = LockdownTriState.parse(mp.lockdown).getOrElse(None)
+              lockdown = LockdownTriState.parse(mp.lockdown).getOrElse(None),
+              minNodes = mp.minNodes,
+              maxNodes = mp.maxNodes
             )
             store.upsertPool(upserted)
             localPools.put(mp.name, upserted)

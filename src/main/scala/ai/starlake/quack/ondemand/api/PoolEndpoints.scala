@@ -155,3 +155,15 @@ object PoolEndpoints:
       .in(jsonBody[SetPoolLockdownRequest])
       .in(authToken)
       .out(jsonBody[PoolResponse])
+
+  val setPoolAutoscale: PublicEndpoint[
+    (SetPoolAutoscaleRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    PoolResponse,
+    Any
+  ] =
+    base.post
+      .in("pool" / "setAutoscale")
+      .in(jsonBody[SetPoolAutoscaleRequest])
+      .in(authToken)
+      .out(jsonBody[PoolResponse])

@@ -115,6 +115,23 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.auth.management.oidc.clientSecret` | `QOD_MGMT_OIDC_CLIENT_SECRET` | `***` | yes | OIDC client secret for admin-UI SSO (system scope). |
 | `quack-on-demand.auth.management.oidc.scopes` | `QOD_MGMT_OIDC_SCOPES` | `openid email profile` |  | OIDC scopes requested for admin-UI SSO. Default 'openid email profile'. |
 
+## `quack-on-demand.autoscale`
+
+| Key | Env var | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- |
+| `quack-on-demand.autoscale.enabled` | `QOD_AUTOSCALE_ENABLED` | `true` |  | Global kill switch for the demand scale-out sweep. |
+| `quack-on-demand.autoscale.sweepSeconds` | `QOD_AUTOSCALE_SWEEP_SEC` | `60` |  | Sweep interval in seconds; clamped to a 30s floor. |
+| `quack-on-demand.autoscale.windowMinutes` | `QOD_AUTOSCALE_WINDOW_MINUTES` | `5` |  | Load window W for the Little's-law concurrency estimate. |
+| `quack-on-demand.autoscale.highWatermark` | `QOD_AUTOSCALE_HIGH_WATERMARK` | `0.8` |  | Scale-out utilization threshold. |
+| `quack-on-demand.autoscale.lowWatermark` | `QOD_AUTOSCALE_LOW_WATERMARK` | `0.3` |  | Scale-in utilization threshold; must be &lt; highWatermark. |
+| `quack-on-demand.autoscale.outStreak` | `QOD_AUTOSCALE_OUT_STREAK` | `2` |  | Consecutive sweeps above highWatermark before adding a reader. |
+| `quack-on-demand.autoscale.inStreak` | `QOD_AUTOSCALE_IN_STREAK` | `10` |  | Consecutive sweeps below lowWatermark before removing a reader. |
+| `quack-on-demand.autoscale.scaleOutCooldownSec` | `QOD_AUTOSCALE_OUT_COOLDOWN_SEC` | `180` |  | Per-pool cooldown after any scale action or resume before scaling out. |
+| `quack-on-demand.autoscale.scaleInCooldownSec` | `QOD_AUTOSCALE_IN_COOLDOWN_SEC` | `600` |  | Per-pool cooldown after any scale action before scaling in. |
+| `quack-on-demand.autoscale.assumedConcurrencyPerNode` | `QOD_AUTOSCALE_ASSUMED_CONCURRENCY` | `4` |  | Capacity contribution of a node with maxConcurrent = 0 (unlimited). |
+| `quack-on-demand.autoscale.hardCap` | `QOD_AUTOSCALE_HARD_CAP` | `16` |  | Upper bound on maxNodes at validation time; a typo guard, not a quota. |
+| `quack-on-demand.autoscale.failureBackoffSweeps` | `QOD_AUTOSCALE_FAILURE_BACKOFF_SWEEPS` | `5` |  | Sweeps to skip a pool after 3 consecutive scale failures. |
+
 ## `quack-on-demand.catalog`
 
 | Key | Env var | Default | Sensitive | Description |

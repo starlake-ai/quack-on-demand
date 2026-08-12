@@ -13,13 +13,15 @@ import cats.effect.{IO, Resource}
 import cats.implicits._
 import com.comcast.ip4s.{Host, Port}
 import com.typesafe.scalalogging.LazyLogging
-import org.http4s.{HttpRoutes, Method, Response, StaticFile, Status, Uri}
+import org.http4s.{HttpRoutes, Method, Request, Response, StaticFile, Status, Uri}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.headers.Location
 import org.http4s.server.{staticcontent, Router}
+import org.http4s.server.staticcontent.FileService
 import org.typelevel.ci.CIString
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.http4s.Http4sServerInterpreter
+import fs2.io.file.{Path => FsPath}
 
 final class ManagerServer(
     cfg: ManagerConfig,
@@ -556,6 +558,9 @@ final class ManagerServer(
       PoolEndpoints.setPoolLockdown.serverLogic { case (req, token) =>
         pools.setLockdown(req, token)(sessions.scopeOf)
       },
+      PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
+        pools.setPoolAutoscale(req, token)(sessions.scopeOf)
+      },
       NodeEndpoints.setMaxConcurrent.serverLogic { case (req, token) =>
         nodes.setMaxConcurrent(req, token)(sessions.scopeOf)
       },
@@ -654,16 +659,102 @@ final class ManagerServer(
     val uiRoutes = Router("/ui" -> (uiAssets <+> spaFallback))
 
     // Module static mounts (SPI): same shape as the /ui mount above, one per
-    // registered ai.starlake.quack.spi.StaticMount.
-    val moduleStatic: HttpRoutes[IO] =
-      moduleStaticMounts.foldLeft(HttpRoutes.empty[IO]) { (acc, m) =>
-        val assets = staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
-        val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
-          StaticFile
-            .fromResource[IO](s"${m.classpathDir}/index.html", Some(req))
-            .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+    // registered ai.starlake.quack.spi.StaticMount. A mount with a diskDir
+    // that exists on disk is served from the filesystem (live-updatable
+    // content); classpath resources are the fallback. spaFallback=false
+    // mounts (marketing pages) 404 for real instead of swallowing unmatched
+    // paths into index.html.
+    // CDN contract for marketing (non-SPA) mounts: hashed Vite assets are
+    // immutable, pages revalidate within minutes, 404s are never cached.
+    // See the enrollment-website design spec (qod-hosted docs) D4.
+    val hashedAsset = raw".*/assets/[^/]+-[A-Za-z0-9_]{8,}\.[a-z0-9]+".r
+    def withMarketingCacheHeaders(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+      cats.data.Kleisli { (req: Request[IO]) =>
+        routes(req).map { resp =>
+          val cc =
+            if resp.status == Status.NotFound then "no-store"
+            else if hashedAsset.matches(req.uri.path.renderString) then
+              "public, max-age=31536000, immutable"
+            else "public, max-age=300, stale-while-revalidate=600"
+          resp.putHeaders(
+            org.http4s.Header.Raw(org.typelevel.ci.CIString("Cache-Control"), cc)
+          )
         }
-        acc <+> Router(m.urlPrefix -> (assets <+> fallback))
+      }
+    val moduleStatic: HttpRoutes[IO] =
+      moduleStaticMounts.sortBy(m => -m.urlPrefix.length).foldLeft(HttpRoutes.empty[IO]) {
+        (acc, m) =>
+          val diskRoot: Option[String] =
+            m.diskDir.filter(d => java.nio.file.Files.isDirectory(java.nio.file.Paths.get(d)))
+          val assets = diskRoot match
+            case Some(root) =>
+              staticcontent.fileService[IO](FileService.Config(root))
+            case None =>
+              staticcontent.resourceServiceBuilder[IO](m.classpathDir).toRoutes
+          def page(name: String, req: Request[IO]) = diskRoot match
+            case Some(root) => StaticFile.fromPath[IO](FsPath(root) / name, Some(req))
+            case None       => StaticFile.fromResource[IO](s"${m.classpathDir}/$name", Some(req))
+          // Decoded path segments of the request's Router-translated remaining
+          // path (`pathInfo`, see the note on directoryIndexCandidate below).
+          // Decoding first means a percent-encoded dot-segment (`%2e%2e`) is
+          // caught the same as a literal `..`.
+          def decodedSegments(req: Request[IO]): Vector[String] =
+            req.pathInfo.segments.map(_.decoded())
+          // `.` or `..` anywhere in the decoded path is a directory-traversal
+          // attempt: in disk mode `page()` resolves through `StaticFile.fromPath`,
+          // which (unlike classpath mode's `getResource`) has no containment
+          // guard, so `FsPath(root) / "../../outside/index.html"` would resolve
+          // outside the mount root. Refuse it before a candidate is ever built.
+          def hasDotSegment(segments: Vector[String]): Boolean =
+            segments.exists(s => s == "." || s == "..")
+          // Directory-index candidate for a request's Router-translated remaining
+          // path (`pathInfo`, NOT `uri.path` - Router leaves the original request
+          // path untouched and only adjusts the caret that `pathInfo` reads, so a
+          // check against `uri.path` would only ever fire by accident for a "/"
+          // mount). Built from the DECODED segments (not `renderString`) so a
+          // percent-encoded separator resolves the same as a literal one, e.g.
+          // "/our%20team/" -> "our team/index.html". "/" -> "index.html",
+          // "/pricing/" -> "pricing/index.html", "/no/such/page" ->
+          // "no/such/page/index.html" (a lookup that's expected to miss).
+          // Mirrors FileService's directory auto-resolution, which
+          // ResourceService does not provide for classpath-backed mounts.
+          def directoryIndexCandidate(segments: Vector[String]): String =
+            if segments.isEmpty then "index.html" else s"${segments.mkString("/")}/index.html"
+          def notFoundPage(req: Request[IO]): IO[Response[IO]] =
+            page("404.html", req)
+              .map(_.withStatus(Status.NotFound))
+              .getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+          // A request is "extensionless" when its decoded segments are empty
+          // (the mount root), or the last segment carries no `.`: `/pricing`,
+          // `/pricing/`, `/enroll/complete/`. Real static assets always carry a
+          // file extension, so extensionless requests never legitimately belong
+          // to `assets`.
+          def isExtensionless(segments: Vector[String]): Boolean =
+            segments.isEmpty || !segments.last.contains(".")
+          val mounted =
+            if m.spaFallback then
+              val fallback: HttpRoutes[IO] = HttpRoutes.of[IO] { req =>
+                page("index.html", req).getOrElseF(IO.pure(Response[IO](Status.NotFound)))
+              }
+              Router(m.urlPrefix -> (assets <+> fallback))
+            else
+              // Extensionless requests are routed to the page/404 lookup
+              // BEFORE `assets`, so `assets` never sees them. This closes a
+              // jar-packaging bug: `sbt assembly` packs zero-byte directory
+              // entries (e.g. `www/pricing/`) into the classpath jar, and
+              // http4s' resourceServiceBuilder matches a bare-directory GET
+              // against that entry and serves it as a 200 with an empty body,
+              // before the directory-index fallback below ever gets a chance
+              // - `assets <+> fallback` short-circuits on the first match.
+              val pages: HttpRoutes[IO] = HttpRoutes.of[IO] {
+                case req if isExtensionless(decodedSegments(req)) =>
+                  val segments = decodedSegments(req)
+                  if hasDotSegment(segments) then notFoundPage(req)
+                  else page(directoryIndexCandidate(segments), req).getOrElseF(notFoundPage(req))
+              }
+              val notFound: HttpRoutes[IO] = HttpRoutes.of[IO](req => notFoundPage(req))
+              Router(m.urlPrefix -> (pages <+> assets <+> notFound))
+          acc <+> (if m.spaFallback then mounted else withMarketingCacheHeaders(mounted))
       }
 
     // Redirect the bare root (`/`) to `/ui/` so visiting the manager host

@@ -140,7 +140,9 @@ object ManifestExporter:
           cpu = p.cpu,
           memory = p.memory,
           podTemplateYaml = p.podTemplateYaml,
-          lockdown = LockdownTriState.render(p.lockdown)
+          lockdown = LockdownTriState.render(p.lockdown),
+          minNodes = p.minNodes,
+          maxNodes = p.maxNodes
         )
       }
 

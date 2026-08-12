@@ -34,7 +34,6 @@ final class KubernetesQuackBackend(
     quackPort: Int,
     podLabel: String,
     startupTimeoutSec: Int,
-    defaultMetastore: Map[String, String] = Map.empty,
     readPodReady: Pod => Boolean = pod => Option(pod.getStatus).map(_.getPhase).contains("Running"),
     readEnv: String => Option[String] = name => Option(System.getenv(name)),
     podTemplateEnabled: Boolean = false,
@@ -78,8 +77,15 @@ final class KubernetesQuackBackend(
 
   private def buildPod(spec: NodeSpec, token: String): Pod =
     val envs = new java.util.ArrayList[EnvVar]()
-    // Defaults first, per-pool overrides next, then well-known QUACK_* keys.
-    val merged = defaultMetastore ++ spec.metastore
+    // spec.metastore is ALREADY the fully-resolved, per-kind node metastore --
+    // PoolSupervisor.effectiveMetastoreFor merged the manager defaults with the
+    // tenant-db's own params and dropped whatever the kind doesn't want (e.g. no
+    // `dataPath` for a pathless duckdb-file / in-memory tenant-db). Do NOT overlay
+    // a separate defaults map here: re-merging manager defaults on top of this
+    // would resurrect a key `effectiveMetastoreFor` deliberately removed (e.g. the
+    // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
+    // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
+    val merged = spec.metastore
     merged.foreach { case (k, v) =>
       val e = new EnvVar()
       e.setName(k)
@@ -89,8 +95,8 @@ final class KubernetesQuackBackend(
     // Mirror the env-inheritance LocalQuackBackend gets for free (via
     // ProcessBuilder): forward object-store credentials present on the
     // manager process so spawn-quack-node.sh can build CREATE SECRET for
-    // s3:// / az:// / gs:// data paths. `defaultMetastore` wins if the
-    // operator has explicitly pinned a value there.
+    // s3:// / az:// / gs:// data paths. `spec.metastore` wins if it already
+    // carries an explicit value for one of these keys.
     KubernetesQuackBackend.cloudCredEnvVars.foreach { name =>
       if !merged.contains(name) then
         readEnv(name).foreach { v =>

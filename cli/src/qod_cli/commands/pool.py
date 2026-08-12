@@ -1,3 +1,5 @@
+from typing import Optional
+
 import typer
 
 from ..registry import covers
@@ -42,6 +44,8 @@ def list_(ctx: typer.Context):
         "startSuspended": "--start-suspended",
         "cohorts": "--cohort",
         "lockdown": "--lockdown",
+        "minNodes": "--min-nodes",
+        "maxNodes": "--max-nodes",
     },
 )
 def create(
@@ -73,6 +77,8 @@ def create(
         "--lockdown",
         help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag.",
     ),
+    min_nodes: Optional[int] = typer.Option(None, "--min-nodes", help="Autoscale floor (set with --max-nodes)"),
+    max_nodes: Optional[int] = typer.Option(None, "--max-nodes", help="Autoscale ceiling (set with --min-nodes)"),
 ):
     body = {
         **_key(tenant, db, pool),
@@ -106,6 +112,10 @@ def create(
                 }
             )
         body["cohorts"] = cohorts
+    if min_nodes is not None:
+        body["minNodes"] = min_nodes
+    if max_nodes is not None:
+        body["maxNodes"] = max_nodes
     call(ctx, "POST", "/api/pool/create", body=body)
 
 
@@ -176,6 +186,39 @@ def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: s
 )
 def set_resources(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: str = POOL, cpu: str = typer.Option(..., "--cpu"), memory: str = typer.Option(..., "--memory")):
     call(ctx, "POST", "/api/pool/setResources", body={**_key(tenant, db, pool), "cpu": cpu, "memory": memory})
+
+
+@app.command("set-autoscale")
+@covers(
+    "POST",
+    "/api/pool/setAutoscale",
+    {
+        "tenant": "--tenant",
+        "tenantDb": "--db",
+        "pool": "--pool",
+        "minNodes": "--min-nodes",
+        "maxNodes": "--max-nodes",
+    },
+)
+def set_autoscale(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    min_nodes: Optional[int] = typer.Option(
+        None, "--min-nodes", help="Set both or neither; omit both to clear the band."
+    ),
+    max_nodes: Optional[int] = typer.Option(
+        None, "--max-nodes", help="Set both or neither; omit both to clear the band."
+    ),
+):
+    """Set or clear a pool's autoscale band (omit both bounds to clear)."""
+    body = _key(tenant, db, pool)
+    if min_nodes is not None:
+        body["minNodes"] = min_nodes
+    if max_nodes is not None:
+        body["maxNodes"] = max_nodes
+    call(ctx, "POST", "/api/pool/setAutoscale", body=body)
 
 
 @app.command("set-lockdown")

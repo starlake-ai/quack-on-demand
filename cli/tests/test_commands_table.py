@@ -122,6 +122,22 @@ CASES = [
         },
     ),
     (
+        [
+            "pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+            "--size", "2", "--min-nodes", "1", "--max-nodes", "4",
+        ],
+        "POST",
+        "/api/pool/create",
+        {},
+        {
+            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
+            "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
+            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
+            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
+            "lockdown": "inherit", "minNodes": 1, "maxNodes": 4,
+        },
+    ),
+    (
         ["pool", "suspend", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
         "POST", "/api/pool/suspend", {},
         {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
@@ -169,6 +185,21 @@ CASES = [
         ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--lockdown", "on"],
         "POST", "/api/pool/setLockdown", {},
         {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "lockdown": "on"},
+    ),
+    (
+        ["pool", "set-autoscale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--min-nodes", "1", "--max-nodes", "4"],
+        "POST", "/api/pool/setAutoscale", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "minNodes": 1, "maxNodes": 4},
+    ),
+    (
+        ["pool", "set-autoscale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi"],
+        "POST", "/api/pool/setAutoscale", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi"},
+    ),
+    (
+        ["pool", "set-autoscale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--min-nodes", "0", "--max-nodes", "4"],
+        "POST", "/api/pool/setAutoscale", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "minNodes": 0, "maxNodes": 4},
     ),
     (
         ["pool", "permission", "list", "--tenant", "acme"],

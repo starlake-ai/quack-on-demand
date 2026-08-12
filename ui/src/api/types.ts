@@ -76,6 +76,11 @@ export interface PoolResponse {
   lockdown?: string;
   // The tri-state resolved against the global nodeLockdown.enabled flag.
   lockdownEffective?: boolean;
+  // Owner-declared demand scale-out band. Both absent on a fixed-size pool;
+  // when set, the manager autoscales the pool within [minNodes, maxNodes]
+  // and manual scales outside the band are refused.
+  minNodes?: number;
+  maxNodes?: number;
 }
 
 export interface SetPoolDisabledRequest {

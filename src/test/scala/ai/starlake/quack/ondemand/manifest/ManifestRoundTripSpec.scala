@@ -90,7 +90,10 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         cpu = "2",
         memory = "8Gi",
         podTemplateYaml = "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n",
-        lockdown = Some(true)
+        lockdown = Some(true),
+        // writeonly + dual = 2 write-capable nodes, so the floor must be >= 2.
+        minNodes = Some(2),
+        maxNodes = Some(4)
       )
     )
 
@@ -181,6 +184,11 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // Same guarantee for the scale-to-zero flag: an import must not wake a
     // suspended pool back up by resetting it to false.
     restoredPool.suspended shouldBe true
+    // The owner-declared demand scale-out band must survive the export ->
+    // import cycle too: the importer's apply path threads minNodes/maxNodes
+    // into the Pool(...) build, not just the exporter's read side.
+    restoredPool.minNodes shouldBe Some(2)
+    restoredPool.maxNodes shouldBe Some(4)
 
     // Step 7: second export from the imported store
     val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
@@ -585,4 +593,67 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
     dst.listPools(db.id).find(_.name == "sales").get.suspended shouldBe false
+  }
+
+  // ------------------------------------------------------------------
+  // Test 10: a pool manifest that OMITS the autoscale band imports as
+  // fixed-size (Pool.minNodes/maxNodes == None/None), so a pre-autoscale
+  // YAML never acquires a spurious band.
+  // ------------------------------------------------------------------
+
+  it should "import a pool that omits the autoscale band as fixed-size" in {
+    val yaml =
+      """apiVersion: quack-on-demand/v1
+        |kind: ConfigManifest
+        |exportedAt: '2026-06-05T12:00:00Z'
+        |exportedFrom: { managerVersion: x, hostname: y }
+        |tenants:
+        |  - name: tpch
+        |    tenantDbs:
+        |      - name: tpch_tpch1
+        |    pools:
+        |      - name: sales
+        |        tenantDb: tpch_tpch1
+        |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
+        |""".stripMargin
+    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    parsed.tenants.head.pools.head.minNodes shouldBe None
+    parsed.tenants.head.pools.head.maxNodes shouldBe None
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+
+    val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
+    val pool     = dst.listPools(db.id).find(_.name == "sales").get
+    pool.minNodes shouldBe None
+    pool.maxNodes shouldBe None
+  }
+
+  // ------------------------------------------------------------------
+  // Test 11: a one-sided autoscale band is rejected by validation rather
+  // than silently coerced or applied.
+  // ------------------------------------------------------------------
+
+  it should "reject a pool manifest with a one-sided autoscale band" in {
+    val yaml =
+      """apiVersion: quack-on-demand/v1
+        |kind: ConfigManifest
+        |exportedAt: '2026-06-05T12:00:00Z'
+        |exportedFrom: { managerVersion: x, hostname: y }
+        |tenants:
+        |  - name: tpch
+        |    tenantDbs:
+        |      - name: tpch_tpch1
+        |    pools:
+        |      - name: sales
+        |        tenantDb: tpch_tpch1
+        |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
+        |        minNodes: 1
+        |""".stripMargin
+    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    val dst    = new InMemoryControlPlaneStore()
+    val result = ManifestImporter.apply(parsed, dst)
+    result.isLeft shouldBe true
+    result.left.toOption.get.exists(_.contains("set together")) shouldBe true
   }

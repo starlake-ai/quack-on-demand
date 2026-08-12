@@ -3588,6 +3588,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setAutoscale:
+    post:
+      operationId: postApiPoolSetautoscale
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolAutoscaleRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/pool/setDisabled:
     post:
       operationId: postApiPoolSetdisabled
@@ -5029,6 +5069,12 @@ components:
           type: string
         lockdown:
           type: string
+        minNodes:
+          type: integer
+          format: int32
+        maxNodes:
+          type: integer
+          format: int32
     CreateRowPolicyRequest:
       title: CreateRowPolicyRequest
       type: object
@@ -5912,6 +5958,12 @@ components:
           type: string
         lockdownEffective:
           type: boolean
+        minNodes:
+          type: integer
+          format: int32
+        maxNodes:
+          type: integer
+          format: int32
     PreviewColumn:
       title: PreviewColumn
       type: object
@@ -6299,6 +6351,26 @@ components:
         nodeId:
           type: string
         max:
+          type: integer
+          format: int32
+    SetPoolAutoscaleRequest:
+      title: SetPoolAutoscaleRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        minNodes:
+          type: integer
+          format: int32
+        maxNodes:
           type: integer
           format: int32
     SetPoolDisabledRequest:

@@ -12,7 +12,6 @@ import scala.collection.concurrent.TrieMap
 final class LocalQuackBackend(
     min: Int,
     max: Int,
-    defaultMetastore: Map[String, String] = Map.empty,
     commandFor: (NodeSpec, Int, String) => List[String] =
       LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript)
 ) extends QuackBackend:
@@ -44,7 +43,14 @@ final class LocalQuackBackend(
         if current.isEmpty then prefix else s"$prefix${java.io.File.pathSeparator}$current"
       )
     }
-    defaultMetastore.foreach { case (k, v) => env.put(k, v) }
+    // spec.metastore is ALREADY the fully-resolved, per-kind node metastore --
+    // PoolSupervisor.effectiveMetastoreFor merged the manager defaults with the
+    // tenant-db's own params and dropped whatever the kind doesn't want (e.g. no
+    // `dataPath` for a pathless duckdb-file / in-memory tenant-db). Do NOT overlay
+    // a separate defaults map here: re-merging manager defaults on top of this
+    // would resurrect a key `effectiveMetastoreFor` deliberately removed (e.g. the
+    // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
+    // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
     spec.metastore.foreach { case (k, v) => env.put(k, v) }
     env.put("kind", spec.kindWire)
     if spec.extraSetupSql.nonEmpty then env.put("extraSetupSql", spec.extraSetupSql)

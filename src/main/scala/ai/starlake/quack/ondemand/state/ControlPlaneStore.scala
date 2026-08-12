@@ -44,6 +44,25 @@ trait ControlPlaneStore:
   def listPools(tenantDbId: String): List[Pool]
   def deletePool(id: String): Unit
 
+  /** Add `statements`/`totalDurationMs` to the 1-minute demand bucket `(poolId, bucketStart)`,
+    * creating it if absent. Upsert-add rather than overwrite so concurrent replicas summing
+    * counters into the same bucket don't clobber each other.
+    */
+  def addPoolLoad(
+      poolId: String,
+      bucketStart: java.time.Instant,
+      statements: Long,
+      totalDurationMs: Long
+  ): Unit
+
+  /** Sum of `(statements, totalDurationMs)` per pool across every bucket `>= from`. Feeds the
+    * autoscale sweep's demand signal.
+    */
+  def poolLoadWindow(from: java.time.Instant): Map[String, (Long, Long)]
+
+  /** Delete every bucket older than `olderThan`. Returns the number of rows removed. */
+  def purgePoolLoad(olderThan: java.time.Instant): Int
+
   /** Insert/update a running node under the given pool surrogate id. `RunningNode.poolKey` is a
     * natural key (tenant/pool) carried by the runtime and does not always match a single Postgres
     * row, so the FK to `qodstate_pool.id` is supplied explicitly by the caller.

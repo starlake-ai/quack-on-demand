@@ -43,7 +43,11 @@ final case class Pool(
     // QOD_NODE_LOCKDOWN flag; Some(b) forces lockdown on/off for this pool.
     // Resolved once in PoolSupervisor.effectiveLockdown and fed to BOTH
     // enforcement layers (edge screen + spawn-time engine SQL).
-    lockdown: Option[Boolean] = None
+    lockdown: Option[Boolean] = None,
+    // Owner-declared demand scale-out band. Both None = fixed-size pool
+    // (exact pre-0025 behavior). Set together or not at all; REST validates.
+    minNodes: Option[Int] = None,
+    maxNodes: Option[Int] = None
 ):
   /** Effective scheduling plan: either the explicit cohorts, or one synthesized placement-less
     * cohort carrying the flat distribution.

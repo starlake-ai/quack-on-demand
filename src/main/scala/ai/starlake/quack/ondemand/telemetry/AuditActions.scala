@@ -31,6 +31,7 @@ object AuditActions:
   val PoolSetResources     = "pool.setResources"
   val PoolSetPodTemplate   = "pool.setPodTemplate"
   val PoolSetLockdown      = "pool.setLockdown"
+  val PoolSetAutoscale     = "pool.setAutoscale"
   val PoolPermissionGrant  = "pool.permission.grant"
   val PoolPermissionRevoke = "pool.permission.revoke"
   // users, roles, groups
@@ -115,6 +116,7 @@ object AuditActions:
     PoolSetResources,
     PoolSetPodTemplate,
     PoolSetLockdown,
+    PoolSetAutoscale,
     PoolPermissionGrant,
     PoolPermissionRevoke,
     UserCreate,

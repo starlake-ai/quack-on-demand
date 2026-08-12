@@ -197,6 +197,43 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
       back.lockdown shouldBe value
   }
 
+  it should "round-trip the pool autoscale band" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val banded = pool.copy(minNodes = Some(1), maxNodes = Some(4))
+    store.upsertPool(banded)
+    store.listPools(banded.tenantDbId).find(_.id == banded.id).get.minNodes shouldBe Some(1)
+    store.listPools(banded.tenantDbId).find(_.id == banded.id).get.maxNodes shouldBe Some(4)
+    val cleared = banded.copy(minNodes = None, maxNodes = None)
+    store.upsertPool(cleared)
+    store.listPools(banded.tenantDbId).find(_.id == banded.id).get.minNodes shouldBe None
+    store.listPools(banded.tenantDbId).find(_.id == banded.id).get.maxNodes shouldBe None
+  }
+
+  it should "upsert-add pool load buckets so concurrent replicas sum" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    val b0 = Instant.parse("2026-08-12T10:00:00Z")
+    store.addPoolLoad(pool.id, b0, statements = 2, totalDurationMs = 1000)
+    store.addPoolLoad(pool.id, b0, statements = 3, totalDurationMs = 500) // second replica
+    store.poolLoadWindow(b0) shouldBe Map(pool.id -> (5L, 1500L))
+  }
+
+  it should "sum pool load over the window and purge old buckets" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    store.upsertPool(pool)
+    val b0 = Instant.parse("2026-08-12T10:00:00Z")
+    val b1 = b0.plusSeconds(60)
+    store.addPoolLoad(pool.id, b0, 1, 100)
+    store.addPoolLoad(pool.id, b1, 1, 200)
+    store.poolLoadWindow(b0) shouldBe Map(pool.id -> (2L, 300L))
+    store.poolLoadWindow(b1) shouldBe Map(pool.id -> (1L, 200L))
+    store.purgePoolLoad(olderThan = b1) shouldBe 1
+    store.poolLoadWindow(b0) shouldBe Map(pool.id -> (1L, 200L))
+  }
+
   it should "preserve idleTimeoutSec as a populated Option" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)
