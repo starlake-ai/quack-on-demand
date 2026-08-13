@@ -139,6 +139,59 @@ final class UserStore(
     case AllDisabled
     case Found(grants: List[UserGrant])
 
+  /** Self-service credential rotation: verify `currentPassword` against the stored bcrypt hash,
+    * then swap in `newPassword` and clear `must_change_password` in the same statement. Unknown
+    * user, wrong password, and disabled account all return the same
+    * [[UserStore.ChangePasswordError.InvalidCredentials]] so the public change-password endpoint
+    * cannot be used to probe which accounts exist. Password-policy checks (non-empty, differs from
+    * current) live in the REST handler, not here.
+    */
+  def changePassword(
+      tenant: Option[String],
+      username: String,
+      currentPassword: String,
+      newPassword: String
+  ): Either[UserStore.ChangePasswordError, Unit] =
+    withConn { c =>
+      val selectSql = tenant match
+        case Some(_) =>
+          "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant = ? AND username = ?"
+        case None =>
+          "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant IS NULL AND username = ?"
+      val ps  = c.prepareStatement(selectSql)
+      val row =
+        try
+          tenant match
+            case Some(t) =>
+              ps.setString(1, t)
+              ps.setString(2, username)
+            case None =>
+              ps.setString(1, username)
+          val rs = ps.executeQuery()
+          try
+            if rs.next() then Some((rs.getString(1), rs.getString(2), rs.getBoolean(3)))
+            else None
+          finally rs.close()
+        finally ps.close()
+      row match
+        case Some((id, storedHash, enabled))
+            if enabled &&
+              BCrypt.verifyer().verify(currentPassword.toCharArray, storedHash).verified =>
+          val newHash = BCrypt.withDefaults().hashToString(12, newPassword.toCharArray)
+          val upd     = c.prepareStatement(
+            """UPDATE qodstate_user
+              |SET password_hash = ?, must_change_password = false, updated_at = NOW()
+              |WHERE id = ?""".stripMargin
+          )
+          try
+            upd.setString(1, newHash)
+            upd.setString(2, id)
+            upd.executeUpdate()
+            Right(())
+          finally upd.close()
+        case _ => Left(UserStore.ChangePasswordError.InvalidCredentials)
+    }
+
   private def lookupByUsername(c: Connection, username: String): Lookup =
     // No `AND enabled` filter here: rows must be fetched regardless of
     // their enabled state so an all-disabled username can be distinguished
@@ -170,6 +223,12 @@ object UserStore:
     * existing row got its password + role refreshed (`false`).
     */
   final case class Upsert(id: String, inserted: Boolean)
+
+  /** Failure of [[UserStore.changePassword]]. Deliberately a single case: unknown user, wrong
+    * current password, and disabled account are indistinguishable to the caller.
+    */
+  enum ChangePasswordError:
+    case InvalidCredentials
 
   /** Build a store from the global `defaultMetastore` map. Same shape as
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next to the state table by
