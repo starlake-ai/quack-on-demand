@@ -1332,7 +1332,8 @@ final class PoolSupervisor(
       gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
-      ai.starlake.quack.spi.StructureMutation.CreatePool(key.tenant, key.tenantDb, dist.total),
+      ai.starlake.quack.spi.StructureMutation
+        .CreatePool(key.tenant, key.tenantDb, dist.total, cpu, memory),
       gateBypass
     ).flatMap {
       case Left(reason) =>
@@ -1589,28 +1590,44 @@ final class PoolSupervisor(
   def setPoolResources(
       key: PoolKey,
       cpu: String,
-      memory: String
+      memory: String,
+      gateBypass: Boolean = false
   ): IO[Either[SupervisorError, Pool]] =
-    IO.blocking {
-      withCacheRecovery("setPoolResources") {
-        pools.get(key) match
-          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
-          case Some(state) =>
-            poolIdByKey.get(key).flatMap(poolRows.get) match
-              case None =>
-                Left(
-                  SupervisorError.Internal(
-                    s"pool entity missing for $key (control-plane out of sync)"
-                  )
-                )
-              case Some(p) =>
-                val updated = p.copy(cpu = cpu, memory = memory)
-                store.upsertPool(updated)
-                poolRows.put(updated.id, updated)
-                pools.put(key, state.copy(cpu = cpu, memory = memory))
-                publish.topologyChanged()
-                Right(updated)
-      }
+    val current  = get(key)
+    val mutation = ai.starlake.quack.spi.StructureMutation.SetPoolResources(
+      key.tenant,
+      key.tenantDb,
+      key.pool,
+      nodes = current.map(_.distribution.total).getOrElse(0),
+      fromCpu = current.map(_.cpu).getOrElse(""),
+      fromMemory = current.map(_.memory).getOrElse(""),
+      toCpu = cpu,
+      toMemory = memory
+    )
+    gateCheck(mutation, gateBypass).flatMap {
+      case Left(reason) => IO.pure(Left(SupervisorError.QuotaExceeded(reason)))
+      case Right(())    =>
+        IO.blocking {
+          withCacheRecovery("setPoolResources") {
+            pools.get(key) match
+              case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+              case Some(state) =>
+                poolIdByKey.get(key).flatMap(poolRows.get) match
+                  case None =>
+                    Left(
+                      SupervisorError.Internal(
+                        s"pool entity missing for $key (control-plane out of sync)"
+                      )
+                    )
+                  case Some(p) =>
+                    val updated = p.copy(cpu = cpu, memory = memory)
+                    store.upsertPool(updated)
+                    poolRows.put(updated.id, updated)
+                    pools.put(key, state.copy(cpu = cpu, memory = memory))
+                    publish.topologyChanged()
+                    Right(updated)
+          }
+        }
     }
 
   def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[SupervisorError, Pool]] =
@@ -1660,14 +1677,18 @@ final class PoolSupervisor(
       reason: String = "manual"
   ): IO[List[RunningNode]] =
     require(newDist.isValidFor(targetSize), "role distribution does not sum to targetSize")
-    val from = get(key).map(_.distribution.total).getOrElse(0)
+    val st    = get(key)
+    val from  = st.map(_.distribution.total).getOrElse(0)
+    val shape = st.map(s => (s.cpu, s.memory)).getOrElse(("", ""))
     gateCheck(
       ai.starlake.quack.spi.StructureMutation.ResizePool(
         key.tenant,
         key.tenantDb,
         key.pool,
         from,
-        targetSize
+        targetSize,
+        shape._1,
+        shape._2
       ),
       gateBypass
     ).flatMap {

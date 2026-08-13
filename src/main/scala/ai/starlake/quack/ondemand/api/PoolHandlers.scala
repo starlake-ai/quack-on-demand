@@ -609,8 +609,11 @@ final class PoolHandlers(
             )
           )
         else
-          val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-          sup.setPoolResources(key, req.cpu, req.memory).map {
+          val key        = PoolKey(req.tenant, req.tenantDb, req.pool)
+          val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+          sup.setPoolResources(key, req.cpu, req.memory, gateBypass = gateBypass).map {
+            case Left(q: SupervisorError.QuotaExceeded) =>
+              Left((StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.message)))
             case Left(err) =>
               Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
             case Right(_) =>

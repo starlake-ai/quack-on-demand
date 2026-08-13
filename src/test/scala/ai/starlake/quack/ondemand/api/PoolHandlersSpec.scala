@@ -7,6 +7,8 @@ import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.spi.StructureMutation
+import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -336,6 +338,54 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
+
+  it should "map a gate refusal on setResources to 429 quota_exceeded" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h = new PoolHandlers(sup, tracker)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .unsafeRunSync()
+    sup
+      .setMutationGates(List {
+        case _: StructureMutation.SetPoolResources =>
+          IO.pure(Left("cores quota is 8 (requested 16): contact support to raise it"))
+        case _ => IO.pure(Right(()))
+      })
+      .unsafeRunSync()
+    // Only a non-superuser (tenant-admin) session runs the gate; static-key /
+    // superuser callers (apiKey = None) bypass it, matching createPool.
+    val out = h
+      .setResources(
+        SetPoolResourcesRequest("acme", "acme_default", "sales", "16", "64Gi"),
+        Some("tok")
+      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      .unsafeRunSync()
+    out.left.toOption.map(_._1) shouldBe Some(StatusCode.TooManyRequests)
+    out.left.toOption.map(_._2.error) shouldBe Some("quota_exceeded")
+
+  it should "let a superuser (apiKey = None) bypass the gate on setResources" in:
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h = new PoolHandlers(sup, tracker)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .unsafeRunSync()
+    sup
+      .setMutationGates(List {
+        case _: StructureMutation.SetPoolResources => IO.pure(Left("denied"))
+        case _                                     => IO.pure(Right(()))
+      })
+      .unsafeRunSync()
+    val out = h
+      .setResources(
+        SetPoolResourcesRequest("acme", "acme_default", "sales", "500m", "2Gi"),
+        None
+      )((_: String) => None)
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
 
   // CRITICAL 1: createPool must guard podTemplateYaml
 
