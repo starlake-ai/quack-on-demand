@@ -95,7 +95,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     )
     result shouldBe a[Left[?, ?]]
     // InMemoryBasicAuthProvider emits "invalid credentials" on bcrypt mismatch.
-    result.left.map(_.toLowerCase) shouldBe Left("invalid credentials")
+    result.left.map(_.message.toLowerCase) shouldBe Left("invalid credentials")
   }
 
   it should "return Left for an unknown user" in {
@@ -107,7 +107,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       "x"
     )
     result shouldBe a[Left[?, ?]]
-    result.left.map(m => m should include("not found"))
+    result.left.map(m => m.message should include("not found"))
   }
 
   it should "succeed for the system superuser (root / no tenant)" in {
@@ -131,7 +131,7 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
       SecurityFixtures.AliceUsername,
       SecurityFixtures.AlicePassword
     )
-    result shouldBe Left("No basic auth providers configured")
+    result.left.map(_.message) shouldBe Left("No basic auth providers configured")
   }
 
   // ==========================================================================

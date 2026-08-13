@@ -12,18 +12,19 @@ import java.sql.DriverManager
 import scala.util.Try
 
 /** Config-load-time gate for `DatabaseAuthConfig.systemQuery` / `tenantQuery`: both queries must
-  * project exactly three columns `(password_hash, role, enabled)`. This mirrors, at startup, the
-  * runtime enforcement pinned by `UserEnabledAuthSpec` ("reject authentication when a legacy custom
-  * query does not project the enabled column").
+  * project exactly four columns `(password_hash, role, enabled, must_change_password)`. This
+  * mirrors, at startup, the runtime enforcement pinned by `UserEnabledAuthSpec` ("reject
+  * authentication when a legacy custom query does not project the enabled column") and by
+  * `MustChangePasswordAuthSpec` ("hard-fail a legacy 3-column operator query").
   */
 class AuthQueryPreconditionsSpec extends AnyFlatSpec with Matchers:
 
   TestPostgres.dropStrayTestDatabases("qodaqp")
 
+  private val FourColumnQuery =
+    "SELECT password_hash, role, enabled, must_change_password FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
   private val ThreeColumnQuery =
     "SELECT password_hash, role, enabled FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
-  private val TwoColumnQuery =
-    "SELECT password_hash, role FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
 
   private def config(systemQuery: String, tenantQuery: String) =
     DatabaseAuthConfig(
@@ -45,33 +46,33 @@ class AuthQueryPreconditionsSpec extends AnyFlatSpec with Matchers:
       test(url)
     finally Try(TestPostgres.dropDatabase(dbName))
 
-  "AuthQueryPreconditions" should "accept queries that project all three required columns" in
+  "AuthQueryPreconditions" should "accept queries that project all four required columns" in
     withFreshDb { url =>
       val conn = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
       try
         AuthQueryPreconditions.validate(
           conn,
-          config(ThreeColumnQuery, ThreeColumnQuery)
+          config(FourColumnQuery, FourColumnQuery)
         ) shouldBe Right(())
       finally conn.close()
     }
 
-  it should "refuse a systemQuery that omits the enabled column" in
+  it should "refuse a systemQuery that omits the must_change_password column" in
     withFreshDb { url =>
       val conn = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
       try
         AuthQueryPreconditions
-          .validate(conn, config(TwoColumnQuery, ThreeColumnQuery))
+          .validate(conn, config(ThreeColumnQuery, FourColumnQuery))
           .isLeft shouldBe true
       finally conn.close()
     }
 
-  it should "refuse a tenantQuery that omits the enabled column" in
+  it should "refuse a tenantQuery that omits the must_change_password column" in
     withFreshDb { url =>
       val conn = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
       try
         AuthQueryPreconditions
-          .validate(conn, config(ThreeColumnQuery, TwoColumnQuery))
+          .validate(conn, config(FourColumnQuery, ThreeColumnQuery))
           .isLeft shouldBe true
       finally conn.close()
     }
@@ -80,7 +81,7 @@ class AuthQueryPreconditionsSpec extends AnyFlatSpec with Matchers:
     withFreshDb { url =>
       val conn = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
       try
-        val cfg = config(TwoColumnQuery, TwoColumnQuery).copy(enabled = false)
+        val cfg = config(ThreeColumnQuery, ThreeColumnQuery).copy(enabled = false)
         AuthQueryPreconditions.validate(conn, cfg) shouldBe Right(())
       finally conn.close()
     }

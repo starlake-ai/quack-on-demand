@@ -276,6 +276,8 @@ final class FlightEdgeServer(
                     authService
                       .authenticateBasic(scope, r.user, p)
                       .map(Some(_))
+                      .left
+                      .map(_.message)
                   case Left(err) =>
                     Left(s"missing tenant scope for Basic auth: $err")
               case _ =>

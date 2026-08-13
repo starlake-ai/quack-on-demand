@@ -1,6 +1,11 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{
+  AuthFailure,
+  AuthScope,
+  AuthenticatedProfile,
+  AuthenticationService
+}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -80,8 +85,8 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
         scope: AuthScope,
         username: String,
         password: String
-    ): Either[String, AuthenticatedProfile] =
-      Left("not used")
+    ): Either[AuthFailure, AuthenticatedProfile] =
+      Left(AuthFailure.InvalidCredentials("not used"))
 
   private val oidcCfg = Map(
     "issuerUrl"       -> "https://idp.example.com/realms/qod",

@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ManagementOidcConfig
 import ai.starlake.quack.edge.auth.{
+  AuthFailure,
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
@@ -173,8 +174,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         scope: AuthScope,
         username: String,
         password: String
-    ): Either[String, AuthenticatedProfile] =
-      Left("not available in OIDC mode")
+    ): Either[AuthFailure, AuthenticatedProfile] =
+      Left(AuthFailure.InvalidCredentials("not available in OIDC mode"))
 
   private def makeHandlers(
       grants: List[UserGrant],

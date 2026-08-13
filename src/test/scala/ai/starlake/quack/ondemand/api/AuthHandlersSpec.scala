@@ -1,6 +1,11 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{
+  AuthFailure,
+  AuthScope,
+  AuthenticatedProfile,
+  AuthenticationService
+}
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
   AwsAuthConfig,
@@ -76,7 +81,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   )
 
   private def makeHandlers(
-      result: Either[String, AuthenticatedProfile],
+      result: Either[AuthFailure, AuthenticatedProfile],
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore,
       cookieSecureOverride: Option[Boolean] = None,
@@ -88,7 +93,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
           scope: AuthScope,
           username: String,
           password: String
-      ): Either[String, AuthenticatedProfile] =
+      ): Either[AuthFailure, AuthenticatedProfile] =
         capturedScope += ((scope, username, password))
         result
 
@@ -152,6 +157,54 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls.head._1 shouldBe AuthScope.System
     resp.superuser shouldBe true
     resp.manageableTenants shouldBe empty
+  }
+
+  // The typed AuthFailure must reach the wire as its own error code: the UI
+  // keys the forced-rotation screen off `password_change_required`, and a
+  // generic invalid_credentials would strand a user holding a valid temp
+  // password. Both login scopes are pinned.
+  it should "return 401 password_change_required for a flagged user (system scope)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Left(AuthFailure.PasswordChangeRequired), calls)
+
+    val out = h.login(LoginRequest("flagged", "temp", tenant = None)).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "password_change_required"
+        err.message shouldBe "password change required; use POST /api/auth/change-password"
+      case Right(_) => fail("expected 401")
+    calls.head._1 shouldBe AuthScope.System
+  }
+
+  it should "return 401 password_change_required for a flagged user (tenant scope)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Left(AuthFailure.PasswordChangeRequired), calls)
+
+    val out =
+      h.login(LoginRequest("flagged", "temp", tenant = Some("t-abc123"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "password_change_required"
+      case Right(_) => fail("expected 401")
+    calls.head._1 shouldBe AuthScope.Tenant("t-abc123")
+  }
+
+  it should "keep invalid_credentials for a plain bad password" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Left(AuthFailure.InvalidCredentials("Invalid password")), calls)
+
+    val out = h.login(LoginRequest("alice", "nope", tenant = None)).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "invalid_credentials"
+        err.message shouldBe "Invalid password"
+      case Right(_) => fail("expected 401")
   }
 
   it should "resolve a tenant DISPLAY NAME to its surrogate id before forwarding the scope" in {
@@ -381,7 +434,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
           scope: AuthScope,
           username: String,
           password: String
-      ): Either[String, AuthenticatedProfile] = Right(profile)
+      ): Either[AuthFailure, AuthenticatedProfile] = Right(profile)
 
     val fakeDirectory: GrantsLookup = (identity, email) =>
       directory.getOrElse(

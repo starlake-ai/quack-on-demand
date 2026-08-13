@@ -2,6 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.auth.{
+  AuthFailure,
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
@@ -85,21 +86,26 @@ object InMemoryAuthService:
         scope: AuthScope,
         username: String,
         password: String
-    ): Either[String, AuthenticatedProfile] =
+    ): Either[AuthFailure, AuthenticatedProfile] =
       val tenant = scope.tenantId
       store.getPasswordHash(tenant, username) match
         case None =>
-          Left(s"user '$username' not found")
+          Left(AuthFailure.InvalidCredentials(s"user '$username' not found"))
         case Some(hash) =>
           val result = BCrypt.verifyer().verify(password.toCharArray, hash)
           if result.verified then
             store.findUser(tenant, username) match
-              case None                  => Left(s"user '$username' vanished after hash lookup")
+              case None =>
+                Left(AuthFailure.InvalidCredentials(s"user '$username' vanished after hash lookup"))
               case Some(u) if !u.enabled =>
                 // Mirrors DatabaseAuthenticator: a disabled user is rejected
                 // with the exact same message as a wrong password so the
                 // REST response cannot distinguish the two.
-                Left("invalid credentials")
+                Left(AuthFailure.InvalidCredentials("invalid credentials"))
+              case Some(u) if u.mustChangePassword =>
+                // Mirrors DatabaseAuthenticator: the password verified on an
+                // enabled account, so the distinct failure is safe to reveal.
+                Left(AuthFailure.PasswordChangeRequired)
               case Some(u) =>
                 Right(
                   AuthenticatedProfile(
@@ -111,7 +117,7 @@ object InMemoryAuthService:
                     tenant = u.tenant
                   )
                 )
-          else Left("invalid credentials")
+          else Left(AuthFailure.InvalidCredentials("invalid credentials"))
 
   /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all
     * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the
@@ -133,6 +139,7 @@ object InMemoryAuthService:
         scope: AuthScope,
         username: String,
         password: String
-    ): Either[String, AuthenticatedProfile] =
-      if !providersEnabled then Left("No basic auth providers configured")
+    ): Either[AuthFailure, AuthenticatedProfile] =
+      if !providersEnabled then
+        Left(AuthFailure.InvalidCredentials("No basic auth providers configured"))
       else provider.authenticate(scope, username, password)

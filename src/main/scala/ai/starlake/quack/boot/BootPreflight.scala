@@ -13,13 +13,13 @@ import com.typesafe.scalalogging.LazyLogging
 object BootPreflight extends LazyLogging:
 
   /** Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery must each project
-    * (password_hash, role, enabled) -- exactly the shape DatabaseAuthenticator requires at runtime
-    * now that the tolerant two-column branch is gone. Caught here instead of at first login. Runs
-    * AFTER the Liquibase apply: the default queries target qodstate_user in the control-plane
-    * database, which does not exist yet on a fresh (or nuked) metastore until the changelog has
-    * been applied. The probe result is computed first and sys.error'd after, so an unreachable auth
-    * database surfaces as the same clean config-error framing as the sibling boot gates, not a raw
-    * JDBC exception.
+    * (password_hash, role, enabled, must_change_password) -- exactly the shape
+    * DatabaseAuthenticator requires at runtime now that the tolerant short-projection branch is
+    * gone. Caught here instead of at first login. Runs AFTER the Liquibase apply: the default
+    * queries target qodstate_user in the control-plane database, which does not exist yet on a
+    * fresh (or nuked) metastore until the changelog has been applied. The probe result is computed
+    * first and sys.error'd after, so an unreachable auth database surfaces as the same clean
+    * config-error framing as the sibling boot gates, not a raw JDBC exception.
     */
   def probeAuthDatabase(dbCfg: DatabaseAuthConfig): Unit =
     val probeResult: Either[String, Unit] =

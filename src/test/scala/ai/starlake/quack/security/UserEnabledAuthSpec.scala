@@ -15,10 +15,11 @@ import scala.util.Try
   * boundaries that do NOT go through PoolSupervisor:
   *
   *   - [[DatabaseAuthenticator]] (REST/UI password login): the default `systemQuery` /
-  *     `tenantQuery` project `enabled` as a third column; a disabled user presenting the CORRECT
-  *     password must be rejected with the exact same error as a wrong password so the response does
-  *     not reveal which one failed. A custom operator query that projects only two columns is
-  *     REQUIRED to project `enabled`; a two-column result set fails authentication outright.
+  *     `tenantQuery` project `enabled` as a third column (and `must_change_password` as a fourth,
+  *     see [[MustChangePasswordAuthSpec]]); a disabled user presenting the CORRECT password must be
+  *     rejected with the exact same error as a wrong password so the response does not reveal which
+  *     one failed. A custom operator query is REQUIRED to project `enabled`; a short result set
+  *     fails authentication outright.
   *   - [[UserStore.grantsForIdentity]] (OIDC login): a disabled user must yield no grants, so the
   *     OIDC callback hits the not_provisioned gate instead of minting a session.
   *
@@ -32,11 +33,12 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
 
   TestPostgres.dropStrayTestDatabases("qoduen")
 
-  // Mirror the application.conf defaults (three-column projection with `enabled`).
+  // Mirror the application.conf defaults (four-column projection with
+  // `enabled` and `must_change_password`).
   private val DefaultSystemQuery =
-    "SELECT password_hash, role, enabled FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
+    "SELECT password_hash, role, enabled, must_change_password FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
   private val DefaultTenantQuery =
-    "SELECT password_hash, role, enabled FROM qodstate_user WHERE tenant = ? AND username = ? LIMIT 1"
+    "SELECT password_hash, role, enabled, must_change_password FROM qodstate_user WHERE tenant = ? AND username = ? LIMIT 1"
 
   // A pre-0022-style operator override that does not project `enabled`. Must
   // now be rejected outright: the enabled column is mandatory.

@@ -31,11 +31,14 @@ QOD_AUTH_DB_PASSWORD=secret
 # Custom lookup queries
 # - systemQuery placeholders in order: username
 # - tenantQuery placeholders in order: tenant, username
-# Both must return columns: password_hash, role
-QOD_AUTH_DB_SYSTEM_QUERY="SELECT password_hash, role FROM qodstate_user \
-  WHERE tenant IS NULL AND username = ? LIMIT 1"
-QOD_AUTH_DB_TENANT_QUERY="SELECT password_hash, role FROM qodstate_user \
-  WHERE tenant = ? AND username = ? LIMIT 1"
+# Both MUST return four columns, in order:
+#   password_hash, role, enabled, must_change_password
+# The last two are mandatory: a shorter projection is refused at boot and
+# fails every login (no tolerant default-to-enabled / default-to-unflagged).
+QOD_AUTH_DB_SYSTEM_QUERY="SELECT password_hash, role, enabled, must_change_password \
+  FROM qodstate_user WHERE tenant IS NULL AND username = ? LIMIT 1"
+QOD_AUTH_DB_TENANT_QUERY="SELECT password_hash, role, enabled, must_change_password \
+  FROM qodstate_user WHERE tenant = ? AND username = ? LIMIT 1"
 ```
 
 Rotate the bootstrap admin password by changing `QOD_ADMIN_PASSWORD` and restarting; the row is re-hashed on every boot.

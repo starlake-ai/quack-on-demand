@@ -30,13 +30,13 @@ case class DatabaseAuthConfig(
     @field @ConfigField(
       envVar = "QOD_AUTH_DB_SYSTEM_QUERY",
       description =
-        "SQL template for AuthScope.System (empty tenant / superuser=true). Returns (password_hash, role) and accepts one ? placeholder for username; matches WHERE tenant IS NULL."
+        "SQL template for AuthScope.System (empty tenant / superuser=true). MUST return the four mandatory columns (password_hash, role, enabled, must_change_password) and accepts one ? placeholder for username; matches WHERE tenant IS NULL."
     )
     systemQuery: String,
     @field @ConfigField(
       envVar = "QOD_AUTH_DB_TENANT_QUERY",
       description =
-        "SQL template for AuthScope.Tenant. Returns (password_hash, role) and accepts two ? placeholders in order: tenant, username."
+        "SQL template for AuthScope.Tenant. MUST return the four mandatory columns (password_hash, role, enabled, must_change_password) and accepts two ? placeholders in order: tenant, username."
     )
     tenantQuery: String
 ) derives ConfigReader

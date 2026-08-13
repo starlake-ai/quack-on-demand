@@ -31,7 +31,7 @@ class ResourceOwnerPasswordAuthenticator(
       scope: AuthScope,
       username: String,
       password: String
-  ): Either[String, AuthenticatedProfile] =
+  ): Either[AuthFailure, AuthenticatedProfile] =
     // OIDC ROPC providers don't see `scope` -- the OIDC server is
     // authoritative for the password check; map-to-tenant happens via
     // the JWT claims on the way back. (The TenantOidcRegistry picks the
@@ -51,13 +51,17 @@ class ResourceOwnerPasswordAuthenticator(
 
       if response.statusCode() != 200 then
         logger.debug(s"$name: token endpoint returned ${response.statusCode()}: ${response.body()}")
-        Left(s"$name: authentication failed (HTTP ${response.statusCode()})")
+        Left(
+          AuthFailure.InvalidCredentials(
+            s"$name: authentication failed (HTTP ${response.statusCode()})"
+          )
+        )
       else
         // Parse the access_token from the JSON response
         val responseBody = response.body()
         JsonField.first(responseBody, "access_token") match
           case None =>
-            Left(s"$name: no access_token in response")
+            Left(AuthFailure.InvalidCredentials(s"$name: no access_token in response"))
           case Some(accessToken) =>
             // Decode the access token to extract claims
             val signedJWT = SignedJWT.parse(accessToken)
@@ -88,7 +92,7 @@ class ResourceOwnerPasswordAuthenticator(
     catch
       case e: Exception =>
         logger.debug(s"$name: ROPC authentication failed: ${e.getMessage}", e)
-        Left(s"$name: ${e.getMessage}")
+        Left(AuthFailure.InvalidCredentials(s"$name: ${e.getMessage}"))
 
   private def buildFormBody(username: String, password: String): String =
     val enc = (s: String) => URLEncoder.encode(s, StandardCharsets.UTF_8)

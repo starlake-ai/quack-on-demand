@@ -24,6 +24,23 @@ object AuthScope:
   final case class Tenant(id: String) extends AuthScope:
     val tenantId: Option[String] = Some(id)
 
+/** Typed failure of the basic (password) auth chain.
+  *
+  *   - [[InvalidCredentials]]: unknown user, wrong password, disabled account, provider error. The
+  *     detail string is what the legacy `Either[String, _]` carried.
+  *   - [[PasswordChangeRequired]]: the password VERIFIED but is flagged `must_change_password` --
+  *     the caller must be told to rotate it, not that the credentials were wrong. Only reachable
+  *     with a correct password on an enabled account, so surfacing it leaks nothing.
+  */
+enum AuthFailure:
+  case InvalidCredentials(detail: String)
+  case PasswordChangeRequired
+
+  def message: String = this match
+    case InvalidCredentials(d)  => d
+    case PasswordChangeRequired =>
+      "password change required; use POST /api/auth/change-password"
+
 /** Authenticates username/password credentials (database, ROPC).
   *
   * `scope` picks the realm. For the database backend, [[AuthScope.System]] looks up the row with
@@ -37,7 +54,7 @@ trait BasicAuthProvider extends AutoCloseable:
       scope: AuthScope,
       username: String,
       password: String
-  ): Either[String, AuthenticatedProfile]
+  ): Either[AuthFailure, AuthenticatedProfile]
   def close(): Unit = ()
 
 /** Authenticates Bearer tokens (JWT, OIDC). */

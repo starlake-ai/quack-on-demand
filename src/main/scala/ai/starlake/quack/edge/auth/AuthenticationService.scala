@@ -42,13 +42,15 @@ class AuthenticationService(
       scope: AuthScope,
       username: String,
       password: String
-  ): Either[String, AuthenticatedProfile] =
-    if basicProviders.isEmpty then Left("No basic auth providers configured")
+  ): Either[AuthFailure, AuthenticatedProfile] =
+    if basicProviders.isEmpty then
+      Left(AuthFailure.InvalidCredentials("No basic auth providers configured"))
     else
       val scopeLabel = scope match
         case AuthScope.System    => "system"
         case AuthScope.Tenant(t) => t
-      val errors = List.newBuilder[String]
+      var passwordChangeRequired = false
+      val errors                 = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
           provider.authenticate(scope, username, password) match
@@ -56,12 +58,25 @@ class AuthenticationService(
               logger.info(s"User '$username' ($scopeLabel) authenticated via ${provider.name}")
               right
             case Left(err) =>
-              logger.debug(s"Provider ${provider.name} rejected '$username' ($scopeLabel): $err")
-              errors += s"${provider.name}: $err"
+              logger.debug(
+                s"Provider ${provider.name} rejected '$username' ($scopeLabel): ${err.message}"
+              )
+              if err == AuthFailure.PasswordChangeRequired then passwordChangeRequired = true
+              errors += s"${provider.name}: ${err.message}"
               Left(err)
         }
         .collectFirst { case r @ Right(_) => r }
-        .getOrElse(Left(s"Authentication failed: ${errors.result().mkString("; ")}"))
+        .getOrElse(
+          // A PasswordChangeRequired from any provider is authoritative: it means the
+          // password VERIFIED there. Do not bury it under the other providers' noise.
+          if passwordChangeRequired then Left(AuthFailure.PasswordChangeRequired)
+          else
+            Left(
+              AuthFailure.InvalidCredentials(
+                s"Authentication failed: ${errors.result().mkString("; ")}"
+              )
+            )
+        )
 
   /** System-scope bearer validation against the global chain. Used for management-plane logins (no
     * tenant context) and FlightSQL handshakes with `?superuser=true`.

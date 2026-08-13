@@ -56,11 +56,12 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
     val errors = List.newBuilder[String]
     chain.iterator
       .map { p =>
-        p.authenticate(scope, username, password) match
-          case r @ Right(_) => r
-          case Left(err) =>
-            errors += s"${p.name}: $err"
-            Left(err)
+        // AuthFailure is rendered to its wire string here, mirroring what the
+        // FlightSQL edge and the REST login do with the typed failure.
+        p.authenticate(scope, username, password).left.map { err =>
+          errors += s"${p.name}: ${err.message}"
+          err.message
+        }
       }
       .collectFirst { case r @ Right(_) => r }
       .getOrElse(Left(s"Authentication failed: ${errors.result().mkString("; ")}"))

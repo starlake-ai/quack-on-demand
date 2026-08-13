@@ -5,10 +5,11 @@ import ai.starlake.quack.edge.config.DatabaseAuthConfig
 import java.sql.Connection
 
 /** Config-load-time gate for `DatabaseAuthConfig.systemQuery` / `tenantQuery`: both MUST project
-  * exactly three columns `(password_hash, role, enabled)`, mirroring the runtime enforcement in
-  * [[DatabaseAuthenticator]] (a result set with fewer than three columns fails every login).
-  * Catching a misconfigured custom query at startup is cheaper than discovering it the first time
-  * an operator wonders why disabling a user does not lock them out.
+  * exactly four columns `(password_hash, role, enabled, must_change_password)`, mirroring the
+  * runtime enforcement in [[DatabaseAuthenticator]] (a result set with fewer than four columns
+  * fails every login). Catching a misconfigured custom query at startup is cheaper than discovering
+  * it the first time an operator wonders why disabling a user does not lock them out, or why a
+  * forced password rotation never takes effect.
   *
   * Uses `PreparedStatement.getMetaData` -- the Postgres JDBC driver resolves column metadata via
   * the wire-protocol `Describe` message without executing the statement or binding parameters, so
@@ -20,7 +21,7 @@ import java.sql.Connection
   */
 object AuthQueryPreconditions:
 
-  private val RequiredColumns = 3
+  private val RequiredColumns = 4
 
   def validate(conn: Connection, config: DatabaseAuthConfig): Either[String, Unit] =
     if !config.enabled then Right(())
@@ -37,7 +38,8 @@ object AuthQueryPreconditions:
       if n < RequiredColumns then
         Left(
           s"auth.database.$label must project $RequiredColumns columns " +
-            "(password_hash, role, enabled) -- the enabled column is mandatory " +
+            "(password_hash, role, enabled, must_change_password) -- the enabled and " +
+            "must_change_password columns are mandatory " +
             s"(this query currently projects only $n)"
         )
       else Right(())

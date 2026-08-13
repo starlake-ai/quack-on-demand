@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.auth.{
+  AuthFailure,
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
@@ -321,7 +322,10 @@ final class AuthHandlers(
             tenant = req.tenant,
             detail = Map("username" -> req.username)
           )
-          Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", err)))
+          val code = err match
+            case AuthFailure.PasswordChangeRequired => "password_change_required"
+            case _                                  => "invalid_credentials"
+          Left((StatusCode.Unauthorized, ErrorResponse(code, err.message)))
         case Right(profile) =>
           val tenantOpt = scope match
             case AuthScope.System    => None
