@@ -155,6 +155,29 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
   "TenantDbRequest" should "default every optional field when absent" in:
     decode[TenantDbRequest]("""{"tenant":"acme","name":"acme_x"}""") shouldBe
       Right(TenantDbRequest("acme", "acme_x"))
+    decode[TenantDbRequest]("""{"tenant":"acme","name":"acme_x"}""").map(_.managedStorage) shouldBe
+      Right(false)
+
+  it should "round-trip managedStorage through the wire" in:
+    val req = TenantDbRequest("acme", "sales", managedStorage = true)
+    req.asJson.hcursor.get[Boolean]("managedStorage") shouldBe Right(true)
+    decode[TenantDbRequest](req.asJson.noSpaces) shouldBe Right(req)
+    decode[TenantDbRequest](
+      """{"tenant":"acme","name":"sales","managedStorage":true}"""
+    ).map(_.managedStorage) shouldBe Right(true)
+
+  "TenantDbOpRequest" should "decode a body written before purgeManagedData existed" in:
+    // Pins the deriveCodec -> ConfiguredCodec swap: without it the added field makes
+    // every existing database/delete body fail to decode.
+    decode[TenantDbOpRequest]("""{"tenant":"t","name":"n"}""") shouldBe
+      Right(TenantDbOpRequest("t", "n"))
+    decode[TenantDbOpRequest]("""{"tenant":"t","name":"n"}""").map(_.purgeManagedData) shouldBe
+      Right(false)
+
+  it should "round-trip purgeManagedData through the wire" in:
+    val req = TenantDbOpRequest("t", "n", purgeManagedData = true)
+    req.asJson.hcursor.get[Boolean]("purgeManagedData") shouldBe Right(true)
+    decode[TenantDbOpRequest](req.asJson.noSpaces) shouldBe Right(req)
 
   // ----- Auth --------------------------------------------------------------
 

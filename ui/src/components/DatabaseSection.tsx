@@ -130,7 +130,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
         name,  // server is idempotent on already-prefixed input
         kind,
       };
-      if (kind === 'ducklake') {
+      if (kind === 'ducklake' && storeType === 'managed') {
+        reqBody.metastore      = collectMetastore();
+        reqBody.managedStorage = true;
+        // dataPath / objectStore intentionally omitted -- the server
+        // provisions and resolves the data path itself.
+      } else if (kind === 'ducklake') {
         reqBody.metastore   = collectMetastore();
         reqBody.dataPath    = dataPath.trim();
         reqBody.objectStore = buildObjectStore(storeType, storeKeys, storeExtras);
@@ -151,12 +156,16 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     }
   }
 
-  async function handleDelete(dbName: string): Promise<boolean> {
+  async function handleDelete(dbName: string, kind: TenantDbKind): Promise<boolean> {
     if (!confirm(`Delete database '${dbName}' from tenant '${tenant}'?\n\n` +
                  `This drops the Postgres database '${dbName}' and any DuckLake catalog in it.`)) return false;
+    // Only a ducklake database can hold managed object storage; the second
+    // confirm is meaningless (and confusing) for duckdb-file / memory kinds.
+    const purge = kind === 'ducklake' && confirm('Also purge managed object storage now? ' +
+      'OK = purge immediately, Cancel = retain for the configured window.');
     setError(null);
     try {
-      await api.deleteTenantDb({ tenant, name: dbName });
+      await api.deleteTenantDb({ tenant, name: dbName, purgeManagedData: purge });
       await reload();
       return true;
     } catch (e) {
@@ -372,7 +381,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             </label>
             <div className="row" style={{ gap: 8, marginTop: '0.75rem', justifyContent: 'space-between' }}>
               <button type="button" className="danger"
-                onClick={() => void (async () => { const ok = await handleDelete(editingDb.name); if (ok) setEditingDb(null); })()}>
+                onClick={() => void (async () => { const ok = await handleDelete(editingDb.name, editingDb.kind); if (ok) setEditingDb(null); })()}>
                 Delete database
               </button>
               <div className="row" style={{ gap: 8 }}>

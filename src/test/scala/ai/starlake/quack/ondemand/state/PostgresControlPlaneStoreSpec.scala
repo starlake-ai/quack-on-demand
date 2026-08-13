@@ -234,6 +234,108 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     store.poolLoadWindow(b0) shouldBe Map(pool.id -> (1L, 200L))
   }
 
+  it should "walk the managed-prefix lifecycle" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val createdAt = Instant.parse("2026-08-12T10:00:00Z")
+    store.insertManagedPrefix(
+      "mp-1",
+      tenant.id,
+      tenantDb.name,
+      "acme/acme_default/td-abc/",
+      createdAt
+    )
+    store.managedPrefix("mp-1") shouldBe Some(
+      ManagedPrefixRow(
+        id = "mp-1",
+        tenant = tenant.id,
+        tenantDbName = tenantDb.name,
+        prefix = "acme/acme_default/td-abc/",
+        createdAt = createdAt,
+        deletedAt = None,
+        purgeEligibleAt = None,
+        purgedAt = None
+      )
+    )
+
+    val deletedAt       = createdAt.plusSeconds(3600)
+    val purgeEligibleAt = deletedAt.plusSeconds(604800)
+    store.markManagedPrefixDeleted("mp-1", deletedAt, purgeEligibleAt)
+    val afterDelete = store.managedPrefix("mp-1").get
+    afterDelete.deletedAt shouldBe Some(deletedAt)
+    afterDelete.purgeEligibleAt shouldBe Some(purgeEligibleAt)
+    afterDelete.purgedAt shouldBe None
+
+    store.dueManagedPrefixes(purgeEligibleAt.minusSeconds(1)) shouldBe Nil
+    // purge_eligible_at <= now is inclusive, so the boundary itself is due.
+    val due = store.dueManagedPrefixes(purgeEligibleAt)
+    due.map(_.id) shouldBe List("mp-1")
+
+    val purgedAt = purgeEligibleAt.plusSeconds(60)
+    store.markManagedPrefixPurged("mp-1", purgedAt)
+    store.dueManagedPrefixes(purgedAt) shouldBe Nil
+    val afterPurge = store.managedPrefix("mp-1").get
+    afterPurge.purgedAt shouldBe Some(purgedAt)
+  }
+
+  it should "order due prefixes by eligibility and skip unknown-id marks" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val createdAt       = Instant.parse("2026-08-12T10:00:00Z")
+    val laterEligible   = createdAt.plusSeconds(700000)
+    val earlierEligible = createdAt.plusSeconds(600000)
+    store.insertManagedPrefix(
+      "mp-later",
+      tenant.id,
+      tenantDb.name,
+      "acme/acme_default/td-a/",
+      createdAt
+    )
+    store.insertManagedPrefix(
+      "mp-earlier",
+      tenant.id,
+      tenantDb.name,
+      "acme/acme_default/td-b/",
+      createdAt
+    )
+    store.markManagedPrefixDeleted("mp-later", createdAt, laterEligible)
+    store.markManagedPrefixDeleted("mp-earlier", createdAt, earlierEligible)
+
+    val due = store.dueManagedPrefixes(laterEligible.plusSeconds(1))
+    due.map(_.id) shouldBe List("mp-earlier", "mp-later")
+
+    noException should be thrownBy store.markManagedPrefixDeleted(
+      "no-such-id",
+      createdAt,
+      createdAt.plusSeconds(1)
+    )
+  }
+
+  it should "keep the first insert's createdAt on a duplicate id" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val firstCreated  = Instant.parse("2026-08-12T10:00:00Z")
+    val secondCreated = firstCreated.plusSeconds(3600)
+    store.insertManagedPrefix(
+      "mp-dup",
+      tenant.id,
+      tenantDb.name,
+      "acme/acme_default/td-dup/",
+      firstCreated
+    )
+    store.insertManagedPrefix(
+      "mp-dup",
+      tenant.id,
+      tenantDb.name,
+      "acme/acme_default/td-dup-2/",
+      secondCreated
+    )
+
+    val row = store.managedPrefix("mp-dup").get
+    row.createdAt shouldBe firstCreated
+    row.prefix shouldBe "acme/acme_default/td-dup/"
+  }
+
   it should "preserve idleTimeoutSec as a populated Option" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

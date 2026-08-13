@@ -530,6 +530,52 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     }
     stale.size
 
+  // ---------------- Managed prefix (tombstone registry) ----------------
+  private val managedPrefixes = TrieMap.empty[String, ManagedPrefixRow]
+
+  def insertManagedPrefix(
+      id: String,
+      tenant: String,
+      tenantDbName: String,
+      prefix: String,
+      createdAt: Instant
+  ): Unit =
+    managedPrefixes.putIfAbsent(
+      id,
+      ManagedPrefixRow(
+        id = id,
+        tenant = tenant,
+        tenantDbName = tenantDbName,
+        prefix = prefix,
+        createdAt = createdAt,
+        deletedAt = None,
+        purgeEligibleAt = None,
+        purgedAt = None
+      )
+    )
+    ()
+
+  def markManagedPrefixDeleted(id: String, deletedAt: Instant, purgeEligibleAt: Instant): Unit =
+    managedPrefixes.get(id).foreach { row =>
+      managedPrefixes.put(
+        id,
+        row.copy(deletedAt = Some(deletedAt), purgeEligibleAt = Some(purgeEligibleAt))
+      )
+    }
+
+  def dueManagedPrefixes(now: Instant): List[ManagedPrefixRow] =
+    managedPrefixes.values
+      .filter(r => r.purgeEligibleAt.exists(!_.isAfter(now)) && r.purgedAt.isEmpty)
+      .toList
+      .sortBy(_.purgeEligibleAt.get)
+
+  def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit =
+    managedPrefixes
+      .get(id)
+      .foreach(row => managedPrefixes.put(id, row.copy(purgedAt = Some(purgedAt))))
+
+  def managedPrefix(id: String): Option[ManagedPrefixRow] = managedPrefixes.get(id)
+
   def snapshot(): ControlPlaneSnapshot = ControlPlaneSnapshot(
     tenants = listTenants(),
     tenantDbs = tenantDbs.values.toList.sortBy(_.name),

@@ -29,4 +29,5 @@ object Versions {
   val micrometer     = "1.13.6"
   val liquibase      = "4.29.2"
   val caffeine       = "3.1.8"
+  val awsSdk         = "2.42.21"
 }

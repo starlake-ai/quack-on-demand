@@ -470,6 +470,7 @@ final case class ManagerConfig(
     catalog: CatalogConfig = CatalogConfig(),
     routing: RoutingConfig = RoutingConfig(),
     autoscale: AutoscaleConfig = AutoscaleConfig(),
+    managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
@@ -585,6 +586,68 @@ final case class AutoscaleConfig(
   require(hardCap >= 1, "autoscale: hardCap must be >= 1")
   def sweepInterval: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(math.max(30, sweepSeconds)).seconds
+
+/** Managed object storage: one operator root bucket, one prefix per tenant-db incarnation. Fills
+  * the database's objectStore from these credentials at managed create; a background worker purges
+  * deleted prefixes after retainDays. See
+  * docs/superpowers/specs/2026-08-13-managed-object-storage-design.md.
+  */
+final case class ManagedObjectStoreConfig(
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_ENABLED",
+      description = "Global kill switch for managed object storage. Off = managed creates 400."
+    )
+    enabled: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_ENDPOINT",
+      description = "S3-compatible endpoint URL for the operator root bucket."
+    )
+    endpoint: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_REGION",
+      description = "Region passed to the S3-compatible client."
+    )
+    region: String = "us-east-1",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_BUCKET",
+      description = "Operator root bucket; each tenant-db incarnation gets its own prefix."
+    )
+    bucket: String = "qod-managed",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_ACCESS_KEY_ID",
+      description = "Access key id for the operator root bucket."
+    )
+    accessKeyId: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_SECRET_ACCESS_KEY",
+      description = "Secret access key for the operator root bucket.",
+      sensitive = true
+    )
+    secretAccessKey: String = "",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_URL_STYLE",
+      description = "Bucket addressing style presented to clients: 'path' or 'vhost'."
+    )
+    urlStyle: String = "path",
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_RETAIN_DAYS",
+      description =
+        "Days a deleted tenant-db prefix is retained before the purge worker removes it."
+    )
+    retainDays: Int = 7,
+    @field @ConfigField(
+      envVar = "QOD_MANAGED_STORE_PURGE_SWEEP_SEC",
+      description = "Purge worker sweep interval in seconds; clamped to a 60s floor."
+    )
+    purgeSweepSec: Int = 300
+):
+  require(retainDays >= 0, "managedObjectStore: retainDays must be >= 0")
+  require(
+    urlStyle == "path" || urlStyle == "vhost",
+    "managedObjectStore: urlStyle must be path or vhost"
+  )
+  def purgeSweepInterval: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(math.max(60, purgeSweepSec)).seconds
 
 final case class FlightConfig(
     @field @ConfigField(envVar = "PROXY_HOST", description = "FlightSQL edge bind address.")

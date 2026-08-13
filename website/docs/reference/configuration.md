@@ -194,6 +194,20 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.maintenance.runTimeoutMin` | `QOD_MAINT_RUN_TIMEOUT_MIN` | `60` |  | Minutes without a heartbeat before a running maintenance run is swept as failed. |
 | `quack-on-demand.maintenance.nodeReadyTimeoutSec` | `QOD_MAINT_NODE_READY_TIMEOUT_SEC` | `180` |  | Seconds to wait for the ephemeral maintenance node to accept connections after spawn before the run is failed as 'node spawn failed'. Covers cold-start extension installs. |
 
+## `quack-on-demand.managedObjectStore`
+
+| Key | Env var | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- |
+| `quack-on-demand.managedObjectStore.enabled` | `QOD_MANAGED_STORE_ENABLED` | `false` |  | Global kill switch for managed object storage. Off = managed creates 400. |
+| `quack-on-demand.managedObjectStore.endpoint` | `QOD_MANAGED_STORE_ENDPOINT` | _(unset)_ |  | S3-compatible endpoint URL for the operator root bucket. |
+| `quack-on-demand.managedObjectStore.region` | `QOD_MANAGED_STORE_REGION` | `us-east-1` |  | Region passed to the S3-compatible client. |
+| `quack-on-demand.managedObjectStore.bucket` | `QOD_MANAGED_STORE_BUCKET` | `qod-managed` |  | Operator root bucket; each tenant-db incarnation gets its own prefix. |
+| `quack-on-demand.managedObjectStore.accessKeyId` | `QOD_MANAGED_STORE_ACCESS_KEY_ID` | _(unset)_ |  | Access key id for the operator root bucket. |
+| `quack-on-demand.managedObjectStore.secretAccessKey` | `QOD_MANAGED_STORE_SECRET_ACCESS_KEY` | `***` | yes | Secret access key for the operator root bucket. |
+| `quack-on-demand.managedObjectStore.urlStyle` | `QOD_MANAGED_STORE_URL_STYLE` | `path` |  | Bucket addressing style presented to clients: 'path' or 'vhost'. |
+| `quack-on-demand.managedObjectStore.retainDays` | `QOD_MANAGED_STORE_RETAIN_DAYS` | `7` |  | Days a deleted tenant-db prefix is retained before the purge worker removes it. |
+| `quack-on-demand.managedObjectStore.purgeSweepSec` | `QOD_MANAGED_STORE_PURGE_SWEEP_SEC` | `300` |  | Purge worker sweep interval in seconds; clamped to a 60s floor. |
+
 ## `quack-on-demand.metrics`
 
 | Key | Env var | Default | Sensitive | Description |

@@ -853,6 +853,146 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     td.metastore("dbName")     shouldBe "tpch_prod"
     td.metastore("schemaName") shouldBe "main"
 
+  // ---------- Managed object storage (createTenantDb / deleteTenantDb) ----------
+
+  private def managedCfg(): ai.starlake.quack.ManagedObjectStoreConfig =
+    ai.starlake.quack.ManagedObjectStoreConfig(
+      enabled         = true,
+      bucket          = "qod-managed",
+      accessKeyId     = "AK",
+      secretAccessKey = "SK"
+    )
+
+  /** Managed creates go through the DuckLake arm, so they need the RecordingDbAdmin stub the
+    * other DuckLake create tests use; the DuckLake pre-init itself fails against the fake
+    * metastore and falls through to the swallow-and-retry arm, exactly as in those tests. */
+  private def supManaged(
+      cfg: Option[ai.starlake.quack.ManagedObjectStoreConfig]
+  ): (PoolSupervisor, InMemoryControlPlaneStore) =
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(
+      fakeBackend(), new NodeLoadTracker, st,
+      defaultMetastore = Map.empty, dbAdmin = new RecordingDbAdmin, managedStore = cfg
+    )
+    (sup, st)
+
+  private val managedMeta = Map(
+    "pgHost" -> "h", "pgPort" -> "0", "pgUser" -> "u",
+    "pgPassword" -> "s", "dbName" -> "ignored", "schemaName" -> "main"
+  )
+
+  "PoolSupervisor.createTenantDb (managed)" should
+    "resolve an id-keyed managed dataPath and fill objectStore from config" in:
+    val (sup, st) = supManaged(Some(managedCfg()))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val td = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    td.dataPath should fullyMatch regex "s3://qod-managed/acme_sales-[0-9a-f]{8}/"
+    td.dataPath shouldBe s"s3://qod-managed/acme_sales-${td.id.stripPrefix("td-").take(8)}/"
+    td.objectStore("s3_access_key_id")     shouldBe "AK"
+    td.objectStore("s3_secret_access_key") shouldBe "SK"
+    td.objectStore("s3_region")            shouldBe "us-east-1"
+    td.objectStore("s3_url_style")         shouldBe "path"
+    td.objectStore.contains("s3_endpoint") shouldBe false
+    val row = st.managedPrefix(td.id)
+    row shouldBe defined
+    row.get.tenant       shouldBe "acme"
+    row.get.tenantDbName shouldBe "acme_sales"
+    row.get.prefix       shouldBe td.dataPath
+    row.get.deletedAt    shouldBe None
+
+  it should "refuse managed create when unconfigured" in:
+    val (sup, st) = supManaged(None)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val out = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync()
+    out.swap.toOption.get shouldBe a[SupervisorError.InvalidArgument]
+    out.swap.toOption.get.message should include("QOD_MANAGED_STORE_ENABLED")
+    sup.listTenantDbsByTenant("acme") shouldBe empty
+
+  it should "refuse managed create when the config block is disabled" in:
+    val (sup, _) = supManaged(Some(managedCfg().copy(enabled = false)))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val out = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync()
+    out.swap.toOption.get shouldBe a[SupervisorError.InvalidArgument]
+
+  it should "give a recreated database a fresh prefix" in:
+    val (sup, st) = supManaged(Some(managedCfg()))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val first = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    sup.deleteTenantDb("acme", "acme_sales").unsafeRunSync() shouldBe Right(())
+    val second = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    second.id       should not be first.id
+    second.dataPath should not be first.dataPath
+    st.managedPrefix(first.id).get.deletedAt  shouldBe defined
+    st.managedPrefix(second.id).get.deletedAt shouldBe None
+
+  "PoolSupervisor.deleteTenantDb (managed)" should
+    "stamp eligibility per retainDays and immediately with the purge flag" in:
+    val (sup, st) = supManaged(Some(managedCfg()))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val first = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    sup.deleteTenantDb("acme", "acme_sales").unsafeRunSync() shouldBe Right(())
+    val retained = st.managedPrefix(first.id).get
+    val deleted  = retained.deletedAt.get
+    retained.purgeEligibleAt.get shouldBe deleted.plus(7, java.time.temporal.ChronoUnit.DAYS)
+    retained.purgedAt shouldBe None
+
+    val second = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    sup.deleteTenantDb("acme", "acme_sales", purgeManagedData = true)
+      .unsafeRunSync() shouldBe Right(())
+    val purged = st.managedPrefix(second.id).get
+    purged.purgeEligibleAt.get shouldBe purged.deletedAt.get
+    // The first incarnation's window is untouched by the second's immediate purge.
+    st.managedPrefix(first.id).get.purgeEligibleAt.get shouldBe
+      deleted.plus(7, java.time.temporal.ChronoUnit.DAYS)
+
+  it should "leave a BYO database alone when purgeManagedData is set" in:
+    val (sup, st) = supManaged(Some(managedCfg()))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val td = sup.createTenantDb(
+      "acme", "byo", TenantDbKind.DuckLake, managedMeta, dataPath = "/data/acme_byo"
+    ).unsafeRunSync().toOption.get
+    st.managedPrefix(td.id) shouldBe None
+    sup.deleteTenantDb("acme", "acme_byo", purgeManagedData = true)
+      .unsafeRunSync() shouldBe Right(())
+    st.managedPrefix(td.id) shouldBe None
+
+  "PoolSupervisor.deleteTenant (managed)" should
+    "stamp deletedAt and purgeEligibleAt on the managed prefix row during the cascade delete" in:
+    // deleteTenant's per-tenant-db loop calls stampManagedPrefixDeleted itself (it does not
+    // route through deleteTenantDb) -- pin that the cascade leaves the same tombstone behind
+    // so a managed prefix is never stranded un-eligible for purge.
+    val (sup, st) = supManaged(Some(managedCfg()))
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val td = sup.createTenantDb(
+      "acme", "sales", TenantDbKind.DuckLake, managedMeta, dataPath = "",
+      managedStorage = true
+    ).unsafeRunSync().toOption.get
+    sup.deleteTenant("acme").unsafeRunSync() shouldBe Right(())
+    val row = st.managedPrefix(td.id).get
+    val deleted = row.deletedAt.get
+    row.purgeEligibleAt.get shouldBe deleted.plus(7, java.time.temporal.ChronoUnit.DAYS)
+
   "PoolSupervisor.deleteTenantDb" should "invoke DbAdmin.dropDatabase after the row is gone" in:
     val (sup, admin) = supWithAdmin()
     sup.createTenant(Tenant("tpch")).unsafeRunSync()

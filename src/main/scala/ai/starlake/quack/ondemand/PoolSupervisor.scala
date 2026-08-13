@@ -27,6 +27,7 @@ import ai.starlake.quack.ondemand.state.{
   RbacUser,
   RolePermission
 }
+import ai.starlake.quack.ondemand.storage.ManagedPrefix
 import ai.starlake.quack.route.PoolSnapshot
 import ai.starlake.quack.spi.ManagerEvent
 import cats.effect.IO
@@ -104,7 +105,14 @@ final class PoolSupervisor(
       * global default the per-pool tri-state inherits, so the query path and the maintenance path
       * can never drift.
       */
-    lockdownEnabled: Boolean = false
+    lockdownEnabled: Boolean = false,
+    /** Managed object storage (QOD_MANAGED_STORE_*), from Main; `None` when the config block is
+      * disabled. Present-and-enabled is the precondition for `createTenantDb(managedStorage =
+      * true)`: it supplies the bucket the per-incarnation prefix is carved from, the credentials
+      * the tenant-db's objectStore is filled with, and the `retainDays` window [[deleteTenantDb]]
+      * stamps on the tombstone row.
+      */
+    managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -998,7 +1006,11 @@ final class PoolSupervisor(
             )
           else
             tdbs.foreach { td =>
-              store.deleteTenantDb(td.id); tenantDbs.remove(td.id)
+              store.deleteTenantDb(td.id)
+              // Same tombstone stamp as deleteTenantDb: a cascaded delete must not strand a
+              // managed prefix un-eligible, or its objects would be billed forever.
+              stampManagedPrefixDeleted(td.id, td.name, purgeManagedData = false)
+              tenantDbs.remove(td.id)
               try onTenantDbDeleted(name.toLowerCase, td.name)
               catch case _: Throwable => ()
               dbAdmin.dropDatabase(td.name) match
@@ -1029,6 +1041,13 @@ final class PoolSupervisor(
       defaultDatabase: Option[String] = None,
       defaultSchema: Option[String] = None,
       initSql: String = "",
+      /** Carve this database's storage out of the operator-managed bucket: the caller supplies
+        * neither `dataPath` nor `objectStore`, and both are resolved here from [[managedStore]]
+        * (prefix keyed by the freshly minted surrogate id, credentials from the config block).
+        * Refused when managed storage is not configured. The REST layer additionally refuses it
+        * together with a caller-supplied dataPath/objectStore and on non-DuckLake kinds.
+        */
+      managedStorage: Boolean = false,
       gateBypass: Boolean = false
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
@@ -1045,6 +1064,13 @@ final class PoolSupervisor(
                 val tn = tenantName.toLowerCase
                 getTenant(tn) match
                   case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
+                  case Some(_) if managedStorage && managedStore.forall(!_.enabled) =>
+                    Left(
+                      SupervisorError.InvalidArgument(
+                        "managed storage is not configured: set QOD_MANAGED_STORE_ENABLED " +
+                          "and its credentials"
+                      )
+                    )
                   case Some(t)
                       if tenantDbs.values.exists(td => td.tenantId == t.id && td.name == full) =>
                     Left(
@@ -1060,14 +1086,44 @@ final class PoolSupervisor(
                       case TenantDbKind.DuckDbFile => metastore
                       case TenantDbKind.InMemory   => metastore
 
+                    // Minted up front: a managed prefix is keyed by this id, so a recreated
+                    // database of the same name never lands on its predecessor's data.
+                    val id         = newId("td")
+                    val managedCfg =
+                      if managedStorage then managedStore.filter(_.enabled) else None
+                    // `full` is `<tenant>_<suffix>` and ManagedPrefix.dataPath re-joins its
+                    // (tenant, dbName) arguments with an underscore, so the db-name piece fed
+                    // here is `full` minus its tenant prefix. Result: the spec's shape
+                    // `s3://<bucket>/<tenant>_<dbname>-<id8>/`.
+                    val effectiveDataPath = managedCfg.fold(dataPath) { cfg =>
+                      ManagedPrefix.dataPath(cfg.bucket, tn, full.stripPrefix(s"${tn}_"), id)
+                    }
+                    val effectiveObjectStore =
+                      managedCfg.fold(objectStore)(ManagedPrefix.objectStoreFor)
+
+                    /** Tombstone row for the managed prefix, written with the tenant-db row so no
+                      * managed create can leave storage carved out with nothing to purge it. No-op
+                      * for BYO / default-path databases.
+                      */
+                    def recordManagedPrefix(): Unit =
+                      managedCfg.foreach { _ =>
+                        store.insertManagedPrefix(
+                          id,
+                          tn,
+                          full,
+                          effectiveDataPath,
+                          java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+                        )
+                      }
+
                     val td = TenantDb(
-                      id = newId("td"),
+                      id = id,
                       tenantId = t.id,
                       name = full,
                       kind = kind,
                       metastore = effectiveMeta,
-                      dataPath = dataPath,
-                      objectStore = objectStore,
+                      dataPath = effectiveDataPath,
+                      objectStore = effectiveObjectStore,
                       defaultDatabase = defaultDatabase,
                       defaultSchema = defaultSchema,
                       initSql = initSql
@@ -1093,9 +1149,10 @@ final class PoolSupervisor(
                                 // don't race on `CREATE TABLE __ducklake_metadata`.
                                 try
                                   DuckLakeInitializer.initBlocking(
-                                    effectiveMeta.updated("dataPath", dataPath)
+                                    effectiveMeta.updated("dataPath", effectiveDataPath)
                                   )
                                   store.upsertTenantDb(td)
+                                  recordManagedPrefix()
                                   tenantDbs.put(td.id, td)
                                   publish.topologyChanged()
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
@@ -1116,12 +1173,14 @@ final class PoolSupervisor(
                                         s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
                                     )
                                     store.upsertTenantDb(td)
+                                    recordManagedPrefix()
                                     tenantDbs.put(td.id, td)
                                     publish.topologyChanged()
                                     events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                     Right(td)
                           case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                             store.upsertTenantDb(td)
+                            recordManagedPrefix()
                             tenantDbs.put(td.id, td)
                             publish.topologyChanged()
                             events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
@@ -1130,7 +1189,41 @@ final class PoolSupervisor(
         }
     }
 
-  def deleteTenantDb(tenantName: String, tenantDbName: String): IO[Either[SupervisorError, Unit]] =
+  /** Stamp the deleted tenant-db's managed-prefix tombstone: `deletedAt` now, `purgeEligibleAt`
+    * `retainDays` later (or now when the caller asked for an immediate purge). The retention window
+    * falls back to the config default when managed storage is not wired on this replica, so a row
+    * written by another replica is never stranded permanently un-eligible. Already-stamped rows are
+    * left alone: re-stamping would silently extend or shorten a window the purge worker may already
+    * be acting on.
+    */
+  private def stampManagedPrefixDeleted(
+      tenantDbId: String,
+      tenantDbName: String,
+      purgeManagedData: Boolean
+  ): Unit =
+    store.managedPrefix(tenantDbId) match
+      case Some(row) if row.deletedAt.isEmpty =>
+        val now        = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+        val retainDays = managedStore.map(_.retainDays).getOrElse(7)
+        val eligible   =
+          if purgeManagedData then now
+          else now.plus(retainDays.toLong, java.time.temporal.ChronoUnit.DAYS)
+        store.markManagedPrefixDeleted(tenantDbId, now, eligible)
+      case Some(_) => ()
+      case None    =>
+        if purgeManagedData then
+          logger.warn(s"purgeManagedData ignored: '$tenantDbName' has no managed prefix")
+
+  /** `purgeManagedData` makes a managed database's storage eligible for the purge worker
+    * immediately instead of after `managedStore.retainDays`; the objects themselves are removed
+    * asynchronously, so the call still returns as fast as a plain delete. Ignored with a WARN on a
+    * BYO / default-path database, which has no managed prefix to purge.
+    */
+  def deleteTenantDb(
+      tenantName: String,
+      tenantDbName: String,
+      purgeManagedData: Boolean = false
+  ): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
       withCacheRecovery("deleteTenantDb") {
         val tn = tenantName.toLowerCase
@@ -1162,6 +1255,7 @@ final class PoolSupervisor(
                   )
                 else
                   store.deleteTenantDb(td.id)
+                  stampManagedPrefixDeleted(td.id, tenantDbName, purgeManagedData)
                   tenantDbs.remove(td.id)
                   dataPathBlocked.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)

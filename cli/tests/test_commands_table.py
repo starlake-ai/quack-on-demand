@@ -61,6 +61,22 @@ CASES = [
         },
     ),
     (
+        ["database", "create", "--tenant", "acme", "--name", "tpch1", "--managed-storage"],
+        "POST",
+        "/api/database/create",
+        {},
+        {
+            "tenant": "acme",
+            "name": "tpch1",
+            "kind": "ducklake",
+            "metastore": {},
+            "dataPath": "",
+            "objectStore": {},
+            "initSql": "",
+            "managedStorage": True,
+        },
+    ),
+    (
         ["database", "update", "--tenant", "acme", "--name", "tpch1", "--default-schema", "main"],
         "POST",
         "/api/database/update",
@@ -73,6 +89,13 @@ CASES = [
         "/api/database/delete",
         {},
         {"tenant": "acme", "name": "tpch1"},
+    ),
+    (
+        ["database", "delete", "--tenant", "acme", "--name", "tpch1", "--purge-managed-data"],
+        "POST",
+        "/api/database/delete",
+        {},
+        {"tenant": "acme", "name": "tpch1", "purgeManagedData": True},
     ),
     (["pool", "list"], "GET", "/api/pool/list", {}, None),
     (

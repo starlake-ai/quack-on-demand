@@ -298,6 +298,9 @@ export interface TenantDbRequest {
   defaultDatabase?: string;
   defaultSchema?: string;
   initSql?: string;
+  // DuckLake only; exclusive with dataPath/objectStore. When true the
+  // server provisions and resolves the dataPath itself.
+  managedStorage?: boolean;
 }
 
 export interface TenantDbResponse {
@@ -330,6 +333,9 @@ export interface TenantDbListResponse {
 export interface TenantDbOpRequest {
   tenant: string;
   name: string;
+  // Immediate purge eligibility for managed object storage vs. the
+  // retention window. Ignored (server WARNs) for non-managed databases.
+  purgeManagedData?: boolean;
 }
 
 export interface UpdateTenantDbRequest {

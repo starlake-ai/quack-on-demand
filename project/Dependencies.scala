@@ -75,6 +75,10 @@ object Dependencies {
   val blobstoreGcs          = "com.github.fs2-blobstore" %% "gcs" % Versions.blobstore
   val blobstoreAzure        = "com.github.fs2-blobstore" %% "azure" % Versions.blobstore
 
+  // AWS SDK v2 S3 client (managed object storage) - explicit pin of the version
+  // fs2-blobstore's `s3` module already pulls in transitively.
+  val awsS3                 = "software.amazon.awssdk" % "s3" % Versions.awsSdk
+
   // DuckDB JDBC (for catalog resolver)
   val duckdbJdbc            = "org.duckdb" % "duckdb_jdbc" % Versions.duckdb
 

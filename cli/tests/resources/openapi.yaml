@@ -6657,11 +6657,14 @@ components:
       required:
       - tenant
       - name
+      - purgeManagedData
       properties:
         tenant:
           type: string
         name:
           type: string
+        purgeManagedData:
+          type: boolean
     TenantDbRequest:
       title: TenantDbRequest
       type: object
@@ -6673,6 +6676,7 @@ components:
       - dataPath
       - objectStore
       - initSql
+      - managedStorage
       properties:
         tenant:
           type: string
@@ -6692,6 +6696,8 @@ components:
           type: string
         initSql:
           type: string
+        managedStorage:
+          type: boolean
     TenantDbResponse:
       title: TenantDbResponse
       type: object

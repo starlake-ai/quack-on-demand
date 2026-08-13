@@ -1932,6 +1932,102 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  // ---------------- Managed prefix (tombstone registry) ------------------
+
+  def insertManagedPrefix(
+      id: String,
+      tenant: String,
+      tenantDbName: String,
+      prefix: String,
+      createdAt: Instant
+  ): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_managed_prefix (id, tenant, tenant_db_name, prefix, created_at)
+        |VALUES (?, ?, ?, ?, ?)
+        |ON CONFLICT (id) DO NOTHING""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      ps.setString(2, tenant)
+      ps.setString(3, tenantDbName)
+      ps.setString(4, prefix)
+      ps.setTimestamp(5, Timestamp.from(createdAt))
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def markManagedPrefixDeleted(
+      id: String,
+      deletedAt: Instant,
+      purgeEligibleAt: Instant
+  ): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_managed_prefix
+        |SET deleted_at = ?, purge_eligible_at = ?
+        |WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setTimestamp(1, Timestamp.from(deletedAt))
+      ps.setTimestamp(2, Timestamp.from(purgeEligibleAt))
+      ps.setString(3, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def dueManagedPrefixes(now: Instant): List[ManagedPrefixRow] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db_name, prefix, created_at, deleted_at, purge_eligible_at, purged_at
+        |FROM qodstate_managed_prefix
+        |WHERE purge_eligible_at <= ? AND purged_at IS NULL
+        |ORDER BY purge_eligible_at ASC""".stripMargin
+    )
+    try
+      ps.setTimestamp(1, Timestamp.from(now))
+      val rs = ps.executeQuery()
+      try drain(rs)(readManagedPrefixRow)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      "UPDATE qodstate_managed_prefix SET purged_at = ? WHERE id = ?"
+    )
+    try
+      ps.setTimestamp(1, Timestamp.from(purgedAt))
+      ps.setString(2, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def managedPrefix(id: String): Option[ManagedPrefixRow] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db_name, prefix, created_at, deleted_at, purge_eligible_at, purged_at
+        |FROM qodstate_managed_prefix WHERE id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readManagedPrefixRow(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  private def readManagedPrefixRow(rs: ResultSet): ManagedPrefixRow =
+    ManagedPrefixRow(
+      id = rs.getString("id"),
+      tenant = rs.getString("tenant"),
+      tenantDbName = rs.getString("tenant_db_name"),
+      prefix = rs.getString("prefix"),
+      createdAt = rs.getTimestamp("created_at").toInstant,
+      deletedAt = Option(rs.getTimestamp("deleted_at")).map(_.toInstant),
+      purgeEligibleAt = Option(rs.getTimestamp("purge_eligible_at")).map(_.toInstant),
+      purgedAt = Option(rs.getTimestamp("purged_at")).map(_.toInstant)
+    )
+
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
     val buf = ListBuffer.empty[A]
     while rs.next() do buf += read(rs)

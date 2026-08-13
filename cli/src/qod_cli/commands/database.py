@@ -26,6 +26,7 @@ def list_(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant")):
         "defaultDatabase": "--default-database",
         "defaultSchema": "--default-schema",
         "initSql": "--init-sql",
+        "managedStorage": "--managed-storage",
     },
 )
 def create(
@@ -39,6 +40,11 @@ def create(
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),
     init_sql: str = typer.Option("", "--init-sql"),
+    managed_storage: bool = typer.Option(
+        False,
+        "--managed-storage",
+        help="Provision a managed data path (exclusive with --data-path/--object-store)",
+    ),
 ):
     body = {
         "tenant": tenant,
@@ -53,6 +59,8 @@ def create(
         body["defaultDatabase"] = default_database
     if default_schema is not None:
         body["defaultSchema"] = default_schema
+    if managed_storage:
+        body["managedStorage"] = True
     call(ctx, "POST", "/api/database/create", body=body)
 
 
@@ -95,6 +103,22 @@ def update(
 
 
 @app.command()
-@covers("POST", "/api/database/delete", {"tenant": "--tenant", "name": "--name"})
-def delete(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant"), name: str = typer.Option(..., "--name")):
-    call(ctx, "POST", "/api/database/delete", body={"tenant": tenant, "name": name})
+@covers(
+    "POST",
+    "/api/database/delete",
+    {"tenant": "--tenant", "name": "--name", "purgeManagedData": "--purge-managed-data"},
+)
+def delete(
+    ctx: typer.Context,
+    tenant: str = typer.Option(..., "--tenant"),
+    name: str = typer.Option(..., "--name"),
+    purge_managed_data: bool = typer.Option(
+        False,
+        "--purge-managed-data",
+        help="Purge managed object storage immediately instead of after the retention window",
+    ),
+):
+    body = {"tenant": tenant, "name": name}
+    if purge_managed_data:
+        body["purgeManagedData"] = True
+    call(ctx, "POST", "/api/database/delete", body=body)

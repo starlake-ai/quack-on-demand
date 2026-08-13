@@ -396,6 +396,109 @@ all, a separate pre-existing gap). Editing `objectStore` restarts the
 database's nodes so the new secret takes effect immediately; there is no
 in-place rotation on an already-running node.
 
+### Managed object storage (QoD provisions the bucket prefix)
+
+Instead of bringing a bucket, a `ducklake` database can ask QoD to carve its
+data path out of ONE operator-owned root bucket. Off by default; enable it on
+the manager with:
+
+```bash
+export QOD_MANAGED_STORE_ENABLED=true
+export QOD_MANAGED_STORE_ENDPOINT=http://seaweedfs:8333   # empty = AWS default resolution
+export QOD_MANAGED_STORE_REGION=us-east-1
+export QOD_MANAGED_STORE_BUCKET=qod-managed
+export QOD_MANAGED_STORE_ACCESS_KEY_ID=...
+export QOD_MANAGED_STORE_SECRET_ACCESS_KEY=...
+export QOD_MANAGED_STORE_URL_STYLE=path                   # path (S3-compatible) | vhost (AWS)
+export QOD_MANAGED_STORE_RETAIN_DAYS=7                    # retention after delete, 0 = immediate
+export QOD_MANAGED_STORE_PURGE_SWEEP_SEC=300              # purge worker cadence, 60s floor
+```
+
+**The root bucket must have versioning OFF.** On a versioned bucket a delete
+writes a delete marker instead of removing the object: the purge worker's next
+listing comes back empty, it stamps the prefix purged, and the non-current
+versions keep billing forever. Boot creates the bucket if missing; an
+unreachable store only WARNs (`managed object store unreachable`) and never
+blocks a managed create at the control plane - the create still succeeds, and
+the failure surfaces later, at node spawn/ATTACH against the missing bucket.
+In HA, replicas race that first create, so the losing ones can log one false
+"unreachable" WARN at first boot; it self-heals.
+
+```bash
+# Create a managed database. No dataPath, no objectStore: the server resolves
+# both. The response's dataPath is s3://<bucket>/<tenant>_<name>-<id8>/ where
+# id8 is the first 8 chars of the tenant-db surrogate id, so recreating a
+# deleted name always lands on a fresh empty prefix.
+curl -sS -X POST "http://localhost:20900/api/database/create" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"sales","kind":"ducklake","managedStorage":true}'
+
+# CLI equivalent
+qod database create --tenant acme --name sales --kind ducklake --managed-storage
+```
+
+400s, all actionable: managed storage not enabled on this deployment
+(`QOD_MANAGED_STORE_ENABLED`); `managedStorage` sent together with a
+`dataPath`/`objectStore` (one intent per call); `managedStorage` on a
+non-`ducklake` kind. `database/update` has NO `managedStorage` field: there is
+no BYO-to-managed (or managed-to-BYO) migration, recreate instead.
+
+- **Credential rotation**: a managed create snapshots the operator credential
+  (`QOD_MANAGED_STORE_SECRET_ACCESS_KEY`) into that database's own
+  `objectStore` at create time. Rotating the env var only affects *future*
+  managed creates; existing managed databases keep signing with the old key
+  and break at their next node respawn once it is revoked. Remediation today:
+  `database/update` each managed database's `objectStore` with the new
+  secret, then recycle its pools. Per-database credential minting is the
+  designed follow-up.
+
+```bash
+# Delete: tombstone now, objects purged after retainDays (7 by default).
+curl -sS -X POST "http://localhost:20900/api/database/delete" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"acme_sales"}'
+
+# Delete and make the storage purge-eligible immediately (the worker drains it
+# on its next sweep; the call itself still returns straight away).
+curl -sS -X POST "http://localhost:20900/api/database/delete" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","name":"acme_sales","purgeManagedData":true}'
+
+qod database delete --tenant acme --name acme_sales --purge-managed-data
+```
+
+`purgeManagedData` on a BYO / default-path database is ignored with a WARN.
+Deleting the whole TENANT cascades tombstones with the normal retention window,
+never immediate.
+
+Inventory / audit the prefixes in the control-plane Postgres:
+
+```sql
+SELECT id, prefix, deleted_at, purge_eligible_at, purged_at
+FROM qodstate_managed_prefix
+ORDER BY created_at;
+```
+
+- `deleted_at IS NULL` - live database.
+- `deleted_at` set, `purged_at NULL` - retained; the objects are still there and
+  still billed. Until `purge_eligible_at`, this window doubles as the undrop
+  window (the data is recoverable by hand).
+- `purged_at` set - objects gone, row kept as the audit trail.
+
+The purge worker is HA-leader-gated, sweeps every `purgeSweepSec`, drains each
+due prefix in bounded list+delete batches (resuming across sweeps for large
+prefixes), isolates failures per prefix, and stamps `purged_at` only when a
+listing comes back empty. Grep the manager log for `managed purge:`.
+
+Two operator cautions:
+
+- **Changing `QOD_MANAGED_STORE_BUCKET` strands existing tombstones.** Rows
+  written under the old bucket no longer match the configured root, so the
+  worker logs `skipping <id>, prefix ... is not under ...` on every sweep and
+  the old bucket's objects leak. Purge or migrate before switching buckets.
+- **All managed databases share the operator credential.** Isolation between
+  tenants' managed data is prefix-by-convention, enforced by the per-db
+  `CREATE SECRET` scoped to that database's own `dataPath` plus per-pool
+  lockdown, not by store-level ACLs. Per-database credential minting is the
+  designed follow-up.
+
 ### Register a federated source
 
 ```bash

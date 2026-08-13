@@ -57,3 +57,5 @@ databaseChangeLog:
       file: db/changelog/0025-pool-autoscale-band.yaml
   - include:
       file: db/changelog/0026-pool-load.yaml
+  - include:
+      file: db/changelog/0027-managed-prefix.yaml
