@@ -441,16 +441,30 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       role = "user",
       mustChangePassword = true
     )
+    // Same for the superuser "admin" (tenant = None): the exporter's
+    // superuser branch (ManifestExporter.scala's `superusers` block) is a
+    // separate code path from the tenant-scoped branch, so it needs its own
+    // coverage rather than relying on alice's assertion alone.
+    src.upsertUserWithHash(
+      tenant = None,
+      username = "admin",
+      passwordHash = adminHash,
+      role = "admin",
+      mustChangePassword = true
+    )
 
     val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
     val aliceManifest = manifest1.users.find(_.username == "alice").get
     aliceManifest.mustChangePassword shouldBe true
+    val adminManifest = manifest1.users.find(_.username == "admin").get
+    adminManifest.mustChangePassword shouldBe true
 
     val dst = new InMemoryControlPlaneStore()
     ManifestImporter.apply(manifest1, dst) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.findUser(Some(aliceTenantId), "alice").get.mustChangePassword shouldBe true
+    dst.findUser(None, "admin").get.mustChangePassword shouldBe true
   }
 
   it should "import a manifest without the mustChangePassword field as false" in {

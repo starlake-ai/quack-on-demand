@@ -504,12 +504,12 @@ object ManifestImporter:
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
             val userId                   =
               store.upsertUserWithHash(
-                tenantId,
-                mu.username,
-                hash,
-                mu.role,
-                mu.enabled,
-                mu.mustChangePassword
+                tenant = tenantId,
+                username = mu.username,
+                passwordHash = hash,
+                role = mu.role,
+                enabled = mu.enabled,
+                mustChangePassword = mu.mustChangePassword
               )
 
             // --- User roles
