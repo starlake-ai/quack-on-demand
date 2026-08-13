@@ -59,6 +59,7 @@ import type {
   UserUpdateRequest,
   UserDeleteRequest,
   UserListResponse,
+  ChangePasswordRequest,
   RoleResponse,
   RoleCreateRequest,
   RoleDeleteRequest,
@@ -125,7 +126,7 @@ const FETCH_OPTS: RequestInit = { credentials: 'same-origin' };
 /** API error with a normalized message + HTTP status so callers can branch
  * on 401 (login-page redirect) vs. other failures. */
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public code?: string) { super(message); }
 }
 
 /** Normalize any thrown value to a display string (ApiError keeps its server message). */
@@ -137,11 +138,13 @@ async function handle<T>(r: Response): Promise<T> {
   if (!r.ok) {
     const body = await r.text();
     let msg = body;
+    let code: string | undefined;
     try {
       const j = JSON.parse(body);
       msg = j.message ?? j.error ?? body;
+      code = j.error;
     } catch { /* not JSON */ }
-    throw new ApiError(r.status, msg || r.statusText);
+    throw new ApiError(r.status, msg || r.statusText, code);
   }
   return r.headers.get('content-length') === '0'
     ? (undefined as T)
@@ -167,6 +170,7 @@ export const api = {
   // Auth
   login:   (req: LoginRequest) => post<LoginResponse>('/auth/login', req),
   logout:  () => post<void>('/auth/logout'),
+  changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
   // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
   authMode: (tenant?: string) =>

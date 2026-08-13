@@ -1,6 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { errorMessage } from '../api/client';
+import { ApiError, api, errorMessage } from '../api/client';
 
 export default function Login() {
   const { login } = useAuth();
@@ -10,6 +10,14 @@ export default function Login() {
   const [err, setErr]           = useState<string | null>(null);
   const [busy, setBusy]         = useState(false);
 
+  // Forced password-change pivot: a login attempt against an account
+  // flagged mustChangePassword comes back 401 password_change_required
+  // instead of a session. `password` still holds the value the user typed,
+  // which doubles as currentPassword for the change-password call below.
+  const [phase, setPhase]                 = useState<'login' | 'change'>('login');
+  const [newPassword, setNewPassword]     = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setErr(null);
@@ -17,11 +25,89 @@ export default function Login() {
     try {
       await login(username, password, tenant);
     } catch (e) {
-      const msg = errorMessage(e);
-      setErr(msg);
+      if (e instanceof ApiError && e.code === 'password_change_required') {
+        setErr(null);
+        setPhase('change');
+      } else {
+        setErr(errorMessage(e));
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  function backToLogin() {
+    setPhase('login');
+    setNewPassword('');
+    setConfirmPassword('');
+    setErr(null);
+  }
+
+  async function submitChange(e: FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    if (newPassword !== confirmPassword) {
+      setErr('New password and confirmation do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.changePassword({
+        tenant: tenant || null,
+        username,
+        currentPassword: password,
+        newPassword,
+      });
+      await login(username, newPassword, tenant);
+    } catch (e) {
+      setErr(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (phase === 'change') {
+    return (
+      <div className="login-shell">
+        <form className="login-card" onSubmit={submitChange}>
+          <div className="login-brand">
+            <img src="/ui/mark-dark.svg" alt="" className="login-logo" />
+            <h1>Quack on Demand</h1>
+            <p className="login-sub">Password change required</p>
+          </div>
+          {err && <div className="login-err">{err}</div>}
+          <label>
+            Username
+            <input value={username} disabled autoComplete="username" />
+          </label>
+          <label>
+            New password
+            <input
+              type="password"
+              value={newPassword}
+              onChange={e => setNewPassword(e.target.value)}
+              autoComplete="new-password"
+              autoFocus
+            />
+          </label>
+          <label>
+            Confirm new password
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          </label>
+          <button type="submit" disabled={busy || !newPassword || !confirmPassword}>
+            {busy ? 'Updating…' : 'Change password'}
+          </button>
+          <p className="login-hint">
+            <a href="#" onClick={e => { e.preventDefault(); backToLogin(); }}>Back to login</a>
+          </p>
+        </form>
+      </div>
+    );
   }
 
   return (

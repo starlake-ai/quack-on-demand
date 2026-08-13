@@ -371,6 +371,7 @@ export interface UserCreateRequest {
   username: string;
   password: string;
   role?: string;
+  mustChangePassword?: boolean;
 }
 
 export interface UserUpdateRequest {
@@ -378,10 +379,19 @@ export interface UserUpdateRequest {
   tenant?: string | null;
   password?: string | null;
   role?: string | null;
+  mustChangePassword?: boolean;
 }
 
 export interface UserDeleteRequest { id: string; }
 export interface UserListResponse  { users: UserResponse[]; }
+
+// ----- Auth: forced password change -----
+export interface ChangePasswordRequest {
+  tenant?: string | null;
+  username: string;
+  currentPassword: string;
+  newPassword: string;
+}
 
 // ----- RBAC: roles -----
 export interface RoleResponse {

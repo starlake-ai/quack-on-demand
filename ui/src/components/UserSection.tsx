@@ -103,6 +103,10 @@ export default function UserSection({
   const [newPassword, setNewPassword] = useState('');
   const [newRole,     setNewRole]     = useState<'user' | 'admin'>('user');
   const [newTenant,   setNewTenant]   = useState<string>(tenant ?? SUPERUSER);
+  // Only meaningful for db-mode tenants: an OIDC pre-provisioned user has a
+  // random throwaway password nobody can ever present, so the flag would
+  // be a no-op there.
+  const [newMustChange, setNewMustChange] = useState(false);
 
   // Per-row edit (password rotation only). Edit form opens inline
   // below the table row. Skipped for OIDC-tenant users -- the IdP
@@ -110,6 +114,7 @@ export default function UserSection({
   const [editingId, setEditingId]       = useState<string | null>(null);
   const [editPassword, setEditPassword] = useState('');
   const [editIsAdmin, setEditIsAdmin]   = useState(false);
+  const [editMustChange, setEditMustChange] = useState(false);
 
   // Resolve the selected new-tenant to its provider so the form can
   // adapt. Superuser always uses the db backend (no IdP routing).
@@ -158,9 +163,10 @@ export default function UserSection({
         // against it. The IdP is authoritative.
         password: newTenantIsDb ? newPassword : crypto.randomUUID(),
         role:     newRole,
+        mustChangePassword: newTenantIsDb ? newMustChange : false,
       });
       setAdding(false);
-      setNewUsername(''); setNewPassword(''); setNewRole('user');
+      setNewUsername(''); setNewPassword(''); setNewRole('user'); setNewMustChange(false);
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -174,8 +180,9 @@ export default function UserSection({
         id,
         password: editPassword || null,
         role:     editIsAdmin ? 'admin' : 'user',
+        mustChangePassword: editPassword ? editMustChange : undefined,
       });
-      setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditIsAdmin(false);
+      setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -358,6 +365,16 @@ export default function UserSection({
                 />
                 {' '}Admin User
               </label>
+              {newTenantIsDb && (
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={newMustChange}
+                    onChange={ev => setNewMustChange(ev.target.checked)}
+                  />
+                  {' '}Require password change at next login
+                </label>
+              )}
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setAdding(false); setError(null); }}>Cancel</button>
                 <button type="submit" style={{ minWidth: '7rem' }}>{newTenantIsDb ? 'Create' : 'Pre-provision'}</button>
@@ -370,7 +387,7 @@ export default function UserSection({
         const u = rows.find(r => r.id === editingId);
         if (!u) return null;
         return (
-          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}>
+          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); }}>
               <div className="card-title">
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
@@ -388,13 +405,22 @@ export default function UserSection({
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
+                    checked={editMustChange}
+                    disabled={!editPassword}
+                    onChange={ev => setEditMustChange(ev.target.checked)}
+                  />
+                  {' '}Require password change at next login
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
                     checked={editIsAdmin}
                     onChange={ev => setEditIsAdmin(ev.target.checked)}
                   />
                   {' '}Admin User
                 </label>
                 <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); }}>Cancel</button>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); }}>Cancel</button>
                   <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
                 </div>
               </form>
