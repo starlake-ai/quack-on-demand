@@ -72,7 +72,8 @@ final class UserStore(
       tenant: Option[String],
       username: String,
       plaintext: String,
-      role: String
+      role: String,
+      mustChangePassword: Option[Boolean] = None
   ): UserStore.Upsert =
     require(
       tenant.forall(_.nonEmpty),
@@ -83,7 +84,15 @@ final class UserStore(
       // Delegate to the shared upsert. enabled = None: a credential/role
       // rotation through this path must never re-enable a disabled user, so
       // the enabled column is left untouched on update (DB default on insert).
-      val r = UserUpsert(c, tenant, username, hash, role, enabled = None)
+      val r = UserUpsert(
+        c,
+        tenant,
+        username,
+        hash,
+        role,
+        enabled = None,
+        mustChangePassword = mustChangePassword
+      )
       UserStore.Upsert(id = r.id, inserted = r.inserted)
     }
 

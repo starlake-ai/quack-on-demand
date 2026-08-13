@@ -23,11 +23,11 @@ object UserUpsert:
     * indexes (admin `tenant IS NULL` vs scoped `(tenant, username)`) mean a single `ON CONFLICT`
     * target can't be named without knowing the tenant kind, so the lookup is the cleanest path.
     *
-    * `enabled` controls the disabled flag:
-    *   - `Some(b)`: write `enabled = b` on both insert and update.
-    *   - `None`: leave `enabled` to the column default on insert and PRESERVE the stored value on
-    *     update -- the plain credential/role rotation path must never silently re-enable a disabled
-    *     user.
+    * `enabled` and `mustChangePassword` control the two flag columns:
+    *   - `Some(b)`: write the column `= b` on both insert and update.
+    *   - `None`: leave the column to its default on insert and PRESERVE the stored value on update
+    *     -- the plain credential/role rotation path must never silently re-enable a disabled user
+    *     or clear a pending forced password change.
     */
   def apply(
       c: Connection,
@@ -35,26 +35,27 @@ object UserUpsert:
       username: String,
       passwordHash: String,
       role: String,
-      enabled: Option[Boolean]
+      enabled: Option[Boolean],
+      mustChangePassword: Option[Boolean] = None
   ): Result =
     val existing = lookupId(c, tenant, username)
     val id       = existing.getOrElse(Names.newSurrogateId("u"))
-    val sql      = enabled match
-      case Some(_) =>
-        """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, enabled, updated_at)
-          |VALUES (?, ?, ?, ?, ?, ?, NOW())
-          |ON CONFLICT (id) DO UPDATE SET
-          |  password_hash = EXCLUDED.password_hash,
-          |  role          = EXCLUDED.role,
-          |  enabled       = EXCLUDED.enabled,
-          |  updated_at    = NOW()""".stripMargin
-      case None =>
-        """INSERT INTO qodstate_user (id, tenant, username, password_hash, role, updated_at)
-          |VALUES (?, ?, ?, ?, ?, NOW())
-          |ON CONFLICT (id) DO UPDATE SET
-          |  password_hash = EXCLUDED.password_hash,
-          |  role          = EXCLUDED.role,
-          |  updated_at    = NOW()""".stripMargin
+    // Optional flag columns: present -> written on both insert and update;
+    // absent -> column default on insert, stored value preserved on update.
+    val extras = List(
+      "enabled"              -> enabled,
+      "must_change_password" -> mustChangePassword
+    ).collect { case (name, Some(v)) => (name, v) }
+    val extraNames   = extras.map((n, _) => s", $n").mkString
+    val extraHoles   = extras.map(_ => ", ?").mkString
+    val extraUpdates = extras.map((n, _) => s",\n  $n = EXCLUDED.$n").mkString
+    val sql          =
+      s"""INSERT INTO qodstate_user (id, tenant, username, password_hash, role$extraNames, updated_at)
+         |VALUES (?, ?, ?, ?, ?$extraHoles, NOW())
+         |ON CONFLICT (id) DO UPDATE SET
+         |  password_hash = EXCLUDED.password_hash,
+         |  role          = EXCLUDED.role$extraUpdates,
+         |  updated_at    = NOW()""".stripMargin
     val ps = c.prepareStatement(sql)
     try
       ps.setString(1, id)
@@ -64,7 +65,7 @@ object UserUpsert:
       ps.setString(3, username)
       ps.setString(4, passwordHash)
       ps.setString(5, role)
-      enabled.foreach(b => ps.setBoolean(6, b))
+      extras.zipWithIndex.foreach { case ((_, v), i) => ps.setBoolean(6 + i, v) }
       ps.executeUpdate()
       Result(id = id, inserted = existing.isEmpty)
     finally ps.close()

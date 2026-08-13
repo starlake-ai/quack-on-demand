@@ -149,13 +149,17 @@ trait ControlPlaneStore:
     * creating/refreshing an enabled user without change.
     * [[ai.starlake.quack.ondemand.manifest.ManifestImporter]] passes the manifest's `enabled` field
     * through explicitly so a disabled user round-trips.
+    *
+    * `mustChangePassword` defaults to `false` and mirrors `enabled`: pass `true` to force the user
+    * to change their password before they can authenticate again.
     */
   def upsertUserWithHash(
       tenant: Option[String],
       username: String,
       passwordHash: String,
       role: String,
-      enabled: Boolean = true
+      enabled: Boolean = true,
+      mustChangePassword: Boolean = false
   ): String
 
   def getUserById(id: String): Option[RbacUser]
