@@ -95,3 +95,59 @@ class PoolSupervisorGateSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .isRight shouldBe true
   }
+
+  "createPool" should "carry the requested cpu/memory in the gate mutation" in {
+    val sup               = setup()
+    val seen              = new java.util.concurrent.atomic.AtomicReference[StructureMutation]()
+    val spy: MutationGate = m => IO { seen.set(m); Right(()) }
+    sup.setMutationGates(List(spy)).unsafeRunSync()
+    val key = PoolKey("acme", dbName(sup), "bi")
+    sup.createPool(key, RoleDistribution(0, 1, 0), cpu = "2", memory = "8Gi").unsafeRunSync()
+    seen.get() match
+      case StructureMutation.CreatePool(_, _, 1, cpu, memory) =>
+        cpu shouldBe "2"; memory shouldBe "8Gi"
+      case other => fail(s"expected CreatePool with shape, got $other")
+  }
+
+  "scale" should "carry the pool's current declared shape in ResizePool" in {
+    val sup = setup()
+    val key = PoolKey("acme", dbName(sup), "bi")
+    sup.createPool(key, RoleDistribution(0, 1, 0), cpu = "1", memory = "4Gi").unsafeRunSync()
+    val seen              = new java.util.concurrent.atomic.AtomicReference[StructureMutation]()
+    val spy: MutationGate = m => IO { seen.set(m); Right(()) }
+    sup.setMutationGates(List(spy)).unsafeRunSync()
+    sup.scale(key, 2, RoleDistribution(0, 2, 0), force = false).unsafeRunSync()
+    seen.get() match
+      case StructureMutation.ResizePool(_, _, _, 1, 2, cpu, memory) =>
+        cpu shouldBe "1"; memory shouldBe "4Gi"
+      case other => fail(s"expected ResizePool with shape, got $other")
+  }
+
+  "setPoolResources" should "be gated and refuse with QuotaExceeded" in {
+    val sup = setup()
+    val key = PoolKey("acme", dbName(sup), "bi")
+    sup.createPool(key, RoleDistribution(0, 1, 0)).unsafeRunSync()
+    val deny: MutationGate = {
+      case _: StructureMutation.SetPoolResources => IO.pure(Left("denied"))
+      case _                                     => IO.pure(Right(()))
+    }
+    sup.setMutationGates(List(deny)).unsafeRunSync()
+    sup.setPoolResources(key, "4", "16Gi").unsafeRunSync() match
+      case Left(SupervisorError.QuotaExceeded(msg)) => msg shouldBe "denied"
+      case other                                    => fail(s"expected QuotaExceeded, got $other")
+    // gateBypass short-circuits
+    sup.setPoolResources(key, "4", "16Gi", gateBypass = true).unsafeRunSync().isRight shouldBe true
+  }
+
+  it should "carry nodes and from/to shapes in the mutation" in {
+    val sup = setup()
+    val key = PoolKey("acme", dbName(sup), "bi")
+    sup.createPool(key, RoleDistribution(0, 2, 0), cpu = "1", memory = "4Gi").unsafeRunSync()
+    val seen              = new java.util.concurrent.atomic.AtomicReference[StructureMutation]()
+    val spy: MutationGate = m => IO { seen.set(m); Right(()) }
+    sup.setMutationGates(List(spy)).unsafeRunSync()
+    sup.setPoolResources(key, "2", "8Gi").unsafeRunSync()
+    seen.get() match
+      case StructureMutation.SetPoolResources(_, _, _, 2, "1", "4Gi", "2", "8Gi") => succeed
+      case other => fail(s"expected SetPoolResources with from/to shapes, got $other")
+  }

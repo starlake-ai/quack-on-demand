@@ -201,6 +201,16 @@ curl -sS -X POST "http://localhost:20900/api/pool/setPodTemplate" -H "X-API-Key:
 
 The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `setResources` for node-pod sizing.
 
+`pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser sessions and static-`X-API-Key` callers bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
+
+Hosted deployments can cap a tenant's *cumulated* cores and memory across all its pools (dimensions `maxCores` / `maxMemoryGib`, `0` = unlimited). What an operator hitting a 429 needs to know:
+
+- The charge is computed from **declared** pool shapes, not live nodes: `sum over pools of (desired nodes) * cpu` and likewise for memory. **Suspended and disabled pools still count** (they keep their reservation); a stopped pool whose distribution is zeroed charges nothing.
+- Under a finite cap, a pool with an **undeclared** (empty) cpu or memory is refused rather than counted as zero. The message is `declare cpu/memory on this pool: resource caps are active for this tenant`; the fix is to `pool/setResources` a real shape on it (which is itself cap-checked). Pre-cap pools are not retroactively broken: they charge nothing until a gated mutation touches them.
+- An unparseable quantity is refused naming the offending string. Kubernetes quantity syntax: cpu `"2"` / `"1.5"` / `"500m"` (millicores are the only cpu suffix), memory `"8Gi"` / `"1024Mi"` / `Ki` / `Ti`, the decimal `k`/`M`/`G`/`T` (lowercase `k`, matching what the manager's own quantity validator admits), or a plain byte count.
+- **Shrinks always pass.** A scale-down, and any shape swap whose per-dimension delta is `<= 0`, is admitted without consulting the cap, so a tenant that is already over (caps lowered under it, shapes backfilled past them) can always shrink back into compliance.
+- Autoscale scale-outs route through the same gate, so caps bound autoscale with no extra config: a band whose ceiling exceeds the cap simply stops growing at the cap, and the refusal feeds the sweep's normal failure backoff.
+
 ## RBAC grants
 
 Grants live in the normalized `qodstate_*` tables in Postgres. The endpoints are always mounted (Postgres is the only control-plane store since 2026-06-12).
