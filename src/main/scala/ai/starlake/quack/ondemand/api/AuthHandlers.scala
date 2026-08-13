@@ -345,15 +345,33 @@ final class AuthHandlers(
   }
 
   /** Pre-session self-service password change. Anti-enumeration: unknown user, wrong current
-    * password, and disabled account all answer the same 401 invalid_credentials. Policy: the new
-    * password must be non-empty and differ from the current one; no complexity rules. Clears
+    * password, disabled account, and an over-long current password all answer the same 401
+    * invalid_credentials. Policy: the new password must be non-empty, at most 71 UTF-8 bytes
+    * (bcrypt's limit), and differ from the current one; no complexity rules. Clears
     * `must_change_password` on success (inside [[ai.starlake.quack.ondemand.state.UserStore]]).
     */
   def changePassword(req: ChangePasswordRequest): Out[Unit] = IO.blocking {
     if req.username.isEmpty || req.currentPassword.isEmpty then
       Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", "invalid credentials")))
+    // BCrypt.withDefaults()'s strict long-password strategy throws
+    // IllegalArgumentException above 71 UTF-8 bytes, both on the verify path
+    // (currentPassword) and the hash path (newPassword). Nothing catches
+    // that below, so an unauthenticated caller could 500 this public route
+    // with an over-long value; reject both here instead. currentPassword
+    // over the limit can never match a stored hash, so it gets the same
+    // 401 invalid_credentials as any other bad-credential shape rather than
+    // a distinguishable error.
+    else if req.currentPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 71 then
+      Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", "invalid credentials")))
     else if req.newPassword.isEmpty then
       Left((StatusCode.BadRequest, ErrorResponse("invalid_password", "new password is required")))
+    else if req.newPassword.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 71 then
+      Left(
+        (
+          StatusCode.BadRequest,
+          ErrorResponse("invalid_password", "new password must be at most 71 bytes")
+        )
+      )
     else if req.newPassword == req.currentPassword then
       Left(
         (

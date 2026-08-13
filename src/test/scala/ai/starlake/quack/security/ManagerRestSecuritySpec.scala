@@ -97,6 +97,26 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "allow POST /api/auth/change-password without X-API-Key (static key mode)" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      val body =
+        s"""{"username":"${SecurityFixtures.RootUsername}","currentPassword":"${SecurityFixtures.RootPassword}","newPassword":"new-password"}"""
+      val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/change-password", body)
+      // The harness never wires a changePasswordStore, so a request that
+      // reaches the handler always answers 503 auth_disabled -- a JSON
+      // body with an error code, unlike apiKeyGuard's bare, bodyless 401.
+      // Asserting that exact handler-level shape (rather than merely "not
+      // 401") proves the guard's isPublicApi arm actually let the request
+      // through instead of coincidentally matching a would-be 401.
+      withClue(s"POST /api/auth/change-password body: ${resp.body()}") {
+        resp.statusCode() shouldBe 503
+        errorCode(resp.body()) should contain("auth_disabled")
+      }
+    finally h.shutdown()
+  }
+
   it should "allow GET /api/config/client without X-API-Key (static key mode)" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))

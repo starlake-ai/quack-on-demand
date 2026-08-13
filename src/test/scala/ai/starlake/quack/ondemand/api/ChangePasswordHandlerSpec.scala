@@ -35,10 +35,10 @@ import scala.util.Try
   * [[UserStore]].
   *
   * The endpoint is pre-session: the current password IS the credential, so the only gates are the
-  * store's own credential check plus two policy rules owned by the handler (new password non-empty,
-  * and different from the current one). Anti-enumeration is the load-bearing property: unknown
-  * user, wrong current password and disabled account must all answer the same
-  * `401 invalid_credentials`.
+  * store's own credential check plus the policy rules owned by the handler (new password non-empty,
+  * at most bcrypt's 71-byte limit, and different from the current one). Anti-enumeration is the
+  * load-bearing property: unknown user, wrong current password, disabled account, and an over-long
+  * current password must all answer the same `401 invalid_credentials`.
   */
 class ChangePasswordHandlerSpec extends AnyFlatSpec with Matchers:
 
@@ -233,6 +233,43 @@ class ChangePasswordHandlerSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
 
       // Same answer as an unknown user or a wrong password: no account-state oracle.
+      out match
+        case Left((status, err)) =>
+          status shouldBe StatusCode.Unauthorized
+          err.error shouldBe "invalid_credentials"
+        case Right(_) => fail("expected 401")
+      store.findUser(None, "alice").get.mustChangePassword shouldBe true
+    }
+
+  it should "400 invalid_password on a new password over the bcrypt 71-byte limit" in
+    withFreshDb { (store, userStore, _) =>
+      userStore.upsertUser(None, "alice", "temp", "admin", mustChangePassword = Some(true))
+      val tooLong = "x" * 100
+      val out     = handlers(userStore)
+        .changePassword(ChangePasswordRequest(None, "alice", "temp", tooLong))
+        .unsafeRunSync()
+
+      out match
+        case Left((status, err)) =>
+          status shouldBe StatusCode.BadRequest
+          err.error shouldBe "invalid_password"
+        case Right(_) => fail("expected 400")
+      // The policy gate runs before the store, so the flag survives.
+      store.findUser(None, "alice").get.mustChangePassword shouldBe true
+    }
+
+  it should "401 invalid_credentials on a current password over the bcrypt 71-byte limit" in
+    withFreshDb { (store, userStore, _) =>
+      userStore.upsertUser(None, "alice", "temp", "admin", mustChangePassword = Some(true))
+      val tooLong = "x" * 100
+      val out     = handlers(userStore)
+        .changePassword(ChangePasswordRequest(None, "alice", tooLong, "real"))
+        .unsafeRunSync()
+
+      // Same answer as any other bad-credential shape: an over-long current
+      // password can never match a stored hash, so it must not be
+      // distinguishable (and must never reach bcrypt's verify path, which
+      // would throw instead of returning a clean 401).
       out match
         case Left((status, err)) =>
           status shouldBe StatusCode.Unauthorized
