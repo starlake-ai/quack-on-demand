@@ -566,13 +566,20 @@ final case class UserCreateRequest(
     tenant: Option[String] = None, // None = superuser
     username: String,
     password: String,
-    role: String = "user"
+    role: String = "user",
+    // Marks the assigned password as temporary: login is refused (REST and FlightSQL)
+    // until the user swaps it via POST /api/auth/change-password.
+    mustChangePassword: Boolean = false
 )
 final case class UserUpdateRequest(
     id: String,
     tenant: Option[String] = None,   // None = leave unchanged
     password: Option[String] = None, // None = no rotation
-    role: Option[String] = None
+    role: Option[String] = None,
+    // Only meaningful together with `password`: Some(true) flags the new temp password,
+    // Some(false)/None clears any pending flag along with the rotation. Some(true)
+    // without a password is a 400.
+    mustChangePassword: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(

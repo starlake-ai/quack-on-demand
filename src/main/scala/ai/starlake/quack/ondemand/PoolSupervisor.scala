@@ -2105,14 +2105,16 @@ final class PoolSupervisor(
 
   /** Persist a new (tenant, username) principal with its bcrypt hash, and register it with the
     * resolver so role grants can FK to it. Returns the persisted [[RbacUser]]. `tenant = None`
-    * creates a superuser.
+    * creates a superuser. `mustChangePassword = true` marks `password` as temporary: the principal
+    * cannot log in until it is swapped through the self-service change-password path.
     */
   def createUser(
       tenant: Option[String],
       username: String,
       password: String,
       role: String = "user",
-      userStore: ai.starlake.quack.ondemand.state.UserStore
+      userStore: ai.starlake.quack.ondemand.state.UserStore,
+      mustChangePassword: Boolean = false
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("createUser") {
       if username.isEmpty || password.isEmpty then
@@ -2130,8 +2132,20 @@ final class PoolSupervisor(
             val resolvedTenantId = tenant.flatMap { t =>
               tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
             }
-            val out = userStore.upsertUser(resolvedTenantId, username, password, role)
-            val u   = RbacUser(out.id, resolvedTenantId, username, role)
+            val out = userStore.upsertUser(
+              resolvedTenantId,
+              username,
+              password,
+              role,
+              mustChangePassword = Some(mustChangePassword)
+            )
+            val u = RbacUser(
+              out.id,
+              resolvedTenantId,
+              username,
+              role,
+              mustChangePassword = mustChangePassword
+            )
             store.upsertUserIdentity(u)
             Right(u)
     }
@@ -2141,18 +2155,42 @@ final class PoolSupervisor(
       userId: String,
       password: Option[String],
       role: Option[String],
-      userStore: ai.starlake.quack.ondemand.state.UserStore
+      userStore: ai.starlake.quack.ondemand.state.UserStore,
+      mustChangePassword: Option[Boolean] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("updateUserPassword") {
-      store.getUserById(userId) match
-        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
-        case Some(u) =>
-          val newRole = role.getOrElse(u.role)
-          password.foreach(pw => userStore.upsertUser(u.tenant, u.username, pw, newRole))
-          val updated = u.copy(role = newRole)
-          store.upsertUserIdentity(updated)
-          invalidateEffectiveCache()
-          Right(updated)
+      if mustChangePassword.contains(true) && password.isEmpty then
+        Left(
+          SupervisorError.InvalidArgument(
+            "mustChangePassword requires a password in the same request"
+          )
+        )
+      else
+        store.getUserById(userId) match
+          case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+          case Some(u) =>
+            val newRole = role.getOrElse(u.role)
+            // A rotation always writes the flag: the requested value, or false when
+            // absent -- an unflagged admin reset hands out a normal password and
+            // clears any pending must-change state. Role-only updates leave it alone.
+            val newFlag = password.map { pw =>
+              val flag = mustChangePassword.getOrElse(false)
+              userStore.upsertUser(
+                u.tenant,
+                u.username,
+                pw,
+                newRole,
+                mustChangePassword = Some(flag)
+              )
+              flag
+            }
+            // upsertUserIdentity only writes (tenant, username, role) on conflict, so the
+            // flag just persisted by the rotation survives; carry it on the returned value.
+            val updated =
+              u.copy(role = newRole, mustChangePassword = newFlag.getOrElse(u.mustChangePassword))
+            store.upsertUserIdentity(updated)
+            invalidateEffectiveCache()
+            Right(updated)
     }
   }
 

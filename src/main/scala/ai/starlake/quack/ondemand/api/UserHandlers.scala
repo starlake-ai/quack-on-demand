@@ -111,31 +111,40 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.createUser(req.tenant, req.username, req.password, req.role, userStore).map {
-          case Right(u) =>
-            val tenantId = u.tenant
-            // NEVER include password in detail.
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.UserCreate,
-              "ok",
-              tenant = tenantId,
-              target = Some(u.username),
-              detail = Map("username" -> u.username, "role" -> u.role)
-            )
-            toResponseFor(u.id) match
-              case Some(r) => Right(r)
-              case None    =>
-                Left(
-                  (
-                    StatusCode.InternalServerError,
-                    ErrorResponse("missing", s"created user ${u.id} not found")
+        sup
+          .createUser(
+            req.tenant,
+            req.username,
+            req.password,
+            req.role,
+            userStore,
+            mustChangePassword = req.mustChangePassword
+          )
+          .map {
+            case Right(u) =>
+              val tenantId = u.tenant
+              // NEVER include password in detail.
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.UserCreate,
+                "ok",
+                tenant = tenantId,
+                target = Some(u.username),
+                detail = Map("username" -> u.username, "role" -> u.role)
+              )
+              toResponseFor(u.id) match
+                case Some(r) => Right(r)
+                case None    =>
+                  Left(
+                    (
+                      StatusCode.InternalServerError,
+                      ErrorResponse("missing", s"created user ${u.id} not found")
+                    )
                   )
-                )
-          case Left(err) =>
-            Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
-        }
+            case Left(err) =>
+              Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
+          }
 
   // ---------- /user/update ----------
 
@@ -154,27 +163,35 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.updateUserPassword(req.id, req.password, req.role, userStore).map {
-          case Right(u) =>
-            // NEVER include password in detail.
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.UserUpdate,
-              "ok",
-              tenant = u.tenant,
-              target = Some(u.username)
-            )
-            toResponseFor(u.id) match
-              case Some(r) => Right(r)
-              case None    =>
-                Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
-          case Left(err) =>
-            val code = err match
-              case SupervisorError.NotFound(_) => StatusCode.NotFound
-              case _                           => StatusCode.BadRequest
-            Left((code, ErrorResponse("invalid_user", err.message)))
-        }
+        sup
+          .updateUserPassword(
+            req.id,
+            req.password,
+            req.role,
+            userStore,
+            mustChangePassword = req.mustChangePassword
+          )
+          .map {
+            case Right(u) =>
+              // NEVER include password in detail.
+              audit.rest(
+                apiKey,
+                "control-plane",
+                AuditActions.UserUpdate,
+                "ok",
+                tenant = u.tenant,
+                target = Some(u.username)
+              )
+              toResponseFor(u.id) match
+                case Some(r) => Right(r)
+                case None    =>
+                  Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
+            case Left(err) =>
+              val code = err match
+                case SupervisorError.NotFound(_) => StatusCode.NotFound
+                case _                           => StatusCode.BadRequest
+              Left((code, ErrorResponse("invalid_user", err.message)))
+          }
 
   // ---------- /user/delete ----------
 
