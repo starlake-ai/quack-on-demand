@@ -224,6 +224,7 @@ object ManifestExporter:
             passwordHash = store.getPasswordHash(u.tenant, u.username),
             role = u.role,
             enabled = u.enabled,
+            mustChangePassword = u.mustChangePassword,
             roles = userRoleNames,
             groups = userGroupNames,
             poolGrants = userPoolGrants
@@ -263,6 +264,7 @@ object ManifestExporter:
         passwordHash = store.getPasswordHash(None, u.username),
         role = u.role,
         enabled = u.enabled,
+        mustChangePassword = u.mustChangePassword,
         roles = Nil,
         groups = Nil,
         poolGrants = userPoolGrants

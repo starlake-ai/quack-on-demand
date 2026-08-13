@@ -170,6 +170,9 @@ final case class ManifestUser(
     passwordHash: Option[String] = None,
     role: String = "user",
     enabled: Boolean = true,
+    // Marks the stored credential as must-change-at-next-login; round-trips so a flagged
+    // user stays flagged across export/import. Optional and backward compatible.
+    mustChangePassword: Boolean = false,
     roles: List[String] = Nil,
     groups: List[String] = Nil,
     poolGrants: List[ManifestPoolGrant] = Nil

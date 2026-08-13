@@ -426,6 +426,57 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
+  // Test 5b: mustChangePassword round-trips across export -> import, and a
+  // manifest without the field imports as false (backward compatible).
+  // ------------------------------------------------------------------
+
+  it should "round-trip a flagged mustChangePassword user across export then import" in {
+    val src = buildSrc()
+    // alice starts with mustChangePassword = false (buildSrc's default);
+    // re-upsert with the same hash and mustChangePassword = true.
+    src.upsertUserWithHash(
+      tenant = Some("tpch"),
+      username = "alice",
+      passwordHash = aliceHash,
+      role = "user",
+      mustChangePassword = true
+    )
+
+    val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+    val aliceManifest = manifest1.users.find(_.username == "alice").get
+    aliceManifest.mustChangePassword shouldBe true
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    dst.findUser(Some(aliceTenantId), "alice").get.mustChangePassword shouldBe true
+  }
+
+  it should "import a manifest without the mustChangePassword field as false" in {
+    val src       = buildSrc()
+    val manifest1 = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+
+    // Simulate an older manifest that predates the field: drop it from the
+    // YAML entirely and re-parse, rather than relying on the in-memory case
+    // class default (which would trivially pass without exercising decoding).
+    val yamlStr      = Yaml.pretty(manifest1.asJson)
+    val parsedJson   = parser.parse(yamlStr).toOption.get
+    val strippedJson = parsedJson.hcursor
+      .downField("users")
+      .withFocus(_.mapArray(_.map(_.mapObject(_.remove("mustChangePassword")))))
+      .top
+      .get
+    val stripped = strippedJson.as[ConfigManifest].toOption.get
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(stripped, dst) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    dst.findUser(Some(aliceTenantId), "alice").get.mustChangePassword shouldBe false
+  }
+
+  // ------------------------------------------------------------------
   // Test 6: a superuser pool grant to a pool in a DIFFERENT tenant
   // round-trips to the exact same (tenant, pool) target
   // ------------------------------------------------------------------

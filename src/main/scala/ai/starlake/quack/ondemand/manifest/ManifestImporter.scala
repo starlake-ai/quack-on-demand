@@ -503,7 +503,14 @@ object ManifestImporter:
             // the import-time validation guarantees a non-None tenant resolves.
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
             val userId                   =
-              store.upsertUserWithHash(tenantId, mu.username, hash, mu.role, mu.enabled)
+              store.upsertUserWithHash(
+                tenantId,
+                mu.username,
+                hash,
+                mu.role,
+                mu.enabled,
+                mu.mustChangePassword
+              )
 
             // --- User roles
             val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
