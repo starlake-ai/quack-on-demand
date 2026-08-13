@@ -140,6 +140,14 @@ On the wire:
 
 Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. Pin `QOD_SESSION_JWT_SECRET` to a stable random >=32-char value before exposing the manager; the default value in `application.conf` is a well-known dev string and Main emits a loud startup warning if it isn't overridden.
 
+Forced password change: `qodstate_user.must_change_password` (set via `mustChangePassword`
+on `user/create` / `user/update`) makes `DatabaseAuthenticator` refuse the password on BOTH
+the REST login (401 `password_change_required`) and the FlightSQL handshake, until the user
+swaps it through the public pre-session `POST /api/auth/change-password` (current password
+is the credential; new must differ; clears the flag). The auth queries MUST project
+`(password_hash, role, enabled, must_change_password)` - a shorter custom
+`QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails every login.
+
 ### K8s backend - per-pod and per-pool Secrets
 
 `KubernetesQuackBackend` creates one Pod + one Service per node, plus two Secrets:

@@ -34,7 +34,7 @@ The document mirrors the object hierarchy:
   - `identities[]` - external identity mappings for the tenant.
 - `roles[]` - each `(tenant, name)` with its `permissions[]` (catalog/schema/table/verb).
 - `groups[]` - each `(tenant, name)` with its assigned `roles[]`.
-- `users[]` - `tenant` (omitted/null for a superuser), `username`, `passwordHash`, `role`, `enabled`, and the user's `roles[]`, `groups[]`, and `poolGrants[]`.
+- `users[]` - `tenant` (omitted/null for a superuser), `username`, `passwordHash`, `role`, `enabled`, `mustChangePassword` (optional, default `false`), and the user's `roles[]`, `groups[]`, and `poolGrants[]`.
 
 ### Sensitivity of an export
 

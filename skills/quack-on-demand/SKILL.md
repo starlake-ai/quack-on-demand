@@ -307,6 +307,33 @@ The EffectiveSet cache is invalidated on every RBAC mutation, so changes take ef
 
 ACL is *off* by default (`acl.enabled=false`). Flip with `QOD_ACL_ENABLED=true` to actually enforce.
 
+### Force a password change at next login
+
+Create with a temporary password (or reset one) that only works against
+`POST /api/auth/change-password`:
+
+```bash
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/create \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","username":"alice","password":"Temp123","role":"user","mustChangePassword":true}'
+
+# reset an existing password as temporary
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"<userId>","password":"Temp123","mustChangePassword":true}'
+```
+
+Until changed, REST login answers `401 password_change_required` and the FlightSQL
+handshake fails `UNAUTHENTICATED` with "password change required". The user swaps it
+(no session needed; also available anytime for voluntary rotation, and CLI
+`qod auth change-password`):
+
+```bash
+curl -sS -X POST http://localhost:20900/api/auth/change-password \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","username":"alice","currentPassword":"Temp123","newPassword":"Real456"}'
+```
+
 ## Federation - external catalogs via DuckDB extensions
 
 Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table.
