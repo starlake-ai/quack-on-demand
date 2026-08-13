@@ -2351,6 +2351,30 @@ paths:
                 $ref: '#/components/schemas/HealthResponse'
         default:
           description: ''
+  /api/auth/change-password:
+    post:
+      operationId: postApiAuthChange-password
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/login:
     post:
       operationId: postApiAuthLogin
@@ -4894,6 +4918,22 @@ components:
           format: date-time
         exists:
           type: boolean
+    ChangePasswordRequest:
+      title: ChangePasswordRequest
+      type: object
+      required:
+      - username
+      - currentPassword
+      - newPassword
+      properties:
+        tenant:
+          type: string
+        username:
+          type: string
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
     ClientConfigResponse:
       title: ClientConfigResponse
       type: object
@@ -7034,6 +7074,7 @@ components:
       - username
       - password
       - role
+      - mustChangePassword
       properties:
         tenant:
           type: string
@@ -7043,6 +7084,8 @@ components:
           type: string
         role:
           type: string
+        mustChangePassword:
+          type: boolean
     UserDeleteRequest:
       title: UserDeleteRequest
       type: object
@@ -7126,6 +7169,8 @@ components:
           type: string
         role:
           type: string
+        mustChangePassword:
+          type: boolean
     WhoamiResponse:
       title: WhoamiResponse
       type: object

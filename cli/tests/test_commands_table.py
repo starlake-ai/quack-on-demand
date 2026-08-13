@@ -267,16 +267,34 @@ CASES = [
     (
         ["user", "create", "--tenant", "acme", "--username", "bob", "--password", "pw", "--role", "admin"],
         "POST", "/api/user/create", {},
-        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin"},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": False},
+    ),
+    (
+        [
+            "user", "create", "--tenant", "acme", "--username", "bob", "--password", "pw",
+            "--role", "admin", "--must-change-password",
+        ],
+        "POST", "/api/user/create", {},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": True},
     ),
     (
         ["user", "create", "--superuser", "--username", "root", "--password", "pw"],
         "POST", "/api/user/create", {},
-        {"tenant": None, "username": "root", "password": "pw", "role": "user"},
+        {"tenant": None, "username": "root", "password": "pw", "role": "user", "mustChangePassword": False},
     ),
     (
         ["user", "update", "u1", "--role", "admin"],
         "POST", "/api/user/update", {}, {"id": "u1", "role": "admin"},
+    ),
+    (
+        ["user", "update", "u1", "--password", "pw", "--must-change-password"],
+        "POST", "/api/user/update", {},
+        {"id": "u1", "password": "pw", "mustChangePassword": True},
+    ),
+    (
+        ["user", "update", "u1", "--password", "pw", "--no-must-change-password"],
+        "POST", "/api/user/update", {},
+        {"id": "u1", "password": "pw", "mustChangePassword": False},
     ),
     (["user", "delete", "u1"], "POST", "/api/user/delete", {}, {"id": "u1"}),
     (["user", "effective", "u1"], "GET", "/api/user/u1/effective", {}, None),

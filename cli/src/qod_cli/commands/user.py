@@ -21,6 +21,7 @@ def list_(ctx: typer.Context, tenant: str = typer.Option(None, "--tenant", help=
         "username": "--username",
         "password": "--password",
         "role": "--role",
+        "mustChangePassword": "--must-change-password",
     },
 )
 def create(
@@ -30,6 +31,11 @@ def create(
     superuser: bool = typer.Option(False, "--superuser", help="Create a superuser (no tenant)."),
     password: str = typer.Option(None, "--password", help="Prompted when omitted."),
     role: str = typer.Option("user", "--role"),
+    must_change_password: bool = typer.Option(
+        False,
+        "--must-change-password",
+        help="Force a password change at the user's next login.",
+    ),
 ):
     if superuser and tenant:
         raise typer.BadParameter("--superuser and --tenant are mutually exclusive")
@@ -41,7 +47,13 @@ def create(
         ctx,
         "POST",
         "/api/user/create",
-        body={"tenant": None if superuser else tenant, "username": username, "password": password, "role": role},
+        body={
+            "tenant": None if superuser else tenant,
+            "username": username,
+            "password": password,
+            "role": role,
+            "mustChangePassword": must_change_password,
+        },
     )
 
 
@@ -49,7 +61,13 @@ def create(
 @covers(
     "POST",
     "/api/user/update",
-    {"id": "ID", "tenant": "--tenant", "password": "--password", "role": "--role"},
+    {
+        "id": "ID",
+        "tenant": "--tenant",
+        "password": "--password",
+        "role": "--role",
+        "mustChangePassword": "--must-change-password",
+    },
 )
 def update(
     ctx: typer.Context,
@@ -57,6 +75,11 @@ def update(
     tenant: str = typer.Option(None, "--tenant"),
     password: str = typer.Option(None, "--password", help="Omit = no rotation."),
     role: str = typer.Option(None, "--role"),
+    must_change_password: bool = typer.Option(
+        None,
+        "--must-change-password/--no-must-change-password",
+        help="With --password: flag (or explicitly unflag) the new password as temporary.",
+    ),
 ):
     body: dict = {"id": user_id}
     if tenant is not None:
@@ -65,6 +88,8 @@ def update(
         body["password"] = password
     if role is not None:
         body["role"] = role
+    if must_change_password is not None:
+        body["mustChangePassword"] = must_change_password
     call(ctx, "POST", "/api/user/update", body=body)
 
 

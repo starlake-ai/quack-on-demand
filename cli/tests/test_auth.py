@@ -103,3 +103,47 @@ def test_auth_mode_with_tenant(runner, respx_mock):
     assert result.exit_code == 0
     assert route.called
     assert dict(route.calls.last.request.url.params) == {"tenant": "acme"}
+
+
+def test_change_password_sends_credentials(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/change-password").mock(
+        return_value=httpx.Response(200)
+    )
+    result = runner.invoke(
+        app,
+        ["auth", "change-password", "--username", "bob", "--tenant", "acme"],
+        input="oldpw\nnewpw\nnewpw\n",
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "tenant": "acme",
+        "username": "bob",
+        "currentPassword": "oldpw",
+        "newPassword": "newpw",
+    }
+
+
+def test_change_password_without_tenant(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/change-password").mock(
+        return_value=httpx.Response(200)
+    )
+    result = runner.invoke(
+        app,
+        ["auth", "change-password", "--username", "root"],
+        input="oldpw\nnewpw\nnewpw\n",
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "tenant": None,
+        "username": "root",
+        "currentPassword": "oldpw",
+        "newPassword": "newpw",
+    }

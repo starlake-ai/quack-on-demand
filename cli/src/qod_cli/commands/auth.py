@@ -64,6 +64,33 @@ def login(
     )
 
 
+@app.command("change-password")
+@covers(
+    "POST",
+    "/api/auth/change-password",
+    {
+        "tenant": "--tenant",
+        "username": "--username",
+        "currentPassword": "(prompted)",
+        "newPassword": "(prompted)",
+    },
+)
+def change_password(
+    ctx: typer.Context,
+    username: str = typer.Option(..., "--username"),
+    tenant: str = typer.Option(None, "--tenant", help="Omit for a superuser account."),
+):
+    """Change your own password (works pre-login; the current password is the credential)."""
+    current = typer.prompt("Current password", hide_input=True)
+    new = typer.prompt("New password", hide_input=True, confirmation_prompt=True)
+    call(
+        ctx,
+        "POST",
+        "/api/auth/change-password",
+        body={"tenant": tenant, "username": username, "currentPassword": current, "newPassword": new},
+    )
+
+
 @covers("POST", "/api/auth/logout")
 def logout(ctx: typer.Context):
     """Revoke the current session token."""
