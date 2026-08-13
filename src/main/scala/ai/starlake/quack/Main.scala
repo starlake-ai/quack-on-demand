@@ -502,7 +502,8 @@ object Main extends IOApp with LazyLogging:
       oidc = mgmtAuth.oidcSso,
       sqlToken = mgmtAuth.sqlToken,
       audit = auditRecorder,
-      events = moduleEventBus.sink
+      events = moduleEventBus.sink,
+      changePasswordStore = Some(userStore)
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)

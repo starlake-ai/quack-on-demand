@@ -81,7 +81,8 @@ final class ManagerServer(
 
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
-    path == "/api/auth/login" || path == "/api/config/client" ||
+    path == "/api/auth/login" || path == "/api/auth/change-password" ||
+      path == "/api/config/client" ||
       path == "/api/auth/mode" ||
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout" ||
@@ -96,8 +97,10 @@ final class ManagerServer(
     *   - **`cfg.apiKey` set**: every `/api/...` request must carry an `X-API-Key` header matching
     *     either the static key OR a known admin UI session token.
     *
-    * Always-open paths: `/api/auth/login`, `/api/config/client`, `/health`, `/ready`, and
-    * everything outside `/api/...` (incl. `/ui/...`).
+    * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
+    * credential, and a user blocked by must_change_password has no session to present),
+    * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
+    * `/ui/...`).
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     // Treat an empty string the same as unset. Compose / k8s configs routinely
@@ -341,6 +344,7 @@ final class ManagerServer(
 
     val authEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       AuthEndpoints.login.serverLogic { case (req, proto) => auth.login(req, proto) },
+      AuthEndpoints.changePassword.serverLogic(req => auth.changePassword(req)),
       AuthEndpoints.logout.serverLogic { case (apiKey, cookie, proto) =>
         auth.logout(apiKey, cookie, proto)
       },

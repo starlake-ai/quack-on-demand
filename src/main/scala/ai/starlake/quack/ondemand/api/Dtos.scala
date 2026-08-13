@@ -434,6 +434,17 @@ final case class LoginRequest(
     tenant: Option[String] = None
 )
 
+/** Pre-session self-service password change: the current password IS the credential, so this works
+  * without a session or API key (public like /api/auth/login). Serves both the forced change flow
+  * (must_change_password) and voluntary rotation.
+  */
+final case class ChangePasswordRequest(
+    tenant: Option[String] = None, // None/empty = superuser (system scope)
+    username: String,
+    currentPassword: String,
+    newPassword: String
+)
+
 /** Login response. Carries the session token + the authority bits the UI needs to decide what to
   * render. `role` is deliberately NOT here: every minted session is admin by construction (the
   * login handler 403s anything else), so the field was a tautology of the gate. UIs that want to
@@ -1114,10 +1125,12 @@ object Dtos:
   given Codec[FailedRestart]          = deriveCodec
   given Codec[UpdateTenantDbResponse] = deriveCodec
 
-  given Codec[LoginRequest]     = deriveCodec
-  given Codec[LoginResponse]    = ConfiguredCodec.derived
-  given Codec[WhoamiResponse]   = ConfiguredCodec.derived
-  given Codec[AuthModeResponse] = ConfiguredCodec.derived
+  given Codec[LoginRequest] = deriveCodec
+  // ConfiguredCodec so a body that omits the optional `tenant` still decodes.
+  given Codec[ChangePasswordRequest] = ConfiguredCodec.derived
+  given Codec[LoginResponse]         = ConfiguredCodec.derived
+  given Codec[WhoamiResponse]        = ConfiguredCodec.derived
+  given Codec[AuthModeResponse]      = ConfiguredCodec.derived
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec

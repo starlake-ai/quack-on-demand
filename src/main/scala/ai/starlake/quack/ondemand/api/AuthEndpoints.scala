@@ -42,6 +42,18 @@ object AuthEndpoints:
       .out(setCookie(SessionTokenStore.CookieName))
       .out(jsonBody[LoginResponse])
 
+  // Pre-session password change: the current password is the credential. Public like
+  // `login`; no cookie is set and no session is minted -- the client logs in afterwards.
+  val changePassword: PublicEndpoint[
+    ChangePasswordRequest,
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("auth" / "change-password")
+      .in(jsonBody[ChangePasswordRequest])
+
   // Logout accepts the token via cookie OR header so the browser path works
   // even though JS can't read the HttpOnly cookie. The response always
   // clears the cookie (Max-Age=0); the handler also adds the jti to the

@@ -12,6 +12,8 @@ object AuditActions:
   val AuthLoginFailure  = "auth.login.failure"
   val AuthLogout        = "auth.logout"
   val AuthRevoke        = "auth.revoke"
+  // Self-service credential rotation via the public POST /api/auth/change-password.
+  val AuthPasswordChange = "auth.password.change"
   // tenant + database
   val TenantCreate      = "tenant.create"
   val TenantDelete      = "tenant.delete"
@@ -99,6 +101,7 @@ object AuditActions:
     AuthLoginFailure,
     AuthLogout,
     AuthRevoke,
+    AuthPasswordChange,
     TenantCreate,
     TenantDelete,
     TenantSetDisabled,

@@ -84,7 +84,11 @@ final class AuthHandlers(
     /** SPI module event sink. Defaults to noop so callers that don't wire module telemetry (tests,
       * legacy code) are unaffected.
       */
-    events: ManagerEventSink = ManagerEventSink.noop
+    events: ManagerEventSink = ManagerEventSink.noop,
+    /** Backing store for the pre-session change-password endpoint. `None` (tests, callers that
+      * don't wire Postgres) makes the endpoint answer 503 auth_disabled.
+      */
+    changePasswordStore: Option[ai.starlake.quack.ondemand.state.UserStore] = None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -338,6 +342,72 @@ final class AuthHandlers(
               Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
             case Right(mode) =>
               mintSessionFor(profile, required, forwardedProto, mode, "rest")
+  }
+
+  /** Pre-session self-service password change. Anti-enumeration: unknown user, wrong current
+    * password, and disabled account all answer the same 401 invalid_credentials. Policy: the new
+    * password must be non-empty and differ from the current one; no complexity rules. Clears
+    * `must_change_password` on success (inside [[ai.starlake.quack.ondemand.state.UserStore]]).
+    */
+  def changePassword(req: ChangePasswordRequest): Out[Unit] = IO.blocking {
+    if req.username.isEmpty || req.currentPassword.isEmpty then
+      Left((StatusCode.Unauthorized, ErrorResponse("invalid_credentials", "invalid credentials")))
+    else if req.newPassword.isEmpty then
+      Left((StatusCode.BadRequest, ErrorResponse("invalid_password", "new password is required")))
+    else if req.newPassword == req.currentPassword then
+      Left(
+        (
+          StatusCode.BadRequest,
+          ErrorResponse("invalid_password", "new password must differ from the current password")
+        )
+      )
+    else
+      changePasswordStore match
+        case None =>
+          Left(
+            (
+              StatusCode.ServiceUnavailable,
+              ErrorResponse("auth_disabled", "password change requires the database auth backend")
+            )
+          )
+        case Some(users) =>
+          // Same tenant resolution as login: id or display name; unknown values pass
+          // through so the store answers invalid_credentials without a tenant oracle.
+          val scopeTenant =
+            req.tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
+          users.changePassword(
+            scopeTenant,
+            req.username,
+            req.currentPassword,
+            req.newPassword
+          ) match
+            case Left(_) =>
+              audit.restAs(
+                req.username,
+                "tenant",
+                "auth",
+                AuditActions.AuthPasswordChange,
+                "denied",
+                tenant = scopeTenant,
+                detail = Map("username" -> req.username)
+              )
+              Left(
+                (
+                  StatusCode.Unauthorized,
+                  ErrorResponse("invalid_credentials", "invalid credentials")
+                )
+              )
+            case Right(()) =>
+              audit.restAs(
+                req.username,
+                "tenant",
+                "auth",
+                AuditActions.AuthPasswordChange,
+                "ok",
+                tenant = scopeTenant,
+                detail = Map("username" -> req.username)
+              )
+              Right(())
   }
 
   /** Shared authorization + session minting for both the password login and the OIDC callback.
