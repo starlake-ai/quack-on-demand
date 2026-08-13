@@ -179,6 +179,7 @@ lazy val root = (project in file("."))
       Dependencies.blobstoreS3,
       Dependencies.blobstoreGcs,
       Dependencies.blobstoreAzure,
+      Dependencies.awsS3,
       Dependencies.duckdbJdbc,
       Dependencies.micrometerCore,
       Dependencies.micrometerPrometheus,

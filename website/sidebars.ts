@@ -55,6 +55,7 @@ const sidebars: SidebarsConfig = {
           label: 'Provisioning',
           items: [
             'operating/tenants-databases',
+            'operating/managed-storage',
             'operating/pools-cohorts',
             'operating/autoscaling',
             'operating/federation',

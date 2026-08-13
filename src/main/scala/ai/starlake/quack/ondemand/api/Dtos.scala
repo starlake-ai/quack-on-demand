@@ -333,7 +333,12 @@ final case class TenantDbRequest(
     objectStore: Map[String, String] = Map.empty,
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
-    initSql: String = ""
+    initSql: String = "",
+    // Carve the storage out of the operator-managed bucket instead of
+    // supplying it: exclusive with `dataPath` / `objectStore`, requires
+    // kind=ducklake and an enabled managed-store config. The resolved
+    // location comes back on the response's `dataPath`.
+    managedStorage: Boolean = false
 )
 final case class TenantDbResponse(
     id: String,
@@ -356,7 +361,15 @@ final case class TenantDbResponse(
     tableCount: Option[Int] = None
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
-final case class TenantDbOpRequest(tenant: String, name: String)
+final case class TenantDbOpRequest(
+    tenant: String,
+    name: String,
+    // Delete-only: makes a managed database's storage eligible for the purge
+    // worker immediately instead of after retainDays. Ignored (with a WARN)
+    // for a BYO / default-path database, and meaningless on any other
+    // endpoint that reuses this request shape.
+    purgeManagedData: Boolean = false
+)
 
 final case class UpdateTenantDbRequest(
     tenant: String,
@@ -1085,10 +1098,11 @@ object Dtos:
   given Codec[ConfigListResponse]       = deriveCodec
   given Codec[ManifestImportSummary]    = deriveCodec
 
-  given Codec[TenantDbRequest]        = ConfiguredCodec.derived
-  given Codec[TenantDbResponse]       = deriveCodec
-  given Codec[TenantDbListResponse]   = deriveCodec
-  given Codec[TenantDbOpRequest]      = deriveCodec
+  given Codec[TenantDbRequest]      = ConfiguredCodec.derived
+  given Codec[TenantDbResponse]     = deriveCodec
+  given Codec[TenantDbListResponse] = deriveCodec
+  // ConfiguredCodec so an old body without `purgeManagedData` still decodes.
+  given Codec[TenantDbOpRequest]      = ConfiguredCodec.derived
   given Codec[UpdateTenantDbRequest]  = deriveCodec
   given Codec[FailedRestart]          = deriveCodec
   given Codec[UpdateTenantDbResponse] = deriveCodec

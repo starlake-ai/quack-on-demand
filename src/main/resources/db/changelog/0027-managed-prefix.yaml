@@ -1,0 +1,43 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0027-qodstate-managed-prefix
+      author: quack-on-demand
+      changes:
+        # Tombstone registry for managed-object-store prefixes (per spec):
+        # one row per tenant-db data-path prefix carved out of the shared
+        # bucket. deleted_at/purge_eligible_at are set together when the
+        # owning tenant-db is dropped; a sweep purges the underlying
+        # objects once purge_eligible_at elapses and stamps purged_at.
+        # Rows with deleted_at IS NULL are the live set.
+        - createTable:
+            tableName: qodstate_managed_prefix
+            columns:
+              - column:
+                  name: id
+                  type: TEXT
+                  constraints: { primaryKey: true, nullable: false }
+              - column:
+                  name: tenant
+                  type: TEXT
+                  constraints: { nullable: false }
+              - column:
+                  name: tenant_db_name
+                  type: TEXT
+                  constraints: { nullable: false }
+              - column:
+                  name: prefix
+                  type: TEXT
+                  constraints: { nullable: false }
+              - column:
+                  name: created_at
+                  type: TIMESTAMPTZ
+                  constraints: { nullable: false }
+              - column:
+                  name: deleted_at
+                  type: TIMESTAMPTZ
+              - column:
+                  name: purge_eligible_at
+                  type: TIMESTAMPTZ
+              - column:
+                  name: purged_at
+                  type: TIMESTAMPTZ

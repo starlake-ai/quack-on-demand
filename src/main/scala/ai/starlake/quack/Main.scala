@@ -89,6 +89,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
+  given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -99,28 +100,29 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[JwtAuthConfig]             = ProductHint[JwtAuthConfig](camelMapping)
   given ProductHint[AuthenticationConfig]      = ProductHint[AuthenticationConfig](camelMapping)
 
-  given ConfigReader[K8sConfig]              = deriveReader[K8sConfig]
-  given ConfigReader[AdminConfig]            = deriveReader[AdminConfig]
-  given ConfigReader[FederationConfig]       = deriveReader[FederationConfig]
-  given ConfigReader[ManagementOidcConfig]   = deriveReader[ManagementOidcConfig]
-  given ConfigReader[ManagementAuthConfig]   = deriveReader[ManagementAuthConfig]
-  given ConfigReader[ManagerAuthConfig]      = deriveReader[ManagerAuthConfig]
-  given ConfigReader[DefaultMetastoreConfig] = deriveReader[DefaultMetastoreConfig]
-  given ConfigReader[HaConfig]               = deriveReader[HaConfig]
-  given ConfigReader[TelemetryConfig]        = deriveReader[TelemetryConfig]
-  given ConfigReader[MaintenanceConfig]      = deriveReader[MaintenanceConfig]
-  given ConfigReader[CatalogConfig]          = deriveReader[CatalogConfig]
-  given ConfigReader[RoutingConfig]          = deriveReader[RoutingConfig]
-  given ConfigReader[AutoscaleConfig]        = deriveReader[AutoscaleConfig]
-  given ConfigReader[ManagerConfig]          = deriveReader[ManagerConfig]
-  given ConfigReader[FlightConfig]           = deriveReader[FlightConfig]
-  given ConfigReader[DatabaseAuthConfig]     = deriveReader[DatabaseAuthConfig]
-  given ConfigReader[KeycloakAuthConfig]     = deriveReader[KeycloakAuthConfig]
-  given ConfigReader[GoogleAuthConfig]       = deriveReader[GoogleAuthConfig]
-  given ConfigReader[AzureAuthConfig]        = deriveReader[AzureAuthConfig]
-  given ConfigReader[AwsAuthConfig]          = deriveReader[AwsAuthConfig]
-  given ConfigReader[JwtAuthConfig]          = deriveReader[JwtAuthConfig]
-  given ConfigReader[AuthenticationConfig]   = deriveReader[AuthenticationConfig]
+  given ConfigReader[K8sConfig]                = deriveReader[K8sConfig]
+  given ConfigReader[AdminConfig]              = deriveReader[AdminConfig]
+  given ConfigReader[FederationConfig]         = deriveReader[FederationConfig]
+  given ConfigReader[ManagementOidcConfig]     = deriveReader[ManagementOidcConfig]
+  given ConfigReader[ManagementAuthConfig]     = deriveReader[ManagementAuthConfig]
+  given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
+  given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
+  given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
+  given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
+  given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
+  given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
+  given ConfigReader[RoutingConfig]            = deriveReader[RoutingConfig]
+  given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
+  given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
+  given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
+  given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
+  given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
+  given ConfigReader[KeycloakAuthConfig]       = deriveReader[KeycloakAuthConfig]
+  given ConfigReader[GoogleAuthConfig]         = deriveReader[GoogleAuthConfig]
+  given ConfigReader[AzureAuthConfig]          = deriveReader[AzureAuthConfig]
+  given ConfigReader[AwsAuthConfig]            = deriveReader[AwsAuthConfig]
+  given ConfigReader[JwtAuthConfig]            = deriveReader[JwtAuthConfig]
+  given ConfigReader[AuthenticationConfig]     = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 
   private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
@@ -298,7 +300,8 @@ object Main extends IOApp with LazyLogging:
       locks = poolLocks,
       publish = publisher,
       events = moduleEventBus.sink,
-      lockdownEnabled = lockdownCfg.enabled
+      lockdownEnabled = lockdownCfg.enabled,
+      managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
     )
     supRef.set(sup)
 
@@ -429,7 +432,8 @@ object Main extends IOApp with LazyLogging:
       sup,
       manifestFedStore,
       catalog = catalogHandlers,
-      audit = auditRecorder
+      audit = auditRecorder,
+      managedEnabled = mgrCfg.managedObjectStore.enabled
     )
 
     // REST surface only; the scheduler + drain-loop fibers start later with the duty fibers.
@@ -893,6 +897,12 @@ object Main extends IOApp with LazyLogging:
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts)
       )
+      // One managed-object-store client for both the boot probe below and the purge
+      // worker further down. Constructed unconditionally: the SDK client it wraps is
+      // lazy, so nothing is touched while managed storage is off.
+      val managedStoreClient =
+        new ai.starlake.quack.ondemand.storage.S3ManagedStoreClient(mgrCfg.managedObjectStore)
+
       // Leader-only boot duties. Ordering: the bootstrap hook runs BEFORE restore()
       // so the supervisor cache reflects imported state and reconcile() can spawn
       // those pools; inverting leaves the REST/UI on an empty cache after boot.
@@ -947,6 +957,32 @@ object Main extends IOApp with LazyLogging:
         // One-shot purge at boot: single-manager mode never runs the HA leader's
         // periodic purge of expired denylist rows.
         IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
+        // Managed object store reachability probe. Advisory only: an unreachable or
+        // mis-credentialed bucket must never stop the manager from booting. It does
+        // not gate managed tenant-db creates either - those still succeed at the
+        // control plane; the failure only surfaces later, when a node tries to
+        // ATTACH against the missing bucket.
+        (if !mgrCfg.managedObjectStore.enabled then IO.unit
+         else
+           IO.blocking(managedStoreClient.ensureBucket()).attempt.map {
+             case Right(Right(())) =>
+               logger.info(
+                 s"managed object store ready: bucket '${mgrCfg.managedObjectStore.bucket}'"
+               )
+             case Right(Left(err)) =>
+               logger.warn(
+                 s"managed object store unreachable: managed creates still succeed " +
+                   s"at the control plane, but their nodes will fail to ATTACH until " +
+                   s"the store recovers: $err"
+               )
+             case Left(t) =>
+               logger.warn(
+                 s"managed object store unreachable: managed creates still succeed " +
+                   s"at the control plane, but their nodes will fail to ATTACH until " +
+                   s"the store recovers: " +
+                   Option(t.getMessage).getOrElse(t.toString)
+               )
+           }) *>
         moduleStart *>
         // Modules may build their MutationGates only inside start(), so this reads
         // them strictly after moduleStart and before the server binds.
@@ -1060,6 +1096,17 @@ object Main extends IOApp with LazyLogging:
                 )
                 val autoscaleFiber = autoscaleWiring.fiber
 
+                // Managed-object-store purge worker: deletes the objects under a
+                // tombstoned tenant-db prefix once its retention window has passed.
+                val managedStoreWiring = new ai.starlake.quack.boot.ManagedStoreWiring(
+                  cfg = mgrCfg.managedObjectStore,
+                  client = managedStoreClient,
+                  due = store.dueManagedPrefixes,
+                  markPurged = store.markManagedPrefixPurged,
+                  isLeader = () => coordinator.forall(_.isLeader)
+                )
+                val managedPurgeFiber = managedStoreWiring.fiber
+
                 // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
                 val coordinatorFiber = coordinator match
                   case Some(c) => c.loop.start
@@ -1128,18 +1175,21 @@ object Main extends IOApp with LazyLogging:
                               maintenanceSchedulerFiber.flatMap { msFiber =>
                                 maintenanceDrainFiber.flatMap { mdFiber =>
                                   autoscaleFiber.flatMap { asFiber =>
-                                    moduleDispatcherFibers.flatMap { modDispFibers =>
-                                      moduleSingletonFibers.flatMap { modSingFibers =>
-                                        IO.never[Unit]
-                                          .guarantee(
-                                            fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                              hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                              rlFiber.cancel *> msFiber.cancel *> mdFiber.cancel *>
-                                              asFiber.cancel *>
-                                              modDispFibers.traverse_(_.cancel) *>
-                                              modSingFibers.traverse_(_.cancel) *>
-                                              gracefulShutdown
-                                          )
+                                    managedPurgeFiber.flatMap { mpFiber =>
+                                      moduleDispatcherFibers.flatMap { modDispFibers =>
+                                        moduleSingletonFibers.flatMap { modSingFibers =>
+                                          IO.never[Unit]
+                                            .guarantee(
+                                              fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                                hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
+                                                rlFiber.cancel *> msFiber.cancel *>
+                                                mdFiber.cancel *> asFiber.cancel *>
+                                                mpFiber.cancel *>
+                                                modDispFibers.traverse_(_.cancel) *>
+                                                modSingFibers.traverse_(_.cancel) *>
+                                                gracefulShutdown
+                                            )
+                                        }
                                       }
                                     }
                                   }

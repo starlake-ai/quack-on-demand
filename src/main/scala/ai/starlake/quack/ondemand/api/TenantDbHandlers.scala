@@ -18,7 +18,11 @@ final class TenantDbHandlers(
     sup: PoolSupervisor,
     federatedStore: Option[FederatedSourceStore] = None,
     catalog: Option[CatalogHandlers] = None,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    /** Mirrors `manager.managedObjectStore.enabled`: gates `managedStorage` requests here so the
+      * caller gets a 400 naming the env var instead of a supervisor-level refusal.
+      */
+    managedEnabled: Boolean = false
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -33,6 +37,21 @@ final class TenantDbHandlers(
     */
   private def validateObjectStore(objectStore: Map[String, String]): Option[String] =
     TenantDb.objectStoreError(objectStore)
+
+  /** The three `managedStorage` refusals, all 400 `invalid`: the deployment has managed storage
+    * switched off, the caller mixed managed with a BYO location, or the kind cannot hold one. An
+    * unparseable `kind` yields None here so the existing `invalid_kind` arm below still owns that
+    * message.
+    */
+  private def validateManagedStorage(req: TenantDbRequest): Option[String] =
+    if !req.managedStorage then None
+    else if !managedEnabled then
+      Some("managed storage is not enabled on this deployment (QOD_MANAGED_STORE_ENABLED)")
+    else if req.dataPath.nonEmpty || req.objectStore.nonEmpty then
+      Some("managedStorage is exclusive with dataPath/objectStore: one intent per call")
+    else if TenantDbKind.fromWire(req.kind).toOption.exists(_ != TenantDbKind.DuckLake) then
+      Some("managedStorage requires kind=ducklake")
+    else None
 
   private def federatedCount(tenantDbId: String): Int =
     federatedStore.fold(0)(_.listSources(tenantDbId).size)
@@ -88,7 +107,7 @@ final class TenantDbHandlers(
             )
           )
         else
-          validateObjectStore(req.objectStore) match
+          validateObjectStore(req.objectStore).orElse(validateManagedStorage(req)) match
             case Some(msg) =>
               IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
             case None =>
@@ -108,6 +127,7 @@ final class TenantDbHandlers(
                       defaultDatabase = req.defaultDatabase,
                       defaultSchema = req.defaultSchema,
                       initSql = req.initSql,
+                      managedStorage = req.managedStorage,
                       gateBypass = gateBypass
                     )
                     .flatMap {
@@ -187,7 +207,7 @@ final class TenantDbHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.deleteTenantDb(req.tenant, req.name).map {
+        sup.deleteTenantDb(req.tenant, req.name, purgeManagedData = req.purgeManagedData).map {
           case Right(_) =>
             audit.rest(
               apiKey,

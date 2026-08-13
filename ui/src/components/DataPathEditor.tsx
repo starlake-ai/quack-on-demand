@@ -4,7 +4,7 @@ import { useEffect } from 'react';
 // human strings shown in the dropdown; the keys are the values
 // persisted on the tenant-db row's `objectStore` map and used by the
 // Quack node to attach the right cloud filesystem.
-export type StoreType = 'none' | 's3' | 'r2' | 'azure' | 'gcs';
+export type StoreType = 'none' | 's3' | 'r2' | 'azure' | 'gcs' | 'managed';
 
 interface KeySpec {
   name:        string;
@@ -22,6 +22,10 @@ interface StoreSpec {
 const STORE_SPECS: Record<StoreType, StoreSpec> = {
   none: {
     label: 'Local filesystem',
+    keys:  []
+  },
+  managed: {
+    label: 'Managed (QoD-provisioned)',
     keys:  []
   },
   s3: {
@@ -95,7 +99,7 @@ export function buildObjectStore(
   storeKeys:   Record<string, string>,
   storeExtras: string,
 ): Record<string, string> {
-  if (storeType === 'none') return {};
+  if (storeType === 'none' || storeType === 'managed') return {};
   const spec   = STORE_SPECS[storeType];
   const forbid = new Set(spec.keys.map(k => k.name));
   const extras = parseExtras(storeExtras, forbid);
@@ -150,7 +154,14 @@ export default function DataPathEditor(p: Props) {
           <span>Backend</span>
           <select
             value={p.storeType}
-            onChange={ev => p.onStoreTypeChange(ev.target.value as StoreType)}
+            onChange={ev => {
+              const next = ev.target.value as StoreType;
+              // Managed storage has no path for the user to set; clear any
+              // path typed under a previous backend selection so the
+              // disabled field doesn't show stale, unsent text.
+              if (next === 'managed' && p.dataPath !== '') p.onDataPathChange('');
+              p.onStoreTypeChange(next);
+            }}
           >
             {(Object.keys(STORE_SPECS) as StoreType[]).map(t => (
               <option key={t} value={t}>{STORE_SPECS[t].label}</option>
@@ -162,11 +173,19 @@ export default function DataPathEditor(p: Props) {
           <input
             value={p.dataPath}
             onChange={ev => p.onDataPathChange(ev.target.value)}
-            placeholder="/data/prod or s3://bucket/path"
+            placeholder={p.storeType === 'managed' ? 'resolved by the server at create' : '/data/prod or s3://bucket/path'}
+            disabled={p.storeType === 'managed'}
             style={{ width: '100%' }}
           />
         </label>
       </div>
+
+      {p.storeType === 'managed' && (
+        <p className="subtle" style={{ marginTop: '0.5rem' }}>
+          The server provisions object storage for this database and resolves its data path
+          automatically; no credentials to fill in.
+        </p>
+      )}
 
       {spec.keys.length > 0 && (
         <div style={{ marginTop: '0.75rem' }}>

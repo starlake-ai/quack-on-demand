@@ -34,6 +34,17 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     (sup, new TenantDbHandlers(sup))
 
+  /** Same fixture as [[freshHandlers]] but with `managedEnabled = true`, for the arms of
+    * `validateManagedStorage` that only fire once the deployment-level gate is open. */
+  private def freshHandlersManaged(): TenantDbHandlers =
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore()
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    new TenantDbHandlers(sup, managedEnabled = true)
+
   private val denyingGate = new ai.starlake.quack.spi.MutationGate:
     def check(
         m: ai.starlake.quack.spi.StructureMutation
@@ -343,3 +354,76 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       Some("root-key")
     )(superuserScopeOf).unsafeRunSync()
     out.isRight shouldBe true
+
+  "TenantDbHandlers.createTenantDb (managedStorage validation)" should
+    "reject managedStorage=true when managed storage is disabled on this deployment (400 invalid)" in:
+    val h = freshHandlers()
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "mgd1", kind = "ducklake", managedStorage = true),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid"
+    err.message should include("QOD_MANAGED_STORE_ENABLED")
+
+  it should "reject managedStorage=true combined with a non-empty dataPath (400 invalid, one intent per call)" in:
+    val h = freshHandlersManaged()
+    val out = h.createTenantDb(
+      TenantDbRequest(
+        tenant         = "acme",
+        name           = "mgd2",
+        kind           = "ducklake",
+        managedStorage = true,
+        dataPath       = "/data/acme_mgd2"
+      ),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid"
+    err.message should include("one intent per call")
+
+  it should "reject managedStorage=true combined with a non-empty objectStore (400 invalid)" in:
+    val h = freshHandlersManaged()
+    val out = h.createTenantDb(
+      TenantDbRequest(
+        tenant         = "acme",
+        name           = "mgd3",
+        kind           = "ducklake",
+        managedStorage = true,
+        objectStore    = Map("s3_access_key_id" -> "k")
+      ),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid"
+    err.message should include("one intent per call")
+
+  it should "reject managedStorage=true with kind=memory (400 invalid, names ducklake)" in:
+    val h = freshHandlersManaged()
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "mgd4", kind = "memory", managedStorage = true),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid"
+    err.message should include("ducklake")
+
+  it should "reject an unparseable kind with invalid_kind, even with managedStorage=true " +
+    "(the managed arm must not swallow the kind check)" in:
+    val h = freshHandlersManaged()
+    val out = h.createTenantDb(
+      TenantDbRequest(tenant = "acme", name = "mgd5", kind = "garbage", managedStorage = true),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isLeft shouldBe true
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.BadRequest
+    err.error shouldBe "invalid_kind"

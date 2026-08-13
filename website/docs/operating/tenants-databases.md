@@ -100,6 +100,10 @@ This per-db secret is authored only for `kind=ducklake` databases (both spawn sc
 
 Editing `objectStore` (create or update) restarts the database's nodes so the new secret takes effect immediately; edits do not rotate a secret on an already-running node without a respawn. For object storage on S3-compatible backends and the manager-wide `QOD_S3_*` keys, see the Docker deployment page and the [Configuration reference](/reference/configuration).
 
+### Managed object storage
+
+The alternative to bringing your own bucket: with `quack-on-demand.managedObjectStore` enabled, `qod database create --managed-storage` (or `managedStorage: true`, or the storage mode "Managed (QoD-provisioned)" in the admin UI) lets the manager carve this database's `dataPath` out of one operator root bucket and fill its `objectStore` for you. `managedStorage` is exclusive with `dataPath` and `objectStore`, requires `kind=ducklake`, and is refused while the config block is off. Deleting such a database tombstones its prefix and a background worker purges the objects after a retention window. See [Managed object storage](/operating/managed-storage).
+
 ### List and delete
 
 ```bash
@@ -110,7 +114,7 @@ qod database list --tenant acme
 qod database delete --tenant acme --name sales
 ```
 
-Deleting a database removes the `qodstate_tenant_db` row. The underlying Postgres database and any object-store Parquet are not erased by the API; reclaim them separately if you no longer need the data.
+Deleting a database removes the `qodstate_tenant_db` row. The underlying Postgres database and any object-store Parquet are not erased by the API; reclaim them separately if you no longer need the data. The exception is a database on [managed object storage](/operating/managed-storage), whose data QoD does reclaim: delete tombstones the prefix and a background worker purges the objects once the retention window elapses, or right away with `--purge-managed-data`.
 
 ## Next step
 

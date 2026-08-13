@@ -63,6 +63,43 @@ trait ControlPlaneStore:
   /** Delete every bucket older than `olderThan`. Returns the number of rows removed. */
   def purgePoolLoad(olderThan: java.time.Instant): Int
 
+  // ---------------- Managed prefix (tombstone registry) ------------------
+  // Tombstones a data-path prefix carved out of the shared managed object
+  // store for a tenant-db. `insertManagedPrefix` runs at tenant-db create
+  // time; `markManagedPrefixDeleted` at tenant-db drop time (sets both
+  // deletedAt and the retention-window purgeEligibleAt together); the purge
+  // sweep polls `dueManagedPrefixes` and stamps `markManagedPrefixPurged`
+  // once the underlying objects are gone.
+
+  /** Insert a new tombstone row in the live (not-yet-deleted) state. */
+  def insertManagedPrefix(
+      id: String,
+      tenant: String,
+      tenantDbName: String,
+      prefix: String,
+      createdAt: java.time.Instant
+  ): Unit
+
+  /** Stamp `deletedAt` and `purgeEligibleAt` on an existing row. No-op when `id` is unknown. */
+  def markManagedPrefixDeleted(
+      id: String,
+      deletedAt: java.time.Instant,
+      purgeEligibleAt: java.time.Instant
+  ): Unit
+
+  /** Rows past their retention window and not yet purged, ordered by `purgeEligibleAt` ascending.
+    * Feeds the purge sweep.
+    */
+  def dueManagedPrefixes(now: java.time.Instant): List[ManagedPrefixRow]
+
+  /** Stamp `purgedAt` once the sweep has removed the underlying objects. No-op when `id` is
+    * unknown.
+    */
+  def markManagedPrefixPurged(id: String, purgedAt: java.time.Instant): Unit
+
+  /** Look up a single tombstone row by id. */
+  def managedPrefix(id: String): Option[ManagedPrefixRow]
+
   /** Insert/update a running node under the given pool surrogate id. `RunningNode.poolKey` is a
     * natural key (tenant/pool) carried by the runtime and does not always match a single Postgres
     * row, so the FK to `qodstate_pool.id` is supplied explicitly by the caller.
@@ -349,3 +386,18 @@ trait ControlPlaneStore:
 
   /** Cheap liveness probe for readiness checks. */
   def ping(): Boolean = true
+
+/** A tombstone row for a managed-object-store prefix carved out for one tenant-db. `deletedAt` /
+  * `purgeEligibleAt` are `None` while the tenant-db is live; both get set together when it is
+  * dropped, and `purgedAt` is set once the purge sweep has removed the underlying objects.
+  */
+final case class ManagedPrefixRow(
+    id: String,
+    tenant: String,
+    tenantDbName: String,
+    prefix: String,
+    createdAt: java.time.Instant,
+    deletedAt: Option[java.time.Instant],
+    purgeEligibleAt: Option[java.time.Instant],
+    purgedAt: Option[java.time.Instant]
+)
