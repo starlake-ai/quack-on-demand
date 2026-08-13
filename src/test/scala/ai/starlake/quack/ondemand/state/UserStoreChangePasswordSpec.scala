@@ -37,7 +37,21 @@ class UserStoreChangePasswordSpec extends AnyFlatSpec with Matchers:
       users.changePassword(None, "alice", "temp1", "real1") shouldBe Right(())
       val u = store.findUser(None, "alice").get
       u.mustChangePassword shouldBe false
+      u.role shouldBe "admin"
+      u.enabled shouldBe true
       val hash = store.getPasswordHash(None, "alice").get
+      BCrypt.verifyer().verify("real1".toCharArray, hash).verified shouldBe true
+      BCrypt.verifyer().verify("temp1".toCharArray, hash).verified shouldBe false
+    }
+
+  it should "swap the hash and clear the flag for a tenant-scoped user" in
+    withFreshDb { (store, users) =>
+      store.upsertTenant(Tenant(id = "t-1"))
+      users.upsertUser(Some("t-1"), "bob", "temp1", "user", mustChangePassword = Some(true))
+      users.changePassword(Some("t-1"), "bob", "temp1", "real1") shouldBe Right(())
+      val u = store.findUser(Some("t-1"), "bob").get
+      u.mustChangePassword shouldBe false
+      val hash = store.getPasswordHash(Some("t-1"), "bob").get
       BCrypt.verifyer().verify("real1".toCharArray, hash).verified shouldBe true
     }
 
