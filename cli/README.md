@@ -120,11 +120,12 @@ for the full flag list of any command.
 | `qod usage` | Usage accounting rollups. |
 | `qod sql` | Run SQL against the FlightSQL edge; one-shot or interactive REPL. |
 
-### auth - authentication mode discovery
+### auth - mode discovery and self-service password change
 
 | Verb | Purpose |
 |---|---|
 | `mode` | Show the auth mode (db or oidc) the manager expects. |
+| `change-password` | Change your own password (works pre-login; prompts for current and new). |
 
 ### config - server-published configuration
 

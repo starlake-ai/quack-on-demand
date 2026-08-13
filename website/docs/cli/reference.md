@@ -15,6 +15,7 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 | `qod logout` | Revoke the current session token. |
 | `qod whoami` | Verify the current session. |
 | `qod auth mode` | Show the auth mode (db or oidc) the manager expects. |
+| `qod auth change-password` | Change your own password (works pre-login; prompts for current and new). |
 | `qod health` | Liveness plus pool/node counts (open endpoint). |
 
 ## tenant

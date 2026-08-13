@@ -8,7 +8,7 @@ from ..registry import covers
 from ..rest import ApiError, RestClient
 from ._run import call
 
-app = typer.Typer(help="Authentication mode discovery.")
+app = typer.Typer(help="Authentication: mode discovery and self-service password change.")
 
 
 @app.command()
