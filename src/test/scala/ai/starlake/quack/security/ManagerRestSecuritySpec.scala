@@ -148,6 +148,37 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "let a non-admin session reach both /api/profile routes" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      val token = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      // 200 (not 401/403) proves the guard's allowlist arm handed the request
+      // to the real handler: these two paths 404'd until the routes existed,
+      // which is why the case was deferred out of the guard's own task.
+      val usage = get(h.httpClient, s"${h.baseUrl}/api/profile/usage", apiKey = Some(token))
+      withClue(s"GET /api/profile/usage body: ${usage.body()}") {
+        usage.statusCode() shouldBe 200
+      }
+      val stmts = get(h.httpClient, s"${h.baseUrl}/api/profile/statements", apiKey = Some(token))
+      withClue(s"GET /api/profile/statements body: ${stmts.body()}") {
+        stmts.statusCode() shouldBe 200
+      }
+
+      // The same session on an admin route stays sealed -- the allowlist widened
+      // by exactly two paths, not by a namespace.
+      val denied = get(h.httpClient, s"${h.baseUrl}/api/pool/list", apiKey = Some(token))
+      withClue(s"GET /api/pool/list body: ${denied.body()}") {
+        denied.statusCode() shouldBe 403
+        errorCode(denied.body()) should contain("admin_required")
+      }
+    finally h.shutdown()
+  }
+
   it should "match the profile allowlist exactly, never by prefix" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))

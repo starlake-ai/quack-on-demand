@@ -59,6 +59,9 @@ final class ManagerServer(
     auditHandlers: AuditHandlers = new AuditHandlers(NoopTelemetryStore),
     history: HistoryHandlers = new HistoryHandlers(NoopTelemetryStore),
     usage: UsageHandlers = new UsageHandlers(NoopTelemetryStore),
+    // Required (no inert default on purpose): a forgotten wiring must break the
+    // build, not silently answer every regular user an empty profile.
+    profile: ProfileHandlers,
     moduleEndpoints: List[ServerEndpoint[Any, IO]] = Nil,
     modulePublicPrefixes: Set[String] = Set.empty,
     moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil
@@ -423,6 +426,11 @@ final class ManagerServer(
       },
       AuthEndpoints.whoami.serverLogic(token => auth.whoami(token, None)),
       AuthEndpoints.authMode.serverLogic(tenant => auth.authMode(tenant)),
+      // Self-scoped: identity comes from the token, never from a request param.
+      ProfileEndpoints.usage.serverLogic { case (days, token) => profile.usage(days, token) },
+      ProfileEndpoints.statements.serverLogic { case (limit, token) =>
+        profile.statements(limit, token)
+      },
       NodeEndpoints.statementHistory.serverLogic { case (limit, token) =>
         statementHistory.recent(limit, token)(sessions.scopeOf)
       },

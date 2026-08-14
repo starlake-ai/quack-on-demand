@@ -52,10 +52,14 @@ final class StatementHistoryHandlers(
         }
         snap.filter(r => allowed.contains(r.tenant))
 
-    Right(StatementHistoryResponse(filtered.map(toDto)))
+    Right(StatementHistoryResponse(filtered.map(StatementHistoryHandlers.toDto)))
   }
 
-  private def toDto(r: ai.starlake.quack.edge.StatementRecord): StatementHistoryEntry =
+object StatementHistoryHandlers:
+  /** Ring record -> wire entry. On the companion so the self-scoped [[ProfileHandlers]] renders the
+    * same shape from the same ring instead of keeping a second copy in sync.
+    */
+  def toDto(r: ai.starlake.quack.edge.StatementRecord): StatementHistoryEntry =
     StatementHistoryEntry(
       ts = r.ts.toString,
       user = r.user,

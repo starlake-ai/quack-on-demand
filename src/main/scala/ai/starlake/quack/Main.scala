@@ -509,9 +509,17 @@ object Main extends IOApp with LazyLogging:
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val historyApiHandlers = new ai.starlake.quack.ondemand.api.HistoryHandlers(telemetryStore)
     val usageHandlers      = new ai.starlake.quack.ondemand.api.UsageHandlers(telemetryStore)
-    val sessions           = new SessionRegistry
-    val arrowAllocator     = new org.apache.arrow.memory.RootAllocator()
-    val client             = new QuackHttpClient(
+    // Self-service surface for non-admin sessions; scopes strictly to the
+    // session's own (tenant, username), so it takes no tenant/user input.
+    val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+      sessionTokens,
+      telemetryStore,
+      stmtHistory,
+      id => sup.getTenantById(id)
+    )
+    val sessions       = new SessionRegistry
+    val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
+    val client         = new QuackHttpClient(
       arrowAllocator,
       // Degrades to the embedded HTTP client on platforms with no bundled
       // libquackwire native (Windows on ARM64) instead of crashing at JNI load.
@@ -894,6 +902,7 @@ object Main extends IOApp with LazyLogging:
         auditHandlers = auditHandlers,
         history = historyApiHandlers,
         usage = usageHandlers,
+        profile = profileHandlers,
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts)

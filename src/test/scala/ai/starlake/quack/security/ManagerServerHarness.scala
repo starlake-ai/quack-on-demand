@@ -296,6 +296,12 @@ object ManagerServerHarness:
     val auditHandlers      = new AuditHandlers(telemetryStore)
     val historyApiHandlers = new HistoryHandlers(telemetryStore)
     val usageHandlers      = new UsageHandlers(telemetryStore)
+    val profileHandlers    = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+      sessions,
+      telemetryStore,
+      statementStore,
+      id => sup.getTenantById(id)
+    )
     val activeRegistry     = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeRegistry,
@@ -461,6 +467,7 @@ object ManagerServerHarness:
       auditHandlers = auditHandlers,
       history = historyApiHandlers,
       usage = usageHandlers,
+      profile = profileHandlers,
       moduleEndpoints = moduleEndpoints,
       modulePublicPrefixes = modulePublicPrefixes,
       moduleStaticMounts = moduleStaticMounts
