@@ -152,6 +152,12 @@ trait ControlPlaneStore:
     *
     * `mustChangePassword` defaults to `false` and mirrors `enabled`: pass `true` to force the user
     * to change their password before they can authenticate again.
+    *
+    * `email` defaults to `None` (no contact address). Single-level `Option`, not the
+    * `Option[Option[String]]` shape used by [[UserStore.upsertUser]]: this path is always fed an
+    * explicit value (or `None` to store NULL) rather than needing a "leave unchanged" state, since
+    * [[ai.starlake.quack.ondemand.manifest.ManifestImporter]] always carries the manifest's email
+    * field through explicitly.
     */
   def upsertUserWithHash(
       tenant: Option[String],
@@ -159,7 +165,8 @@ trait ControlPlaneStore:
       passwordHash: String,
       role: String,
       enabled: Boolean = true,
-      mustChangePassword: Boolean = false
+      mustChangePassword: Boolean = false,
+      email: Option[String] = None
   ): String
 
   def getUserById(id: String): Option[RbacUser]

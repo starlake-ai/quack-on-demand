@@ -128,12 +128,13 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     val existing = users.get(u.id)
     val now      = Instant.now()
     // Mirror the Postgres impl: the identity upsert writes (tenant, username, role) only, so
-    // `enabled` and `mustChangePassword` keep whatever the credential paths last stored.
+    // `enabled`, `mustChangePassword` and `email` keep whatever the credential paths last stored.
     users.put(
       u.id,
       u.copy(
         enabled = existing.map(_.enabled).getOrElse(u.enabled),
         mustChangePassword = existing.map(_.mustChangePassword).getOrElse(u.mustChangePassword),
+        email = existing.map(_.email).getOrElse(u.email),
         createdAt = u.createdAt.orElse(existing.flatMap(_.createdAt)).orElse(Some(now)),
         updatedAt = Some(now)
       )
@@ -148,7 +149,8 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       passwordHash: String,
       role: String,
       enabled: Boolean = true,
-      mustChangePassword: Boolean = false
+      mustChangePassword: Boolean = false,
+      email: Option[String] = None
   ): String =
     val now             = Instant.now()
     val (id, createdAt) = findUser(tenant, username) match
@@ -163,6 +165,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
         role = role,
         enabled = enabled,
         mustChangePassword = mustChangePassword,
+        email = email,
         createdAt = Some(createdAt),
         updatedAt = Some(now)
       )

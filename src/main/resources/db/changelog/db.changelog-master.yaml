@@ -61,3 +61,5 @@ databaseChangeLog:
       file: db/changelog/0027-managed-prefix.yaml
   - include:
       file: db/changelog/0028-user-must-change-password.yaml
+  - include:
+      file: db/changelog/0029-user-email.yaml

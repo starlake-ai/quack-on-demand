@@ -23,11 +23,18 @@ object UserUpsert:
     * indexes (admin `tenant IS NULL` vs scoped `(tenant, username)`) mean a single `ON CONFLICT`
     * target can't be named without knowing the tenant kind, so the lookup is the cleanest path.
     *
-    * `enabled` and `mustChangePassword` control the two flag columns:
+    * `enabled` and `mustChangePassword` control the two boolean flag columns:
     *   - `Some(b)`: write the column `= b` on both insert and update.
     *   - `None`: leave the column to its default on insert and PRESERVE the stored value on update
     *     -- the plain credential/role rotation path must never silently re-enable a disabled user
     *     or clear a pending forced password change.
+    *
+    * `email` follows the identical present/absent rule but is a nullable TEXT rather than a
+    * boolean, so it is one level deeper:
+    *   - `Some(inner)`: write the column `= inner.orNull` on both insert and update (`Some(None)`
+    *     clears it to SQL NULL, `Some(Some(x))` sets it).
+    *   - `None`: leave the column to its default (NULL) on insert and PRESERVE the stored value on
+    *     update -- a plain credential/role rotation must never silently clear a stored email.
     */
   def apply(
       c: Connection,
@@ -36,20 +43,27 @@ object UserUpsert:
       passwordHash: String,
       role: String,
       enabled: Option[Boolean],
-      mustChangePassword: Option[Boolean] = None
+      mustChangePassword: Option[Boolean] = None,
+      email: Option[Option[String]] = None
   ): Result =
     val existing = lookupId(c, tenant, username)
     val id       = existing.getOrElse(Names.newSurrogateId("u"))
-    // Optional flag columns: present -> written on both insert and update;
-    // absent -> column default on insert, stored value preserved on update.
-    val extras = List(
+    // Optional boolean flag columns: present -> written on both insert and
+    // update; absent -> column default on insert, stored value preserved on
+    // update.
+    val boolExtras = List(
       "enabled"              -> enabled,
       "must_change_password" -> mustChangePassword
     ).collect { case (name, Some(v)) => (name, v) }
-    val extraNames   = extras.map((n, _) => s", $n").mkString
-    val extraHoles   = extras.map(_ => ", ?").mkString
-    val extraUpdates = extras.map((n, _) => s",\n  $n = EXCLUDED.$n").mkString
-    val sql          =
+    // email is a nullable TEXT rather than a boolean, so it can't share the
+    // boolExtras list/bind type, but follows the same present/absent rule.
+    val emailExtra     = email.map(inner => "email" -> inner.orNull)
+    val extraNames     = (boolExtras.map(_._1) ++ emailExtra.map(_._1)).map(n => s", $n").mkString
+    val extraHoleCount = boolExtras.size + emailExtra.size
+    val extraHoles     = List.fill(extraHoleCount)(", ?").mkString
+    val extraUpdates   =
+      (boolExtras.map(_._1) ++ emailExtra.map(_._1)).map(n => s",\n  $n = EXCLUDED.$n").mkString
+    val sql =
       s"""INSERT INTO qodstate_user (id, tenant, username, password_hash, role$extraNames, updated_at)
          |VALUES (?, ?, ?, ?, ?$extraHoles, NOW())
          |ON CONFLICT (id) DO UPDATE SET
@@ -65,7 +79,17 @@ object UserUpsert:
       ps.setString(3, username)
       ps.setString(4, passwordHash)
       ps.setString(5, role)
-      extras.zipWithIndex.foreach { case ((_, v), i) => ps.setBoolean(6 + i, v) }
+      var idx = 6
+      boolExtras.foreach { case (_, v) =>
+        ps.setBoolean(idx, v)
+        idx += 1
+      }
+      // setString(idx, null) binds SQL NULL -- no separate setNull needed for
+      // a TEXT column.
+      emailExtra.foreach { case (_, v) =>
+        ps.setString(idx, v)
+        idx += 1
+      }
       ps.executeUpdate()
       Result(id = id, inserted = existing.isEmpty)
     finally ps.close()

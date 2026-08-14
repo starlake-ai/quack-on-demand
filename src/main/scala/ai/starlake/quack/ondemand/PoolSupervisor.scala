@@ -2114,7 +2114,8 @@ final class PoolSupervisor(
       password: String,
       role: String = "user",
       userStore: ai.starlake.quack.ondemand.state.UserStore,
-      mustChangePassword: Boolean = false
+      mustChangePassword: Boolean = false,
+      email: Option[String] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("createUser") {
       if username.isEmpty || password.isEmpty then
@@ -2132,19 +2133,23 @@ final class PoolSupervisor(
             val resolvedTenantId = tenant.flatMap { t =>
               tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
             }
+            // Create always sets email, even to None (clearing is not meaningful on a
+            // brand-new row, but a fresh insert with no email is the common case).
             val out = userStore.upsertUser(
               resolvedTenantId,
               username,
               password,
               role,
-              mustChangePassword = Some(mustChangePassword)
+              mustChangePassword = Some(mustChangePassword),
+              email = Some(email)
             )
             val u = RbacUser(
               out.id,
               resolvedTenantId,
               username,
               role,
-              mustChangePassword = mustChangePassword
+              mustChangePassword = mustChangePassword,
+              email = email
             )
             store.upsertUserIdentity(u)
             Right(u)
@@ -2156,7 +2161,8 @@ final class PoolSupervisor(
       password: Option[String],
       role: Option[String],
       userStore: ai.starlake.quack.ondemand.state.UserStore,
-      mustChangePassword: Option[Boolean] = None
+      mustChangePassword: Option[Boolean] = None,
+      email: Option[Option[String]] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("updateUserPassword") {
       if mustChangePassword.contains(true) && password.isEmpty then
@@ -2180,14 +2186,38 @@ final class PoolSupervisor(
                 u.username,
                 pw,
                 newRole,
-                mustChangePassword = Some(flag)
+                mustChangePassword = Some(flag),
+                email = email
               )
               flag
             }
+            // Email can change on a role-only update -- there's no password rotation
+            // to piggyback the write on, so rewrite the row through the control-plane
+            // store with its already-persisted hash and current flags (both unchanged)
+            // so only email (and role) move. Skipped when the branch above already
+            // applied it in the same statement as the password rotation.
+            if password.isEmpty then
+              email.foreach { inner =>
+                store.getPasswordHash(u.tenant, u.username).foreach { hash =>
+                  store.upsertUserWithHash(
+                    u.tenant,
+                    u.username,
+                    hash,
+                    newRole,
+                    enabled = u.enabled,
+                    mustChangePassword = u.mustChangePassword,
+                    email = inner
+                  )
+                }
+              }
             // upsertUserIdentity only writes (tenant, username, role) on conflict, so the
-            // flag just persisted by the rotation survives; carry it on the returned value.
+            // flag/email just persisted above survive; carry them on the returned value.
             val updated =
-              u.copy(role = newRole, mustChangePassword = newFlag.getOrElse(u.mustChangePassword))
+              u.copy(
+                role = newRole,
+                mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
+                email = email.getOrElse(u.email)
+              )
             store.upsertUserIdentity(updated)
             invalidateEffectiveCache()
             Right(updated)

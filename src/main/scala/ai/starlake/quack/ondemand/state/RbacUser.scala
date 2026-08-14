@@ -17,6 +17,7 @@ final case class RbacUser(
     role: String,
     enabled: Boolean = true,
     mustChangePassword: Boolean = false,
+    email: Option[String] = None,
     createdAt: Option[Instant] = None,
     updatedAt: Option[Instant] = None
 )

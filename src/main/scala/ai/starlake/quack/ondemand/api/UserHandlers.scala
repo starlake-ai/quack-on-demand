@@ -54,7 +54,8 @@ final class UserHandlers(
       enabled = true,
       roles = roles,
       groups = groups,
-      poolGrants = grants
+      poolGrants = grants,
+      email = u.email
     )
 
   /** Convenience: build the response for one user, doing the supervisor lookup inline. Returns
@@ -118,7 +119,8 @@ final class UserHandlers(
             req.password,
             req.role,
             userStore,
-            mustChangePassword = req.mustChangePassword
+            mustChangePassword = req.mustChangePassword,
+            email = req.email
           )
           .map {
             case Right(u) =>
@@ -163,13 +165,17 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
+        // Map the wire DTO's single-level Option onto the store's two-level shape:
+        // omit (None) = unchanged, empty string = clear to NULL, non-empty = set.
+        val email: Option[Option[String]] = req.email.map(e => if e.isEmpty then None else Some(e))
         sup
           .updateUserPassword(
             req.id,
             req.password,
             req.role,
             userStore,
-            mustChangePassword = req.mustChangePassword
+            mustChangePassword = req.mustChangePassword,
+            email = email
           )
           .map {
             case Right(u) =>

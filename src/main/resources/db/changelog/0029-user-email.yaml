@@ -1,0 +1,12 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0029-user-email
+      author: qod
+      changes:
+        # Optional contact address for a database-backed user. Only users with a
+        # non-null email are eligible for the self-service forgot-password flow and
+        # (Phase 2) account lockout; emailless rows keep admin reset as recovery.
+        - addColumn:
+            tableName: qodstate_user
+            columns:
+              - column: { name: email, type: TEXT }

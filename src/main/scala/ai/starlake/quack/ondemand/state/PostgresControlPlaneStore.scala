@@ -580,12 +580,14 @@ final class PostgresControlPlaneStore(
       passwordHash: String,
       role: String,
       enabled: Boolean = true,
-      mustChangePassword: Boolean = false
+      mustChangePassword: Boolean = false,
+      email: Option[String] = None
   ): String = withConn { c =>
     // Delegate to the shared upsert. enabled = Some(enabled) and
     // mustChangePassword = Some(mustChangePassword): this path owns both flags
     // (manifest import, admin provisioning) and writes them on both insert and
-    // update.
+    // update. email = Some(email): the manifest import always sets an explicit
+    // value or null, so this path owns the column too.
     UserUpsert(
       c,
       tenant,
@@ -593,13 +595,14 @@ final class PostgresControlPlaneStore(
       passwordHash,
       role,
       enabled = Some(enabled),
-      mustChangePassword = Some(mustChangePassword)
+      mustChangePassword = Some(mustChangePassword),
+      email = Some(email)
     ).id
   }
 
   def getUserById(id: String): Option[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      "SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at FROM qodstate_user WHERE id = ?"
+      "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at FROM qodstate_user WHERE id = ?"
     )
     try
       ps.setString(1, id)
@@ -613,7 +616,7 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
             |FROM qodstate_user WHERE tenant = ? AND username = ?""".stripMargin
         )
         p.setString(1, t)
@@ -621,7 +624,7 @@ final class PostgresControlPlaneStore(
         p
       case None =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
             |FROM qodstate_user WHERE tenant IS NULL AND username = ?""".stripMargin
         )
         p.setString(1, username)
@@ -637,14 +640,14 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
             |FROM qodstate_user WHERE tenant = ? ORDER BY username""".stripMargin
         )
         p.setString(1, t)
         p
       case None =>
         c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
             |FROM qodstate_user ORDER BY COALESCE(tenant, ''), username""".stripMargin
         )
     try
@@ -656,7 +659,7 @@ final class PostgresControlPlaneStore(
 
   def listSuperusers(): List[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
         |FROM qodstate_user WHERE tenant IS NULL ORDER BY username""".stripMargin
     )
     try
@@ -671,7 +674,7 @@ final class PostgresControlPlaneStore(
     // the wildcard NULL superuser row when both exist with the same
     // username. Mirrors application.conf's auth.database.query.
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
         |FROM qodstate_user
         |WHERE (tenant IS NULL OR tenant = ?) AND username = ?
         |ORDER BY (tenant IS NOT NULL) DESC
@@ -697,6 +700,7 @@ final class PostgresControlPlaneStore(
       role = rs.getString("role"),
       enabled = rs.getBoolean("enabled"),
       mustChangePassword = rs.getBoolean("must_change_password"),
+      email = Option(rs.getString("email")),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
       updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
     )
@@ -1433,7 +1437,7 @@ final class PostgresControlPlaneStore(
       ),
       users = selectAll(
         c,
-        "SELECT id, tenant, username, role, enabled, must_change_password, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
+        "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
         readRbacUser
       ),
       roles = selectAll(

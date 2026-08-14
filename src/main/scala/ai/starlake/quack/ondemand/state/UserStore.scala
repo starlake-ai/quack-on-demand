@@ -30,6 +30,16 @@ import java.sql.Connection
   * A user is identified by `(tenant, username)`. `(NULL, name)` is a superuser; tenant-scoped
   * principals carry a non-empty tenant. Pool access is granted through [[PoolPermission]] rows, not
   * on the user row itself.
+  *
+  * DESIGN DECISION -- password operations are per-`(tenant, username)` row, never fan out.
+  * `changePassword`, `upsertUser` (admin reset), and user creation each mutate exactly ONE row,
+  * keyed by that row's id. The same username enrolled in several tenants (e.g. `alice@acme` and
+  * `alice@globex`) is intentionally a set of INDEPENDENT database credentials with separate hashes;
+  * rotating one leaves the others untouched. There is deliberately NO bulk "reset this username in
+  * every tenant" helper -- do not add one. This applies ONLY to database-backed principals stored
+  * here (the [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] path). It does not concern IdP /
+  * OIDC identities (no password is stored here; the credential lives at the provider) or ROPC
+  * logins (delegated to the IdP), where "change it once" is inherent to the external identity.
   */
 final class UserStore(
     jdbcUrl: String,
@@ -73,7 +83,8 @@ final class UserStore(
       username: String,
       plaintext: String,
       role: String,
-      mustChangePassword: Option[Boolean] = None
+      mustChangePassword: Option[Boolean] = None,
+      email: Option[Option[String]] = None
   ): UserStore.Upsert =
     require(
       tenant.forall(_.nonEmpty),
@@ -84,6 +95,7 @@ final class UserStore(
       // Delegate to the shared upsert. enabled = None: a credential/role
       // rotation through this path must never re-enable a disabled user, so
       // the enabled column is left untouched on update (DB default on insert).
+      // email: outer None leaves the stored value untouched (same rule).
       val r = UserUpsert(
         c,
         tenant,
@@ -91,7 +103,8 @@ final class UserStore(
         hash,
         role,
         enabled = None,
-        mustChangePassword = mustChangePassword
+        mustChangePassword = mustChangePassword,
+        email = email
       )
       UserStore.Upsert(id = r.id, inserted = r.inserted)
     }

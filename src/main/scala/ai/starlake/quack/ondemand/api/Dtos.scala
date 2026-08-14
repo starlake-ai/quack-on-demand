@@ -583,7 +583,10 @@ final case class UserCreateRequest(
     role: String = "user",
     // Marks the assigned password as temporary: login is refused (REST and FlightSQL)
     // until the user swaps it via POST /api/auth/change-password.
-    mustChangePassword: Boolean = false
+    mustChangePassword: Boolean = false,
+    // Optional contact address. Omit to leave the row emailless (admin reset stays
+    // the only recovery path -- see the forgot-password / lockout gate).
+    email: Option[String] = None
 )
 final case class UserUpdateRequest(
     id: String,
@@ -594,7 +597,9 @@ final case class UserUpdateRequest(
     // Some(false)/None clears any pending flag along with the rotation. Without a
     // password this field is a no-op -- role-only updates never touch the flag, and
     // Some(true) without a password is a 400.
-    mustChangePassword: Option[Boolean] = None
+    mustChangePassword: Option[Boolean] = None,
+    // Omit (None) = unchanged; empty string = clear to no email; non-empty = set.
+    email: Option[String] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(
@@ -603,9 +608,10 @@ final case class UserResponse(
     username: String,
     role: String,
     enabled: Boolean = true,
-    roles: List[String] = Nil,     // role NAMES (not ids), tenant-scoped
-    groups: List[String] = Nil,    // group NAMES
-    poolGrants: List[String] = Nil // human label "tenant/pool" or "tenant/*"
+    roles: List[String] = Nil,      // role NAMES (not ids), tenant-scoped
+    groups: List[String] = Nil,     // group NAMES
+    poolGrants: List[String] = Nil, // human label "tenant/pool" or "tenant/*"
+    email: Option[String] = None
 )
 final case class UserListResponse(users: List[UserResponse])
 
