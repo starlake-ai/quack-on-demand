@@ -102,6 +102,7 @@ export default function UserSection({
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole,     setNewRole]     = useState<'user' | 'admin'>('user');
+  const [newEmail,    setNewEmail]    = useState('');
   const [newTenant,   setNewTenant]   = useState<string>(tenant ?? SUPERUSER);
   // Only meaningful for db-mode tenants: an OIDC pre-provisioned user has a
   // random throwaway password nobody can ever present, so the flag would
@@ -115,6 +116,10 @@ export default function UserSection({
   const [editPassword, setEditPassword] = useState('');
   const [editIsAdmin, setEditIsAdmin]   = useState(false);
   const [editMustChange, setEditMustChange] = useState(false);
+  const [editEmail, setEditEmail]       = useState('');
+  // The email value the edit form was opened with, so handleUpdate only
+  // sends `email` when it actually changed (server: omit = unchanged).
+  const [editEmailOriginal, setEditEmailOriginal] = useState('');
 
   // Resolve the selected new-tenant to its provider so the form can
   // adapt. Superuser always uses the db backend (no IdP routing).
@@ -164,9 +169,10 @@ export default function UserSection({
         password: newTenantIsDb ? newPassword : crypto.randomUUID(),
         role:     newRole,
         mustChangePassword: newTenantIsDb ? newMustChange : false,
+        email: newEmail.trim() || undefined,
       });
       setAdding(false);
-      setNewUsername(''); setNewPassword(''); setNewRole('user'); setNewMustChange(false);
+      setNewUsername(''); setNewPassword(''); setNewRole('user'); setNewMustChange(false); setNewEmail('');
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -181,8 +187,12 @@ export default function UserSection({
         password: editPassword || null,
         role:     editIsAdmin ? 'admin' : 'user',
         mustChangePassword: editPassword ? editMustChange : undefined,
+        // Omit when unchanged (server: undefined = leave as-is); empty
+        // string clears the address, non-empty sets it.
+        email: editEmail === editEmailOriginal ? undefined : editEmail,
       });
       setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
+      setEditEmail(''); setEditEmailOriginal('');
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -286,7 +296,13 @@ export default function UserSection({
                         className="icon-btn"
                         title="Edit"
                         aria-label="Edit"
-                        onClick={() => { setEditingId(u.id); setEditPassword(''); setEditIsAdmin(u.role === 'admin'); }}
+                        onClick={() => {
+                          setEditingId(u.id);
+                          setEditPassword('');
+                          setEditIsAdmin(u.role === 'admin');
+                          setEditEmail(u.email ?? '');
+                          setEditEmailOriginal(u.email ?? '');
+                        }}
                       ><EditIcon /></button>
                     ) : (
                       <button
@@ -334,6 +350,15 @@ export default function UserSection({
               <label>
                 Username
                 <input value={newUsername} onChange={ev => setNewUsername(ev.target.value)} required />
+              </label>
+              <label>
+                Email <span className="subtle">(optional)</span>
+                <input
+                  type="email"
+                  value={newEmail}
+                  onChange={ev => setNewEmail(ev.target.value)}
+                  placeholder="used for forgot-password links"
+                />
               </label>
               {newTenantIsDb && (
                 <label>
@@ -387,7 +412,7 @@ export default function UserSection({
         const u = rows.find(r => r.id === editingId);
         if (!u) return null;
         return (
-          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); }}>
+          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); }}>
               <div className="card-title">
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
@@ -400,6 +425,15 @@ export default function UserSection({
                     value={editPassword}
                     onChange={ev => setEditPassword(ev.target.value)}
                     placeholder="(leave blank to leave unchanged)"
+                  />
+                </label>
+                <label>
+                  Email <span className="subtle">(optional)</span>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={ev => setEditEmail(ev.target.value)}
+                    placeholder="used for forgot-password links"
                   />
                 </label>
                 <label className="checkbox-label">
@@ -420,7 +454,7 @@ export default function UserSection({
                   {' '}Admin User
                 </label>
                 <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); }}>Cancel</button>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); }}>Cancel</button>
                   <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
                 </div>
               </form>

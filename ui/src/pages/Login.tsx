@@ -1,25 +1,43 @@
 import { FormEvent, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { ApiError, api, errorMessage } from '../api/client';
 
+// Anti-enumeration: this exact copy is shown after every forgot-password
+// submission, whether or not the (tenant, username) account exists, has an
+// email on file, or the request even reached the server successfully. Never
+// branch this message on the outcome - see api.forgotPassword.
+const FORGOT_PASSWORD_NOTICE = 'If that account exists, a reset link has been emailed.';
+
 export default function Login() {
   const { login } = useAuth();
+  const location = useLocation();
   const [username, setUsername] = useState('admin@localhost.local');
   const [password, setPassword] = useState('');
   const [tenant,   setTenant]   = useState('');
   const [err, setErr]           = useState<string | null>(null);
   // Informational (non-error) notice on the login form, e.g. after a
-  // password change whose automatic re-login attempt failed.
-  const [notice, setNotice]     = useState<string | null>(null);
+  // password change whose automatic re-login attempt failed, or after
+  // navigating back here from a successful password reset.
+  const [notice, setNotice]     = useState<string | null>(
+    () => (location.state as { notice?: string } | null)?.notice ?? null
+  );
   const [busy, setBusy]         = useState(false);
 
   // Forced password-change pivot: a login attempt against an account
   // flagged mustChangePassword comes back 401 password_change_required
   // instead of a session. `password` still holds the value the user typed,
   // which doubles as currentPassword for the change-password call below.
-  const [phase, setPhase]                 = useState<'login' | 'change'>('login');
+  const [phase, setPhase]                 = useState<'login' | 'change' | 'forgot'>('login');
   const [newPassword, setNewPassword]     = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+
+  // Forgot-password inline form. Defaults to whatever the user already
+  // typed into the login form's username/tenant fields.
+  const [forgotUsername, setForgotUsername] = useState('');
+  const [forgotTenant,   setForgotTenant]   = useState('');
+  const [forgotSent,     setForgotSent]     = useState(false);
+  const [forgotBusy,     setForgotBusy]     = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -45,6 +63,39 @@ export default function Login() {
     setNewPassword('');
     setConfirmPassword('');
     setErr(null);
+  }
+
+  function openForgot() {
+    setForgotUsername(username);
+    setForgotTenant(tenant);
+    setForgotSent(false);
+    setErr(null);
+    setPhase('forgot');
+  }
+
+  function backToLoginFromForgot() {
+    setPhase('login');
+    setForgotSent(false);
+    setErr(null);
+  }
+
+  async function submitForgot(e: FormEvent) {
+    e.preventDefault();
+    setForgotBusy(true);
+    try {
+      await api.forgotPassword({
+        tenant: forgotTenant.trim() || undefined,
+        username: forgotUsername.trim(),
+      });
+    } catch {
+      // Deliberately ignored: the same static notice is shown whether the
+      // account exists, has no email, or the request itself failed. Any
+      // outcome-dependent message here would reopen the enumeration channel
+      // the backend closes with its uniform 200 response.
+    } finally {
+      setForgotBusy(false);
+      setForgotSent(true);
+    }
   }
 
   async function submitChange(e: FormEvent) {
@@ -85,6 +136,56 @@ export default function Login() {
       return;
     }
     setBusy(false);
+  }
+
+  if (phase === 'forgot') {
+    return (
+      <div className="login-shell">
+        <div className="login-card">
+          <div className="login-brand">
+            <img src="/ui/mark-dark.svg" alt="" className="login-logo" />
+            <h1>Quack on Demand</h1>
+            <p className="login-sub">Reset your password</p>
+          </div>
+          {forgotSent ? (
+            <>
+              <div className="login-notice">{FORGOT_PASSWORD_NOTICE}</div>
+              <p className="login-hint">
+                <a href="#" onClick={e => { e.preventDefault(); backToLoginFromForgot(); }}>Back to login</a>
+              </p>
+            </>
+          ) : (
+            <form onSubmit={submitForgot}>
+              <label>
+                Username
+                <input
+                  value={forgotUsername}
+                  onChange={e => setForgotUsername(e.target.value)}
+                  autoComplete="username"
+                  autoFocus
+                  required
+                />
+              </label>
+              <label>
+                Tenant
+                <input
+                  value={forgotTenant}
+                  onChange={e => setForgotTenant(e.target.value)}
+                  placeholder="leave blank for superuser"
+                  autoComplete="off"
+                />
+              </label>
+              <button type="submit" disabled={forgotBusy || !forgotUsername}>
+                {forgotBusy ? 'Sending…' : 'Send reset link'}
+              </button>
+              <p className="login-hint">
+                <a href="#" onClick={e => { e.preventDefault(); backToLoginFromForgot(); }}>Back to login</a>
+              </p>
+            </form>
+          )}
+        </div>
+      </div>
+    );
   }
 
   if (phase === 'change') {
@@ -171,6 +272,9 @@ export default function Login() {
         <button type="submit" disabled={busy || !username || !password}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
+        <p className="login-hint">
+          <a href="#" onClick={e => { e.preventDefault(); openForgot(); }}>Forgot password?</a>
+        </p>
         <p className="login-hint">
           Superusers leave Tenant blank. Tenant admins and other tenant users
           enter their tenant name or id (both shown on the Tenants page, e.g.{' '}

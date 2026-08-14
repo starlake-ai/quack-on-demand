@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
+import ResetPassword from './pages/ResetPassword';
 
 // ---- SSO error codes returned by /api/auth/oidc/callback via ?error= ----
 
@@ -183,7 +184,14 @@ function SsoRedirect({ ssoLogin }: { ssoLogin: () => void }) {
 }
 
 function AuthGate() {
+  const location = useLocation();
   const { username, role, loading, identitySource, ssoLogin } = useAuth();
+  // Password-reset landing page: reached straight from the emailed link and
+  // must render immediately, before (and regardless of) any session/SSO
+  // resolution - same public, pre-session contract as the
+  // /api/auth/reset-password endpoint it calls. Short-circuit ahead of every
+  // other gate below, including the loading spinner.
+  if (location.pathname === '/reset-password') return <ResetPassword />;
   if (loading) return <div className="loading">Loading session…</div>;
   // Right after login() sets `username` there's a brief async gap before its
   // follow-up whoami() call resolves `role` - without this guard that window

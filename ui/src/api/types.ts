@@ -364,6 +364,7 @@ export interface UserResponse {
   roles:  string[];                 // effective role NAMES
   groups: string[];                 // effective group NAMES
   poolGrants: string[];             // human "tenant/pool" or "tenant/*" labels
+  email?: string | null;
 }
 
 export interface UserCreateRequest {
@@ -372,6 +373,8 @@ export interface UserCreateRequest {
   password: string;
   role?: string;
   mustChangePassword?: boolean;
+  // Optional contact address, used by forgot-password. Omit to leave the row emailless.
+  email?: string | null;
 }
 
 export interface UserUpdateRequest {
@@ -380,6 +383,8 @@ export interface UserUpdateRequest {
   password?: string | null;
   role?: string | null;
   mustChangePassword?: boolean;
+  // Omit (undefined) = unchanged; empty string = clear to no email; non-empty = set.
+  email?: string | null;
 }
 
 export interface UserDeleteRequest { id: string; }
@@ -390,6 +395,20 @@ export interface ChangePasswordRequest {
   tenant?: string | null;
   username: string;
   currentPassword: string;
+  newPassword: string;
+}
+
+// ----- Auth: self-service password reset -----
+// Public, pre-session endpoints. `forgotPassword` always answers 200
+// regardless of whether the (tenant, username) account exists or carries
+// an email - anti-enumeration is enforced server-side.
+export interface ForgotPasswordRequest {
+  tenant?: string | null;
+  username: string;
+}
+
+export interface ResetPasswordRequest {
+  token: string;
   newPassword: string;
 }
 

@@ -31,6 +31,8 @@ import type {
   LoginRequest,
   LoginResponse,
   WhoamiResponse,
+  ForgotPasswordRequest,
+  ResetPasswordRequest,
   StatementHistoryResponse,
   CatalogSchemaEntry,
   CatalogTableEntry,
@@ -172,6 +174,11 @@ export const api = {
   logout:  () => post<void>('/auth/logout'),
   changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
+  // Public, pre-session: reachable without a X-API-Key or session cookie
+  // (server-side isPublicApi allowlist). Always 200 on forgotPassword
+  // regardless of account existence - anti-enumeration.
+  forgotPassword: (req: ForgotPasswordRequest) => post<void>('/auth/forgot-password', req),
+  resetPassword:  (req: ResetPasswordRequest)  => post<void>('/auth/reset-password', req),
   // Self-service profile surface for regular (non-admin) sessions. NO tenant
   // param: the server scopes both routes off the verified session identity
   // alone, and a stray `?tenant=` would trip the perimeter guard (403
