@@ -5,18 +5,19 @@
 
 .DESCRIPTION
   One knob, $env:QOD_VERSION, picks where the jar comes from:
-    unset / latest    - resolve the latest release from Maven Central
-                        (ai.starlake:quack-on-demand_3), cache it under
-                        $JAR_CACHE_DIR (sha1-checked), run `java -jar`.
-                        Falls back to a local distrib\ jar / `sbt assembly` when
-                        the artifact isn't published yet.
+    unset / latest    - resolve the latest GitHub release
+                        (github.com/starlake-ai/quack-on-demand/releases),
+                        cache it under $JAR_CACHE_DIR (sha256-checked), run
+                        `java -jar`. Falls back to a local distrib\ jar /
+                        `sbt assembly` when the artifact isn't published yet.
     <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
-    latest-snapshot   - download the newest Central snapshot.
+    latest-snapshot   - download the rolling `snapshot` pre-release
+                        (published by snapshot.yml on every push to main).
     BUILD             - run `sbt assembly` from this checkout (bootstrapping sbt
                         into .sbt-bootstrap\ if it isn't on PATH) and run the
                         freshly-built jar in distrib\.
     LOCAL             - run the newest jar already in distrib\ without
-                        rebuilding or consulting Maven Central (falls back to
+                        rebuilding or consulting GitHub releases (falls back to
                         a build when distrib\ is empty).
 
   Boot extras (parity with run-jar.sh):
@@ -38,7 +39,7 @@
                            `latest` (default), `latest-snapshot`, `BUILD`
                            (sbt assembly first; requires sbt + npm, sbt is
                            auto-bootstrapped if missing), or `LOCAL` (newest
-                           distrib\ jar, no rebuild, no Central lookup)
+                           distrib\ jar, no rebuild, no network lookup)
     JAR_CACHE_DIR          download cache (default $HOME\.cache\quack-on-demand)
     NUKE=1                 wipe local state (control-plane DB, demo tenant-dbs,
                            ducklake\, state\, certs\) before booting. Irreversible.
@@ -76,8 +77,8 @@ $RepoDir    = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $DistribDir = Join-Path $RepoDir 'distrib'
 Set-Location $RepoDir
 
-$GroupPath   = 'ai/starlake'
-$Artifact    = 'quack-on-demand_3'
+$GhRepo      = 'starlake-ai/quack-on-demand'
+$Assembly    = 'quack-on-demand-assembly'
 $JarCacheDir = if ($env:JAR_CACHE_DIR) { $env:JAR_CACHE_DIR } else { Join-Path $HOME '.cache\quack-on-demand' }
 
 # Anchor the DuckLake data path to the repo unless the caller set it. The LOAD_*
@@ -227,30 +228,35 @@ function Use-LocalJarOrBuild {
   return (Invoke-Build)
 }
 
-function Get-LocalSnapshotVersion {
-  $vf = Join-Path $RepoDir 'version.sbt'
-  if (-not (Test-Path $vf)) { return $null }
-  $line = Select-String -Path $vf -Pattern 'ThisBuild\s*/\s*version\s*:=' | Select-Object -First 1
-  if ($line -and $line.Line -match '"([^"]+)"') { return $Matches[1] }
-  return $null
-}
-
-function Get-MavenMetaValue([string]$Url, [string]$Tag) {
+# Latest release tag via the releases/latest redirect: no REST API, no
+# rate limit. PowerShell 5.1 throws on a 3xx when redirects are capped,
+# so read the Location header out of the caught response.
+function Get-LatestReleaseVersion {
+  $url = "https://github.com/$GhRepo/releases/latest"
+  $location = $null
   try {
-    $xml = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
-    if ($xml.Content -match "<$Tag>([^<]+)</$Tag>") { return $Matches[1] }
-  } catch { }
+    $resp = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+    $location = $resp.Headers['Location']
+  } catch {
+    $r = $_.Exception.Response
+    if ($r -and $r.Headers) { $location = $r.Headers['Location'] }
+  }
+  if ($location -match 'tag/v([^/\s]+)$') { return $Matches[1] }
   return $null
 }
 
-# Returns $true when the cached jar's sha1 matches the remote sidecar.
-function Test-JarCurrent([string]$Jar, [string]$Sha1Url) {
+# CI publishes a `.sha256` sidecar (shasum -a 256 output: digest, two
+# spaces, filename) next to every release asset; compare its digest with
+# the local file's.
+function Test-JarCurrent([string]$Jar, [string]$Sha256Url) {
   if (-not (Test-Path $Jar)) { return $false }
   try {
-    $remote = (Invoke-WebRequest -Uri $Sha1Url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop).Content
-    $remote = ($remote -replace '\s','').Substring(0, 40).ToLower()
+    $remote = (Invoke-WebRequest -Uri $Sha256Url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop).Content
+    if ($remote -is [byte[]]) { $remote = [System.Text.Encoding]::ASCII.GetString($remote) }
+    $remote = ($remote -split '\s')[0].ToLower()
+    if ($remote.Length -ne 64) { return $false }
   } catch { return $false }
-  $local = (Get-FileHash -Algorithm SHA1 -LiteralPath $Jar).Hash.ToLower()
+  $local = (Get-FileHash -Algorithm SHA256 -LiteralPath $Jar).Hash.ToLower()
   return ($local -eq $remote)
 }
 
@@ -260,55 +266,49 @@ if ($QodVersion -ceq 'BUILD') {
   Write-Host "QOD_VERSION=BUILD: local source build"
   $Jar = Invoke-Build
 } elseif ($QodVersion -ceq 'LOCAL') {
-  Write-Host "QOD_VERSION=LOCAL: newest distrib\ jar, no rebuild, no Central lookup"
+  Write-Host "QOD_VERSION=LOCAL: newest distrib\ jar, no rebuild, no network lookup"
   $Jar = Use-LocalJarOrBuild
 } else {
   New-Item -ItemType Directory -Force -Path $JarCacheDir | Out-Null
   $version = $QodVersion
   switch ($version) {
     'latest' {
-      $version = Get-MavenMetaValue "https://repo1.maven.org/maven2/$GroupPath/$Artifact/maven-metadata.xml" 'release'
+      $version = Get-LatestReleaseVersion
       if ($version) {
         Write-Host "resolved latest release: $version"
       } else {
-        $version = Get-LocalSnapshotVersion
-        if ($version -and $version.EndsWith('-SNAPSHOT')) {
-          Write-Host "no release on Maven Central; trying snapshot $version (from version.sbt)"
-        } else {
-          Write-Warning "no release on Maven Central and no snapshot detected; falling back to local jar / build."
-          $version = ''
-        }
+        Write-Warning "could not resolve the latest GitHub release; falling back to local jar / build."
+        $version = ''
       }
     }
     'latest-snapshot' {
-      $version = Get-MavenMetaValue "https://central.sonatype.com/repository/maven-snapshots/$GroupPath/$Artifact/maven-metadata.xml" 'latest'
-      if (-not $version) { $version = Get-LocalSnapshotVersion }
-      if ($version) { Write-Host "resolved latest snapshot: $version" }
-      else { Write-Warning "no snapshot found and no version.sbt detected; falling back to local jar / build." }
+      # No discovery needed: the rolling `snapshot` pre-release uses
+      # stable asset names (see .github/workflows/snapshot.yml).
+      $version = 'snapshot'
     }
   }
 
   if ([string]::IsNullOrEmpty($version)) {
     $Jar = Use-LocalJarOrBuild
-  } elseif ($version.EndsWith('-SNAPSHOT')) {
-    $baseUrl = "https://central.sonatype.com/repository/maven-snapshots/$GroupPath/$Artifact/$version"
-    $Jar     = Join-Path $JarCacheDir "$Artifact-$version.jar"
-    $jarUrl  = "$baseUrl/$Artifact-$version.jar"
-    if (Test-JarCurrent $Jar "$jarUrl.sha1") {
-      Write-Host "snapshot $version cached (sha1 matches Central); skipping download."
+  } elseif ($version -ceq 'snapshot') {
+    $baseUrl = "https://github.com/$GhRepo/releases/download/snapshot"
+    $Jar     = Join-Path $JarCacheDir "$Assembly-snapshot.jar"
+    $jarUrl  = "$baseUrl/$Assembly-snapshot.jar"
+    if (Test-JarCurrent $Jar "$jarUrl.sha256") {
+      Write-Host "snapshot cached (sha256 matches GitHub); skipping download."
     } else {
-      Write-Host "downloading snapshot $version..."
+      Write-Host "downloading latest snapshot from GitHub releases..."
       try { Invoke-WebRequest -Uri $jarUrl -OutFile $Jar -TimeoutSec 600 -ErrorAction Stop }
-      catch { Write-Warning "snapshot download failed; falling back to local jar / build."; $Jar = Use-LocalJarOrBuild }
+      catch { Write-Warning "snapshot download failed (has snapshot.yml published the rolling pre-release yet?); falling back to local jar / build."; $Jar = Use-LocalJarOrBuild }
     }
   } else {
-    $baseUrl = "https://repo1.maven.org/maven2/$GroupPath/$Artifact/$version"
-    $Jar     = Join-Path $JarCacheDir "$Artifact-$version.jar"
-    $jarUrl  = "$baseUrl/$Artifact-$version.jar"
-    if (Test-JarCurrent $Jar "$jarUrl.sha1") {
-      Write-Host "release $version cached (sha1 matches Central); skipping download."
+    $baseUrl = "https://github.com/$GhRepo/releases/download/v$version"
+    $Jar     = Join-Path $JarCacheDir "$Assembly-$version.jar"
+    $jarUrl  = "$baseUrl/$Assembly-$version.jar"
+    if (Test-JarCurrent $Jar "$jarUrl.sha256") {
+      Write-Host "release $version cached (sha256 matches GitHub); skipping download."
     } else {
-      Write-Host "downloading $version from Maven Central..."
+      Write-Host "downloading $version from GitHub releases..."
       try { Invoke-WebRequest -Uri $jarUrl -OutFile $Jar -TimeoutSec 600 -ErrorAction Stop }
       catch { Write-Warning "release download failed; falling back to local jar / build."; $Jar = Use-LocalJarOrBuild }
     }
