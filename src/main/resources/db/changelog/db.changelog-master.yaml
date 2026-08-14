@@ -63,3 +63,5 @@ databaseChangeLog:
       file: db/changelog/0028-user-must-change-password.yaml
   - include:
       file: db/changelog/0029-user-email.yaml
+  - include:
+      file: db/changelog/0030-user-lockout.yaml

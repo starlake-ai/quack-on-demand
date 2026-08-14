@@ -1,0 +1,19 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0030-user-lockout
+      author: qod
+      changes:
+        # Phase 2 account lockout. failed_attempts counts consecutive bad passwords;
+        # locked_at NULL means unlocked, a timestamp means locked since that instant.
+        # Only rows with a non-null email are ever counted or locked (Task 9 enforces
+        # this) -- an emailless account has no self-service reset path, so locking it
+        # out would strand the operator with no way back in except an admin reset.
+        - addColumn:
+            tableName: qodstate_user
+            columns:
+              - column:
+                  name: failed_attempts
+                  type: INT
+                  defaultValueNumeric: 0
+                  constraints: { nullable: false }
+              - column: { name: locked_at, type: TIMESTAMPTZ }

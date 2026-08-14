@@ -21,7 +21,7 @@ object BootPreflight extends LazyLogging:
     * first and sys.error'd after, so an unreachable auth database surfaces as the same clean
     * config-error framing as the sibling boot gates, not a raw JDBC exception.
     */
-  def probeAuthDatabase(dbCfg: DatabaseAuthConfig): Unit =
+  def probeAuthDatabase(dbCfg: DatabaseAuthConfig, lockoutEnabled: Boolean = false): Unit =
     val probeResult: Either[String, Unit] =
       try
         Class.forName("org.postgresql.Driver")
@@ -30,7 +30,10 @@ object BootPreflight extends LazyLogging:
           dbCfg.username,
           dbCfg.password
         )
-        try AuthQueryPreconditions.validate(probeConn, dbCfg)
+        try
+          AuthQueryPreconditions
+            .validate(probeConn, dbCfg)
+            .flatMap(_ => if lockoutEnabled then checkLockoutColumns(probeConn) else Right(()))
         finally probeConn.close()
       catch
         case e: Exception =>
@@ -41,6 +44,43 @@ object BootPreflight extends LazyLogging:
               "QOD_AUTH_DB_PASSWORD and that the auth database is reachable."
           )
     probeResult.left.foreach(msg => sys.error(msg))
+
+  /** When lockout is enabled, `qodstate_user` must carry `failed_attempts`, `locked_at`, and
+    * `email` -- the three columns Task 9's enforcement reads and writes. A custom
+    * QOD_AUTH_DB_JDBC_URL pointed at a database that never ran the quack-on-demand Liquibase
+    * changelog (or an operator-managed lookalike table) would otherwise fail at first login instead
+    * of at boot.
+    */
+  private val LockoutRequiredColumns = Set("failed_attempts", "locked_at", "email")
+
+  private def checkLockoutColumns(conn: java.sql.Connection): Either[String, Unit] =
+    val rs      = conn.getMetaData.getColumns(null, null, "qodstate_user", null)
+    val present = scala.collection.mutable.Set.empty[String]
+    try while rs.next() do present += rs.getString("COLUMN_NAME").toLowerCase
+    finally rs.close()
+    val missing = LockoutRequiredColumns.diff(present.toSet)
+    if missing.nonEmpty then
+      Left(
+        "auth.lockout.enabled is true but qodstate_user is missing column(s): " +
+          s"${missing.toList.sorted.mkString(", ")} -- run the quack-on-demand Liquibase " +
+          "changelog (0029-user-email / 0030-user-lockout) against the auth database, or " +
+          "point QOD_AUTH_DB_JDBC_URL at one that has."
+      )
+    else Right(())
+
+  /** Pure gate: lockout requires a reachable SMTP relay, otherwise a locked-out user has no
+    * self-service way back in (the whole reason Phase 1 built the forgot/reset-password flow). Kept
+    * side-effect-free so it is unit-testable without a live Postgres or SMTP relay; the call site
+    * sys.errors on Left, mirroring `probeAuthDatabase`.
+    */
+  def checkLockoutSmtp(lockoutEnabled: Boolean, smtpHost: Option[String]): Either[String, Unit] =
+    if lockoutEnabled && smtpHost.forall(_.isEmpty) then
+      Left(
+        "auth.lockout.enabled is true but no SMTP relay is configured -- a locked-out user would " +
+          "have no way back in. Set QOD_SMTP_HOST (and QOD_SMTP_PORT / QOD_SMTP_USER / " +
+          "QOD_SMTP_PASSWORD as needed) or set QOD_AUTH_LOCKOUT_ENABLED=false."
+      )
+    else Right(())
 
   /** Bootstrap admin users at startup so the DB auth backend has at least one credential. Re-hashed
     * on every boot: changing QOD_ADMIN_PASSWORD + restart rotates. All names in QOD_ADMIN_USERNAME

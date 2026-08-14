@@ -82,6 +82,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[FederationConfig]          = ProductHint[FederationConfig](camelMapping)
   given ProductHint[ManagementOidcConfig]      = ProductHint[ManagementOidcConfig](camelMapping)
   given ProductHint[ManagementAuthConfig]      = ProductHint[ManagementAuthConfig](camelMapping)
+  given ProductHint[LockoutConfig]             = ProductHint[LockoutConfig](camelMapping)
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
@@ -107,6 +108,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[FederationConfig]         = deriveReader[FederationConfig]
   given ConfigReader[ManagementOidcConfig]     = deriveReader[ManagementOidcConfig]
   given ConfigReader[ManagementAuthConfig]     = deriveReader[ManagementAuthConfig]
+  given ConfigReader[LockoutConfig]            = deriveReader[LockoutConfig]
   given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
@@ -195,6 +197,19 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
+    // Lockout enabled with no SMTP relay would strand a locked-out user with no way
+    // back in. Pure check, no DB/network required, so it runs before the Postgres
+    // preflight below.
+    BootPreflight
+      .checkLockoutSmtp(mgrCfg.auth.lockout.enabled, mgrCfg.smtp.host)
+      .left
+      .foreach(msg => sys.error(msg))
+    logger.info(
+      if mgrCfg.auth.lockout.enabled then
+        s"account lockout: enabled (locks after ${mgrCfg.auth.lockout.maxFailures} consecutive failed logins)"
+      else "account lockout: disabled"
+    )
+
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
     Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
@@ -207,9 +222,11 @@ object Main extends IOApp with LazyLogging:
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
-    // Probe the database-auth query shape now instead of at first login.
+    // Probe the database-auth query shape now instead of at first login. Also confirms
+    // failed_attempts/locked_at/email exist on qodstate_user when lockout is enabled.
     // Must run AFTER the Liquibase apply above.
-    if authCfg.database.enabled then BootPreflight.probeAuthDatabase(authCfg.database)
+    if authCfg.database.enabled then
+      BootPreflight.probeAuthDatabase(authCfg.database, mgrCfg.auth.lockout.enabled)
 
     // One shared Hikari pool against qodstate_user; closed in the shutdown hook.
     val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)

@@ -168,8 +168,31 @@ final case class ManagementAuthConfig(
     oidc: ManagementOidcConfig = ManagementOidcConfig()
 )
 
+/** Phase 2 account lockout. Off by default so existing deployments boot unchanged. Enabling it
+  * without a working SMTP relay would strand a locked-out user with no way back in -- Main's boot
+  * gate (`BootPreflight.checkLockoutSmtp`) refuses to start in that combination. Enforcement
+  * (counting failures, locking, checking the lock on login) is Task 9; this config only carries the
+  * knobs.
+  */
+final case class LockoutConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUTH_LOCKOUT_ENABLED",
+      description =
+        "Lock a database-backed user out after maxFailures consecutive bad passwords. Requires " +
+          "SMTP to be configured (quack-on-demand.smtp.host) so a locked-out user has a self-service " +
+          "reset path; Main refuses to boot otherwise."
+    )
+    enabled: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_AUTH_LOCKOUT_MAX_FAILURES",
+      description = "Consecutive failed logins before a database-backed user is locked out."
+    )
+    maxFailures: Int = 10
+)
+
 final case class ManagerAuthConfig(
-    management: ManagementAuthConfig
+    management: ManagementAuthConfig,
+    lockout: LockoutConfig = LockoutConfig()
 )
 
 /** Typed view of the `quack-on-demand.defaultMetastore` block. Every scalar maps to an env-var
