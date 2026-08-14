@@ -225,6 +225,7 @@ object ManifestExporter:
             role = u.role,
             enabled = u.enabled,
             mustChangePassword = u.mustChangePassword,
+            email = u.email,
             roles = userRoleNames,
             groups = userGroupNames,
             poolGrants = userPoolGrants
@@ -265,6 +266,7 @@ object ManifestExporter:
         role = u.role,
         enabled = u.enabled,
         mustChangePassword = u.mustChangePassword,
+        email = u.email,
         roles = Nil,
         groups = Nil,
         poolGrants = userPoolGrants

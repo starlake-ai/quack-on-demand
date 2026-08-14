@@ -509,7 +509,8 @@ object ManifestImporter:
                 passwordHash = hash,
                 role = mu.role,
                 enabled = mu.enabled,
-                mustChangePassword = mu.mustChangePassword
+                mustChangePassword = mu.mustChangePassword,
+                email = mu.email
               )
 
             // --- User roles

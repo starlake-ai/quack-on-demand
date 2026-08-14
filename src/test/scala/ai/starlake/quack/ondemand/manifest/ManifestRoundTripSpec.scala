@@ -491,6 +491,78 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
+  // Test 5c: email round-trips across export -> import, and a manifest
+  // without the field imports as None (backward compatible).
+  // ------------------------------------------------------------------
+
+  it should "round-trip a user's email across export then import" in {
+    val src = buildSrc()
+    // alice starts with email = None (buildSrc's default); re-upsert with
+    // the same hash and an email set.
+    src.upsertUserWithHash(
+      tenant = Some("tpch"),
+      username = "alice",
+      passwordHash = aliceHash,
+      role = "user",
+      email = Some("alice@x.io")
+    )
+    // Same for the superuser "admin" (tenant = None): the exporter's
+    // superuser branch (ManifestExporter.scala's `superusers` block) is a
+    // separate code path from the tenant-scoped branch, so it needs its own
+    // coverage rather than relying on alice's assertion alone.
+    src.upsertUserWithHash(
+      tenant = None,
+      username = "admin",
+      passwordHash = adminHash,
+      role = "admin",
+      email = Some("admin@x.io")
+    )
+
+    val manifest1     = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+    val aliceManifest = manifest1.users.find(_.username == "alice").get
+    aliceManifest.email shouldBe Some("alice@x.io")
+    val adminManifest = manifest1.users.find(_.username == "admin").get
+    adminManifest.email shouldBe Some("admin@x.io")
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    dst.findUser(Some(aliceTenantId), "alice").get.email shouldBe Some("alice@x.io")
+    dst.findUser(None, "admin").get.email shouldBe Some("admin@x.io")
+  }
+
+  it should "import a manifest without the email field as None" in {
+    val src = buildSrc()
+    src.upsertUserWithHash(
+      tenant = Some("tpch"),
+      username = "alice",
+      passwordHash = aliceHash,
+      role = "user",
+      email = Some("alice@x.io")
+    )
+    val manifest1 = ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname)
+
+    // Simulate an older manifest that predates the field: drop it from the
+    // YAML entirely and re-parse, rather than relying on the in-memory case
+    // class default (which would trivially pass without exercising decoding).
+    val yamlStr      = Yaml.pretty(manifest1.asJson)
+    val parsedJson   = parser.parse(yamlStr).toOption.get
+    val strippedJson = parsedJson.hcursor
+      .downField("users")
+      .withFocus(_.mapArray(_.map(_.mapObject(_.remove("email")))))
+      .top
+      .get
+    val stripped = strippedJson.as[ConfigManifest].toOption.get
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(stripped, dst) shouldBe Right(())
+
+    val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+    dst.findUser(Some(aliceTenantId), "alice").get.email shouldBe None
+  }
+
+  // ------------------------------------------------------------------
   // Test 6: a superuser pool grant to a pool in a DIFFERENT tenant
   // round-trips to the exact same (tenant, pool) target
   // ------------------------------------------------------------------

@@ -173,6 +173,9 @@ final case class ManifestUser(
     // Marks the stored credential as must-change-at-next-login; round-trips so a flagged
     // user stays flagged across export/import. Optional and backward compatible.
     mustChangePassword: Boolean = false,
+    // Contact address for account-lockout notices / password-reset links. Optional and
+    // backward compatible: a manifest without this field imports as None.
+    email: Option[String] = None,
     roles: List[String] = Nil,
     groups: List[String] = Nil,
     poolGrants: List[ManifestPoolGrant] = Nil
