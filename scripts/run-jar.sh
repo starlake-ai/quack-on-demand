@@ -3,18 +3,19 @@
 # Run the quack-on-demand manager from the assembly uber-jar.
 #
 # One knob, QOD_VERSION, picks where the jar comes from:
-#   unset / latest    - download the latest release from Maven Central
-#                       (ai.starlake:quack-on-demand_3), cache it under
-#                       $JAR_CACHE_DIR, run `java -jar`.
+#   unset / latest    - download the latest GitHub release asset
+#                       (github.com/starlake-ai/quack-on-demand/releases),
+#                       cache it under $JAR_CACHE_DIR, run `java -jar`.
 #   <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
-#   latest-snapshot   - download the newest Central snapshot.
+#   latest-snapshot   - download the rolling `snapshot` pre-release
+#                       (published by snapshot.yml on every push to main).
 #   BUILD             - rebuild libquackwire for the host platform (cmake)
 #                       into the vendored libquackwire/binaries/ tree, then
 #                       `sbt assembly` from this checkout. Non-host platforms
 #                       come from the git-tracked binaries already in the
 #                       repo. Uses the freshly-built jar in distrib/.
 #   LOCAL             - run the newest jar already in distrib/ without
-#                       rebuilding or consulting Maven Central (falls back
+#                       rebuilding or consulting GitHub releases (falls back
 #                       to a build when distrib/ is empty).
 #
 # Boot extras: Postgres reachability probe, idempotent CREATE DATABASE
@@ -30,7 +31,8 @@
 #   QOD_VERSION                   jar source (see modes above): a version to
 #                                 download, `latest` (default), `latest-snapshot`,
 #                                 `BUILD` (sbt assembly first), or `LOCAL`
-#                                 (newest distrib/ jar, no rebuild, no Central)
+#                                 (newest distrib/ jar, no rebuild, no GitHub
+#                                 releases lookup)
 #   JAR_CACHE_DIR                 download cache (default ~/.cache/quack-on-demand)
 #   JAVA_HOME                     uses `java` on PATH if unset
 #   JAVA_OPTS                     extra JVM flags (e.g. -Xmx2g)
@@ -112,8 +114,8 @@ cd "$REPO_DIR"
 export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/data}"
 
 NUKE="${NUKE:-0}"
-GROUP_PATH="ai/starlake"
-ARTIFACT="quack-on-demand_3"
+GH_REPO="starlake-ai/quack-on-demand"
+ASSEMBLY="quack-on-demand-assembly"
 JAR_CACHE_DIR="${JAR_CACHE_DIR:-$HOME/.cache/quack-on-demand}"
 
 # ---- DuckDB CLI + libduckdb self-install ---------------------------------
@@ -319,7 +321,7 @@ fi
 
 # ---- Resolve jar ----
 # QOD_VERSION=BUILD always builds locally; QOD_VERSION=LOCAL reuses the
-# newest distrib/ jar. Everything else tries Maven Central and falls back
+# newest distrib/ jar. Everything else tries GitHub releases and falls back
 # to `sbt assembly` if the artifact hasn't been published yet (pre-release
 # / dev), so a fresh clone of the source tree works with the documented
 # invocation regardless of release state.
@@ -380,7 +382,7 @@ sha256_of() {
 # the other platforms' binaries are already in the repo, refreshed by
 # scripts/refresh-quackwire-binaries.sh). The build.sbt resourceGenerator
 # picks all of it up on the following `sbt assembly` - no publishLocal, no
-# Central round-trip.
+# remote-repository round-trip.
 rebuild_libquackwire_locally() {
   # Skip if the C++ source tree is absent (e.g. distribution-style
   # checkout without native/quackwire/).
@@ -462,7 +464,7 @@ build_locally() {
   [[ -n "$JAR" ]] || { echo "ERROR: sbt assembly did not produce a jar in $DISTRIB_DIR" >&2; exit 1; }
 }
 
-# Used by QOD_VERSION=LOCAL and the Maven-Central-fallback path. Reuses an
+# Used by QOD_VERSION=LOCAL and the download-fallback path. Reuses an
 # existing assembly jar if one is sitting in distrib/, saving ~30-45s of
 # sbt assembly. `QOD_VERSION=BUILD` bypasses this and always rebuilds.
 use_local_jar_or_build() {
@@ -480,39 +482,23 @@ if [[ "$QOD_VERSION" == "BUILD" ]]; then
   echo "QOD_VERSION=BUILD: local source build"
   build_locally
 elif [[ "$QOD_VERSION" == "LOCAL" ]]; then
-  echo "QOD_VERSION=LOCAL: newest distrib/ jar, no rebuild, no Central lookup"
+  echo "QOD_VERSION=LOCAL: newest distrib/ jar, no rebuild, no network lookup"
   use_local_jar_or_build
 else
   mkdir -p "$JAR_CACHE_DIR"
 
-  # Resolve the latest published version. The trailing `|| true` keeps
-  # the function exit code at 0 even when curl 404s or grep finds nothing
-  # (otherwise `set -e` + `pipefail` would kill the script before the
-  # empty-result fallback can fire). `2>/dev/null` silences curl's error
-  # messages so the "no published release" path stays clean.
+  # Resolve the latest release tag WITHOUT the GitHub REST API: GitHub
+  # redirects releases/latest to releases/tag/<tag>, so one HEAD request
+  # yields the tag from the redirect target. No token, no 60-requests/hour
+  # unauthenticated rate limit. The trailing `|| true` keeps the exit code
+  # at 0 when curl fails or the pattern does not match (otherwise `set -e`
+  # + `pipefail` would kill the script before the fallback can fire).
   resolve_latest_release() {
-    { curl -fsSL "https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" 2>/dev/null \
-        | grep -oE '<release>[^<]+</release>' | sed 's/<[^>]*>//g' | head -1; } || true
-  }
-  resolve_latest_snapshot() {
-    # First try the standard maven-metadata.xml index. The snapshots repo at
-    # central.sonatype.com (Nexus 3) does not always materialise that index
-    # even when artifacts are present, so this can legitimately return empty
-    # and the caller must have a second strategy (see `local_snapshot_version`).
-    { curl -fsSL "https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/maven-metadata.xml" 2>/dev/null \
-        | grep -oE '<latest>[^<]+</latest>' | sed 's/<[^>]*>//g' | head -1; } || true
-  }
-  # Fall-back: read the SNAPSHOT version pinned in version.sbt. Used when
-  # the snapshots-repo metadata index is missing - we still know which
-  # snapshot the source tree corresponds to and can probe its jar URL.
-  local_snapshot_version() {
-    [[ -f "$REPO_DIR/version.sbt" ]] || return 0
-    awk -F'"' '/ThisBuild *\/ *version *:=/ { print $2 }' "$REPO_DIR/version.sbt" | head -1
+    { curl -fsI -o /dev/null -w '%{redirect_url}' --max-time 10 \
+        "https://github.com/${GH_REPO}/releases/latest" 2>/dev/null \
+        | grep -oE 'tag/v[^/[:space:]]+$' | sed 's|tag/v||'; } || true
   }
 
-  # Belt-and-suspenders: also wrap each substitution with `|| true`, so an
-  # accidental non-zero from the function never aborts the script under
-  # `set -e`. The empty-version fall-back branch below picks up the result.
   version="$QOD_VERSION"
   case "$version" in
     latest)
@@ -520,71 +506,56 @@ else
       if [[ -n "$version" ]]; then
         echo "resolved latest release: $version"
       else
-        # No release on Maven Central; try the project's own SNAPSHOT.
-        version="$(local_snapshot_version)"
-        if [[ -n "$version" && "$version" == *-SNAPSHOT ]]; then
-          echo "no release on Maven Central; trying snapshot $version (from version.sbt)"
-        else
-          echo "WARN: no release on Maven Central and no snapshot version detected; falling back to local jar / build." >&2
-          version=""
-        fi
+        echo "WARN: could not resolve the latest GitHub release; falling back to local jar / build." >&2
       fi
       ;;
     latest-snapshot)
-      version="$(resolve_latest_snapshot || true)"
-      if [[ -z "$version" ]]; then
-        # snapshot index missing -> fall back to version.sbt.
-        version="$(local_snapshot_version)"
-      fi
-      if [[ -n "$version" ]]; then
-        echo "resolved latest snapshot: $version"
-      else
-        echo "WARN: no snapshot found and no version.sbt detected; falling back to local jar / build." >&2
-      fi
+      # No discovery needed: the rolling `snapshot` pre-release uses stable
+      # asset names (see .github/workflows/snapshot.yml).
+      version="snapshot"
       ;;
   esac
 
-  # Decide whether the cached jar at $JAR is already current. Maven
-  # publishes a `.sha1` sidecar next to every jar; compare it against
-  # `shasum -a 1` of the local file. Snapshots use this every time
-  # (same coord can re-publish). Releases use it as belt-and-suspenders
-  # (Central is immutable, so a filename match is usually enough - but
-  # a partial download from a prior interrupted run would slip past
-  # `[[ -f "$JAR" ]]`).
+  # Decide whether the cached jar at $JAR is already current. CI publishes
+  # a `.sha256` sidecar (shasum -a 256 output: digest, two spaces, name)
+  # next to every release asset; compare its digest against the local
+  # file. Snapshots need this every time (the `snapshot` tag re-publishes
+  # on every push to main). Releases use it as belt-and-suspenders (a
+  # partial download from an interrupted run would slip past `[[ -f ]]`).
   jar_is_current() {
     local jar="$1" sha_url="$2"
     [[ -f "$jar" ]] || return 1
-    local remote_sha1 local_sha1
-    remote_sha1=$(curl -fsSL --max-time 10 "$sha_url" 2>/dev/null | tr -d '[:space:]' | head -c40)
-    [[ -n "$remote_sha1" ]] || return 1
-    local_sha1=$(shasum -a 1 "$jar" 2>/dev/null | awk '{print $1}')
-    [[ "$local_sha1" == "$remote_sha1" ]]
+    local remote_sha local_sha
+    remote_sha=$(curl -fsSL --max-time 10 "$sha_url" 2>/dev/null | awk '{print $1}' | head -c64)
+    [[ ${#remote_sha} -eq 64 ]] || return 1
+    local_sha=$(sha256_of "$jar")
+    [[ "$local_sha" == "$remote_sha" ]]
   }
 
   if [[ -z "$version" ]]; then
     # Resolution failed -> reuse local jar if present, else build.
     use_local_jar_or_build
-  elif [[ "$version" == *-SNAPSHOT ]]; then
-    base_url="https://central.sonatype.com/repository/maven-snapshots/${GROUP_PATH}/${ARTIFACT}/${version}"
-    JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
-    jar_url="$base_url/${ARTIFACT}-${version}.jar"
-    if jar_is_current "$JAR" "${jar_url}.sha1"; then
-      echo "snapshot $version cached (sha1 matches Central); skipping download."
+  elif [[ "$version" == "snapshot" ]]; then
+    base_url="https://github.com/${GH_REPO}/releases/download/snapshot"
+    JAR="$JAR_CACHE_DIR/${ASSEMBLY}-snapshot.jar"
+    jar_url="$base_url/${ASSEMBLY}-snapshot.jar"
+    if jar_is_current "$JAR" "${jar_url}.sha256"; then
+      echo "snapshot cached (sha256 matches GitHub); skipping download."
     else
-      echo "downloading snapshot $version..."
+      echo "downloading latest snapshot from GitHub releases..."
       if ! curl -fsSL "$jar_url" -o "$JAR" 2>/dev/null; then
-        echo "WARN: snapshot download failed; falling back to local jar / build." >&2
+        echo "WARN: snapshot download failed (has snapshot.yml published the rolling pre-release yet?); falling back to local jar / build." >&2
         use_local_jar_or_build
       fi
     fi
   else
-    base_url="https://repo1.maven.org/maven2/${GROUP_PATH}/${ARTIFACT}/${version}"
-    JAR="$JAR_CACHE_DIR/${ARTIFACT}-${version}.jar"
-    jar_url="$base_url/${ARTIFACT}-${version}.jar"
-    if jar_is_current "$JAR" "${jar_url}.sha1"; then
-      echo "release $version cached (sha1 matches Central); skipping download."
+    base_url="https://github.com/${GH_REPO}/releases/download/v${version}"
+    JAR="$JAR_CACHE_DIR/${ASSEMBLY}-${version}.jar"
+    jar_url="$base_url/${ASSEMBLY}-${version}.jar"
+    if jar_is_current "$JAR" "${jar_url}.sha256"; then
+      echo "release $version cached (sha256 matches GitHub); skipping download."
     else
-      echo "downloading $version from Maven Central..."
+      echo "downloading $version from GitHub releases..."
       if ! curl -fsSL "$jar_url" -o "$JAR" 2>/dev/null; then
         echo "WARN: release download failed; falling back to local jar / build." >&2
         use_local_jar_or_build
