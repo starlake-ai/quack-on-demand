@@ -77,6 +77,70 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "demote a non-admin session to the profile allowlist" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      // bob is a role=user principal in acme: a tenant-scoped login mints a
+      // profile-only session (no admin grant, empty manageableTenants).
+      val token = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+
+      // An admin endpoint answers 403 with a distinguishable code -- NOT the
+      // bare 401 an unknown token gets. The session is real; the grant isn't.
+      val denied = get(h.httpClient, s"${h.baseUrl}/api/pool/list", apiKey = Some(token))
+      withClue(s"GET /api/pool/list body: ${denied.body()}") {
+        denied.statusCode() shouldBe 403
+        errorCode(denied.body()) should contain("admin_required")
+      }
+
+      // Allowlisted self-service paths reach their handlers.
+      val whoami = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(token))
+      withClue(s"GET /api/auth/whoami body: ${whoami.body()}") {
+        whoami.statusCode() shouldBe 200
+      }
+      val logout = post(h.httpClient, s"${h.baseUrl}/api/auth/logout", "", apiKey = Some(token))
+      withClue(s"POST /api/auth/logout body: ${logout.body()}") {
+        logout.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
+  it should "match the profile allowlist exactly, never by prefix" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      val token = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      // A path that merely EXTENDS an allowlisted one must stay sealed. A
+      // prefix-based predicate would admit it (and answer 404 from the router)
+      // -- and would likewise leak every SPI module prefix mounted under /api.
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami/extra", apiKey = Some(token))
+      withClue(s"GET /api/auth/whoami/extra body: ${resp.body()}") {
+        resp.statusCode() shouldBe 403
+        errorCode(resp.body()) should contain("admin_required")
+      }
+    finally h.shutdown()
+  }
+
+  it should "keep admin sessions unrestricted" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val resp  = get(h.httpClient, s"${h.baseUrl}/api/pool/list", apiKey = Some(token))
+      withClue(s"GET /api/pool/list body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
   // ------------------------------------------------------------------
   // B. Public paths bypass the guard
   // ------------------------------------------------------------------
@@ -150,7 +214,13 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "return 403 with code admin_required for bob (non-admin user)" in {
+  // The former "403 admin_required for bob" case is gone: a tenant-scoped login
+  // by a role=user principal now mints a profile-only session (below). The
+  // login gate's remaining admin_required arms (system login, OIDC scopes, a
+  // tenant the principal holds no grant on) are unreachable over the wire for a
+  // db tenant user -- authentication itself fails first with invalid_credentials
+  // -- so they stay pinned at unit level in AuthHandlersSpec / AuthHandlersOidcSpec.
+  it should "mint a non-admin session for bob on his own tenant" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
     try
@@ -158,8 +228,11 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         s"""{"username":"${SecurityFixtures.BobUsername}","password":"${SecurityFixtures.BobPassword}","tenant":"${SecurityFixtures.TenantId}"}"""
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
       withClue(s"POST /api/auth/login body: ${resp.body()}") {
-        resp.statusCode() shouldBe 403
-        errorCode(resp.body()) should contain("admin_required")
+        resp.statusCode() shouldBe 200
+        val cursor = parse(resp.body()).toOption.get.hcursor
+        cursor.get[String]("token").toOption.getOrElse("") should not be empty
+        cursor.get[Boolean]("admin").toOption should contain(false)
+        cursor.get[Boolean]("superuser").toOption should contain(false)
       }
     finally h.shutdown()
   }

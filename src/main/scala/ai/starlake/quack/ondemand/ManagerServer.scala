@@ -89,6 +89,18 @@ final class ManagerServer(
       path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
       modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
+  /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
+    * `/api` answers `403 admin_required` for such sessions -- this predicate is the entire
+    * authorization story for regular users, so no other handler needs to know they exist.
+    *
+    * Exact equality, never a prefix test: SPI modules mount their own path prefixes under `/api`
+    * (and core keeps adding siblings under `/api/auth`), and a prefix match would silently hand
+    * every one of them to regular users.
+    */
+  private def isProfileApi(path: String): Boolean =
+    path == "/api/auth/whoami" || path == "/api/auth/logout" ||
+      path == "/api/profile/usage" || path == "/api/profile/statements"
+
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
     *     fires so operators know the manager is exposed; this is the documented dev default. To
@@ -96,6 +108,12 @@ final class ManagerServer(
     *     /api/auth/login).
     *   - **`cfg.apiKey` set**: every `/api/...` request must carry an `X-API-Key` header matching
     *     either the static key OR a known admin UI session token.
+    *
+    * Sessions come in two flavors since the regular-user profile feature: admin sessions (JWT
+    * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
+    * tenant-scoped login for a `role=user` principal, which are demoted here to the
+    * [[isProfileApi]] allowlist and get `403 admin_required` everywhere else. The 403 (rather than
+    * the anonymous 401) is what tells a client its session is valid but under-privileged.
     *
     * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
     * credential, and a user blocked by must_change_password has no session to present),
@@ -138,25 +156,44 @@ final class ManagerServer(
           case _                              => false
         val sessionAdmin = provided.exists(sessions.isAdmin)
         val openMode     = staticConfigured.isEmpty
+        // Resolved once: it decides both the non-admin demotion below and the
+        // per-request tenant scope check further down.
+        val tokenScope      = provided.flatMap(sessions.scopeOf)
+        val nonAdminSession = tokenScope.isDefined && !sessionAdmin
 
-        val admitted = staticMatch || sessionAdmin || openMode
+        val admitted =
+          staticMatch || sessionAdmin || openMode || (nonAdminSession && isProfileApi(path))
         if !admitted then
-          val source = req.remote.map(_.host.toString).getOrElse("unknown")
-          if auditLimiter.allow(source) then
-            audit.restAs(
-              "anonymous",
-              "system",
-              "auth",
-              AuditActions.AuthApiKeyFailure,
-              "denied",
-              detail = Map("path" -> path, "source" -> source)
+          if nonAdminSession then
+            // A real, valid session without an admin grant. Answer with the
+            // same stable code the login gate uses so clients treat both alike
+            // -- and not with the anonymous 401, which would send a browser
+            // back to the login screen it just came from.
+            OptionT.pure[IO](
+              Response[IO](Status.Forbidden)
+                .withEntity(
+                  """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
+                )
+                .withContentType(
+                  org.http4s.headers.`Content-Type`(org.http4s.MediaType.application.json)
+                )
             )
-          OptionT.pure[IO](Response[IO](Status.Unauthorized))
+          else
+            val source = req.remote.map(_.host.toString).getOrElse("unknown")
+            if auditLimiter.allow(source) then
+              audit.restAs(
+                "anonymous",
+                "system",
+                "auth",
+                AuditActions.AuthApiKeyFailure,
+                "denied",
+                detail = Map("path" -> path, "source" -> source)
+              )
+            OptionT.pure[IO](Response[IO](Status.Unauthorized))
         else
           // Per-request tenant scope check. Only applies when there is a known
           // session (not the static key, not open mode). Body-tenant endpoints
           // do their own check via TenantScopeCheck.reject.
-          val tokenScope  = provided.flatMap(sessions.scopeOf)
           val queryTenant = req.uri.query.params.get("tenant")
           val pathTenant  = TenantScopeGuard.extractTenant(path, queryTenant)
           (tokenScope, pathTenant) match
