@@ -172,6 +172,12 @@ export const api = {
   logout:  () => post<void>('/auth/logout'),
   changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
+  // Self-service profile surface for regular (non-admin) sessions. NO tenant
+  // param: the server scopes both routes off the verified session identity
+  // alone, and a stray `?tenant=` would trip the perimeter guard (403
+  // tenant_forbidden) before the handler even runs.
+  profileUsage:      (days?: number)  => get<UsageResponse>('/profile/usage' + (days ? `?days=${days}` : '')),
+  profileStatements: (limit?: number) => get<StatementHistoryResponse>('/profile/statements' + (limit ? `?limit=${limit}` : '')),
   // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
   authMode: (tenant?: string) =>
     get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),

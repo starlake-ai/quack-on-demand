@@ -549,9 +549,13 @@ export interface LoginRequest  { username: string; password: string; tenant?: st
 export interface LoginResponse {
   token: string;
   username: string;
-  // `role` deliberately omitted: every minted session is admin by construction
-  // (the server gates anything else with 403 admin_required), so the field was
-  // a tautology. The descriptive role shown in the UI is sourced from /whoami.
+  // `role` deliberately omitted: the descriptive role shown in the UI is
+  // sourced from /whoami. `admin` is the coarse gate: false for a
+  // tenant-scoped regular user, whose session may reach only the
+  // self-service /api/profile/* + /api/auth/* surface (every other /api
+  // call 403s admin_required). Absent on older servers -> treat as admin
+  // for back-compat.
+  admin?: boolean;
   tenant?: string | null;
   superuser?: boolean;
   manageableTenants?: string[];

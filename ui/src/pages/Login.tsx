@@ -8,6 +8,9 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [tenant,   setTenant]   = useState('');
   const [err, setErr]           = useState<string | null>(null);
+  // Informational (non-error) notice on the login form, e.g. after a
+  // password change whose automatic re-login attempt failed.
+  const [notice, setNotice]     = useState<string | null>(null);
   const [busy, setBusy]         = useState(false);
 
   // Forced password-change pivot: a login attempt against an account
@@ -21,6 +24,7 @@ export default function Login() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setErr(null);
+    setNotice(null);
     setBusy(true);
     try {
       await login(username, password, tenant);
@@ -58,12 +62,29 @@ export default function Login() {
         currentPassword: password,
         newPassword,
       });
+    } catch (e) {
+      // The change itself failed (wrong current password, policy rejection,
+      // etc.) - stay on the change form and show the error, unchanged from
+      // today's behavior.
+      setErr(errorMessage(e));
+      setBusy(false);
+      return;
+    }
+    try {
       await login(username, newPassword, tenant);
     } catch (e) {
-      setErr(errorMessage(e));
-    } finally {
+      // The password WAS changed; only the automatic re-login failed (e.g. a
+      // transient blip). Staying on the change form here would dead-end the
+      // user against a stale `password` field. Drop back to the login form
+      // instead, with an informational notice - not an error, since nothing
+      // about the change failed.
+      backToLogin();
+      setPassword('');
+      setNotice('Password changed - sign in with your new password.');
       setBusy(false);
+      return;
     }
+    setBusy(false);
   }
 
   if (phase === 'change') {
@@ -118,6 +139,7 @@ export default function Login() {
           <h1>Quack on Demand</h1>
           <p className="login-sub">Admin console</p>
         </div>
+        {notice && <div className="login-notice">{notice}</div>}
         {err && <div className="login-err">{err}</div>}
         <label>
           Username

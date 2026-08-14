@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import Login from './pages/Login';
 
@@ -68,7 +68,43 @@ import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
 import Users from './pages/Users';
 import Config from './pages/Config';
+import Profile from './pages/Profile';
 import NavDropdown from './components/NavDropdown';
+
+// Regular (non-admin) session: the server only lets this token reach
+// /api/auth/{whoami,logout} and /api/profile/{usage,statements}, so the
+// nav is stripped down to that self-service surface. No admin routes are
+// even mounted - a deep-link to e.g. /tenants would 403 admin_required on
+// first fetch anyway, so redirect to the one page that works instead.
+function ProfileShell() {
+  const { username, role, logout, authEnabled } = useAuth();
+  return (
+    <>
+      <nav className="app-nav">
+        <span className="brand">
+          <img src="/ui/mark-dark.svg" alt="" className="brand-mark" />
+          Quack on Demand
+        </span>
+        <NavLink to="/profile" className={({ isActive }) => isActive ? 'active' : ''}>Profile</NavLink>
+        <span className="spacer" />
+        {authEnabled && (
+          <>
+            <span className="user-pill">
+              {username} <span className="role">{role}</span>
+            </span>
+            <button className="secondary" onClick={() => { void logout(); }}>Sign out</button>
+          </>
+        )}
+      </nav>
+      <main>
+        <Routes>
+          <Route path="/profile" element={<Profile />} />
+          <Route path="*" element={<Navigate to="/profile" replace />} />
+        </Routes>
+      </main>
+    </>
+  );
+}
 
 function Shell() {
   const { username, role, tenant, logout, authEnabled, telemetryEnabled } = useAuth();
@@ -147,9 +183,13 @@ function SsoRedirect({ ssoLogin }: { ssoLogin: () => void }) {
 }
 
 function AuthGate() {
-  const { username, loading, identitySource, ssoLogin } = useAuth();
+  const { username, role, loading, identitySource, ssoLogin } = useAuth();
   if (loading) return <div className="loading">Loading session…</div>;
-  if (username) return <Shell />;
+  // Right after login() sets `username` there's a brief async gap before its
+  // follow-up whoami() call resolves `role` - without this guard that window
+  // would render ProfileShell (role still null) before flipping to Shell.
+  if (username && role == null) return <div className="loading">Loading session…</div>;
+  if (username) return role === 'admin' ? <Shell /> : <ProfileShell />;
   // OIDC mode: redirect to the IdP, or show an error card when the callback
   // returned with ?error=<code>.
   if (identitySource === 'oidc') {

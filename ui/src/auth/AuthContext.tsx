@@ -111,14 +111,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTenant(r.tenant ?? null);
     setSuperuser(r.superuser ?? false);
     setManageableTenants(r.manageableTenants ?? []);
-    // /login no longer returns `role` (every minted session is admin by
-    // construction); fetch the descriptive role from /whoami so the badge
-    // reflects what the auth backend recorded.
+    // /login returns the coarse `admin` gate (false for a tenant-scoped
+    // regular user) but not the descriptive role label; fetch that from
+    // /whoami so the badge reflects what the auth backend recorded. Fall
+    // back to the coarse gate if whoami is unreachable for some reason.
     try {
       const w = await api.whoami();
       setRole(w.role);
     } catch {
-      setRole('admin');
+      setRole(r.admin === false ? 'user' : 'admin');
     }
   }
 

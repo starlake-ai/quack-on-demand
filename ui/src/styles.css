@@ -417,6 +417,15 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
   margin-bottom: 1rem;
   font-size: .85rem;
 }
+.login-notice {
+  background: rgba(52,211,153,.1);
+  border: 1px solid rgba(52,211,153,.4);
+  color: var(--good);
+  padding: .5rem .75rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: .85rem;
+}
 .login-card button { width: 100%; margin-top: .5rem; }
 .login-hint { color: var(--text-mute); font-size: .75rem; text-align: center; margin: 1rem 0 0; }
 
