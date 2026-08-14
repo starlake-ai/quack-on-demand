@@ -59,6 +59,8 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.extract-version.outputs.version }}
     steps:
@@ -102,6 +104,34 @@ jobs:
           # edit, flagged for cleanup in a follow-up.
           QOD_WITH_WINDOWS_NATIVE: 'true'
         run: sbt -no-colors update clean publish
+
+      - name: Upload snapshot jar to the rolling GitHub pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.extract-version.outputs.version }}"
+          src="distrib/quack-on-demand-assembly-${version}.jar"
+          if [[ ! -f "$src" ]]; then
+            echo "::error::assembly jar missing at $src (publish should have built it)"
+            exit 1
+          fi
+          # Stable names so run-jar.sh/.ps1 need no version discovery for
+          # snapshots; the VERSION asset carries provenance instead. The
+          # `snapshot` tag is created once and left in place; assets are
+          # clobbered per push (no delete/recreate: that would 404 anyone
+          # downloading mid-publish).
+          cp "$src" quack-on-demand-assembly-snapshot.jar
+          shasum -a 256 quack-on-demand-assembly-snapshot.jar > quack-on-demand-assembly-snapshot.jar.sha256
+          printf '%s %s %s\n' "$version" "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > VERSION
+          if ! gh release view snapshot >/dev/null 2>&1; then
+            gh release create snapshot --prerelease --title "snapshot" \
+              --notes "Rolling snapshot of main. Assets are overwritten on every push to main; see the VERSION asset for the exact version, commit, and build time. Consumed by QOD_VERSION=latest-snapshot."
+          fi
+          gh release upload snapshot --clobber \
+            quack-on-demand-assembly-snapshot.jar \
+            quack-on-demand-assembly-snapshot.jar.sha256 \
+            VERSION
 
   # -----------------------------------------------------------------------
   # 2. Docker image build (per platform, push by digest)
