@@ -173,6 +173,11 @@ final class ManagerServer(
 
         val admitted =
           staticMatch || sessionAdmin || openMode || (nonAdminSession && isProfileApi(path))
+        // Strip control characters -- jsonb rejects NUL (0x00); cap length so
+        // detail stays bounded. An unsanitized `%00` in the path would make
+        // the insert throw and the attacker would erase their own trail.
+        // Shared by both denial arms below.
+        val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
         if !admitted then
           if nonAdminSession then
             // A real, valid session without an admin grant. Answer with the
@@ -185,10 +190,6 @@ final class ManagerServer(
             // leaves a trail.
             val caller   = provided.flatMap(sessions.get).map(_.profile)
             val username = caller.map(_.username).getOrElse("unknown")
-            // Strip control characters -- jsonb rejects NUL (0x00); cap length so
-            // detail stays bounded. An unsanitized `%00` in the path would make
-            // the insert throw and the attacker would erase their own trail.
-            val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
             // Rate-limited per principal, not per host: the recorder writes
             // synchronously on the request path, so one authenticated session
             // could otherwise insert an audit row per request at line rate.
@@ -222,7 +223,7 @@ final class ManagerServer(
                 "auth",
                 AuditActions.AuthApiKeyFailure,
                 "denied",
-                detail = Map("path" -> path, "source" -> source)
+                detail = Map("path" -> safePath, "source" -> source)
               )
             OptionT.pure[IO](Response[IO](Status.Unauthorized))
         else
