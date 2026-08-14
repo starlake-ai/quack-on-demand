@@ -6,8 +6,10 @@ import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.telemetry.AuditRateLimiter
 import at.favre.lib.crypto.bcrypt.BCrypt
 import cats.effect.unsafe.implicits.global
+import org.scalatest.concurrent.Eventually
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.time.{Seconds, Span}
 import sttp.model.StatusCode
 
 import java.time.Instant
@@ -26,7 +28,7 @@ import scala.util.Try
   *     hash, so a link stops working the instant the password changes (including via the reset
   *     itself).
   */
-class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
+class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers with Eventually:
 
   TestPostgres.dropStrayTestDatabases("qodprh")
 
@@ -63,6 +65,13 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
   private def extractToken(body: String): String =
     tokenRe.findFirstMatchIn(body).map(_.group(1)).getOrElse(fail(s"no token in body: $body"))
 
+  /** The mint + send now runs on a detached fiber, so the mailed body arrives asynchronously; await
+    * it before pulling the reset token out.
+    */
+  private def awaitToken(mail: CapturingMail): String =
+    eventually(timeout(Span(2, Seconds)))(mail.lastBody should not be empty)
+    extractToken(mail.lastBody.get)
+
   private def withFreshDb(test: (PostgresControlPlaneStore, UserStore) => Unit): Unit =
     TestPostgres.ensureReachable()
     val dbName = s"qodprh_test_${System.nanoTime()}"
@@ -89,8 +98,12 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
       handlers(users, mail)
         .forgotPassword(ForgotPasswordRequest(Some("t1"), "carol"))
         .unsafeRunSync() shouldBe Right(())
-      mail.lastTo shouldBe Some("carol@x.io")
-      mail.lastBody.get should include(s"$base/ui/reset-password?token=")
+      // The mint + send now runs on a detached fiber (timing-channel fix), so the
+      // send-assertion has to await it rather than read it synchronously.
+      eventually(timeout(Span(2, Seconds))) {
+        mail.lastTo shouldBe Some("carol@x.io")
+        mail.lastBody.get should include(s"$base/ui/reset-password?token=")
+      }
   }
 
   it should "200 but send nothing for a user without an email" in withFreshDb { (_, users) =>
@@ -117,10 +130,13 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
     users.upsertUser(Some("t1"), "carol", "pw", "user", email = Some(Some("carol@x.io")))
 
     h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync() shouldBe Right(())
-    mail.lastTo shouldBe Some("carol@x.io")
+    // Await the first (admitted) send's fiber before resetting the probe, so a
+    // late-arriving first send can't be mistaken for a second one below.
+    eventually(timeout(Span(2, Seconds)))(mail.lastTo shouldBe Some("carol@x.io"))
 
     mail.reset()
     h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync() shouldBe Right(())
+    // Over the limit: no fiber is started, so lastTo stays None synchronously.
     mail.lastTo shouldBe None // over the limit: still 200, but no second mail
   }
 
@@ -135,7 +151,7 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
       users.upsertUser(Some("t1"), "carol", "oldpw", "user", email = Some(Some("carol@x.io")))
 
       h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync()
-      val token = extractToken(mail.lastBody.get)
+      val token = awaitToken(mail)
 
       h.resetPassword(ResetPasswordRequest(token, "newpass")).unsafeRunSync() shouldBe Right(())
 
@@ -163,7 +179,7 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
     users.upsertUser(Some("t1"), "carol", "pw", "user", email = Some(Some("carol@x.io")))
 
     h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync()
-    val token = extractToken(mail.lastBody.get)
+    val token = awaitToken(mail)
 
     now = now.plusSeconds(120) // past the 1-minute ttl
     h.resetPassword(ResetPasswordRequest(token, "newpass")).unsafeRunSync() match
@@ -180,7 +196,7 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
       users.upsertUser(Some("t1"), "carol", "oldpw", "user", email = Some(Some("carol@x.io")))
 
       h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync()
-      val token = extractToken(mail.lastBody.get)
+      val token = awaitToken(mail)
 
       h.resetPassword(ResetPasswordRequest(token, "newpass")).unsafeRunSync() shouldBe Right(())
 
@@ -200,7 +216,7 @@ class PasswordResetHandlersSpec extends AnyFlatSpec with Matchers:
       users.upsertUser(Some("t1"), "carol", "oldpw", "user", email = Some(Some("carol@x.io")))
 
       h.forgotPassword(ForgotPasswordRequest(Some("t1"), "carol")).unsafeRunSync()
-      val token = extractToken(mail.lastBody.get)
+      val token = awaitToken(mail)
 
       // Empty and over-long both fail the policy gate BEFORE the token is checked,
       // so the token is never consumed by either attempt.

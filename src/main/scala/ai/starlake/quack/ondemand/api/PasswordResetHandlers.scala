@@ -49,32 +49,47 @@ final class PasswordResetHandlers(
     * missing row, an emailless row, and an over-limit account are all indistinguishable from the
     * caller's side. Mail failures are logged, never surfaced.
     */
-  def forgotPassword(req: ForgotPasswordRequest): Out[Unit] = IO.blocking {
-    val scopeTenant =
-      req.tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
-    users.findForReset(scopeTenant, req.username) match
-      // The rate-limit key is per (tenant, username) so it can't be turned into
-      // an email bomb; the guard is only evaluated for a row that actually has
-      // an email, so a missing / emailless account never consumes budget.
-      case Some((id, Some(email), hash))
-          if limiter.allow(s"reset:${scopeTenant.getOrElse("")}:${req.username}") =>
-        val token = tokens.mint(id, hash)
-        val body  =
-          s"""We received a request to reset your Quack on Demand password.
-             |
-             |Open this link to choose a new password (valid for 1 hour):
-             |${resetLink(token)}
-             |
-             |If you did not request this, you can safely ignore this email.""".stripMargin
-        mail.send(email, "Reset your password", body) match
-          case Left(reason) =>
-            // Never leak the recipient: a failed send is an operational signal, not
-            // an account oracle. The address is deliberately kept out of the log.
-            logger.warn(s"forgot-password: a reset email could not be sent: $reason")
-          case Right(()) => ()
-      case _ => ()
-    Right(())
-  }
+  def forgotPassword(req: ForgotPasswordRequest): Out[Unit] =
+    // Only the uniform DB lookup rides on the response; the mint + synchronous
+    // SMTP send is started as a detached fiber so the reply time no longer
+    // depends on whether an account exists, has an email, or the limiter admits.
+    // Every arm returns Right(()) after just the lookup -- the timing channel is
+    // closed as tightly as the byte-identical body.
+    val lookup: IO[Option[(String, String, String)]] = IO.blocking {
+      val scopeTenant =
+        req.tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
+      users.findForReset(scopeTenant, req.username) match
+        // The rate-limit key is per (tenant, username) so it can't be turned into
+        // an email bomb; the guard is only evaluated for a row that actually has
+        // an email, so a missing / emailless account never consumes budget.
+        case Some((id, Some(email), hash))
+            if limiter.allow(s"reset:${scopeTenant.getOrElse("")}:${req.username}") =>
+          Some((id, email, hash))
+        case _ => None
+    }
+
+    lookup.flatMap {
+      case Some((id, email, hash)) =>
+        val send = IO.blocking {
+          val token = tokens.mint(id, hash)
+          val body  =
+            s"""We received a request to reset your Quack on Demand password.
+               |
+               |Open this link to choose a new password (valid for 1 hour):
+               |${resetLink(token)}
+               |
+               |If you did not request this, you can safely ignore this email.""".stripMargin
+          mail.send(email, "Reset your password", body) match
+            case Left(reason) =>
+              // Never leak the recipient: a failed send is an operational signal, not
+              // an account oracle. The address is deliberately kept out of the log.
+              logger.warn(s"forgot-password: a reset email could not be sent: $reason")
+            case Right(()) => ()
+        }
+        send.start.void.as(Right(()))
+      case None =>
+        IO.pure(Right(()))
+    }
 
   /** Redeem a single-use link. Policy first (non-empty, at most 71 UTF-8 bytes -> 400
     * invalid_password), then the two-step token check; any token error OR a missing row -> 400
