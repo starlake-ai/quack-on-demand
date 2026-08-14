@@ -20,9 +20,12 @@ import java.time.temporal.ChronoUnit
   *     ring carry whichever shape the router held at execution time. This mirrors the allow-set
   *     that [[StatementHistoryHandlers]] builds for tenant admins.
   *
-  * A session with no tenant (superuser) matches on username alone, across tenants. A caller with no
-  * resolvable session -- the static API key, or open mode with no token at all -- has no identity
-  * to scope by and gets `400 no_session_identity` rather than an unfiltered window.
+  * The tenant scope is keyed off the session SCOPE, not `profile.tenant`: only a superuser matches
+  * on username alone across tenants. A non-superuser whose profile carries no tenant (an OIDC
+  * tenant-scoped login) falls back to its `manageableTenants`, and a non-superuser with neither
+  * gets an empty alias set that matches nothing -- fail closed, never an unfiltered window. A
+  * caller with no resolvable session -- the static API key, or open mode with no token at all --
+  * has no identity to scope by and gets `400 no_session_identity`.
   *
   * `tenantById` is a lookup seam (`PoolSupervisor.getTenantById` in production) and `now` is
   * injectable, so the whole contract is testable without Postgres.
@@ -46,7 +49,7 @@ final class ProfileHandlers(
       val d       = clamp(days, DefaultDays, MaxDays)
       val toTs    = now()
       val fromTs  = toTs.minus(d.toLong, ChronoUnit.DAYS)
-      val aliases = s.profile.tenant.map(tenantAliases)
+      val aliases = visibleTenantAliases(s)
       val result  = telemetry.queryUsage(
         UsageQuery(groupBy = "user", tenants = aliases, pool = None, from = fromTs, to = toTs)
       )
@@ -87,7 +90,7 @@ final class ProfileHandlers(
     IO.delay {
       sessionOf(token).map { s =>
         val n       = clamp(limit, DefaultLimit, MaxStatements)
-        val aliases = s.profile.tenant.map(tenantAliases)
+        val aliases = visibleTenantAliases(s)
         // Snapshot the FULL window and filter before capping, so a noisier
         // neighbour in the shared ring cannot consume the caller's budget.
         val mine = stmtHistory
@@ -122,6 +125,18 @@ final class ProfileHandlers(
             )
           )
         )
+
+  /** Tenant alias set the session may see, or None for an unrestricted (superuser) session.
+    * Fail-closed: a non-superuser with no resolvable tenant yields an empty set (matches nothing)
+    * rather than dropping the tenant predicate. Keyed on the session SCOPE, never on
+    * `profile.tenant` -- an OIDC tenant login mints `profile.tenant = None` with
+    * `superuser = false`, and must still be tenant-confined.
+    */
+  private def visibleTenantAliases(s: SessionTokenStore.Session): Option[Set[String]] =
+    if s.scope.superuser then None
+    else
+      val ids = s.profile.tenant.map(Set(_)).getOrElse(s.scope.manageableTenants)
+      Some(ids.flatMap(tenantAliases))
 
   /** Both shapes a recorded tenant may carry. An id that no longer resolves (tenant deleted after
     * the rows were written) degrades to the id alone rather than to "match anything".

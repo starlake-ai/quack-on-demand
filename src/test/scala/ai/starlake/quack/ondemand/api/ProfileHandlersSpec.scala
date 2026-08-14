@@ -89,7 +89,8 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
       tokens: SessionTokenStore,
       user: String,
       tenant: Option[String],
-      role: String = "user"
+      role: String = "user",
+      scope: SessionScope = SessionScope(superuser = false, manageableTenants = Set.empty)
   ): String =
     tokens.mintWithScope(
       AuthenticatedProfile(
@@ -100,7 +101,7 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
         authMethod = "db",
         tenant = tenant
       ),
-      SessionScope(superuser = false, manageableTenants = Set.empty)
+      scope
     )
 
   // ------------------------------------------------------------------
@@ -256,4 +257,132 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
     val (status, err) = out.swap.getOrElse(fail("expected an error"))
     status.code shouldBe 400
     err.error shouldBe "no_session_identity"
+  }
+
+  // ------------------------------------------------------------------
+  // tenant scope comes from the SESSION SCOPE, not profile.tenant
+  //
+  // An OIDC tenant-scoped login mints profile.tenant = None with
+  // superuser = false and manageableTenants = {A}. Keying the filter off
+  // profile.tenant would drop the tenant predicate entirely and expose every
+  // tenant's rows for a shared username.
+  // ------------------------------------------------------------------
+
+  private val carolEverywhere = List(
+    group("t1", "carol", 3L),
+    group("acme", "carol", 7L),
+    group("t2", "carol", 1000L),
+    group("globex", "carol", 2000L)
+  )
+
+  private def historyEverywhere(): StatementHistoryStore =
+    val history = new StatementHistoryStore()
+    history.record(record("carol", "t2", "t2 secret"))
+    history.record(record("carol", "globex", "t2 secret by display name"))
+    history.record(record("carol", "t1", "mine by id"))
+    history.record(record("carol", "acme", "mine by display name"))
+    history
+
+  "a tenant-scoped session with no profile tenant" should "still see only its own tenant's usage" in {
+    val tokens    = new SessionTokenStore()
+    val telemetry = new StubTelemetry(carolEverywhere)
+    val token     = sessionFor(
+      tokens,
+      "carol",
+      None,
+      scope = SessionScope(superuser = false, manageableTenants = Set("t1"))
+    )
+    val resp = handlers(tokens, telemetry = telemetry)
+      .usage(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a usage response"))
+
+    resp.groups.map(_.tenant).toSet shouldBe Set("t1", "acme")
+    resp.groups.map(_.statements).sorted shouldBe List(3L, 7L)
+    // the store-side hint is narrowed too, not just the in-memory filter
+    telemetry.lastQuery.flatMap(_.tenants) shouldBe Some(Set("t1", "acme"))
+  }
+
+  it should "still see only its own tenant's statements" in {
+    val tokens = new SessionTokenStore()
+    val token  = sessionFor(
+      tokens,
+      "carol",
+      None,
+      scope = SessionScope(superuser = false, manageableTenants = Set("t1"))
+    )
+    val resp = handlers(tokens, history = historyEverywhere())
+      .statements(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a statements response"))
+
+    resp.statements.map(_.sql).toSet shouldBe Set("mine by id", "mine by display name")
+  }
+
+  it should "see nothing at all when it has no resolvable tenant (fail closed)" in {
+    val tokens    = new SessionTokenStore()
+    val telemetry = new StubTelemetry(carolEverywhere)
+    val token     = sessionFor(tokens, "carol", None)
+
+    val usage = handlers(tokens, telemetry = telemetry)
+      .usage(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a usage response"))
+    usage.groups shouldBe empty
+    telemetry.lastQuery.flatMap(_.tenants) shouldBe Some(Set.empty[String])
+
+    val stmts = handlers(tokens, history = historyEverywhere())
+      .statements(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a statements response"))
+    stmts.statements shouldBe empty
+  }
+
+  "a superuser session" should "see the same username across every tenant" in {
+    val tokens    = new SessionTokenStore()
+    val telemetry = new StubTelemetry(carolEverywhere)
+    val token = sessionFor(tokens, "carol", None, role = "admin", scope = SessionScope.Superuser)
+
+    val usage = handlers(tokens, telemetry = telemetry)
+      .usage(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a usage response"))
+    usage.groups.map(_.tenant).toSet shouldBe Set("t1", "acme", "t2", "globex")
+    telemetry.lastQuery.flatMap(_.tenants) shouldBe None
+
+    val stmts = handlers(tokens, history = historyEverywhere())
+      .statements(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a statements response"))
+    stmts.statements.map(_.sql).toSet shouldBe Set(
+      "t2 secret",
+      "t2 secret by display name",
+      "mine by id",
+      "mine by display name"
+    )
+  }
+
+  "a non-superuser session with an explicit profile tenant" should "see only that tenant" in {
+    val tokens    = new SessionTokenStore()
+    val telemetry = new StubTelemetry(carolEverywhere)
+    // manageableTenants deliberately names the OTHER tenant: profile.tenant wins
+    // for a scoped session, and it must not widen to the manageable set.
+    val token = sessionFor(
+      tokens,
+      "carol",
+      Some("t1"),
+      scope = SessionScope(superuser = false, manageableTenants = Set("t2"))
+    )
+
+    val usage = handlers(tokens, telemetry = telemetry)
+      .usage(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a usage response"))
+    usage.groups.map(_.tenant).toSet shouldBe Set("t1", "acme")
+
+    val stmts = handlers(tokens, history = historyEverywhere())
+      .statements(None, Some(token))
+      .unsafeRunSync()
+      .getOrElse(fail("expected a statements response"))
+    stmts.statements.map(_.sql).toSet shouldBe Set("mine by id", "mine by display name")
   }
