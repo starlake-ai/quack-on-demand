@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.6.3
+
+- **Security (please upgrade): unauthenticated control-plane bypass fixed.** The REST
+  API-key guard matched the raw percent-encoded request path while the router matched the
+  decoded one, so a spelling like `GET /%61pi/tenant/list` or `GET ////api/tenant/list`
+  (four or more leading slashes) skipped the guard entirely and still reached control-plane
+  read AND write endpoints without a key or session. All 0.5.x and 0.6.0-0.6.2 releases
+  carry this hole when `QOD_API_KEY` is set. The guard now derives its path from the same
+  decoded segments the router uses (leading empties dropped), with regression tests pinning
+  both spellings. Deployments exposed beyond localhost should upgrade.
+- **Forced password change at next login.** A super or tenant admin can flag a user's
+  password as temporary at create or reset time (`mustChangePassword` on `user/create` and
+  `user/update`, `--must-change-password` in the CLI, a checkbox in the admin UI). Until the
+  user changes it, both the REST login (`401 password_change_required`) and the FlightSQL
+  handshake refuse it. A new public pre-session `POST /api/auth/change-password` (also
+  `qod auth change-password`) lets the user set a real password: current password is the
+  credential, the new one must differ. The database auth queries now MUST project a fourth
+  `must_change_password` column - a shorter custom `QOD_AUTH_DB_SYSTEM_QUERY` /
+  `QOD_AUTH_DB_TENANT_QUERY` fails at boot with an actionable error.
+- **Regular users can sign in to a profile page.** A tenant-scoped `role=user` login now
+  mints a profile-only session instead of being refused: the admin console stays admin-only,
+  but regular users land on a Profile page where they can change their own password and view
+  their own usage and recent statements (`qod profile usage` / `qod profile statements`).
+  Non-admin sessions are demoted at the API guard to an exact allowlist (whoami, logout,
+  the two profile endpoints); every other endpoint answers `403 admin_required`, and those
+  denials are now audited. The system (tenant-less) login and OIDC SSO remain admin-only.
+
 ## 0.6.2
 
 - **DuckDB driver + node engine alignment.** duckdb_jdbc bumped 1.5.5.0 to 1.5.5.1
