@@ -136,15 +136,17 @@ final class ManagerServer(
     else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
 
     Kleisli { req =>
-      // DECODED path, never `req.uri.path.toString` (which re-renders segments
-      // percent-ENCODED). Tapir routes on decoded segments, so an encoded form
-      // like `/%61pi/tenant/list` would skip this guard entirely and still match
-      // the tenant-list route -- a full auth bypass, verified before the fix.
-      // Decoding here makes the guard and the router agree; a segment hiding a
-      // `%2F` merely lands MORE paths inside the guarded namespace (fails closed).
-      val path =
-        val decoded = req.uri.path.segments.map(_.decoded()).mkString("/", "/", "")
-        if req.uri.path.endsWithSlash then decoded + "/" else decoded
+      // Router parity: tapir segments the path as
+      // renderString.dropWhile(_ == '/').split("/").map(decode), i.e. every
+      // leading slash is dropped and each segment percent-decoded. The guard
+      // MUST see the same shape or an encoded/slash-prefixed spelling of an
+      // /api path routes while skipping the guard (proven: ////api/tenant/list
+      // and /%61pi/tenant/list both bypassed earlier derivations).
+      val path = {
+        val segs = req.uri.path.segments.map(_.decoded()).dropWhile(_.isEmpty)
+        val raw  = segs.mkString("/", "/", "")
+        if req.uri.path.endsWithSlash then raw + "/" else raw
+      }
       if !path.startsWith("/api/") && path != "/api" then routes(req)
       else if isPublicApi(path) then routes(req)
       else
@@ -180,19 +182,28 @@ final class ManagerServer(
             //
             // Audited under the caller's REAL identity (recoverable from the
             // session), so a low-privilege insider sweeping admin endpoints
-            // leaves a trail. Not behind `auditLimiter`: that limiter exists to
-            // cap unauthenticated flood, and this caller is authenticated --
-            // dropping their rows is exactly the wrong trade here.
-            val caller = provided.flatMap(sessions.get).map(_.profile)
-            audit.restAs(
-              caller.map(_.username).getOrElse("unknown"),
-              "tenant",
-              "auth",
-              AuditActions.AuthAdminRequired,
-              "denied",
-              tenant = caller.flatMap(_.tenant),
-              detail = Map("path" -> path)
-            )
+            // leaves a trail.
+            val caller   = provided.flatMap(sessions.get).map(_.profile)
+            val username = caller.map(_.username).getOrElse("unknown")
+            // Strip control characters -- jsonb rejects NUL (0x00); cap length so
+            // detail stays bounded. An unsanitized `%00` in the path would make
+            // the insert throw and the attacker would erase their own trail.
+            val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
+            // Rate-limited per principal, not per host: the recorder writes
+            // synchronously on the request path, so one authenticated session
+            // could otherwise insert an audit row per request at line rate.
+            // Collapsing a flood to one row per interval is deliberate -- the
+            // first row is the signal; the rest are the attacker's volume.
+            if auditLimiter.allow("session:" + username) then
+              audit.restAs(
+                username,
+                "tenant",
+                "auth",
+                AuditActions.AuthAdminRequired,
+                "denied",
+                tenant = caller.flatMap(_.tenant),
+                detail = Map("path" -> safePath)
+              )
             OptionT.pure[IO](
               Response[IO](Status.Forbidden)
                 .withEntity(

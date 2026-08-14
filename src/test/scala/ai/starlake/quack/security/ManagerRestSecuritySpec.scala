@@ -95,6 +95,27 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "not admit a slash-prefixed /api path with no key" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      // Tapir drops EVERY leading slash before segmenting, so `////api/...`
+      // routes to the tenant-list endpoint. A guard that keeps the leading
+      // empty segment sees `//api/tenant/list`, decides it is outside the
+      // guarded namespace and waves the request through unauthenticated --
+      // the exact bypass this pins shut. Two spellings so a fix that only
+      // normalizes one extra slash cannot pass.
+      val four = get(h.httpClient, s"${h.baseUrl}////api/tenant/list")
+      withClue(s"GET ////api/tenant/list status=${four.statusCode()} body: ${four.body()}") {
+        (four.statusCode() >= 200 && four.statusCode() < 300) shouldBe false
+      }
+      val five = get(h.httpClient, s"${h.baseUrl}/////api/pool/list")
+      withClue(s"GET /////api/pool/list status=${five.statusCode()} body: ${five.body()}") {
+        (five.statusCode() >= 200 && five.statusCode() < 300) shouldBe false
+      }
+    finally h.shutdown()
+  }
+
   it should "demote a non-admin session to the profile allowlist" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))

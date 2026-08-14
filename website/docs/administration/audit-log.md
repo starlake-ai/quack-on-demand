@@ -31,6 +31,7 @@ The `action` field is a dotted string. The full set of values emitted by the cur
 | `auth.logout` | Session logout |
 | `auth.revoke` | Explicit session revocation |
 | `auth.api-key.failure` | Rejected `X-API-Key` header; rate-limited to one event per source IP per minute |
+| `auth.admin.required` | Valid non-admin session denied on an admin endpoint; rate-limited to one event per user per minute |
 
 **Control-plane: tenants and databases**
 
