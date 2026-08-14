@@ -3,7 +3,7 @@ id: admin-ui
 title: Admin UI guide
 ---
 
-The manager serves a React admin console at `http://<host>:20900/ui/`. It is an operator console: it manages tenants, databases, pools, users, and access control, and surfaces live node and statement telemetry. It is not an end-user query tool; clients run SQL over the FlightSQL edge, not through this UI.
+The manager serves a React console at `http://<host>:20900/ui/`. Superusers and tenant admins get the full operator console: it manages tenants, databases, pools, users, and access control, and surfaces live node and statement telemetry. Regular (`role=user`) tenant users can log in too, but land on a self-service [Profile page](#profile-page-regular-users) instead of the operator console. Neither view is an end-user query tool; clients run SQL over the FlightSQL edge, not through this UI.
 
 Every screen here is backed by a REST endpoint documented in the [REST API reference](pathname:///api/); the UI is a thin front end over the same `/api/*` calls shown on the operator pages. Where a screen maps to a task already covered in prose, this guide links there rather than repeating it.
 
@@ -13,8 +13,8 @@ The screenshots below are from a local demo deployment with the bootstrap TPC-H 
 
 The login screen takes a username, password, and an optional **Tenant ID**. The tenant field is the realm signal:
 
-- **Leave it blank** to log in as a system superuser. Credentials are validated against the manager's global auth providers (`quack-flightsql.auth.*`) and the matching `qodstate_user` row must have `tenant IS NULL`.
-- **Fill it in** (e.g. `t-02d0e86e`) to log in as a tenant user. Credentials are validated against THAT tenant's configured provider, and the matching `qodstate_user` row must have `tenant = <id>`.
+- **Leave it blank** to log in as a system superuser. Credentials are validated against the manager's global auth providers (`quack-flightsql.auth.*`) and the matching `qodstate_user` row must have `tenant IS NULL`. This path (and the OIDC single sign-on login) is admin-only.
+- **Fill it in** (e.g. `t-02d0e86e`) to log in as a tenant user. Credentials are validated against THAT tenant's configured provider, and the matching `qodstate_user` row must have `tenant = <id>`. A tenant admin lands on the operator console scoped to that tenant; a regular (`role=user`) principal with a database-backed password login lands on the [Profile page](#profile-page-regular-users) instead.
 
 There is no separate superuser checkbox; the field's presence is the only signal. Pre-existing scripts that called `/api/auth/login` with a `tenant` value for the bootstrap admin need to drop the field (or send an empty string) after upgrading.
 
@@ -23,6 +23,12 @@ When the server has no auth providers configured (the no-auth dev mode), the log
 ![The Quack on Demand admin login screen](/img/ui/login.png)
 
 For how credentials are validated and how to wire an external provider, see [Authentication](/operating/authentication) and [Authentication providers](/operating/auth-providers).
+
+## Profile page (regular users)
+
+A tenant-scoped `role=user` principal signing in with a database-backed password login (not OIDC, not the blank/superuser login) lands on a stripped-down `/profile` page instead of the operator console: no Nodes, Tenants, Users, or Audit nav items are even mounted. The page lets them change their own password (username, tenant, and role are read-only) and view their own access statistics - their usage and recent statements, the same data the [Usage](#usage) and [Statements](#statements) pages show an admin, scoped to just that user.
+
+The server enforces this independently of the UI: such a session's REST calls are demoted to a fixed allowlist (`whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements`) and answer `403 admin_required` on everything else, so a deep link to an operator page 403s on its first fetch rather than leaking data. The `qod profile usage` / `qod profile statements` CLI commands hit the same two endpoints.
 
 ## Navigation
 

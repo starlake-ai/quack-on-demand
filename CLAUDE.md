@@ -148,6 +148,16 @@ is the credential; new must differ; clears the flag). The auth queries MUST proj
 `(password_hash, role, enabled, must_change_password)` - a shorter custom
 `QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails boot and every login.
 
+**Regular-user profile sessions.** The manager UI is not admin-exclusive: a tenant-scoped
+`role=user` principal can log in through their tenant (the blank/system login and OIDC SSO
+stay admin-only). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
+principal holding a grant on `t`, not just an admin, and mints a non-admin, profile-only
+session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions to
+a fixed allowlist (`isProfileApi`: `/api/auth/whoami`, `/api/auth/logout`,
+`/api/profile/usage`, `/api/profile/statements`) and answers `403 admin_required` on
+everything else; the UI mounts only the `/profile` route (own password change; own
+usage/statements) for them.
+
 ### K8s backend - per-pod and per-pool Secrets
 
 `KubernetesQuackBackend` creates one Pod + one Service per node, plus two Secrets:

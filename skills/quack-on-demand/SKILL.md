@@ -93,6 +93,27 @@ curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
 
 If `QOD_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic - fine for local dev, never for prod.
 
+### Regular-user login (profile only)
+
+The admin UI isn't admin-exclusive: a tenant-scoped `role=user` principal can log in too, with the same `/api/auth/login` call plus a `tenant` (the blank/system login and OIDC SSO still require an admin grant). The resulting session is demoted to a fixed allowlist - `whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements` - and gets `403 admin_required` on everything else; the UI lands such a session straight on `/profile` (change own password; view own usage + recent statements).
+
+```bash
+# Log in as a regular tenant user (demo credentials from the bootstrap manifest)
+TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"demo-alice","tenant":"acme"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# Own usage and recent statements - the only data endpoints this session can reach
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/profile/usage?days=7'
+curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/profile/statements?limit=20'
+
+# CLI equivalents
+qod auth login --username alice --tenant acme
+qod profile usage --days 7
+qod profile statements --limit 20
+```
+
 ## Tenant + pool management
 
 ```bash
