@@ -24,7 +24,9 @@ def login(
     ctx: typer.Context,
     url: str = typer.Option(None, "--url", help="Manager URL; defaults to the profile value."),
     username: str = typer.Option("admin", "--username"),
-    tenant: str = typer.Option(None, "--tenant", help="Tenant for tenant-scoped admins."),
+    tenant: str = typer.Option(
+        None, "--tenant", help="Tenant for tenant-scoped logins (admins and regular users)."
+    ),
     pool: str = typer.Option(None, "--pool", help="Default pool for qod sql; stored in the profile."),
 ):
     """Mint a session, store it and the edge settings in the active profile."""

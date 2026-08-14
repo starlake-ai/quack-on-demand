@@ -438,7 +438,8 @@ final class AuthHandlers(
     *   - `System`: no tenant was specified; any admin (superuser or tenant-admin) is accepted.
     *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser, admin of
     *     that tenant, or a regular user holding a grant on it (which mints a non-admin,
-    *     profile-only session -- `LoginResponse.admin = false`).
+    *     profile-only session -- `LoginResponse.admin = false`) -- DB-mode logins additionally
+    *     admit any user with a grant on that tenant as a profile-only session.
     *
     * The grant computation and the not_provisioned / admin_required gates are shared by both entry
     * points, so they cannot drift.

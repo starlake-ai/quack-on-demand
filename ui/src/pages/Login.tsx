@@ -137,7 +137,7 @@ export default function Login() {
         <div className="login-brand">
           <img src="/ui/mark-dark.svg" alt="" className="login-logo" />
           <h1>Quack on Demand</h1>
-          <p className="login-sub">Admin console</p>
+          <p className="login-sub">Sign in</p>
         </div>
         {notice && <div className="login-notice">{notice}</div>}
         {err && <div className="login-err">{err}</div>}
@@ -172,9 +172,9 @@ export default function Login() {
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
         <p className="login-hint">
-          Superusers leave Tenant blank. Tenant admins enter their tenant
-          name or id (both shown on the Tenants page, e.g. <code>acme</code> or{' '}
-          <code>t-02d0e86e</code>).
+          Superusers leave Tenant blank. Tenant admins and other tenant users
+          enter their tenant name or id (both shown on the Tenants page, e.g.{' '}
+          <code>acme</code> or <code>t-02d0e86e</code>).
         </p>
       </form>
     </div>
