@@ -30,7 +30,8 @@ import sttp.model.headers.{Cookie, CookieValueWithMeta}
   *   - `SystemStrict`: superuser ONLY. Used by the OIDC bare `/ui/` (system IdP) login. A
   *     non-superuser tenant-admin must sign in through their tenant scope instead.
   *   - `Tenant(id)`: the caller presented a tenant. The principal must be superuser OR an admin of
-  *     that specific tenant.
+  *     that specific tenant, or, for DB-mode logins only, any user with a grant on that tenant
+  *     (profile-only session).
   */
 enum RequiredScope:
   case System
@@ -480,7 +481,12 @@ final class AuthHandlers(
       case RequiredScope.System       => isAdminPrincipal
       case RequiredScope.SystemStrict => superuser
       case RequiredScope.Tenant(t)    =>
-        superuser || manageableTenants.contains(t) || selfTenants.contains(t)
+        superuser || manageableTenants.contains(t) ||
+        // Profile-only sessions are a DB-login feature: in Db mode the single
+        // grant IS the authenticated (tenant, role) row, so role is qodstate's
+        // "user", never an IdP claim. The OIDC callback keeps its admin-only
+        // gate -- its profile.role is the IdP claim and must not reach a mint.
+        (mode == ManagementAuthMode.Db && selfTenants.contains(t))
 
     val realm = if superuser then "system" else "tenant"
     if grants.isEmpty then
@@ -548,7 +554,12 @@ final class AuthHandlers(
         )
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
-      val token        = tokens.mintWithScope(profile, sessionScope)
+      // A profile-only session must never carry role=admin in its JWT --
+      // isAdmin() and the guard demotion key off that claim.
+      val mintProfile =
+        if isAdminPrincipal || !profile.role.equalsIgnoreCase("admin") then profile
+        else profile.copy(role = "user")
+      val token = tokens.mintWithScope(mintProfile, sessionScope)
       audit.restAs(
         profile.username,
         realm,
@@ -556,7 +567,7 @@ final class AuthHandlers(
         AuditActions.AuthLogin,
         "ok",
         tenant = profile.tenant,
-        detail = Map("authMethod" -> profile.authMethod)
+        detail = Map("authMethod" -> profile.authMethod, "admin" -> isAdminPrincipal.toString)
       )
       // profile.tenant already mirrors the requested AuthScope.tenantId (see
       // DatabaseAuthenticator/OIDC providers): None for a system/superuser scope,

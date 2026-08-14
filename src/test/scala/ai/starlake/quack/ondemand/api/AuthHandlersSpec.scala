@@ -523,7 +523,12 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         claims = Map("email" -> "alice@corp"),
         authMethod = "keycloak-ropc",
         tenant = None
-      )
+      ),
+      // Every pre-existing caller logs in with tenant=None (System scope), which
+      // never consults this -- modeFor(None) short-circuits to systemMode. A
+      // tenant-scoped login needs a real lookup to resolve to Oidc mode instead
+      // of 400 tenant_unknown.
+      loadTenant: String => Option[Tenant] = _ => None
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -544,7 +549,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = fakeDirectory,
-      authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Oidc)
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc)
     )
 
   "login (oidc)" should "treat tenant=NULL admin row as superuser, ignoring JWT role" in {
@@ -621,4 +626,33 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.Forbidden
     err.error shouldBe "not_provisioned"
+  }
+
+  it should "keep the OIDC path admin-only for a tenant-scoped grant (no profile-only minting)" in {
+    // Pinning test for the selfTenants leak fix: a `role=user` grant on t-a would
+    // mint a profile-only session under Db mode, but OIDC's profile.role is an
+    // IdP claim with zero qodstate authority -- it must stay admin_required here.
+    val profile = AuthenticatedProfile(
+      username = "alice@corp",
+      role = "admin", // IdP claim -- decoupled from qodstate authority
+      groups = Set.empty,
+      claims = Map("email" -> "alice@corp"),
+      authMethod = "keycloak-ropc",
+      tenant = None
+    )
+    val oidcTenant = Tenant(
+      id = "t-a",
+      authProvider = "keycloak",
+      authConfig =
+        Map("issuerUrl" -> "https://idp.example/t-a", "clientId" -> "c", "clientSecretRef" -> "s")
+    )
+    val h = oidcHandlers(
+      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "user"))),
+      profile = profile,
+      loadTenant = { case "t-a" => Some(oidcTenant); case _ => None }
+    )
+    val out         = h.login(LoginRequest("alice@corp", "p", tenant = Some("t-a"))).unsafeRunSync()
+    val (code, err) = out.swap.toOption.get
+    code shouldBe StatusCode.Forbidden
+    err.error shouldBe "admin_required"
   }
