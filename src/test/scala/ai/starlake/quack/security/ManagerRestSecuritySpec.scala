@@ -251,6 +251,37 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "allow POST /api/auth/forgot-password without X-API-Key (static key mode)" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      // Anti-enumeration: a nonexistent account still answers 200 (the row lookup
+      // misses and nothing is mailed). A 200 -- not the guard's bare 401 -- proves
+      // the isPublicApi arm let the request reach the handler.
+      val body = """{"username":"ghost-nobody"}"""
+      val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/forgot-password", body)
+      withClue(s"POST /api/auth/forgot-password body: ${resp.body()}") {
+        resp.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
+  it should "allow POST /api/auth/reset-password without X-API-Key (static key mode)" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      // A garbage token reaches the handler and comes back 400 invalid_token --
+      // a JSON error body, unlike apiKeyGuard's bare bodyless 401. Asserting that
+      // handler-level shape proves the guard's isPublicApi arm actually admitted it.
+      val body = """{"token":"garbage.not.a.jwt","newPassword":"whatever"}"""
+      val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/reset-password", body)
+      withClue(s"POST /api/auth/reset-password body: ${resp.body()}") {
+        resp.statusCode() shouldBe 400
+        errorCode(resp.body()) should contain("invalid_token")
+      }
+    finally h.shutdown()
+  }
+
   it should "allow GET /api/config/client without X-API-Key (static key mode)" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))

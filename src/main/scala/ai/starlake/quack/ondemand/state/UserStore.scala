@@ -174,6 +174,70 @@ final class UserStore(
           Left(UserStore.ChangePasswordError.InvalidCredentials)
     }
 
+  /** Resolve a `(tenant, username)` row for the password-reset flow: its id, its email (may be
+    * absent), and its current bcrypt hash. `None` when no such row exists. Callers must NOT surface
+    * the presence/absence of the row -- the public `forgot-password` handler answers 200 either
+    * way.
+    */
+  def findForReset(
+      tenant: Option[String],
+      username: String
+  ): Option[(String, Option[String], String)] =
+    withConn { c =>
+      val selectSql = tenant match
+        case Some(_) =>
+          "SELECT id, email, password_hash FROM qodstate_user WHERE tenant = ? AND username = ?"
+        case None =>
+          "SELECT id, email, password_hash FROM qodstate_user WHERE tenant IS NULL AND username = ?"
+      val ps = c.prepareStatement(selectSql)
+      try
+        tenant match
+          case Some(t) =>
+            ps.setString(1, t)
+            ps.setString(2, username)
+          case None =>
+            ps.setString(1, username)
+        val rs = ps.executeQuery()
+        try
+          if rs.next() then
+            Some((rs.getString(1), Option(rs.getString(2)).filter(_.nonEmpty), rs.getString(3)))
+          else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** The current bcrypt hash of the row with this surrogate id, or `None` if it no longer exists.
+    * Used by the reset handler between resolving a token to a userId and fingerprint-verifying it.
+    */
+  def passwordHashById(id: String): Option[String] =
+    withConn { c =>
+      val ps = c.prepareStatement("SELECT password_hash FROM qodstate_user WHERE id = ?")
+      try
+        ps.setString(1, id)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(rs.getString(1)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** Set a new password on the row with this surrogate id (bcrypt-hashed). Keyed by id so the reset
+    * handler never needs to re-resolve `(tenant, username)`. Phase 2 will also clear the lockout
+    * counter here; today it only rotates the hash.
+    */
+  def setPasswordById(id: String, newPlaintext: String): Unit =
+    withConn { c =>
+      val hash = BCrypt.withDefaults().hashToString(12, newPlaintext.toCharArray)
+      val ps   = c.prepareStatement(
+        "UPDATE qodstate_user SET password_hash = ?, updated_at = NOW() WHERE id = ?"
+      )
+      try
+        ps.setString(1, hash)
+        ps.setString(2, id)
+        ps.executeUpdate()
+        ()
+      finally ps.close()
+    }
+
   /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
     * first; if that yields nothing AND `email` is given, retries with `username = email` so
     * operators can provision either form. tenant=NULL rows are superuser grants.

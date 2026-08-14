@@ -54,6 +54,31 @@ object AuthEndpoints:
       .in("auth" / "change-password")
       .in(jsonBody[ChangePasswordRequest])
 
+  // Public pre-session recovery. `forgot-password` ALWAYS answers 200 (Unit): the response must not
+  // reveal whether the account exists / has an email, so there is no success/not-found split. The
+  // errorOut channel is carried only for transport-level framing (never an account oracle).
+  val forgotPassword: PublicEndpoint[
+    ForgotPasswordRequest,
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("auth" / "forgot-password")
+      .in(jsonBody[ForgotPasswordRequest])
+
+  // `reset-password` redeems a single-use link token: 200 on success, 400 invalid_token (bad /
+  // expired / already-used) or 400 invalid_password (empty or over bcrypt's 71-byte bound).
+  val resetPassword: PublicEndpoint[
+    ResetPasswordRequest,
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("auth" / "reset-password")
+      .in(jsonBody[ResetPasswordRequest])
+
   // Logout accepts the token via cookie OR header so the browser path works
   // even though JS can't read the HttpOnly cookie. The response always
   // clears the cookie (Max-Age=0); the handler also adds the jti to the

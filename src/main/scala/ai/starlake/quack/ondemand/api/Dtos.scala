@@ -445,6 +445,24 @@ final case class ChangePasswordRequest(
     newPassword: String
 )
 
+/** Public `POST /api/auth/forgot-password` request. `tenant` is the optional tenant id (or display
+  * name); omit / blank for a superuser (system-scope) account. The endpoint ALWAYS answers 200
+  * regardless of whether the `(tenant, username)` account exists or carries an email -- the
+  * response never becomes an account-existence oracle.
+  */
+final case class ForgotPasswordRequest(
+    tenant: Option[String] = None,
+    username: String
+)
+
+/** Public `POST /api/auth/reset-password` request. `token` is the single-use link token minted by
+  * `forgot-password`; `newPassword` is bounded to bcrypt's 71 UTF-8 bytes and must be non-empty.
+  */
+final case class ResetPasswordRequest(
+    token: String,
+    newPassword: String
+)
+
 /** Login response. Carries the session token + the authority bits the UI needs to decide what to
   * render. `role` is deliberately NOT here: it was a tautology of the gate back when every minted
   * session was admin by construction. UIs that want to show the user's authoritative role read
@@ -1138,6 +1156,9 @@ object Dtos:
   given Codec[LoginRequest] = deriveCodec
   // ConfiguredCodec so a body that omits the optional `tenant` still decodes.
   given Codec[ChangePasswordRequest] = ConfiguredCodec.derived
+  // ConfiguredCodec so a body that omits the optional `tenant` still decodes.
+  given Codec[ForgotPasswordRequest] = ConfiguredCodec.derived
+  given Codec[ResetPasswordRequest]  = ConfiguredCodec.derived
   given Codec[LoginResponse]         = ConfiguredCodec.derived
   given Codec[WhoamiResponse]        = ConfiguredCodec.derived
   given Codec[AuthModeResponse]      = ConfiguredCodec.derived

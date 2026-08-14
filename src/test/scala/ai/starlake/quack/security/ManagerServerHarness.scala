@@ -153,6 +153,7 @@ object ManagerServerHarness:
           |  username      TEXT NOT NULL,
           |  password_hash TEXT NOT NULL,
           |  role          TEXT NOT NULL DEFAULT 'user',
+          |  email         TEXT,
           |  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           |  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
           |)""".stripMargin
@@ -289,6 +290,19 @@ object ManagerServerHarness:
       ),
       audit = audit,
       events = events
+    )
+
+    // Public password-recovery handler over the harness's DuckDB UserStore. The
+    // security spec only needs both routes reachable pre-session; a LogMailSender
+    // keeps the send side inert.
+    val passwordResetHandlers = new ai.starlake.quack.ondemand.api.PasswordResetHandlers(
+      users = userStore,
+      tokens = new ai.starlake.quack.ondemand.api.ResetTokenStore(
+        "test-harness-jwt-secret-padding-padding-pad="
+      ),
+      mail = new ai.starlake.quack.mail.LogMailSender(),
+      resolveTenant = raw => sup.getTenantById(raw).map(_.id),
+      publicBaseUrl = ""
     )
 
     val statementStore     = new StatementHistoryStore()
@@ -470,7 +484,8 @@ object ManagerServerHarness:
       profile = profileHandlers,
       moduleEndpoints = moduleEndpoints,
       modulePublicPrefixes = modulePublicPrefixes,
-      moduleStaticMounts = moduleStaticMounts
+      moduleStaticMounts = moduleStaticMounts,
+      passwordReset = Some(passwordResetHandlers)
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

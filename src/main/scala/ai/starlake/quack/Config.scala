@@ -473,6 +473,14 @@ final case class ManagerConfig(
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
     @field @ConfigField(
+      envVar = "QOD_PUBLIC_BASE_URL",
+      description =
+        "Externally visible base URL (e.g. https://qod.example.com) used to build password-reset " +
+          "links mailed to users. When empty the link is host-relative (/ui/reset-password?...) " +
+          "and Main logs a boot warning."
+    )
+    publicBaseUrl: String = "",
+    @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
         "UI session idle TTL in seconds. A session unused for this long is dropped on the next " +

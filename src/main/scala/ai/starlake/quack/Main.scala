@@ -513,6 +513,27 @@ object Main extends IOApp with LazyLogging:
       events = moduleEventBus.sink,
       changePasswordStore = Some(userStore)
     )
+
+    // Public password-recovery handler. The reset token reuses the SESSION JWT
+    // secret (short-lived, fingerprint-bound, distinct claims shape -> no
+    // cross-use risk); one secret to manage.
+    val resetTokens = new ai.starlake.quack.ondemand.api.ResetTokenStore(
+      mgrCfg.auth.management.sessionJwtSecret
+    )
+    if mgrCfg.publicBaseUrl.trim.isEmpty then
+      logger.warn(
+        "QOD_PUBLIC_BASE_URL is not set: password-reset links will be host-relative " +
+          "(/ui/reset-password?...). Set it to the browser-visible manager origin before " +
+          "exposing password recovery behind a proxy."
+      )
+    val passwordResetHandlers = new ai.starlake.quack.ondemand.api.PasswordResetHandlers(
+      users = userStore,
+      tokens = resetTokens,
+      mail = mailSender,
+      // Same tenant resolution as login: id or display name -> surrogate id.
+      resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
+      publicBaseUrl = mgrCfg.publicBaseUrl.trim
+    )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val historyApiHandlers = new ai.starlake.quack.ondemand.api.HistoryHandlers(telemetryStore)
@@ -913,7 +934,8 @@ object Main extends IOApp with LazyLogging:
         profile = profileHandlers,
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
-        moduleStaticMounts = modules.flatMap(_.staticMounts)
+        moduleStaticMounts = modules.flatMap(_.staticMounts),
+        passwordReset = Some(passwordResetHandlers)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

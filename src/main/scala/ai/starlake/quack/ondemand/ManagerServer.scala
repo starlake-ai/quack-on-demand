@@ -64,7 +64,11 @@ final class ManagerServer(
     profile: ProfileHandlers,
     moduleEndpoints: List[ServerEndpoint[Any, IO]] = Nil,
     modulePublicPrefixes: Set[String] = Set.empty,
-    moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil
+    moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
+    // Public pre-session password recovery. None (tests / callers that don't wire
+    // Postgres) leaves both routes unmounted; the paths still bypass the api-key
+    // guard so a wired handler is reachable without a session.
+    passwordReset: Option[PasswordResetHandlers] = None
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -85,6 +89,7 @@ final class ManagerServer(
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String): Boolean =
     path == "/api/auth/login" || path == "/api/auth/change-password" ||
+      path == "/api/auth/forgot-password" || path == "/api/auth/reset-password" ||
       path == "/api/config/client" ||
       path == "/api/auth/mode" ||
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
@@ -480,6 +485,15 @@ final class ManagerServer(
       }
     )
 
+    // Mounted only when a handler is wired; the paths are guard-exempt regardless
+    // (see isPublicApi), so a wired handler is reachable pre-session.
+    val passwordResetEndpoints: List[ServerEndpoint[Any, IO]] = passwordReset.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        AuthEndpoints.forgotPassword.serverLogic(req => h.forgotPassword(req)),
+        AuthEndpoints.resetPassword.serverLogic(req => h.resetPassword(req))
+      )
+    }
+
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       RbacEndpoints.createUser.serverLogic { case (req, token) =>
         users.createUser(req, token)(sessions.scopeOf)
@@ -719,7 +733,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then
