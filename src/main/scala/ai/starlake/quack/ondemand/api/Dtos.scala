@@ -446,17 +446,20 @@ final case class ChangePasswordRequest(
 )
 
 /** Login response. Carries the session token + the authority bits the UI needs to decide what to
-  * render. `role` is deliberately NOT here: every minted session is admin by construction (the
-  * login handler 403s anything else), so the field was a tautology of the gate. UIs that want to
-  * show the user's authoritative role read [[WhoamiResponse.role]] (sourced from the auth backend's
-  * profile) instead.
+  * render. `role` is deliberately NOT here: it was a tautology of the gate back when every minted
+  * session was admin by construction. UIs that want to show the user's authoritative role read
+  * [[WhoamiResponse.role]] (sourced from the auth backend's profile) instead; `admin` is the single
+  * bit the SPA branches on, since a tenant-scoped regular user now gets a session too.
   */
 final case class LoginResponse(
     token: String,
     username: String,
     tenant: Option[String] = None,
     superuser: Boolean = false,
-    manageableTenants: List[String] = Nil
+    manageableTenants: List[String] = Nil,
+    // False for a tenant-scoped regular-user session: the SPA routes it to the
+    // profile-only view and the API guard demotes it to the profile allowlist.
+    admin: Boolean = true
 )
 final case class WhoamiResponse(
     username: String,

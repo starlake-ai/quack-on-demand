@@ -80,8 +80,12 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     )
   )
 
+  /** `result` is by-name so a test can flip the fake between two calls (the forced-password-change
+    * chain: refused first, accepted after the rotation). Every existing call site passes a plain
+    * value and is unaffected.
+    */
   private def makeHandlers(
-      result: Either[AuthFailure, AuthenticatedProfile],
+      result: => Either[AuthFailure, AuthenticatedProfile],
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore,
       cookieSecureOverride: Option[Boolean] = None,
@@ -272,6 +276,99 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     h.login(req).unsafeRunSync()
 
     calls.head._1 shouldBe AuthScope.System
+  }
+
+  // ----- tenant-scoped regular users (profile-only sessions) -----
+  //
+  // A `role=user` principal logging into a tenant it holds a grant on now gets a
+  // session instead of a flat 403: non-admin, no manageable tenants, so the SPA
+  // can render the profile-only view. Everything else about the gate is
+  // unchanged -- the system login and a foreign tenant still answer
+  // admin_required with the same message bytes.
+
+  private val carolProfile =
+    AuthenticatedProfile("carol", "user", Set.empty, Map.empty, "db", Some("t1"))
+
+  it should "mint a non-admin session for a tenant-scoped regular user" in {
+    val tokens = new SessionTokenStore
+    val calls  = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h      = makeHandlers(Right(carolProfile), calls, tokens)
+
+    val out = h.login(LoginRequest("carol", "pw", tenant = Some("t1"))).unsafeRunSync()
+
+    out match
+      case Right((_, resp)) =>
+        resp.admin shouldBe false
+        resp.superuser shouldBe false
+        resp.manageableTenants shouldBe empty
+        // The minted token is NOT admin but IS a known session.
+        tokens.isAdmin(resp.token) shouldBe false
+        tokens.scopeOf(resp.token).isDefined shouldBe true
+      case Left(e) => fail(s"expected login to succeed, got $e")
+  }
+
+  it should "still refuse a regular user on the system-scope login" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(carolProfile), calls)
+
+    val out = h.login(LoginRequest("carol", "pw", tenant = None)).unsafeRunSync()
+
+    val (status, err) = out.swap.toOption.get
+    status shouldBe StatusCode.Forbidden
+    err.error shouldBe "admin_required"
+    err.message shouldBe "user 'carol' has no admin grant; manager UI is admin-only"
+  }
+
+  it should "refuse a regular user of tenant A logging into tenant B" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(carolProfile), calls)
+
+    val out = h.login(LoginRequest("carol", "pw", tenant = Some("t2"))).unsafeRunSync()
+
+    out.swap.toOption.get._1 shouldBe StatusCode.Forbidden
+    out.swap.toOption.get._2.error shouldBe "admin_required"
+  }
+
+  it should "keep admin logins unchanged with admin=true" in {
+    val profile = AuthenticatedProfile("root", "admin", Set.empty, Map.empty, "db", None)
+    val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h       = makeHandlers(Right(profile), calls)
+
+    val (_, resp) =
+      h.login(LoginRequest("root", "pass", tenant = None)).unsafeRunSync().toOption.get
+
+    resp.admin shouldBe true
+    resp.superuser shouldBe true
+  }
+
+  it should "complete the forced-change flow into a non-admin session" in {
+    // Seeded flagged: the authenticator refuses a must_change_password row even
+    // with the correct temp password. Rotating the password clears the flag --
+    // modeled here by flipping the fake, since the real store round trip is
+    // pinned by ChangePasswordHandlerSpec. The retry lands in a session, where
+    // it used to dead-end on admin_required.
+    var flagged = true
+    val tokens  = new SessionTokenStore
+    val calls   = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h       = makeHandlers(
+      if flagged then Left(AuthFailure.PasswordChangeRequired) else Right(carolProfile),
+      calls,
+      tokens
+    )
+
+    val first = h.login(LoginRequest("carol", "temp", tenant = Some("t1"))).unsafeRunSync()
+    val (firstStatus, firstErr) = first.swap.toOption.get
+    firstStatus shouldBe StatusCode.Unauthorized
+    firstErr.error shouldBe "password_change_required"
+
+    flagged = false
+    val second = h.login(LoginRequest("carol", "rotated", tenant = Some("t1"))).unsafeRunSync()
+
+    second match
+      case Right((_, resp)) =>
+        resp.admin shouldBe false
+        tokens.isAdmin(resp.token) shouldBe false
+      case Left(e) => fail(s"expected the rotated login to succeed, got $e")
   }
 
   "whoami" should "surface the tenant and scope from the stored session" in {

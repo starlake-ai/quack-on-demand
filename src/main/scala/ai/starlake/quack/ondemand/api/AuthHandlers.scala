@@ -46,7 +46,10 @@ enum RequiredScope:
   *     consulted with the JWT's `preferred_username` (and `email` as fallback).
   *
   * Either path collapses to a [[SessionScope]] carrying `superuser` and `manageableTenants`. Empty
-  * grants => `403 not_provisioned`; no admin grant => `403 admin_required` (the UI is admin-only).
+  * grants => `403 not_provisioned`. The admin console is admin-only, so a principal with no admin
+  * grant is still refused `403 admin_required` on the system login and on any tenant it does not
+  * hold a grant on; logging into a tenant it DOES hold a grant on mints a non-admin, profile-only
+  * session instead (`LoginResponse.admin = false`).
   *
   * Transport: on successful login the handler sets a `qod_session` cookie carrying the same JWT
   * returned in `LoginResponse.token`. The browser auto-attaches the cookie on subsequent `/api/...`
@@ -432,11 +435,12 @@ final class AuthHandlers(
     *
     * `required` expresses what the chosen login URL demands:
     *   - `System`: no tenant was specified; any admin (superuser or tenant-admin) is accepted.
-    *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser or admin of
-    *     that tenant.
+    *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser, admin of
+    *     that tenant, or a regular user holding a grant on it (which mints a non-admin,
+    *     profile-only session -- `LoginResponse.admin = false`).
     *
-    * The grant computation and the not_provisioned / admin_required gates are identical to the
-    * original inline `login` logic, so the two entry points cannot drift.
+    * The grant computation and the not_provisioned / admin_required gates are shared by both entry
+    * points, so they cannot drift.
     *
     * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
     * `"rest"` from `login`, `"oidc"` from `oidcCallback`.
@@ -461,16 +465,22 @@ final class AuthHandlers(
       case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
     }.toSet
 
+    val isAdminPrincipal = superuser || manageableTenants.nonEmpty
+    // Tenants where this principal exists at all (any role) -- what a
+    // regular user may log into for the profile-only view.
+    val selfTenants: Set[String] = grants.collect { case UserGrant(Some(t), _) => t }.toSet
+
     // `System` scope (no tenant in the login form) accepts any admin role --
     // superuser or tenant-admin. This preserves the original `login` behavior
     // where the absence of a tenant did not restrict which admins could proceed.
     // `SystemStrict` (OIDC bare /ui/ login) further restricts to superuser only.
-    // `Tenant(t)` scope further requires the caller to be admin of that specific
-    // tenant (or a superuser).
+    // `Tenant(t)` scope admits a superuser, an admin of that specific tenant,
+    // or a regular user holding a grant on it (profile-only session).
     val scopeOk = required match
-      case RequiredScope.System       => superuser || manageableTenants.nonEmpty
+      case RequiredScope.System       => isAdminPrincipal
       case RequiredScope.SystemStrict => superuser
-      case RequiredScope.Tenant(t)    => superuser || manageableTenants.contains(t)
+      case RequiredScope.Tenant(t)    =>
+        superuser || manageableTenants.contains(t) || selfTenants.contains(t)
 
     val realm = if superuser then "system" else "tenant"
     if grants.isEmpty then
@@ -492,45 +502,50 @@ final class AuthHandlers(
           )
         )
       )
-    else if !superuser && manageableTenants.isEmpty then
-      audit.restAs(
-        profile.username,
-        "tenant",
-        "auth",
-        AuditActions.AuthLoginFailure,
-        "denied",
-        tenant = profile.tenant,
-        detail = Map("reason" -> "admin_required")
-      )
-      Left(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse(
-            "admin_required",
-            s"user '${profile.username}' has no admin grant; manager UI is admin-only"
-          )
-        )
-      )
     else if !scopeOk then
-      audit.restAs(
-        profile.username,
-        realm,
-        "auth",
-        AuditActions.AuthLoginFailure,
-        "denied",
-        tenant = profile.tenant,
-        detail = Map("reason" -> "admin_required")
-      )
-      Left(
-        (
-          StatusCode.Forbidden,
-          ErrorResponse(
-            "admin_required",
-            s"user '${profile.username}' is not authorized for the requested scope " +
-              "(system login requires a superuser; sign in via your tenant instead)"
+      // Preserve the pre-existing errors byte-for-byte: a non-admin on the
+      // system login still gets admin_required; a scope mismatch keeps its
+      // existing code/message. Only Tenant(t) logins where the user has a
+      // grant on t now fall through to minting.
+      if !isAdminPrincipal then
+        audit.restAs(
+          profile.username,
+          "tenant",
+          "auth",
+          AuditActions.AuthLoginFailure,
+          "denied",
+          tenant = profile.tenant,
+          detail = Map("reason" -> "admin_required")
+        )
+        Left(
+          (
+            StatusCode.Forbidden,
+            ErrorResponse(
+              "admin_required",
+              s"user '${profile.username}' has no admin grant; manager UI is admin-only"
+            )
           )
         )
-      )
+      else
+        audit.restAs(
+          profile.username,
+          realm,
+          "auth",
+          AuditActions.AuthLoginFailure,
+          "denied",
+          tenant = profile.tenant,
+          detail = Map("reason" -> "admin_required")
+        )
+        Left(
+          (
+            StatusCode.Forbidden,
+            ErrorResponse(
+              "admin_required",
+              s"user '${profile.username}' is not authorized for the requested scope " +
+                "(system login requires a superuser; sign in via your tenant instead)"
+            )
+          )
+        )
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
       val token        = tokens.mintWithScope(profile, sessionScope)
@@ -556,7 +571,8 @@ final class AuthHandlers(
         username = profile.username,
         tenant = None,
         superuser = superuser,
-        manageableTenants = manageableTenants.toList.sorted
+        manageableTenants = manageableTenants.toList.sorted,
+        admin = isAdminPrincipal
       )
       Right((sessionCookie(token, forwardedProto), resp))
 

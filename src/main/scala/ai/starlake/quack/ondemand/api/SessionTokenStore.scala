@@ -173,9 +173,9 @@ final class SessionTokenStore(
   def seedRevoked(entries: Iterable[(String, Instant)]): Unit =
     entries.foreach { case (jti, exp) => denylist.put(jti, exp) }
 
-  /** True when the token resolves to a session whose `role = admin`. The login handler refuses to
-    * mint anything but admin, so a successful lookup is sufficient; the role check stays for
-    * forward-compat.
+  /** True when the token resolves to a session whose `role = admin`. The login handler also mints
+    * non-admin sessions (tenant-scoped regular users, for the profile-only view), so the role check
+    * is load-bearing: "the token resolves" is NOT the same as "the caller is an admin".
     */
   def isAdmin(token: String): Boolean =
     lookup(token).exists(_.profile.role.equalsIgnoreCase("admin"))

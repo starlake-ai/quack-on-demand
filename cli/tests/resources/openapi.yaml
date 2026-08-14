@@ -5479,6 +5479,7 @@ components:
       - token
       - username
       - superuser
+      - admin
       properties:
         token:
           type: string
@@ -5492,6 +5493,8 @@ components:
           type: array
           items:
             type: string
+        admin:
+          type: boolean
     MaintenanceEffectiveEntry:
       title: MaintenanceEffectiveEntry
       type: object
