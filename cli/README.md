@@ -301,6 +301,13 @@ for the full flag list of any command.
 | `statements` | List past statements with filters. |
 | `trends` | Aggregate statement trends over time. |
 
+### profile - your own profile: usage and recent statements (any session)
+
+| Verb | Purpose |
+|---|---|
+| `usage` | Your own daily statement counts. |
+| `statements` | Your own most recent statements. |
+
 ## REST parity gate
 
 Every REST operation published in the generated OpenAPI specification must be

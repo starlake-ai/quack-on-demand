@@ -63,10 +63,11 @@ app.command()(auth.logout)
 app.command()(auth.whoami)
 app.add_typer(auth.app, name="auth")
 
-from .commands import database, tenant  # noqa: E402
+from .commands import database, profile, tenant  # noqa: E402
 
 app.add_typer(tenant.app, name="tenant")
 app.add_typer(database.app, name="database")
+app.add_typer(profile.app, name="profile")
 
 from .commands import node, pool  # noqa: E402
 

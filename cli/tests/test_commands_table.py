@@ -521,6 +521,14 @@ CASES = [
         ["history", "trends", "--granularity", "hour", "--pool", "bi"],
         "GET", "/api/history/trends", {"granularity": "hour", "pool": "bi"}, None,
     ),
+    (
+        ["profile", "usage", "--days", "7"],
+        "GET", "/api/profile/usage", {"days": "7"}, None,
+    ),
+    (
+        ["profile", "statements", "--limit", "10"],
+        "GET", "/api/profile/statements", {"limit": "10"}, None,
+    ),
 ]
 
 

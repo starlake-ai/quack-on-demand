@@ -222,6 +222,13 @@ ALL grant, or DDL plus RO/RW, on the table. For dropped tables, use `qod catalog
 | `qod history statements` | List past statements with filters. |
 | `qod history trends` | Aggregate statement trends over time. |
 
+## profile
+
+| Command | Purpose |
+|---|---|
+| `qod profile usage` | Your own daily statement counts. |
+| `qod profile statements` | Your own most recent statements. |
+
 ## config
 
 | Command | Purpose |
