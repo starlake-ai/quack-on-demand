@@ -22,6 +22,7 @@ import ai.starlake.quack.boot.{
   ManagementAuthWiring
 }
 import ai.starlake.quack.edge.sql.StatementValidator
+import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
 import ai.starlake.quack.model.Names
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
@@ -90,6 +91,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
+  given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -114,6 +116,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[RoutingConfig]            = deriveReader[RoutingConfig]
   given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
+  given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
@@ -219,6 +222,11 @@ object Main extends IOApp with LazyLogging:
     logger.info(
       s"federation: secretStore=${mgrCfg.federation.secretStore}, resolver=${secretResolver.getClass.getSimpleName}"
     )
+
+    // Task 4 wires this into the reset-link handler; log-only until QOD_SMTP_HOST is set.
+    val mailSender: MailSender = mgrCfg.smtp.host.filter(_.nonEmpty) match
+      case Some(_) => new SmtpMailSender(mgrCfg.smtp)
+      case None    => new LogMailSender()
 
     val tracker            = new NodeLoadTracker
     val engineStatsTracker = new EngineStatsTracker

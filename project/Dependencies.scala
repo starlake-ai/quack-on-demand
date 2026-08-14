@@ -91,4 +91,7 @@ object Dependencies {
 
   // Caffeine cache (for column catalog caching)
   val caffeine              = "com.github.ben-manes.caffeine" % "caffeine" % Versions.caffeine
+
+  // Jakarta Mail (SMTP delivery for account-lockout reset emails)
+  val jakartaMail           = "com.sun.mail" % "jakarta.mail" % "2.0.1"
 }

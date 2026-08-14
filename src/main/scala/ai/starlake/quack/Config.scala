@@ -471,6 +471,7 @@ final case class ManagerConfig(
     routing: RoutingConfig = RoutingConfig(),
     autoscale: AutoscaleConfig = AutoscaleConfig(),
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
+    smtp: SmtpConfig = SmtpConfig(),
     @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
@@ -648,6 +649,44 @@ final case class ManagedObjectStoreConfig(
   )
   def purgeSweepInterval: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(math.max(60, purgeSweepSec)).seconds
+
+/** SMTP delivery for account-lockout reset emails. `host` unset (the default) keeps `Main` wiring
+  * `LogMailSender`; setting `QOD_SMTP_HOST` switches to `SmtpMailSender`. Task 8's boot gate also
+  * reads `host` to decide whether lockout can be enabled.
+  */
+final case class SmtpConfig(
+    @field @ConfigField(
+      envVar = "QOD_SMTP_HOST",
+      description = "SMTP relay host. Unset keeps the manager on the log-only mail sender."
+    )
+    host: Option[String] = None,
+    @field @ConfigField(
+      envVar = "QOD_SMTP_PORT",
+      description = "SMTP relay port."
+    )
+    port: Int = 587,
+    @field @ConfigField(
+      envVar = "QOD_SMTP_USER",
+      description = "SMTP auth username. Unset disables SMTP auth."
+    )
+    user: Option[String] = None,
+    @field @ConfigField(
+      envVar = "QOD_SMTP_PASSWORD",
+      description = "SMTP auth password.",
+      sensitive = true
+    )
+    password: Option[String] = None,
+    @field @ConfigField(
+      envVar = "QOD_SMTP_FROM",
+      description = "From address stamped on outgoing mail."
+    )
+    from: String = "no-reply@quack-on-demand.local",
+    @field @ConfigField(
+      envVar = "QOD_SMTP_STARTTLS",
+      description = "Use STARTTLS when connecting to the SMTP relay."
+    )
+    starttls: Boolean = true
+)
 
 final case class FlightConfig(
     @field @ConfigField(envVar = "PROXY_HOST", description = "FlightSQL edge bind address.")
