@@ -8,6 +8,10 @@ package ai.starlake.quack.ondemand.telemetry
 object AuditActions:
   // auth
   val AuthApiKeyFailure = "auth.api-key.failure"
+  // A valid but non-admin session reaching for an admin endpoint. Distinct from
+  // AuthApiKeyFailure (anonymous / bad key): the caller is authenticated, so the
+  // row carries their real username and tenant.
+  val AuthAdminRequired = "auth.admin.required"
   val AuthLogin         = "auth.login"
   val AuthLoginFailure  = "auth.login.failure"
   val AuthLogout        = "auth.logout"
@@ -97,6 +101,7 @@ object AuditActions:
   /** Exhaustive sorted vocabulary served by GET /api/audit/actions. */
   val all: List[String] = List(
     AuthApiKeyFailure,
+    AuthAdminRequired,
     AuthLogin,
     AuthLoginFailure,
     AuthLogout,

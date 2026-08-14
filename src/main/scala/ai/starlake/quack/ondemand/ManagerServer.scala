@@ -136,7 +136,15 @@ final class ManagerServer(
     else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
 
     Kleisli { req =>
-      val path = req.uri.path.toString
+      // DECODED path, never `req.uri.path.toString` (which re-renders segments
+      // percent-ENCODED). Tapir routes on decoded segments, so an encoded form
+      // like `/%61pi/tenant/list` would skip this guard entirely and still match
+      // the tenant-list route -- a full auth bypass, verified before the fix.
+      // Decoding here makes the guard and the router agree; a segment hiding a
+      // `%2F` merely lands MORE paths inside the guarded namespace (fails closed).
+      val path =
+        val decoded = req.uri.path.segments.map(_.decoded()).mkString("/", "/", "")
+        if req.uri.path.endsWithSlash then decoded + "/" else decoded
       if !path.startsWith("/api/") && path != "/api" then routes(req)
       else if isPublicApi(path) then routes(req)
       else
@@ -169,6 +177,22 @@ final class ManagerServer(
             // same stable code the login gate uses so clients treat both alike
             // -- and not with the anonymous 401, which would send a browser
             // back to the login screen it just came from.
+            //
+            // Audited under the caller's REAL identity (recoverable from the
+            // session), so a low-privilege insider sweeping admin endpoints
+            // leaves a trail. Not behind `auditLimiter`: that limiter exists to
+            // cap unauthenticated flood, and this caller is authenticated --
+            // dropping their rows is exactly the wrong trade here.
+            val caller = provided.flatMap(sessions.get).map(_.profile)
+            audit.restAs(
+              caller.map(_.username).getOrElse("unknown"),
+              "tenant",
+              "auth",
+              AuditActions.AuthAdminRequired,
+              "denied",
+              tenant = caller.flatMap(_.tenant),
+              detail = Map("path" -> path)
+            )
             OptionT.pure[IO](
               Response[IO](Status.Forbidden)
                 .withEntity(

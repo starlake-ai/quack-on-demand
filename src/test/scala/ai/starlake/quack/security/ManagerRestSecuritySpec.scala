@@ -77,6 +77,24 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "not admit a percent-encoded /api prefix with no key" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      // The guard tests the request path for the `/api/` prefix while tapir
+      // routes on DECODED segments. If the two ever disagree, `/%61pi/...`
+      // ("a" percent-encoded) skips the guard yet still matches the tenant-list
+      // route -- a full auth bypass. Any non-2xx answer proves it did not; the
+      // guard's own 401 is what actually answers today. Asserted as "not 2xx"
+      // rather than the exact code so a stack that rejects the encoded form
+      // upstream (404) stays green: only leaking data is the failure.
+      val resp = get(h.httpClient, s"${h.baseUrl}/%61pi/tenant/list")
+      withClue(s"GET /%61pi/tenant/list status=${resp.statusCode()} body: ${resp.body()}") {
+        (resp.statusCode() >= 200 && resp.statusCode() < 300) shouldBe false
+      }
+    finally h.shutdown()
+  }
+
   it should "demote a non-admin session to the profile allowlist" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
