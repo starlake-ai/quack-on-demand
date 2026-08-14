@@ -528,7 +528,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       // never consults this -- modeFor(None) short-circuits to systemMode. A
       // tenant-scoped login needs a real lookup to resolve to Oidc mode instead
       // of 400 tenant_unknown.
-      loadTenant: String => Option[Tenant] = _ => None
+      loadTenant: String => Option[Tenant] = _ => None,
+      // Exposed so a caller can inspect the minted token (isAdmin / scopeOf);
+      // every other caller only looks at the LoginResponse.
+      tokens: SessionTokenStore = new SessionTokenStore
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -546,7 +549,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
     new AuthHandlers(
       authService = fakeSvc,
-      tokens = new SessionTokenStore,
+      tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = fakeDirectory,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc)
@@ -655,4 +658,31 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.Forbidden
     err.error shouldBe "admin_required"
+  }
+
+  it should "mint role=admin for an admin principal whose IdP role claim says user" in {
+    // The IdP emits no recognized role, so RoleExtractor defaults profile.role
+    // to "user". Authority comes from qodstate (a tenant-admin grant on t-a), so
+    // the minted JWT must carry role=admin -- otherwise isAdmin(token) is false
+    // and a genuine admin is demoted into the profile-only UI shell.
+    val profile = AuthenticatedProfile(
+      username = "alice@corp",
+      role = "user", // IdP claim, no authority
+      groups = Set.empty,
+      claims = Map("email" -> "alice@corp"),
+      authMethod = "keycloak-ropc",
+      tenant = None
+    )
+    val tokens = new SessionTokenStore
+    val h      = oidcHandlers(
+      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "admin"))),
+      profile = profile,
+      tokens = tokens
+    )
+
+    val (_, r) = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
+
+    r.admin shouldBe true
+    r.manageableTenants shouldBe List("t-a")
+    tokens.isAdmin(r.token) shouldBe true
   }

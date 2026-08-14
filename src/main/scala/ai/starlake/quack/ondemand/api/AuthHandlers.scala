@@ -554,11 +554,17 @@ final class AuthHandlers(
         )
     else
       val sessionScope = SessionScope(superuser, manageableTenants)
-      // A profile-only session must never carry role=admin in its JWT --
-      // isAdmin() and the guard demotion key off that claim.
+      // The JWT role claim must reflect AUTHORITY, not the IdP's descriptive
+      // claim: an admin principal (superuser or tenant admin) always mints
+      // role=admin so isAdmin() and the guard admit them; a non-admin principal
+      // whose profile claims admin is demoted to user so a profile-only session
+      // never carries role=admin. In Db mode this is a no-op (profile.role
+      // already equals the qodstate grant); it only bites the OIDC path, where
+      // RoleExtractor defaults to "user" when the IdP emits no known role.
       val mintProfile =
-        if isAdminPrincipal || !profile.role.equalsIgnoreCase("admin") then profile
-        else profile.copy(role = "user")
+        if isAdminPrincipal then profile.copy(role = "admin")
+        else if profile.role.equalsIgnoreCase("admin") then profile.copy(role = "user")
+        else profile
       val token = tokens.mintWithScope(mintProfile, sessionScope)
       audit.restAs(
         profile.username,

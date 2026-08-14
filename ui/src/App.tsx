@@ -189,7 +189,9 @@ function AuthGate() {
   // follow-up whoami() call resolves `role` - without this guard that window
   // would render ProfileShell (role still null) before flipping to Shell.
   if (username && role == null) return <div className="loading">Loading session…</div>;
-  if (username) return role === 'admin' ? <Shell /> : <ProfileShell />;
+  // Case-insensitive to match the server's equalsIgnoreCase("admin") gate --
+  // a qodstate role of "Admin" is admin server-side and must get the full shell.
+  if (username) return role?.toLowerCase() === 'admin' ? <Shell /> : <ProfileShell />;
   // OIDC mode: redirect to the IdP, or show an error card when the callback
   // returned with ?error=<code>.
   if (identitySource === 'oidc') {

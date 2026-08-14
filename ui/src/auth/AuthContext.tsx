@@ -112,12 +112,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSuperuser(r.superuser ?? false);
     setManageableTenants(r.manageableTenants ?? []);
     // /login returns the coarse `admin` gate (false for a tenant-scoped
-    // regular user) but not the descriptive role label; fetch that from
-    // /whoami so the badge reflects what the auth backend recorded. Fall
-    // back to the coarse gate if whoami is unreachable for some reason.
+    // regular user) but not the descriptive role label, and its `tenant` field
+    // is always null. Re-seed the whole identity from /whoami so the
+    // in-memory state matches what a page reload would produce - Profile's
+    // change-password call sends `tenant`, and a null there resolves to the
+    // superuser row and 401s a tenant-scoped user. Fall back to the coarse
+    // gate if whoami is unreachable for some reason.
     try {
       const w = await api.whoami();
       setRole(w.role);
+      setTenant(w.tenant ?? null);
+      setSuperuser(w.superuser ?? false);
+      setManageableTenants(w.manageableTenants ?? []);
     } catch {
       setRole(r.admin === false ? 'user' : 'admin');
     }
