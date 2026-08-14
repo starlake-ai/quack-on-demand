@@ -4,6 +4,7 @@ package ai.starlake.quack.security
 import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
+  AuthFailure,
   AuthScope,
   BasicAuthProvider,
   BearerAuthProvider,
@@ -31,8 +32,11 @@ import java.util.{Date, UUID}
   *
   * Inline chain walking is used for tests 5-7 where we need to inject an
   * InMemoryBasicAuthProvider as "DB" without a real Postgres connection.
-  * The chain-walk logic is a direct copy of AuthenticationService.authenticateBasic
-  * (minus logging) so we're testing the ordering semantics, not the class itself.
+  * The chain-walk logic is a direct copy of AuthenticationService.authenticateBasic's
+  * first-Right/aggregate-Left walk (minus logging), so we're testing the ordering
+  * semantics, not the class itself -- it does NOT mirror the PasswordChangeRequired
+  * latch (see walkBasicChain's doc). Tests 11-13 (section D) cover that latch against
+  * the real AuthenticationService instead.
   */
 class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
 
@@ -45,7 +49,12 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
   // ---------------------------------------------------------------------------
 
   /** Walk a basic provider chain in order, returning the first Right or a
-    * combined Left. Mirrors AuthenticationService.authenticateBasic (line 46-62).
+    * combined Left. Mirrors the first-Right/aggregate-Left walk of
+    * AuthenticationService.authenticateBasic (line 46-62) -- but NOT its
+    * PasswordChangeRequired latch (the production method surfaces that failure over
+    * other providers' InvalidCredentials noise when no provider succeeds; this helper
+    * just concatenates every rejection's message). Section D below tests the latch
+    * against the real AuthenticationService, not this double.
     */
   private def walkBasicChain(
       chain:    Seq[BasicAuthProvider],
@@ -107,6 +116,36 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
     val jwt    = new SignedJWT(header, builder.build())
     jwt.sign(new MACSigner(secret))
     jwt.serialize()
+
+  /** Basic provider stub that always returns the given fixed result, ignoring the input
+    * credentials. Follows the same "no external connection" spirit as
+    * InMemoryBasicAuthProvider, just with a canned result instead of a lookup.
+    */
+  private final class FixedBasicAuthProvider(
+      val name: String,
+      result:   Either[AuthFailure, AuthenticatedProfile]
+  ) extends BasicAuthProvider:
+    def authenticate(
+        scope:    AuthScope,
+        username: String,
+        password: String
+    ): Either[AuthFailure, AuthenticatedProfile] = result
+
+  /** Build a REAL [[AuthenticationService]] whose basic chain is exactly `providers`.
+    *
+    * The service is constructed with [[emptyAuthConfig]] so its own `buildBasicChain` opens
+    * no external connection (yields Nil), then the private `basicProviders` field is
+    * overwritten via reflection. This exercises the actual production `authenticateBasic`
+    * method body -- including the PasswordChangeRequired latch -- against deterministic stub
+    * providers, instead of re-implementing the chain-walk in a test double (see walkBasicChain
+    * above, which intentionally does NOT mirror the latch).
+    */
+  private def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
+    val svc   = new AuthenticationService(emptyAuthConfig, "test-jwt-secret")
+    val field = classOf[AuthenticationService].getDeclaredField("basicProviders")
+    field.setAccessible(true)
+    field.set(svc, providers)
+    svc
 
   /** Build a keycloak-flavored AuthenticationConfig pointing at mockBaseUrl. */
   private def keycloakOnlyConfig(mockBaseUrl: String): AuthenticationConfig =
@@ -441,3 +480,51 @@ class AuthChainCompositionSpec extends AnyFlatSpec with Matchers:
       msg should include("jwt")
       msg should include("keycloak")
     finally mock.shutdown()
+
+  // ---------------------------------------------------------------------------
+  // D. PasswordChangeRequired latch (AuthenticationService.authenticateBasic)
+  //
+  // Unlike section B, these tests drive the REAL AuthenticationService via
+  // realServiceWithBasicChain (reflection-injected stub providers) instead of the
+  // walkBasicChain test double, because the latch rule under test lives only in the
+  // production method -- it was the one untested link in the flagged-login chain.
+  // ---------------------------------------------------------------------------
+
+  "AuthChainCompositionSpec (D11)" should
+    "surface PasswordChangeRequired over another provider's InvalidCredentials noise" in:
+    val providerA = new FixedBasicAuthProvider("provider-a", Left(AuthFailure.PasswordChangeRequired))
+    val providerB = new FixedBasicAuthProvider("provider-b", Left(AuthFailure.InvalidCredentials("nope")))
+    val svc       = realServiceWithBasicChain(List(providerA, providerB))
+    try
+      val result = svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw")
+      result shouldBe Left(AuthFailure.PasswordChangeRequired)
+    finally svc.close()
+
+  "AuthChainCompositionSpec (D12)" should
+    "surface PasswordChangeRequired regardless of provider order (reversed)" in:
+    val providerA = new FixedBasicAuthProvider("provider-a", Left(AuthFailure.PasswordChangeRequired))
+    val providerB = new FixedBasicAuthProvider("provider-b", Left(AuthFailure.InvalidCredentials("nope")))
+    // Same two providers as D11, walked in the opposite order.
+    val svc = realServiceWithBasicChain(List(providerB, providerA))
+    try
+      val result = svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw")
+      result shouldBe Left(AuthFailure.PasswordChangeRequired)
+    finally svc.close()
+
+  "AuthChainCompositionSpec (D13)" should
+    "let a later provider's success short-circuit an earlier PasswordChangeRequired (IdP-authoritative)" in:
+    val profile = AuthenticatedProfile(
+      username   = "alice",
+      role       = "user",
+      groups     = Set.empty,
+      claims     = Map.empty,
+      authMethod = "provider-b",
+      tenant     = Some(SecurityFixtures.TenantId)
+    )
+    val providerA = new FixedBasicAuthProvider("provider-a", Left(AuthFailure.PasswordChangeRequired))
+    val providerB = new FixedBasicAuthProvider("provider-b", Right(profile))
+    val svc       = realServiceWithBasicChain(List(providerA, providerB))
+    try
+      val result = svc.authenticateBasic(AuthScope.Tenant(SecurityFixtures.TenantId), "alice", "pw")
+      result shouldBe Right(profile)
+    finally svc.close()

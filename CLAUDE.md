@@ -146,7 +146,7 @@ the REST login (401 `password_change_required`) and the FlightSQL handshake, unt
 swaps it through the public pre-session `POST /api/auth/change-password` (current password
 is the credential; new must differ; clears the flag). The auth queries MUST project
 `(password_hash, role, enabled, must_change_password)` - a shorter custom
-`QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails every login.
+`QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails boot and every login.
 
 ### K8s backend - per-pod and per-pool Secrets
 

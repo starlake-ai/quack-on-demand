@@ -588,8 +588,9 @@ final case class UserUpdateRequest(
     password: Option[String] = None, // None = no rotation
     role: Option[String] = None,
     // Only meaningful together with `password`: Some(true) flags the new temp password,
-    // Some(false)/None clears any pending flag along with the rotation. Some(true)
-    // without a password is a 400.
+    // Some(false)/None clears any pending flag along with the rotation. Without a
+    // password this field is a no-op -- role-only updates never touch the flag, and
+    // Some(true) without a password is a 400.
     mustChangePassword: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)
