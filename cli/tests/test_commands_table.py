@@ -267,7 +267,7 @@ CASES = [
     (
         ["user", "create", "--tenant", "acme", "--username", "bob", "--password", "pw", "--role", "admin"],
         "POST", "/api/user/create", {},
-        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": False},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": False, "email": None},
     ),
     (
         [
@@ -275,12 +275,20 @@ CASES = [
             "--role", "admin", "--must-change-password",
         ],
         "POST", "/api/user/create", {},
-        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": True},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": True, "email": None},
     ),
     (
         ["user", "create", "--superuser", "--username", "root", "--password", "pw"],
         "POST", "/api/user/create", {},
-        {"tenant": None, "username": "root", "password": "pw", "role": "user", "mustChangePassword": False},
+        {"tenant": None, "username": "root", "password": "pw", "role": "user", "mustChangePassword": False, "email": None},
+    ),
+    (
+        [
+            "user", "create", "--tenant", "acme", "--username", "bob", "--password", "pw",
+            "--role", "admin", "--email", "bob@acme.example",
+        ],
+        "POST", "/api/user/create", {},
+        {"tenant": "acme", "username": "bob", "password": "pw", "role": "admin", "mustChangePassword": False, "email": "bob@acme.example"},
     ),
     (
         ["user", "update", "u1", "--role", "admin"],
@@ -295,6 +303,14 @@ CASES = [
         ["user", "update", "u1", "--password", "pw", "--no-must-change-password"],
         "POST", "/api/user/update", {},
         {"id": "u1", "password": "pw", "mustChangePassword": False},
+    ),
+    (
+        ["user", "update", "u1", "--email", "bob@acme.example"],
+        "POST", "/api/user/update", {}, {"id": "u1", "email": "bob@acme.example"},
+    ),
+    (
+        ["user", "update", "u1", "--email", ""],
+        "POST", "/api/user/update", {}, {"id": "u1", "email": ""},
     ),
     (["user", "delete", "u1"], "POST", "/api/user/delete", {}, {"id": "u1"}),
     (["user", "effective", "u1"], "GET", "/api/user/u1/effective", {}, None),

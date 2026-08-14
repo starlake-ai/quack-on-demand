@@ -22,6 +22,7 @@ def list_(ctx: typer.Context, tenant: str = typer.Option(None, "--tenant", help=
         "password": "--password",
         "role": "--role",
         "mustChangePassword": "--must-change-password",
+        "email": "--email",
     },
 )
 def create(
@@ -36,6 +37,7 @@ def create(
         "--must-change-password",
         help="Force a password change at the user's next login.",
     ),
+    email: str = typer.Option(None, "--email", help="Contact address for password-reset links. Omit to leave emailless."),
 ):
     if superuser and tenant:
         raise typer.BadParameter("--superuser and --tenant are mutually exclusive")
@@ -53,6 +55,7 @@ def create(
             "password": password,
             "role": role,
             "mustChangePassword": must_change_password,
+            "email": email,
         },
     )
 
@@ -67,6 +70,7 @@ def create(
         "password": "--password",
         "role": "--role",
         "mustChangePassword": "--must-change-password",
+        "email": "--email",
     },
 )
 def update(
@@ -80,6 +84,7 @@ def update(
         "--must-change-password/--no-must-change-password",
         help="With --password: flag (or explicitly unflag) the new password as temporary.",
     ),
+    email: str = typer.Option(None, "--email", help="Omit = unchanged; empty string clears."),
 ):
     body: dict = {"id": user_id}
     if tenant is not None:
@@ -90,6 +95,8 @@ def update(
         body["role"] = role
     if must_change_password is not None:
         body["mustChangePassword"] = must_change_password
+    if email is not None:
+        body["email"] = email
     call(ctx, "POST", "/api/user/update", body=body)
 
 

@@ -93,6 +93,26 @@ def change_password(
     )
 
 
+@app.command("forgot-password")
+@covers("POST", "/api/auth/forgot-password", {"tenant": "--tenant", "username": "--username"})
+def forgot_password(
+    ctx: typer.Context,
+    username: str = typer.Option(..., "--username"),
+    tenant: str = typer.Option(None, "--tenant", help="Omit for a superuser account."),
+):
+    """Request a password-reset link (always answers 200, account existence stays hidden)."""
+    call(ctx, "POST", "/api/auth/forgot-password", body={"tenant": tenant, "username": username})
+
+
+@app.command("reset-password")
+@covers("POST", "/api/auth/reset-password", {"token": "(prompted)", "newPassword": "(prompted)"})
+def reset_password(ctx: typer.Context):
+    """Redeem a single-use reset link token and set a new password."""
+    token = typer.prompt("Reset token")
+    new = typer.prompt("New password", hide_input=True, confirmation_prompt=True)
+    call(ctx, "POST", "/api/auth/reset-password", body={"token": token, "newPassword": new})
+
+
 @covers("POST", "/api/auth/logout")
 def logout(ctx: typer.Context):
     """Revoke the current session token."""

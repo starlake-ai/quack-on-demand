@@ -16,6 +16,8 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 | `qod whoami` | Verify the current session. |
 | `qod auth mode` | Show the auth mode (db or oidc) the manager expects. |
 | `qod auth change-password` | Change your own password (works pre-login; prompts for current and new). |
+| `qod auth forgot-password` | Request a password-reset link (always answers 200; account existence stays hidden). |
+| `qod auth reset-password` | Redeem a single-use reset link token and set a new password (prompts for both). |
 | `qod health` | Liveness plus pool/node counts (open endpoint). |
 
 ## tenant
@@ -81,8 +83,8 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 | Command | Purpose |
 |---|---|
 | `qod user list` | List users. |
-| `qod user create` | Create a user (tenant-scoped, or `--superuser` for tenant-less). |
-| `qod user update` | Update a user's tenant, password, or role. |
+| `qod user create` | Create a user (tenant-scoped, or `--superuser` for tenant-less); `--email` for password-reset links. |
+| `qod user update` | Update a user's tenant, password, role, or email. |
 | `qod user delete` | Delete a user. |
 | `qod user effective` | Closure of roles, groups, table permissions, and pool grants. |
 

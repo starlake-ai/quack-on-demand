@@ -126,6 +126,8 @@ for the full flag list of any command.
 |---|---|
 | `mode` | Show the auth mode (db or oidc) the manager expects. |
 | `change-password` | Change your own password (works pre-login; prompts for current and new). |
+| `forgot-password` | Request a password-reset link (always answers 200; account existence stays hidden). |
+| `reset-password` | Redeem a single-use reset link token and set a new password (prompts for both). |
 
 ### config - server-published configuration
 
@@ -191,8 +193,8 @@ for the full flag list of any command.
 | Verb | Purpose |
 |---|---|
 | `list` | List users. |
-| `create` | Create a user (tenant-scoped, or `--superuser` for tenant-less). |
-| `update` | Update a user's tenant, password, or role. |
+| `create` | Create a user (tenant-scoped, or `--superuser` for tenant-less); `--email` for password-reset links. |
+| `update` | Update a user's tenant, password, role, or email. |
 | `delete` | Delete a user. |
 | `effective` | Closure of roles, groups, table permissions, and pool grants. |
 

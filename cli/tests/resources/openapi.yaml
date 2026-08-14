@@ -2455,6 +2455,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/forgot-password:
+    post:
+      operationId: postApiAuthForgot-password
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/login:
     post:
       operationId: postApiAuthLogin
@@ -2528,6 +2552,30 @@ paths:
         '400':
           description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
             qod_session, Invalid value for: header X-Forwarded-Proto'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/reset-password:
+    post:
+      operationId: postApiAuthReset-password
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body'
           content:
             text/plain:
               schema:
@@ -5451,6 +5499,16 @@ components:
           type: string
         disabled:
           type: boolean
+    ForgotPasswordRequest:
+      title: ForgotPasswordRequest
+      type: object
+      required:
+      - username
+      properties:
+        tenant:
+          type: string
+        username:
+          type: string
     GroupCreateRequest:
       title: GroupCreateRequest
       type: object
@@ -6150,6 +6208,17 @@ components:
           type: string
         recoverable:
           type: boolean
+    ResetPasswordRequest:
+      title: ResetPasswordRequest
+      type: object
+      required:
+      - token
+      - newPassword
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
     RestoreRequest:
       title: RestoreRequest
       type: object
@@ -7169,6 +7238,8 @@ components:
           type: string
         mustChangePassword:
           type: boolean
+        email:
+          type: string
     UserDeleteRequest:
       title: UserDeleteRequest
       type: object
@@ -7227,6 +7298,8 @@ components:
           type: array
           items:
             type: string
+        email:
+          type: string
     UserRoleMembershipRequest:
       title: UserRoleMembershipRequest
       type: object
@@ -7254,6 +7327,8 @@ components:
           type: string
         mustChangePassword:
           type: boolean
+        email:
+          type: string
     WhoamiResponse:
       title: WhoamiResponse
       type: object

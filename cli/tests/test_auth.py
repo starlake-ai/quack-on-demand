@@ -147,3 +147,46 @@ def test_change_password_without_tenant(runner, respx_mock):
         "currentPassword": "oldpw",
         "newPassword": "newpw",
     }
+
+
+def test_forgot_password_sends_credentials(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/forgot-password").mock(
+        return_value=httpx.Response(200)
+    )
+    result = runner.invoke(
+        app, ["auth", "forgot-password", "--username", "bob", "--tenant", "acme"]
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"tenant": "acme", "username": "bob"}
+
+
+def test_forgot_password_without_tenant(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/forgot-password").mock(
+        return_value=httpx.Response(200)
+    )
+    result = runner.invoke(app, ["auth", "forgot-password", "--username", "root"])
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"tenant": None, "username": "root"}
+
+
+def test_reset_password_prompts_and_sends_token(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/reset-password").mock(
+        return_value=httpx.Response(200)
+    )
+    result = runner.invoke(
+        app, ["auth", "reset-password"], input="tok-123\nnewpw\nnewpw\n"
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"token": "tok-123", "newPassword": "newpw"}
