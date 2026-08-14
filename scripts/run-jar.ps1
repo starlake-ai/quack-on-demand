@@ -39,7 +39,8 @@
                            `latest` (default), `latest-snapshot`, `BUILD`
                            (sbt assembly first; requires sbt + npm, sbt is
                            auto-bootstrapped if missing), or `LOCAL` (newest
-                           distrib\ jar, no rebuild, no network lookup)
+                           distrib\ jar, no rebuild, no GitHub releases
+                           lookup)
     JAR_CACHE_DIR          download cache (default $HOME\.cache\quack-on-demand)
     NUKE=1                 wipe local state (control-plane DB, demo tenant-dbs,
                            ducklake\, state\, certs\) before booting. Irreversible.
@@ -238,10 +239,14 @@ function Get-LatestReleaseVersion {
     $resp = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 0 -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
     $location = $resp.Headers['Location']
   } catch {
+    # pwsh 7: the caught response is HttpResponseMessage (no string indexer on
+    # Headers) and a non-throwing HEAD yields Headers['Location'] as string[];
+    # the try/catch fallback and the "$location" stringification keep both
+    # engines on the fallback path instead of crashing.
     $r = $_.Exception.Response
-    if ($r -and $r.Headers) { $location = $r.Headers['Location'] }
+    if ($r) { try { $location = $r.Headers['Location'] } catch { $location = $r.Headers.Location } }
   }
-  if ($location -match 'tag/v([^/\s]+)$') { return $Matches[1] }
+  if ("$location" -match 'tag/v([^/\s]+)$') { return $Matches[1] }
   return $null
 }
 
