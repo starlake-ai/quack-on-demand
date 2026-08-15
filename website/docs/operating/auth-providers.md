@@ -47,6 +47,47 @@ On the management plane (REST/UI), DB credentials are accepted when `auth.manage
 
 > **Upgrading from a single-query deployment**: the old `QOD_AUTH_DB_QUERY` setting is gone, along with the `(tenant IS NULL OR tenant = ?)` wildcard fallback. Pre-existing JDBC URLs that used the bootstrap admin (`admin@localhost.local`) against tenants must now add `?superuser=true` to the URL. There is no migration on the `qodstate_user` table itself.
 
+### Account lockout and password reset
+
+`qodstate_user` has an optional `email` column, set with `qod user create --email` / `qod user update --email` (or the REST `user/create` / `user/update` body). A row with an email can use the self-service password reset flow described below; a row without one cannot, and neither can it ever be locked out - this includes the env-seeded superuser, which has no email by construction.
+
+**SMTP.** Reset links are delivered by mail. With `QOD_SMTP_HOST` unset (the default) the manager logs the mail instead of sending it - fine for local dev, useless for real users.
+
+```bash
+QOD_SMTP_HOST=smtp.example.com
+QOD_SMTP_PORT=587                 # default
+QOD_SMTP_USER=apikey
+QOD_SMTP_PASSWORD=secret
+QOD_SMTP_FROM="no-reply@quack-on-demand.local"   # default
+QOD_SMTP_STARTTLS=true            # default
+
+# Externally visible origin used to build the mailed link
+# ($QOD_PUBLIC_BASE_URL/ui/reset-password?token=...). Left empty, the link is
+# host-relative and the manager logs a boot warning.
+QOD_PUBLIC_BASE_URL=https://qod.example.com
+```
+
+**Self-service reset flow.**
+
+```bash
+# Public endpoint - no API key. Always returns 200, whether or not the
+# account exists or has an email, so the response can't be used to enumerate
+# users. Only sends mail when the account exists, has an email, and the
+# per-account rate limiter admits.
+curl -sS -X POST http://localhost:20900/api/auth/forgot-password \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","tenant":"acme"}'
+
+# Redeem the token from the emailed link. Also public.
+curl -sS -X POST http://localhost:20900/api/auth/reset-password \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<from the link>","newPassword":"a-new-password"}'
+```
+
+The token is a stateless, single-use, 1-hour HS256 JWT (`ResetTokenStore`), signed with the same secret as `QOD_SESSION_JWT_SECRET`. Single-use is enforced by embedding a fingerprint of the password hash at mint time rather than a server-side redemption ledger, so any password change (including the reset itself) invalidates every other outstanding link for that user. CLI: `qod auth forgot-password --username <user> --tenant <tenant>`, `qod auth reset-password` (prompts for the token and new password).
+
+**Account lockout** is opt-in (`QOD_AUTH_LOCKOUT_ENABLED`, default `false`) and locks a row after `QOD_AUTH_LOCKOUT_MAX_FAILURES` (default `10`) consecutive failed passwords - but only rows with an email; emailless rows, including the superuser, are never locked. Turning lockout on without a configured SMTP relay fails boot with an error naming `QOD_SMTP_HOST`, since a locked-out user would otherwise have no way back in. A locked login gets `401 account_locked` with a message pointing at the forgot-password flow. Recovery is either the self-service reset above or an admin password reset (`user/update` with a new `password`); both clear the failure count and the lock as part of writing the new password.
+
 ---
 
 ## External JWT

@@ -114,6 +114,47 @@ qod profile usage --days 7
 qod profile statements --limit 20
 ```
 
+### Account lockout and self-service password reset
+
+Lockout is opt-in and off by default. Turning it on requires SMTP to be configured first - boot refuses to start otherwise (the error names `QOD_SMTP_HOST`), because a locked-out user with no mail path would have no way back in.
+
+```bash
+# Enable lockout: SMTP relay + the lockout switch + the public link base
+export QOD_SMTP_HOST=smtp.example.com
+export QOD_SMTP_USER=apikey
+export QOD_SMTP_PASSWORD=secret
+export QOD_SMTP_FROM=no-reply@example.com
+export QOD_PUBLIC_BASE_URL=https://qod.example.com
+export QOD_AUTH_LOCKOUT_ENABLED=true
+export QOD_AUTH_LOCKOUT_MAX_FAILURES=10   # default; locks after this many consecutive bad passwords
+
+# A locked-out user (or anyone who forgot their password) self-serves a reset -
+# this endpoint is public (no API key) and always returns 200, even for an
+# unknown username or an account without an email, to avoid leaking existence
+curl -sS -X POST http://localhost:20900/api/auth/forgot-password \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","tenant":"acme"}'
+
+# The mailed link carries a single-use, 1-hour token:
+curl -sS -X POST http://localhost:20900/api/auth/reset-password \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<from the emailed link>","newPassword":"a-new-password"}'
+
+# CLI equivalents
+qod auth forgot-password --username alice --tenant acme
+qod auth reset-password
+```
+
+Lockout only ever applies to rows with an `email` set (`qod user create/update --email`). Emailless users and the env-seeded superuser (`tenant IS NULL`, no email) can never be locked and have no self-service path - recover them with an admin password reset instead:
+
+```bash
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"<user-id>","password":"a-new-password"}'
+```
+
+An admin password reset also unconditionally clears the lock (`failed_attempts` and `locked_at`), same as the self-service reset.
+
 ## Tenant + pool management
 
 ```bash

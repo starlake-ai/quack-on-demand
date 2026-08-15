@@ -158,6 +158,16 @@ a fixed allowlist (`isProfileApi`: `/api/auth/whoami`, `/api/auth/logout`,
 everything else; the UI mounts only the `/profile` route (own password change; own
 usage/statements) for them.
 
+### Account lockout, SMTP, and self-service password reset
+
+`qodstate_user` carries an optional `email` column (Liquibase `0029-user-email`). A row with an email can use the public self-service reset flow; a row without one (including the env-seeded superuser, which is created with `tenant IS NULL` and no email) cannot and is never subject to lockout.
+
+**SMTP** (`quack-on-demand.smtp`, env `QOD_SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` / `_STARTTLS`): when `host` is unset (default), Main wires `LogMailSender` (logs recipient/subject, never actually sends); setting `QOD_SMTP_HOST` switches to `SmtpMailSender` (Jakarta Mail). `QOD_PUBLIC_BASE_URL` (`quack-on-demand.publicBaseUrl`, default `""`) is the externally-visible origin used to build the mailed reset link (`$publicBaseUrl/ui/reset-password?token=...`); left empty the link is host-relative and Main logs a boot warning.
+
+**Self-service reset**: `POST /api/auth/forgot-password {tenant?, username}` is a public endpoint (no API key) that always returns 200 regardless of whether the account exists or has an email - anti-enumeration is load-bearing, and the lookup + send are decoupled so response timing doesn't leak account existence either. `POST /api/auth/reset-password {token, newPassword}` (also public) redeems the token. The token (`ResetTokenStore`) is a stateless, single-use, 1-hour HS256 JWT signed with the same secret as `QOD_SESSION_JWT_SECRET`; single-use is enforced not by a redemption ledger but by embedding a fingerprint of the password hash at mint time, so any password change invalidates every outstanding link. `qod auth forgot-password` / `qod auth reset-password` are the CLI equivalents; `qod user create/update --email` sets the column.
+
+**Account lockout** (`quack-on-demand.auth.lockout`, env `QOD_AUTH_LOCKOUT_ENABLED` default `false`, `QOD_AUTH_LOCKOUT_MAX_FAILURES` default `10`) is opt-in. Enabling it requires a working SMTP relay - `BootPreflight.checkLockoutSmtp` refuses to start otherwise, naming `QOD_SMTP_HOST` in the error - because a locked-out user with no mail path would have no way back in. Lockout only ever applies to rows with a non-null `email`; emailless rows (and therefore the seeded superuser) can never be locked no matter how many failed attempts. `DatabaseAuthenticator` checks the lock before bcrypt and, on a locked row, returns `AuthFailure.AccountLocked` -> REST `401 {"error":"account_locked","message":"account locked - use forgot password to reset your credentials"}` (same failure wins the FlightSQL handshake too). Failures accumulate atomically per row and reset to zero on any successful login. Recovery is either the self-service reset above or an admin password reset (`user/update` with a new `password`, or the CLI equivalent) - both unconditionally clear `failed_attempts` and `locked_at` as part of the password write.
+
 ### K8s backend - per-pod and per-pool Secrets
 
 `KubernetesQuackBackend` creates one Pod + one Service per node, plus two Secrets:
