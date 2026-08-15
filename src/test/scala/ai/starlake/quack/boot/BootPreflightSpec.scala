@@ -37,8 +37,53 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Right(())
   }
 
+  it should "refuse lockout enabled with a whitespace-only SMTP host" in {
+    val result = BootPreflight.checkLockoutSmtp(lockoutEnabled = true, smtpHost = Some("  "))
+    result match
+      case Left(msg) => msg should include("QOD_SMTP_HOST")
+      case Right(()) => fail("expected Left naming QOD_SMTP_HOST")
+  }
+
   it should "allow lockout disabled regardless of SMTP configuration" in {
     BootPreflight.checkLockoutSmtp(lockoutEnabled = false, smtpHost = None) shouldBe Right(())
+  }
+
+  private val cpUrl   = "jdbc:postgresql://localhost:5432/qod"
+  private val authUrl = "jdbc:postgresql://otherhost:5432/authdb"
+
+  "checkLockoutDbCoherence" should "refuse lockout enabled when the auth URL diverges" in {
+    val result = BootPreflight.checkLockoutDbCoherence(
+      lockoutEnabled = true,
+      controlPlaneUrl = cpUrl,
+      authUrl = authUrl
+    )
+    result match
+      case Left(msg) => msg should include("QOD_AUTH_DB_JDBC_URL")
+      case Right(()) => fail("expected Left naming QOD_AUTH_DB_JDBC_URL")
+  }
+
+  it should "allow lockout enabled when the URLs coincide" in {
+    BootPreflight.checkLockoutDbCoherence(
+      lockoutEnabled = true,
+      controlPlaneUrl = cpUrl,
+      authUrl = cpUrl
+    ) shouldBe Right(())
+  }
+
+  it should "allow lockout enabled when the URLs differ only by surrounding whitespace" in {
+    BootPreflight.checkLockoutDbCoherence(
+      lockoutEnabled = true,
+      controlPlaneUrl = cpUrl,
+      authUrl = s"  $cpUrl  "
+    ) shouldBe Right(())
+  }
+
+  it should "allow lockout disabled regardless of URL divergence" in {
+    BootPreflight.checkLockoutDbCoherence(
+      lockoutEnabled = false,
+      controlPlaneUrl = cpUrl,
+      authUrl = authUrl
+    ) shouldBe Right(())
   }
 
   TestPostgres.dropStrayTestDatabases("qodlck")

@@ -21,7 +21,7 @@ object BootPreflight extends LazyLogging:
     * first and sys.error'd after, so an unreachable auth database surfaces as the same clean
     * config-error framing as the sibling boot gates, not a raw JDBC exception.
     */
-  def probeAuthDatabase(dbCfg: DatabaseAuthConfig, lockoutEnabled: Boolean = false): Unit =
+  def probeAuthDatabase(dbCfg: DatabaseAuthConfig): Unit =
     val probeResult: Either[String, Unit] =
       try
         Class.forName("org.postgresql.Driver")
@@ -30,10 +30,7 @@ object BootPreflight extends LazyLogging:
           dbCfg.username,
           dbCfg.password
         )
-        try
-          AuthQueryPreconditions
-            .validate(probeConn, dbCfg)
-            .flatMap(_ => if lockoutEnabled then checkLockoutColumns(probeConn) else Right(()))
+        try AuthQueryPreconditions.validate(probeConn, dbCfg)
         finally probeConn.close()
       catch
         case e: Exception =>
@@ -45,11 +42,59 @@ object BootPreflight extends LazyLogging:
           )
     probeResult.left.foreach(msg => sys.error(msg))
 
+  /** Probe the CONTROL-PLANE database (the `defaultMetastore` URL that `UserStore` enforces
+    * against) for the lockout columns. Lockout state lives on `qodstate_user` in the control-plane
+    * db, NOT the auth db, so this must probe the same URL UserStore uses -- probing the auth db
+    * would be untruthful when they diverge (see `checkLockoutDbCoherence`). A control-plane db that
+    * never ran changelog 0029/0030 would otherwise fail at first login instead of at boot.
+    */
+  def probeLockoutColumns(controlPlaneUrl: String, user: String, password: String): Unit =
+    val probeResult: Either[String, Unit] =
+      try
+        Class.forName("org.postgresql.Driver")
+        val probeConn = java.sql.DriverManager.getConnection(controlPlaneUrl, user, password)
+        try checkLockoutColumns(probeConn)
+        finally probeConn.close()
+      catch
+        case e: Exception =>
+          Left(
+            "auth.lockout.enabled is true but the control-plane database could not be probed for " +
+              s"lockout columns at '$controlPlaneUrl' (${e.getMessage}). Check the " +
+              "quack-on-demand.defaultMetastore settings and that the database is reachable."
+          )
+    probeResult.left.foreach(msg => sys.error(msg))
+
+  /** Pure gate: lockout state (`failed_attempts` / `locked_at`) is read and written by `UserStore`
+    * against `qodstate_user` in the CONTROL-PLANE database (the `defaultMetastore`), but auth
+    * queries run against the auth database (`QOD_AUTH_DB_JDBC_URL`). In the default deployment the
+    * two URLs coincide (the auth URL is derived from the defaultMetastore). If an operator points
+    * the auth db at a DIFFERENT database, lockout enforcement becomes inert -- writes hit 0 rows on
+    * the auth side and `isLocked` is always false, i.e. the control fails OPEN while boot claims it
+    * is enabled. Rather than fail open on a security control, refuse to start. URLs are compared
+    * trim-normalized; the two default URLs are built by identical string interpolation, so exact
+    * equality holds for the coincident case. Side-effect-free so it is unit-testable; the call site
+    * sys.errors on Left, mirroring `checkLockoutSmtp`.
+    */
+  def checkLockoutDbCoherence(
+      lockoutEnabled: Boolean,
+      controlPlaneUrl: String,
+      authUrl: String
+  ): Either[String, Unit] =
+    if lockoutEnabled && controlPlaneUrl.trim != authUrl.trim then
+      Left(
+        "auth.lockout.enabled is true but the auth database URL differs from the control-plane " +
+          "database. Account lockout enforces against qodstate_user in the control-plane database " +
+          s"('$controlPlaneUrl'), while auth queries run against '$authUrl' -- with divergent URLs " +
+          "lockout is inert (writes hit 0 rows, isLocked is always false, so lockout fails open). " +
+          "Point QOD_AUTH_DB_JDBC_URL at the control-plane database, or set " +
+          "QOD_AUTH_LOCKOUT_ENABLED=false."
+      )
+    else Right(())
+
   /** When lockout is enabled, `qodstate_user` must carry `failed_attempts`, `locked_at`, and
-    * `email` -- the three columns Task 9's enforcement reads and writes. A custom
-    * QOD_AUTH_DB_JDBC_URL pointed at a database that never ran the quack-on-demand Liquibase
-    * changelog (or an operator-managed lookalike table) would otherwise fail at first login instead
-    * of at boot.
+    * `email` -- the three columns Task 9's enforcement reads and writes. A control-plane database
+    * that never ran the quack-on-demand Liquibase changelog (or an operator-managed lookalike
+    * table) would otherwise fail at first login instead of at boot.
     */
   private val LockoutRequiredColumns = Set("failed_attempts", "locked_at", "email")
 
@@ -63,8 +108,8 @@ object BootPreflight extends LazyLogging:
       Left(
         "auth.lockout.enabled is true but qodstate_user is missing column(s): " +
           s"${missing.toList.sorted.mkString(", ")} -- run the quack-on-demand Liquibase " +
-          "changelog (0029-user-email / 0030-user-lockout) against the auth database, or " +
-          "point QOD_AUTH_DB_JDBC_URL at one that has."
+          "changelog (0029-user-email / 0030-user-lockout) against the control-plane database, " +
+          "or set QOD_AUTH_LOCKOUT_ENABLED=false."
       )
     else Right(())
 
@@ -74,7 +119,7 @@ object BootPreflight extends LazyLogging:
     * sys.errors on Left, mirroring `probeAuthDatabase`.
     */
   def checkLockoutSmtp(lockoutEnabled: Boolean, smtpHost: Option[String]): Either[String, Unit] =
-    if lockoutEnabled && smtpHost.forall(_.isEmpty) then
+    if lockoutEnabled && smtpHost.forall(_.trim.isEmpty) then
       Left(
         "auth.lockout.enabled is true but no SMTP relay is configured -- a locked-out user would " +
           "have no way back in. Set QOD_SMTP_HOST (and QOD_SMTP_PORT / QOD_SMTP_USER / " +

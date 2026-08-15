@@ -268,14 +268,17 @@ final class UserStore(
     * lockout state (`failed_attempts = 0, locked_at = NULL`): a self-service reset via
     * forgot-password is precisely the way a locked-out user gets back in, so the reset unlocks. The
     * columns exist unconditionally (Liquibase `0030`), so clearing them is a harmless no-op when
-    * lockout is disabled (they are already 0/NULL).
+    * lockout is disabled (they are already 0/NULL). Also clears `must_change_password`: a
+    * self-service reset is a user-chosen credential, so a must-change user who recovers this way
+    * must not be forced to immediately change the password they just picked (mirrors
+    * `changePassword`).
     */
   def setPasswordById(id: String, newPlaintext: String): Unit =
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, newPlaintext.toCharArray)
       val ps   = c.prepareStatement(
-        "UPDATE qodstate_user SET password_hash = ?, failed_attempts = 0, locked_at = NULL, " +
-          "updated_at = NOW() WHERE id = ?"
+        "UPDATE qodstate_user SET password_hash = ?, must_change_password = false, " +
+          "failed_attempts = 0, locked_at = NULL, updated_at = NOW() WHERE id = ?"
       )
       try
         ps.setString(1, hash)

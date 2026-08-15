@@ -222,11 +222,28 @@ object Main extends IOApp with LazyLogging:
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 
-    // Probe the database-auth query shape now instead of at first login. Also confirms
-    // failed_attempts/locked_at/email exist on qodstate_user when lockout is enabled.
-    // Must run AFTER the Liquibase apply above.
-    if authCfg.database.enabled then
-      BootPreflight.probeAuthDatabase(authCfg.database, mgrCfg.auth.lockout.enabled)
+    // Probe the database-auth query shape now instead of at first login. Must run AFTER the
+    // Liquibase apply above.
+    if authCfg.database.enabled then BootPreflight.probeAuthDatabase(authCfg.database)
+
+    // Lockout enforces against qodstate_user in the CONTROL-PLANE database (the defaultMetastore
+    // URL UserStore uses below), NOT the auth database. If an operator points QOD_AUTH_DB_JDBC_URL
+    // at a different database, lockout writes hit 0 rows and isLocked is always false -- the control
+    // fails open while boot claims it is enabled. Refuse that combination, then probe the
+    // control-plane db (where the columns actually live) for failed_attempts/locked_at/email.
+    if mgrCfg.auth.lockout.enabled then
+      val dm              = mgrCfg.defaultMetastore
+      val controlPlaneUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
+      if authCfg.database.enabled then
+        BootPreflight
+          .checkLockoutDbCoherence(
+            lockoutEnabled = true,
+            controlPlaneUrl = controlPlaneUrl,
+            authUrl = authCfg.database.jdbcUrl
+          )
+          .left
+          .foreach(msg => sys.error(msg))
+      BootPreflight.probeLockoutColumns(controlPlaneUrl, dm.pgUser, dm.pgPassword)
 
     // One shared Hikari pool against qodstate_user; closed in the shutdown hook.
     val userStore =

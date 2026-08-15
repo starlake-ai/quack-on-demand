@@ -196,6 +196,29 @@ class AccountLockoutSpec extends AnyFlatSpec with Matchers:
       auth.authenticate(AuthScope.Tenant("t1"), "alice", "brandnew").isRight shouldBe true
     }
 
+  it should "clear must_change_password on setPasswordById so the reset user is not re-prompted" in
+    withFreshDb(enabledCfg) { (users, auth, _) =>
+      val id = users
+        .upsertUser(
+          Some("t1"),
+          "alice",
+          "pw",
+          "user",
+          mustChangePassword = Some(true),
+          email = Some(Some("alice@x.io"))
+        )
+        .id
+
+      // Before the reset, the correct password is bounced with PasswordChangeRequired.
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "pw") shouldBe
+        Left(AuthFailure.PasswordChangeRequired)
+
+      // A self-service reset is a user-chosen credential, so it clears the flag: the user is not
+      // forced to immediately change the password they just picked.
+      users.setPasswordById(id, "brandnew")
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "brandnew").isRight shouldBe true
+    }
+
   it should "clear the lock on an admin upsertUser password write" in
     withFreshDb(enabledCfg) { (users, auth, _) =>
       users.upsertUser(Some("t1"), "alice", "pw", "user", email = Some(Some("alice@x.io")))
