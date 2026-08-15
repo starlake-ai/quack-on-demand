@@ -16,7 +16,7 @@ import ai.starlake.quack.ondemand.auth.{
   ManagementIdentitySource,
   SessionScope
 }
-import ai.starlake.quack.ondemand.state.UserGrant
+import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
@@ -332,6 +332,7 @@ final class AuthHandlers(
           )
           val code = err match
             case AuthFailure.PasswordChangeRequired => "password_change_required"
+            case AuthFailure.AccountLocked          => "account_locked"
             case _                                  => "invalid_credentials"
           Left((StatusCode.Unauthorized, ErrorResponse(code, err.message)))
         case Right(profile) =>
@@ -403,7 +404,7 @@ final class AuthHandlers(
             req.currentPassword,
             req.newPassword
           ) match
-            case Left(_) =>
+            case Left(err) =>
               audit.restAs(
                 req.username,
                 "tenant",
@@ -413,12 +414,27 @@ final class AuthHandlers(
                 tenant = scopeTenant,
                 detail = Map("username" -> req.username)
               )
-              Left(
-                (
-                  StatusCode.Unauthorized,
-                  ErrorResponse("invalid_credentials", "invalid credentials")
-                )
-              )
+              // A locked row is surfaced distinctly (account_locked) so the caller is pointed at
+              // the reset flow, mirroring the login path; every other failure collapses to the
+              // anti-enumeration invalid_credentials.
+              err match
+                case UserStore.ChangePasswordError.Locked =>
+                  Left(
+                    (
+                      StatusCode.Unauthorized,
+                      ErrorResponse(
+                        "account_locked",
+                        "account locked - use forgot password to reset your credentials"
+                      )
+                    )
+                  )
+                case UserStore.ChangePasswordError.InvalidCredentials =>
+                  Left(
+                    (
+                      StatusCode.Unauthorized,
+                      ErrorResponse("invalid_credentials", "invalid credentials")
+                    )
+                  )
             case Right(()) =>
               audit.restAs(
                 req.username,

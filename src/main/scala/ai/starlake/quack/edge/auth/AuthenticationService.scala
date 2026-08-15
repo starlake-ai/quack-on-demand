@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.LockoutConfig
 import ai.starlake.quack.edge.config.AuthenticationConfig
+import ai.starlake.quack.ondemand.state.LockoutStore
 import com.typesafe.scalalogging.LazyLogging
 
 /** Central authentication orchestrator. Builds chains of authenticators from config and tries them
@@ -15,7 +17,9 @@ import com.typesafe.scalalogging.LazyLogging
 class AuthenticationService(
     config: AuthenticationConfig,
     jwtSecretKey: String,
-    tenantOidcRegistry: Option[TenantOidcRegistry] = None
+    tenantOidcRegistry: Option[TenantOidcRegistry] = None,
+    lockout: LockoutConfig = LockoutConfig(),
+    lockoutStore: Option[LockoutStore] = None
 ) extends AutoCloseable,
       LazyLogging:
 
@@ -50,6 +54,7 @@ class AuthenticationService(
         case AuthScope.System    => "system"
         case AuthScope.Tenant(t) => t
       var passwordChangeRequired = false
+      var accountLocked          = false
       val errors                 = List.newBuilder[String]
       basicProviders.iterator
         .map { provider =>
@@ -62,14 +67,18 @@ class AuthenticationService(
                 s"Provider ${provider.name} rejected '$username' ($scopeLabel): ${err.message}"
               )
               if err == AuthFailure.PasswordChangeRequired then passwordChangeRequired = true
+              if err == AuthFailure.AccountLocked then accountLocked = true
               errors += s"${provider.name}: ${err.message}"
               Left(err)
         }
         .collectFirst { case r @ Right(_) => r }
         .getOrElse(
-          // A PasswordChangeRequired from any provider is authoritative: it means the
-          // password VERIFIED there. Do not bury it under the other providers' noise.
-          if passwordChangeRequired then Left(AuthFailure.PasswordChangeRequired)
+          // An AccountLocked or PasswordChangeRequired from any provider is authoritative and must
+          // not be buried under the other providers' generic noise. AccountLocked wins first: a
+          // locked row is refused before bcrypt, so it can never co-occur with a verified
+          // PasswordChangeRequired on the same account.
+          if accountLocked then Left(AuthFailure.AccountLocked)
+          else if passwordChangeRequired then Left(AuthFailure.PasswordChangeRequired)
           else
             Left(
               AuthFailure.InvalidCredentials(
@@ -147,7 +156,12 @@ class AuthenticationService(
     val providers = List.newBuilder[BasicAuthProvider]
     if config.database.enabled then
       logger.info("Initializing database authentication provider")
-      providers += new DatabaseAuthenticator(config.database, config.roleClaim)
+      providers += new DatabaseAuthenticator(
+        config.database,
+        config.roleClaim,
+        lockout,
+        lockoutStore
+      )
     // ROPC providers for OIDC backends that support password grant
     if config.keycloak.enabled then
       val tokenEndpoint =

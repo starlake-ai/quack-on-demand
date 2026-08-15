@@ -1,10 +1,32 @@
 package ai.starlake.quack.ondemand.state
 
+import ai.starlake.quack.LockoutConfig
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
 import java.sql.Connection
+
+/** Narrow read/write seam over the account-lockout columns of `qodstate_user`, so
+  * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] can enforce lockout without taking a
+  * dependency on the whole [[UserStore]] surface. All three operations touch the lockout columns
+  * DIRECTLY by `(tenant, username)` -- NOT through the operator-customizable
+  * systemQuery/tenantQuery projection -- and are no-ops for a row with `email IS NULL` (an
+  * emailless account has no self-service reset path, so it is never lockable).
+  */
+trait LockoutStore:
+  /** True only when the row is locked (`locked_at` non-null) AND lockable (`email` non-null). */
+  def isLocked(tenant: Option[String], username: String): Boolean
+
+  /** Atomically bump `failed_attempts` and, when it reaches `maxFailures`, stamp `locked_at`. One
+    * statement, so it is HA-safe (no read-then-write race). No-op for an emailless row.
+    */
+  def recordFailureAndMaybeLock(tenant: Option[String], username: String, maxFailures: Int): Unit
+
+  /** Zero the failure counter (called on a successful auth below the threshold). No-op for an
+    * emailless row.
+    */
+  def resetFailures(tenant: Option[String], username: String): Unit
 
 /** Manages the `qodstate_user` table -- the principal directory used by
   * [[ai.starlake.quack.edge.auth.DatabaseAuthenticator]] and as the FK target for the RBAC
@@ -45,8 +67,10 @@ final class UserStore(
     jdbcUrl: String,
     dbUser: String,
     dbPassword: String,
-    poolSize: Int = 10
-) extends LazyLogging:
+    poolSize: Int = 10,
+    lockout: LockoutConfig = LockoutConfig()
+) extends LazyLogging,
+      LockoutStore:
 
   // Force driver registration so the JDBC URL resolves before HikariCP
   // probes the connection.
@@ -128,51 +152,68 @@ final class UserStore(
       currentPassword: String,
       newPassword: String
   ): Either[UserStore.ChangePasswordError, Unit] =
-    withConn { c =>
-      val selectSql = tenant match
-        case Some(_) =>
-          "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant = ? AND username = ?"
-        case None =>
-          "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant IS NULL AND username = ?"
-      val ps  = c.prepareStatement(selectSql)
-      val row =
-        try
-          tenant match
-            case Some(t) =>
-              ps.setString(1, t)
-              ps.setString(2, username)
-            case None =>
-              ps.setString(1, username)
-          val rs = ps.executeQuery()
+    // Lockout gate (enabled path only, so the disabled path is byte-unchanged): refuse a locked
+    // row up front with a distinct signal so the caller is told to reset rather than getting the
+    // generic invalid-credentials answer. isLocked is a no-op for an emailless row.
+    if lockout.enabled && isLocked(tenant, username) then Left(UserStore.ChangePasswordError.Locked)
+    else
+      withConn { c =>
+        val selectSql = tenant match
+          case Some(_) =>
+            "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant = ? AND username = ?"
+          case None =>
+            "SELECT id, password_hash, enabled FROM qodstate_user WHERE tenant IS NULL AND username = ?"
+        val ps  = c.prepareStatement(selectSql)
+        val row =
           try
-            if rs.next() then Some((rs.getString(1), rs.getString(2), rs.getBoolean(3)))
-            else None
-          finally rs.close()
-        finally ps.close()
-      row match
-        case Some((id, storedHash, enabled)) =>
-          val verified = BCrypt.verifyer().verify(currentPassword.toCharArray, storedHash).verified
-          if verified && enabled then
-            val newHash = BCrypt.withDefaults().hashToString(12, newPassword.toCharArray)
-            val upd     = c.prepareStatement(
-              """UPDATE qodstate_user
-                |SET password_hash = ?, must_change_password = false, updated_at = NOW()
-                |WHERE id = ?""".stripMargin
-            )
+            tenant match
+              case Some(t) =>
+                ps.setString(1, t)
+                ps.setString(2, username)
+              case None =>
+                ps.setString(1, username)
+            val rs = ps.executeQuery()
             try
-              upd.setString(1, newHash)
-              upd.setString(2, id)
-              upd.executeUpdate()
-              Right(())
-            finally upd.close()
-          else Left(UserStore.ChangePasswordError.InvalidCredentials)
-        case None =>
-          // Row missing (or tenant-scope miss): burn the same bcrypt verify against a fixed dummy
-          // hash so this path costs the same as a wrong password on a live row -- see
-          // UserStore.DummyHash.
-          BCrypt.verifyer().verify(currentPassword.toCharArray, UserStore.DummyHash)
-          Left(UserStore.ChangePasswordError.InvalidCredentials)
-    }
+              if rs.next() then Some((rs.getString(1), rs.getString(2), rs.getBoolean(3)))
+              else None
+            finally rs.close()
+          finally ps.close()
+        row match
+          case Some((id, storedHash, enabled)) =>
+            val verified =
+              BCrypt.verifyer().verify(currentPassword.toCharArray, storedHash).verified
+            if verified && enabled then
+              val newHash = BCrypt.withDefaults().hashToString(12, newPassword.toCharArray)
+              // A successful change is a password write, so it also clears the lockout state (the
+              // enabled suffix is empty when lockout is off, keeping the disabled path byte-for-byte
+              // identical to the original single-column update).
+              val lockClear =
+                if lockout.enabled then ", failed_attempts = 0, locked_at = NULL" else ""
+              val upd = c.prepareStatement(
+                s"""UPDATE qodstate_user
+                 |SET password_hash = ?, must_change_password = false$lockClear, updated_at = NOW()
+                 |WHERE id = ?""".stripMargin
+              )
+              try
+                upd.setString(1, newHash)
+                upd.setString(2, id)
+                upd.executeUpdate()
+                Right(())
+              finally upd.close()
+            else
+              // A verified-but-wrong current password on the change-password surface counts toward
+              // lockout too (enabled path only). A disabled-but-correct password is NOT a failure, so
+              // only the !verified case increments.
+              if lockout.enabled && !verified then
+                recordFailureAndMaybeLock(tenant, username, lockout.maxFailures)
+              Left(UserStore.ChangePasswordError.InvalidCredentials)
+          case None =>
+            // Row missing (or tenant-scope miss): burn the same bcrypt verify against a fixed dummy
+            // hash so this path costs the same as a wrong password on a live row -- see
+            // UserStore.DummyHash.
+            BCrypt.verifyer().verify(currentPassword.toCharArray, UserStore.DummyHash)
+            Left(UserStore.ChangePasswordError.InvalidCredentials)
+      }
 
   /** Resolve a `(tenant, username)` row for the password-reset flow: its id, its email (may be
     * absent), and its current bcrypt hash. `None` when no such row exists. Callers must NOT surface
@@ -221,14 +262,18 @@ final class UserStore(
     }
 
   /** Set a new password on the row with this surrogate id (bcrypt-hashed). Keyed by id so the reset
-    * handler never needs to re-resolve `(tenant, username)`. Phase 2 will also clear the lockout
-    * counter here; today it only rotates the hash.
+    * handler never needs to re-resolve `(tenant, username)`. Any password write also clears the
+    * lockout state (`failed_attempts = 0, locked_at = NULL`): a self-service reset via
+    * forgot-password is precisely the way a locked-out user gets back in, so the reset unlocks. The
+    * columns exist unconditionally (Liquibase `0030`), so clearing them is a harmless no-op when
+    * lockout is disabled (they are already 0/NULL).
     */
   def setPasswordById(id: String, newPlaintext: String): Unit =
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, newPlaintext.toCharArray)
       val ps   = c.prepareStatement(
-        "UPDATE qodstate_user SET password_hash = ?, updated_at = NOW() WHERE id = ?"
+        "UPDATE qodstate_user SET password_hash = ?, failed_attempts = 0, locked_at = NULL, " +
+          "updated_at = NOW() WHERE id = ?"
       )
       try
         ps.setString(1, hash)
@@ -237,6 +282,90 @@ final class UserStore(
         ()
       finally ps.close()
     }
+
+  // ------------------------------------------------------------------
+  // LockoutStore -- lockout columns, read/written directly by (tenant, username).
+  // ------------------------------------------------------------------
+
+  override def isLocked(tenant: Option[String], username: String): Boolean =
+    withConn { c =>
+      val sql = tenant match
+        case Some(_) =>
+          "SELECT (locked_at IS NOT NULL AND email IS NOT NULL) FROM qodstate_user " +
+            "WHERE tenant = ? AND username = ?"
+        case None =>
+          "SELECT (locked_at IS NOT NULL AND email IS NOT NULL) FROM qodstate_user " +
+            "WHERE tenant IS NULL AND username = ?"
+      val ps = c.prepareStatement(sql)
+      try
+        bindTenantUser(ps, tenant, username)
+        val rs = ps.executeQuery()
+        try if rs.next() then rs.getBoolean(1) else false
+        finally rs.close()
+      finally ps.close()
+    }
+
+  override def recordFailureAndMaybeLock(
+      tenant: Option[String],
+      username: String,
+      maxFailures: Int
+  ): Unit =
+    withConn { c =>
+      // One atomic statement: increment, and stamp locked_at only when the
+      // post-increment count crosses the threshold. HA-safe -- no read then
+      // write. The `email IS NOT NULL` predicate makes this a no-op for an
+      // emailless row, so a superuser / pre-email account never locks.
+      val sql = tenant match
+        case Some(_) =>
+          "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
+            "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
+            "WHERE tenant = ? AND username = ? AND email IS NOT NULL"
+        case None =>
+          "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
+            "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
+            "WHERE tenant IS NULL AND username = ? AND email IS NOT NULL"
+      val ps = c.prepareStatement(sql)
+      try
+        ps.setInt(1, maxFailures)
+        tenant match
+          case Some(t) =>
+            ps.setString(2, t)
+            ps.setString(3, username)
+          case None =>
+            ps.setString(2, username)
+        ps.executeUpdate()
+        ()
+      finally ps.close()
+    }
+
+  override def resetFailures(tenant: Option[String], username: String): Unit =
+    withConn { c =>
+      val sql = tenant match
+        case Some(_) =>
+          "UPDATE qodstate_user SET failed_attempts = 0 " +
+            "WHERE tenant = ? AND username = ? AND email IS NOT NULL"
+        case None =>
+          "UPDATE qodstate_user SET failed_attempts = 0 " +
+            "WHERE tenant IS NULL AND username = ? AND email IS NOT NULL"
+      val ps = c.prepareStatement(sql)
+      try
+        bindTenantUser(ps, tenant, username)
+        ps.executeUpdate()
+        ()
+      finally ps.close()
+    }
+
+  private def bindTenantUser(
+      ps: java.sql.PreparedStatement,
+      tenant: Option[String],
+      username: String
+  ): Unit =
+    tenant match
+      case Some(t) =>
+        ps.setString(1, t)
+        ps.setString(2, username)
+      case None =>
+        ps.setString(1, username)
 
   /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
     * first; if that yields nothing AND `email` is given, retries with `username = email` so
@@ -313,11 +442,18 @@ object UserStore:
     */
   final case class Upsert(id: String, inserted: Boolean)
 
-  /** Failure of [[UserStore.changePassword]]. Deliberately a single case: unknown user, wrong
-    * current password, and disabled account are indistinguishable to the caller.
+  /** Failure of [[UserStore.changePassword]].
+    *
+    *   - [[InvalidCredentials]]: unknown user, wrong current password, and disabled account are
+    *     deliberately indistinguishable to the caller (anti-enumeration).
+    *   - [[Locked]]: the row is locked out (only reachable with lockout enabled). Surfaced
+    *     distinctly so the handler can answer `account_locked` and point the user at the reset
+    *     flow, mirroring the login path. A locked account already reveals its state on login, so
+    *     this is not a new existence oracle.
     */
   enum ChangePasswordError:
     case InvalidCredentials
+    case Locked
 
   // Burned on the row-miss path so a missing/disabled account costs the same bcrypt verify
   // as a wrong password on a live one -- response latency must not become an existence oracle.
@@ -327,7 +463,10 @@ object UserStore:
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next to the state table by
     * default.
     */
-  def fromDefaultMetastore(meta: Map[String, String]): UserStore =
+  def fromDefaultMetastore(
+      meta: Map[String, String],
+      lockout: LockoutConfig = LockoutConfig()
+  ): UserStore =
     def required(k: String) =
       meta
         .get(k)
@@ -341,4 +480,4 @@ object UserStore:
     val pass = required("pgPassword")
     val db   = required("dbName")
     val url  = s"jdbc:postgresql://$host:$port/$db"
-    new UserStore(url, user, pass)
+    new UserStore(url, user, pass, lockout = lockout)

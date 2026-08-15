@@ -229,7 +229,8 @@ object Main extends IOApp with LazyLogging:
       BootPreflight.probeAuthDatabase(authCfg.database, mgrCfg.auth.lockout.enabled)
 
     // One shared Hikari pool against qodstate_user; closed in the shutdown hook.
-    val userStore = UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val userStore =
+      UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap, mgrCfg.auth.lockout)
     BootPreflight.seedAdminUsers(userStore, mgrCfg.admin)
 
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
@@ -340,7 +341,9 @@ object Main extends IOApp with LazyLogging:
     val authService = new AuthenticationService(
       authCfg,
       authCfg.jwt.secretKey,
-      Some(tenantOidcRegistry)
+      Some(tenantOidcRegistry),
+      lockout = mgrCfg.auth.lockout,
+      lockoutStore = Some(userStore)
     )
 
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =

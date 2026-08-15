@@ -1,6 +1,8 @@
 package ai.starlake.quack.edge.auth
 
+import ai.starlake.quack.LockoutConfig
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.ondemand.state.LockoutStore
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -23,14 +25,29 @@ import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
   * mandatory, not optional -- a result set with fewer than four columns fails the login outright
   * (config error, not a tolerant default-to-enabled / default-to-unflagged).
   *
-  * Check ordering is bcrypt -> enabled -> must_change_password. The flag is only ever surfaced
-  * after the password verified on an enabled account, so the distinct
-  * [[AuthFailure.PasswordChangeRequired]] cannot be used as an account-probing oracle by a caller
-  * who does not already hold the credential.
+  * Check ordering is locked -> bcrypt -> enabled -> must_change_password. The lock is checked
+  * BEFORE bcrypt so a locked account is refused even with the right password (and cheaply, without
+  * paying the verify). The must_change flag is only ever surfaced after the password verified on an
+  * enabled account, so the distinct [[AuthFailure.PasswordChangeRequired]] cannot be used as an
+  * account-probing oracle by a caller who does not already hold the credential.
+  *
+  * Account lockout is opt-in: when `lockout.enabled` is false (the default) OR no `lockoutStore` is
+  * injected, the whole lockout path is skipped and this authenticator behaves exactly as it did
+  * before Task 9 -- a byte-unchanged disabled path. When enabled, a wrong password increments the
+  * per-row failure counter (atomically, HA-safe), a success resets it, and an emailless row is
+  * never locked (the store's `email IS NOT NULL` predicate makes the writes no-ops and `isLocked`
+  * returns false).
   */
-class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
-    extends BasicAuthProvider,
+class DatabaseAuthenticator(
+    config: DatabaseAuthConfig,
+    roleClaim: String,
+    lockout: LockoutConfig = LockoutConfig(),
+    lockoutStore: Option[LockoutStore] = None
+) extends BasicAuthProvider,
       LazyLogging:
+
+  // Lockout enforcement runs only when the operator turned it on AND a store seam is wired.
+  private val lockoutActive: Boolean = lockout.enabled && lockoutStore.isDefined
 
   val name = "database"
 
@@ -45,6 +62,19 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
     new HikariDataSource(hc)
 
   override def authenticate(
+      scope: AuthScope,
+      username: String,
+      password: String
+  ): Either[AuthFailure, AuthenticatedProfile] =
+    // Locked -> bcrypt -> ... : refuse a locked row before paying the bcrypt verify, so even the
+    // correct password is denied while the account is locked. Skipped entirely on the disabled
+    // path (lockoutActive false), which then delegates to the unchanged verify below.
+    if lockoutActive && lockoutStore.exists(_.isLocked(scope.tenantId, username)) then
+      logger.info(s"login rejected for '$username': account locked")
+      Left(AuthFailure.AccountLocked)
+    else verifyPassword(scope, username, password)
+
+  private def verifyPassword(
       scope: AuthScope,
       username: String,
       password: String
@@ -87,6 +117,12 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
               val enabled    = rs.getBoolean(3)
               val mustChange = rs.getBoolean(4)
               if !BCrypt.verifyer().verify(password.toCharArray, storedHash).verified then
+                // Wrong password: count it toward lockout (enabled path only; a no-op for an
+                // emailless row). The disabled path skips this and returns exactly as before.
+                if lockoutActive then
+                  lockoutStore.foreach(
+                    _.recordFailureAndMaybeLock(scope.tenantId, username, lockout.maxFailures)
+                  )
                 Left(AuthFailure.InvalidCredentials("Invalid password"))
               else if !enabled then
                 // Same failure shape as a wrong password so the response does
@@ -104,6 +140,10 @@ class DatabaseAuthenticator(config: DatabaseAuthConfig, roleClaim: String)
                 logger.info(s"login rejected for '$username': password change required")
                 Left(AuthFailure.PasswordChangeRequired)
               else
+                // Success: clear any accumulated failure count (enabled path only; a no-op for an
+                // emailless row).
+                if lockoutActive then
+                  lockoutStore.foreach(_.resetFailures(scope.tenantId, username))
                 Right(
                   AuthenticatedProfile(
                     username = username,

@@ -63,13 +63,20 @@ object UserUpsert:
     val extraHoles     = List.fill(extraHoleCount)(", ?").mkString
     val extraUpdates   =
       (boolExtras.map(_._1) ++ emailExtra.map(_._1)).map(n => s",\n  $n = EXCLUDED.$n").mkString
+    // Every upsert writes a password_hash, and any password write clears the account-lockout
+    // state (`failed_attempts = 0, locked_at = NULL`): an admin reset through this path unlocks a
+    // locked-out user, mirroring the self-service reset (`UserStore.setPasswordById`). The columns
+    // exist unconditionally (Liquibase `0030`) and default to 0/NULL, so this is a harmless no-op
+    // on insert and when lockout is disabled.
     val sql =
       s"""INSERT INTO qodstate_user (id, tenant, username, password_hash, role$extraNames, updated_at)
          |VALUES (?, ?, ?, ?, ?$extraHoles, NOW())
          |ON CONFLICT (id) DO UPDATE SET
-         |  password_hash = EXCLUDED.password_hash,
-         |  role          = EXCLUDED.role$extraUpdates,
-         |  updated_at    = NOW()""".stripMargin
+         |  password_hash   = EXCLUDED.password_hash,
+         |  role            = EXCLUDED.role$extraUpdates,
+         |  failed_attempts = 0,
+         |  locked_at       = NULL,
+         |  updated_at      = NOW()""".stripMargin
     val ps = c.prepareStatement(sql)
     try
       ps.setString(1, id)

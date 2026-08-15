@@ -35,11 +35,14 @@ object AuthScope:
 enum AuthFailure:
   case InvalidCredentials(detail: String)
   case PasswordChangeRequired
+  case AccountLocked
 
   def message: String = this match
     case InvalidCredentials(d)  => d
     case PasswordChangeRequired =>
       "password change required; use POST /api/auth/change-password"
+    case AccountLocked =>
+      "account locked - use forgot password to reset your credentials"
 
 /** Authenticates username/password credentials (database, ROPC).
   *
