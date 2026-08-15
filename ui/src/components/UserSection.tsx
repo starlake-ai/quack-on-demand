@@ -6,6 +6,13 @@ import EffectivePermsCard from './EffectivePermsCard';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
 
+// Mirrors the server-side EmailFormat detector (ai.starlake.quack state
+// package): a username that looks like an email address is treated as
+// the account's email too, so the Email field auto-fills from it and
+// locks to keep the two from drifting apart.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const isEmailUsername = (u: string) => EMAIL_RE.test(u.trim());
+
 /** Users tab on the /users page. Renders the user table for the
   * selected tenant (or every user when `tenant === null`), with inline
   * create + per-row edit / delete / effective drilldown actions.
@@ -169,7 +176,10 @@ export default function UserSection({
         password: newTenantIsDb ? newPassword : crypto.randomUUID(),
         role:     newRole,
         mustChangePassword: newTenantIsDb ? newMustChange : false,
-        email: newEmail.trim() || undefined,
+        // Email-format usernames lock the email field to the username
+        // (see isEmailUsername above); otherwise fall back to whatever
+        // was typed in the free-form field.
+        email: isEmailUsername(newUsername) ? newUsername.trim() : (newEmail.trim() || undefined),
       });
       setAdding(false);
       setNewUsername(''); setNewPassword(''); setNewRole('user'); setNewMustChange(false); setNewEmail('');
@@ -179,7 +189,7 @@ export default function UserSection({
     }
   }
 
-  async function handleUpdate(id: string) {
+  async function handleUpdate(id: string, username: string) {
     setError(null);
     try {
       await api.updateUser({
@@ -187,9 +197,13 @@ export default function UserSection({
         password: editPassword || null,
         role:     editIsAdmin ? 'admin' : 'user',
         mustChangePassword: editPassword ? editMustChange : undefined,
-        // Omit when unchanged (server: undefined = leave as-is); empty
-        // string clears the address, non-empty sets it.
-        email: editEmail === editEmailOriginal ? undefined : editEmail,
+        // Email-format usernames lock the email field to the username --
+        // send it explicitly so a stale editEmail can't fight the server's
+        // own derivation. Otherwise omit when unchanged (server: undefined
+        // = leave as-is); empty string clears the address, non-empty sets it.
+        email: isEmailUsername(username)
+          ? username.trim()
+          : (editEmail === editEmailOriginal ? undefined : editEmail),
       });
       setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
       setEditEmail(''); setEditEmailOriginal('');
@@ -352,10 +366,14 @@ export default function UserSection({
                 <input value={newUsername} onChange={ev => setNewUsername(ev.target.value)} required />
               </label>
               <label>
-                Email <span className="subtle">(optional)</span>
+                Email{' '}
+                <span className="subtle">
+                  {isEmailUsername(newUsername) ? '= username' : '(optional)'}
+                </span>
                 <input
                   type="email"
-                  value={newEmail}
+                  value={isEmailUsername(newUsername) ? newUsername : newEmail}
+                  disabled={isEmailUsername(newUsername)}
                   onChange={ev => setNewEmail(ev.target.value)}
                   placeholder="used for forgot-password links"
                 />
@@ -417,7 +435,7 @@ export default function UserSection({
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
               </div>
-              <form onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id); }}>
+              <form onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id, u.username); }}>
                 <label>
                   New password
                   <input
@@ -428,10 +446,14 @@ export default function UserSection({
                   />
                 </label>
                 <label>
-                  Email <span className="subtle">(optional)</span>
+                  Email{' '}
+                  <span className="subtle">
+                    {isEmailUsername(u.username) ? '= username' : '(optional)'}
+                  </span>
                   <input
                     type="email"
-                    value={editEmail}
+                    value={isEmailUsername(u.username) ? u.username : editEmail}
+                    disabled={isEmailUsername(u.username)}
                     onChange={ev => setEditEmail(ev.target.value)}
                     placeholder="used for forgot-password links"
                   />
