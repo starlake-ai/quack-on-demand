@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.4
+
+- **Account lockout (opt-in).** After a configurable number of failed logins a database
+  account locks. `QOD_AUTH_LOCKOUT_ENABLED` (default off) turns it on and
+  `QOD_AUTH_LOCKOUT_MAX_FAILURES` (default 10) sets the threshold; enabling it requires an
+  SMTP server to be configured (the manager refuses to boot otherwise, naming
+  `QOD_SMTP_HOST`). Only users that carry an email are ever locked, so a user with a
+  non-email username and no email is never affected. Enforced across REST login, the
+  FlightSQL handshake, and the change-password endpoint; a locked login answers
+  `401 account_locked`. Lockout does not revoke already-issued sessions.
+- **Self-service password reset over email.** New public `POST /api/auth/forgot-password`
+  and `POST /api/auth/reset-password` (also `qod auth forgot-password` / `reset-password`)
+  let a user reset their own password through a single-use, time-limited link emailed to
+  their address. Configure SMTP with `QOD_SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` /
+  `_FROM` / `_STARTTLS`, and `QOD_PUBLIC_BASE_URL` for the link's origin. The admin UI gains
+  a "Forgot password?" link and a reset page. This is the recovery path for a locked
+  account.
+- **Optional email on database users.** `qodstate_user` gains an `email` column, settable on
+  `user/create` and `user/update` (`qod user --email`, admin UI field). When a username is
+  itself in email format, it IS the user's email (auto-assigned and immutable); setting a
+  different email returns `400 invalid_email`. Existing email-format usernames are backfilled.
+- **Operator notes.** Enabling lockout requires `QOD_SMTP_HOST` and `QOD_PUBLIC_BASE_URL`.
+  A locked superuser recovers by restarting the manager (the admin re-seed clears the lock
+  and resets to `QOD_ADMIN_PASSWORD`) or via the static `X-API-Key`; set `QOD_ADMIN_USERNAME`
+  to a real deliverable address if you want the seeded admin to self-recover by email.
+
 ## 0.6.3
 
 - **Security (please upgrade): unauthenticated control-plane bypass fixed.** The REST
