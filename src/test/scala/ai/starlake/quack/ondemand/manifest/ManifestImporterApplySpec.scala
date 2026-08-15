@@ -92,6 +92,49 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     err.exists(_.contains("newbie")) shouldBe true
   }
 
+  it should "reject an email-format username whose manifest email differs" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(users =
+      List(
+        ManifestUser(
+          tenant = None,
+          username = "alice@example.com",
+          password = Some("hunter2"),
+          role = "user",
+          email = Some("someone-else@example.com")
+        )
+      )
+    )
+    val err = ManifestImporter.apply(m, s).left.toOption.get
+    err.exists(_.contains("alice@example.com")) shouldBe true
+    s.findUser(None, "alice@example.com") shouldBe empty
+  }
+
+  it should "import an email-format username with a matching or null email and derive email = username" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(users =
+      List(
+        ManifestUser(
+          tenant = None,
+          username = "bob@example.com",
+          password = Some("hunter2"),
+          role = "user",
+          email = None
+        ),
+        ManifestUser(
+          tenant = None,
+          username = "carol@example.com",
+          password = Some("hunter2"),
+          role = "user",
+          email = Some("carol@example.com")
+        )
+      )
+    )
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.findUser(None, "bob@example.com").get.email shouldBe Some("bob@example.com")
+    s.findUser(None, "carol@example.com").get.email shouldBe Some("carol@example.com")
+  }
+
   it should "leave tenants absent from the YAML untouched" in {
     val s = new InMemoryControlPlaneStore()
     s.upsertTenant(Tenant(id = "t-untouched", displayName = "untouched"))

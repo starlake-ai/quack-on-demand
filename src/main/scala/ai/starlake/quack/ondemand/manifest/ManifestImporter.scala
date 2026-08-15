@@ -18,6 +18,7 @@ import ai.starlake.quack.model.{
 }
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
+  EmailPolicy,
   FederatedSourceStore,
   PoolPermission,
   RbacGroup,
@@ -502,78 +503,85 @@ object ManifestImporter:
             // silently come back empty. Superusers (tenant = None) stay None;
             // the import-time validation guarantees a non-None tenant resolves.
             val tenantId: Option[String] = mu.tenant.flatMap(t => tenantIdFor(store, t))
-            val userId                   =
-              store.upsertUserWithHash(
-                tenant = tenantId,
-                username = mu.username,
-                passwordHash = hash,
-                role = mu.role,
-                enabled = mu.enabled,
-                mustChangePassword = mu.mustChangePassword,
-                email = mu.email
-              )
+            // An email-format username IS its own email: derive/verify it here so a
+            // conflicting manifest email is refused instead of persisted (mirrors
+            // PoolSupervisor.createUser / updateUserPassword).
+            EmailPolicy.resolve(mu.username, mu.email) match
+              case Left(msg) =>
+                errs += s"users[]: '${mu.username}': $msg"
+              case Right(effEmail) =>
+                val userId =
+                  store.upsertUserWithHash(
+                    tenant = tenantId,
+                    username = mu.username,
+                    passwordHash = hash,
+                    role = mu.role,
+                    enabled = mu.enabled,
+                    mustChangePassword = mu.mustChangePassword,
+                    email = effEmail
+                  )
 
-            // --- User roles
-            val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
-            val keepUserRoles = mu.roles.flatMap { rn =>
-              tenantRoles.get(rn).map(_.id)
-            }.toSet
-            store.listDirectRolesForUser(userId).foreach { rid =>
-              if !keepUserRoles.contains(rid) then store.removeUserRole(userId, rid)
-            }
-            keepUserRoles.foreach(rid => store.addUserRole(userId, rid))
-
-            // --- User groups
-            val tenantGroups   = tenantId.map(groupsOf).getOrElse(collection.Map.empty)
-            val keepUserGroups = mu.groups.flatMap { gn =>
-              tenantGroups.get(gn).map(_.id)
-            }.toSet
-            store.listGroupsForUser(userId).foreach { gid =>
-              if !keepUserGroups.contains(gid) then store.removeUserGroup(userId, gid)
-            }
-            keepUserGroups.foreach(gid => store.addUserGroup(userId, gid))
-
-            // --- Pool permissions: full replace.
-            store.listPoolPermissionsForUser(userId).foreach { p =>
-              store.deletePoolPermission(p.id)
-            }
-            mu.poolGrants.foreach { mpg =>
-              // The grant's pool lives in `mpg.tenant` when set (a cross-tenant
-              // grant, only meaningful for a superuser -- see ManifestPoolGrant's
-              // doc comment), otherwise it lives in the grant owner's own tenant
-              // (the pre-existing, common in-tenant case). Resolving the
-              // qualifier first is what lets a superuser's cross-tenant grant
-              // round-trip to the SAME (tenant, pool) pair instead of the old
-              // behavior of collapsing to a tenant-less `pool = None`.
-              val grantTenantId: Option[String] =
-                mpg.tenant.flatMap(t => tenantIdFor(store, t)).orElse(tenantId)
-              val poolId: Option[String] = mpg.pool.flatMap { pn =>
-                grantTenantId.flatMap { tid =>
-                  // Walk this tenant's tenant-dbs from the local map and
-                  // search each db's pool map by name -- no store call.
-                  dbsOf(tid).values.iterator
-                    .flatMap(d => poolsOf(d.id).get(pn))
-                    .nextOption()
-                    .map(_.id)
+                // --- User roles
+                val tenantRoles   = tenantId.map(rolesOf).getOrElse(collection.Map.empty)
+                val keepUserRoles = mu.roles.flatMap { rn =>
+                  tenantRoles.get(rn).map(_.id)
+                }.toSet
+                store.listDirectRolesForUser(userId).foreach { rid =>
+                  if !keepUserRoles.contains(rid) then store.removeUserRole(userId, rid)
                 }
-              }
-              store.insertPoolPermission(
-                PoolPermission(
-                  id = Names.newSurrogateId("pp"),
-                  // qodstate_pool_permission.tenant_id FK-references qodstate_tenant
-                  // and must name the pool's OWNING tenant, not necessarily the
-                  // grant owner's tenant. Falling back to "" here (as before this
-                  // qualifier existed) violated that FK for any superuser grant;
-                  // grantTenantId is always the pool's real tenant when the pool
-                  // resolved, so this now names it correctly in both the in-tenant
-                  // and cross-tenant cases.
-                  tenantId = grantTenantId.getOrElse(""),
-                  poolId = poolId,
-                  userId = Some(userId),
-                  groupId = None
-                )
-              )
-            }
+                keepUserRoles.foreach(rid => store.addUserRole(userId, rid))
+
+                // --- User groups
+                val tenantGroups   = tenantId.map(groupsOf).getOrElse(collection.Map.empty)
+                val keepUserGroups = mu.groups.flatMap { gn =>
+                  tenantGroups.get(gn).map(_.id)
+                }.toSet
+                store.listGroupsForUser(userId).foreach { gid =>
+                  if !keepUserGroups.contains(gid) then store.removeUserGroup(userId, gid)
+                }
+                keepUserGroups.foreach(gid => store.addUserGroup(userId, gid))
+
+                // --- Pool permissions: full replace.
+                store.listPoolPermissionsForUser(userId).foreach { p =>
+                  store.deletePoolPermission(p.id)
+                }
+                mu.poolGrants.foreach { mpg =>
+                  // The grant's pool lives in `mpg.tenant` when set (a cross-tenant
+                  // grant, only meaningful for a superuser -- see ManifestPoolGrant's
+                  // doc comment), otherwise it lives in the grant owner's own tenant
+                  // (the pre-existing, common in-tenant case). Resolving the
+                  // qualifier first is what lets a superuser's cross-tenant grant
+                  // round-trip to the SAME (tenant, pool) pair instead of the old
+                  // behavior of collapsing to a tenant-less `pool = None`.
+                  val grantTenantId: Option[String] =
+                    mpg.tenant.flatMap(t => tenantIdFor(store, t)).orElse(tenantId)
+                  val poolId: Option[String] = mpg.pool.flatMap { pn =>
+                    grantTenantId.flatMap { tid =>
+                      // Walk this tenant's tenant-dbs from the local map and
+                      // search each db's pool map by name -- no store call.
+                      dbsOf(tid).values.iterator
+                        .flatMap(d => poolsOf(d.id).get(pn))
+                        .nextOption()
+                        .map(_.id)
+                    }
+                  }
+                  store.insertPoolPermission(
+                    PoolPermission(
+                      id = Names.newSurrogateId("pp"),
+                      // qodstate_pool_permission.tenant_id FK-references qodstate_tenant
+                      // and must name the pool's OWNING tenant, not necessarily the
+                      // grant owner's tenant. Falling back to "" here (as before this
+                      // qualifier existed) violated that FK for any superuser grant;
+                      // grantTenantId is always the pool's real tenant when the pool
+                      // resolved, so this now names it correctly in both the in-tenant
+                      // and cross-tenant cases.
+                      tenantId = grantTenantId.getOrElse(""),
+                      poolId = poolId,
+                      userId = Some(userId),
+                      groupId = None
+                    )
+                  )
+                }
       }
 
       if errs.isEmpty then Right(()) else Left(errs.toList)
