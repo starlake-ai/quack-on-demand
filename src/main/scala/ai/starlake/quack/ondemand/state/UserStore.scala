@@ -203,9 +203,11 @@ final class UserStore(
             else
               // A verified-but-wrong current password on the change-password surface counts toward
               // lockout too (enabled path only). A disabled-but-correct password is NOT a failure, so
-              // only the !verified case increments.
+              // only the !verified case increments. Reuse the ALREADY-HELD connection `c` -- opening a
+              // second pooled connection here would let a concurrent brute-force pin two connections
+              // per caller and starve the very endpoint lockout defends.
               if lockout.enabled && !verified then
-                recordFailureAndMaybeLock(tenant, username, lockout.maxFailures)
+                recordFailureOnConn(c, tenant, username, lockout.maxFailures)
               Left(UserStore.ChangePasswordError.InvalidCredentials)
           case None =>
             // Row missing (or tenant-scope miss): burn the same bcrypt verify against a fixed dummy
@@ -310,33 +312,44 @@ final class UserStore(
       username: String,
       maxFailures: Int
   ): Unit =
-    withConn { c =>
-      // One atomic statement: increment, and stamp locked_at only when the
-      // post-increment count crosses the threshold. HA-safe -- no read then
-      // write. The `email IS NOT NULL` predicate makes this a no-op for an
-      // emailless row, so a superuser / pre-email account never locks.
-      val sql = tenant match
-        case Some(_) =>
-          "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
-            "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
-            "WHERE tenant = ? AND username = ? AND email IS NOT NULL"
+    withConn(c => recordFailureOnConn(c, tenant, username, maxFailures))
+
+  /** The failure-increment against a caller-supplied connection. `recordFailureAndMaybeLock` opens
+    * its own `withConn` and delegates here; `changePassword`'s wrong-password branch calls this
+    * with the connection it ALREADY holds, so that path never nests a second pooled acquisition (a
+    * concurrent brute-force could otherwise pin two connections per caller and exhaust the pool).
+    */
+  private def recordFailureOnConn(
+      c: Connection,
+      tenant: Option[String],
+      username: String,
+      maxFailures: Int
+  ): Unit =
+    // One atomic statement: increment, and stamp locked_at only when the
+    // post-increment count crosses the threshold. HA-safe -- no read then
+    // write. The `email IS NOT NULL` predicate makes this a no-op for an
+    // emailless row, so a superuser / pre-email account never locks.
+    val sql = tenant match
+      case Some(_) =>
+        "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
+          "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
+          "WHERE tenant = ? AND username = ? AND email IS NOT NULL"
+      case None =>
+        "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
+          "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
+          "WHERE tenant IS NULL AND username = ? AND email IS NOT NULL"
+    val ps = c.prepareStatement(sql)
+    try
+      ps.setInt(1, maxFailures)
+      tenant match
+        case Some(t) =>
+          ps.setString(2, t)
+          ps.setString(3, username)
         case None =>
-          "UPDATE qodstate_user SET failed_attempts = failed_attempts + 1, " +
-            "locked_at = CASE WHEN failed_attempts + 1 >= ? THEN NOW() ELSE locked_at END " +
-            "WHERE tenant IS NULL AND username = ? AND email IS NOT NULL"
-      val ps = c.prepareStatement(sql)
-      try
-        ps.setInt(1, maxFailures)
-        tenant match
-          case Some(t) =>
-            ps.setString(2, t)
-            ps.setString(3, username)
-          case None =>
-            ps.setString(2, username)
-        ps.executeUpdate()
-        ()
-      finally ps.close()
-    }
+          ps.setString(2, username)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
 
   override def resetFailures(tenant: Option[String], username: String): Unit =
     withConn { c =>

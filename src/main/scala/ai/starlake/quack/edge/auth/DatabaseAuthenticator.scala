@@ -136,7 +136,12 @@ class DatabaseAuthenticator(
                 // Distinct, deliberately revealed failure: the password verified
                 // and the account is enabled, so the caller already holds the
                 // credential. Telling them to rotate it is the whole point of
-                // the flag.
+                // the flag. A verified password ALWAYS clears the counter --
+                // proving the credential must not leave the user one mistype
+                // from a lockout on the must_change path (enabled path only; a
+                // no-op for an emailless row).
+                if lockoutActive then
+                  lockoutStore.foreach(_.resetFailures(scope.tenantId, username))
                 logger.info(s"login rejected for '$username': password change required")
                 Left(AuthFailure.PasswordChangeRequired)
               else

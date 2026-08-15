@@ -138,6 +138,33 @@ class AccountLockoutSpec extends AnyFlatSpec with Matchers:
       users.isLocked(Some("t1"), "alice") shouldBe false
     }
 
+  it should "reset the counter when a must_change user supplies the correct password" in
+    withFreshDb(enabledCfg) { (users, auth, url) =>
+      users.upsertUser(
+        Some("t1"),
+        "alice",
+        "pw",
+        "user",
+        mustChangePassword = Some(true),
+        email = Some(Some("alice@x.io"))
+      )
+
+      // maxFailures - 1 wrong attempts: one shy of the lock.
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "nope").isLeft shouldBe true
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "nope").isLeft shouldBe true
+      failedAttempts(url, Some("t1"), "alice") shouldBe 2
+
+      // The CORRECT password returns PasswordChangeRequired -- and still clears the counter, so
+      // proving the credential does not leave the user one mistype from a lockout.
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "pw") shouldBe
+        Left(AuthFailure.PasswordChangeRequired)
+      failedAttempts(url, Some("t1"), "alice") shouldBe 0
+
+      // A single subsequent wrong attempt is below the (reset) threshold: not locked.
+      auth.authenticate(AuthScope.Tenant("t1"), "alice", "nope").isLeft shouldBe true
+      users.isLocked(Some("t1"), "alice") shouldBe false
+    }
+
   it should "never lock an emailless row (superuser case) no matter how many failures" in
     withFreshDb(enabledCfg) { (users, auth, url) =>
       users.upsertUser(None, "root", "pw", "admin") // no email
