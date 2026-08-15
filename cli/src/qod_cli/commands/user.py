@@ -37,7 +37,12 @@ def create(
         "--must-change-password",
         help="Force a password change at the user's next login.",
     ),
-    email: str = typer.Option(None, "--email", help="Contact address for password-reset links. Omit to leave emailless."),
+    email: str = typer.Option(
+        None,
+        "--email",
+        help="Contact address for password-reset links. Omit to leave emailless. "
+        "Derived from and locked to the username when the username is itself in email format.",
+    ),
 ):
     if superuser and tenant:
         raise typer.BadParameter("--superuser and --tenant are mutually exclusive")
@@ -84,7 +89,12 @@ def update(
         "--must-change-password/--no-must-change-password",
         help="With --password: flag (or explicitly unflag) the new password as temporary.",
     ),
-    email: str = typer.Option(None, "--email", help="Omit = unchanged; empty string clears."),
+    email: str = typer.Option(
+        None,
+        "--email",
+        help="Omit = unchanged; empty string clears. "
+        "Derived from and locked to the username when the username is itself in email format.",
+    ),
 ):
     body: dict = {"id": user_id}
     if tenant is not None:

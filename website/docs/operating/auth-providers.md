@@ -51,6 +51,8 @@ On the management plane (REST/UI), DB credentials are accepted when `auth.manage
 
 `qodstate_user` has an optional `email` column, set with `qod user create --email` / `qod user update --email` (or the REST `user/create` / `user/update` body). A row with an email can use the self-service password reset flow described below; a row without one cannot, and neither can it ever be locked out - this includes the env-seeded superuser, which has no email by construction.
 
+When the username itself is in email format, `email` is derived from it automatically and cannot be set to anything else: `user/create` / `user/update` (CLI and REST) and manifest import reject a conflicting value with `400 invalid_email`. Existing rows whose username is email-format were backfilled to match on upgrade.
+
 **SMTP.** Reset links are delivered by mail. With `QOD_SMTP_HOST` unset (the default) the manager logs the mail instead of sending it - fine for local dev, useless for real users.
 
 ```bash

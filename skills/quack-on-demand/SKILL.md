@@ -147,6 +147,8 @@ qod auth reset-password
 
 Lockout only ever applies to rows with an `email` set (`qod user create/update --email`). Emailless users and the env-seeded superuser (`tenant IS NULL`, no email) can never be locked and have no self-service path - recover them with an admin password reset instead:
 
+An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically.
+
 ```bash
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
   -H 'Content-Type: application/json' \
