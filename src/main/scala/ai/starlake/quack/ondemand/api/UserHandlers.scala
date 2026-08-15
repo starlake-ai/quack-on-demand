@@ -145,7 +145,11 @@ final class UserHandlers(
                     )
                   )
             case Left(err) =>
-              Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
+              err match
+                case SupervisorError.InvalidEmail(m) =>
+                  Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
+                case _ =>
+                  Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
           }
 
   // ---------- /user/update ----------
@@ -193,10 +197,14 @@ final class UserHandlers(
                 case None    =>
                   Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
             case Left(err) =>
-              val code = err match
-                case SupervisorError.NotFound(_) => StatusCode.NotFound
-                case _                           => StatusCode.BadRequest
-              Left((code, ErrorResponse("invalid_user", err.message)))
+              err match
+                case SupervisorError.InvalidEmail(m) =>
+                  Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
+                case _ =>
+                  val code = err match
+                    case SupervisorError.NotFound(_) => StatusCode.NotFound
+                    case _                           => StatusCode.BadRequest
+                  Left((code, ErrorResponse("invalid_user", err.message)))
           }
 
   // ---------- /user/delete ----------

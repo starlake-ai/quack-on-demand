@@ -20,6 +20,7 @@ import ai.starlake.quack.ondemand.runtime.{NodeLockdown, ObjectStoreSecret, Quac
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   DbAdmin,
+  EmailPolicy,
   NoopDbAdmin,
   PoolPermission,
   RbacGroup,
@@ -2133,26 +2134,31 @@ final class PoolSupervisor(
             val resolvedTenantId = tenant.flatMap { t =>
               tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
             }
-            // Create always sets email, even to None (clearing is not meaningful on a
-            // brand-new row, but a fresh insert with no email is the common case).
-            val out = userStore.upsertUser(
-              resolvedTenantId,
-              username,
-              password,
-              role,
-              mustChangePassword = Some(mustChangePassword),
-              email = Some(email)
-            )
-            val u = RbacUser(
-              out.id,
-              resolvedTenantId,
-              username,
-              role,
-              mustChangePassword = mustChangePassword,
-              email = email
-            )
-            store.upsertUserIdentity(u)
-            Right(u)
+            // An email-format username IS its own email: derive/verify it here so a
+            // conflicting supplied value is refused instead of persisted.
+            EmailPolicy.resolve(username, email) match
+              case Left(msg)       => Left(SupervisorError.InvalidEmail(msg))
+              case Right(effEmail) =>
+                // Create always sets email, even to None (clearing is not meaningful on a
+                // brand-new row, but a fresh insert with no email is the common case).
+                val out = userStore.upsertUser(
+                  resolvedTenantId,
+                  username,
+                  password,
+                  role,
+                  mustChangePassword = Some(mustChangePassword),
+                  email = Some(effEmail)
+                )
+                val u = RbacUser(
+                  out.id,
+                  resolvedTenantId,
+                  username,
+                  role,
+                  mustChangePassword = mustChangePassword,
+                  email = effEmail
+                )
+                store.upsertUserIdentity(u)
+                Right(u)
     }
   }
 
@@ -2175,52 +2181,65 @@ final class PoolSupervisor(
         store.getUserById(userId) match
           case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
           case Some(u) =>
-            val newRole = role.getOrElse(u.role)
-            // A rotation always writes the flag: the requested value, or false when
-            // absent -- an unflagged admin reset hands out a normal password and
-            // clears any pending must-change state. Role-only updates leave it alone.
-            val newFlag = password.map { pw =>
-              val flag = mustChangePassword.getOrElse(false)
-              userStore.upsertUser(
-                u.tenant,
-                u.username,
-                pw,
-                newRole,
-                mustChangePassword = Some(flag),
-                email = email
-              )
-              flag
-            }
-            // Email can change on a role-only update -- there's no password rotation
-            // to piggyback the write on, so rewrite the row through the control-plane
-            // store with its already-persisted hash and current flags (both unchanged)
-            // so only email (and role) move. Skipped when the branch above already
-            // applied it in the same statement as the password rotation.
-            if password.isEmpty then
-              email.foreach { inner =>
-                store.getPasswordHash(u.tenant, u.username).foreach { hash =>
-                  store.upsertUserWithHash(
+            // email: outer None = unchanged (leave the rule untouched); Some(inner) = a
+            // write, resolved against the ROW's username so an email-format user's email
+            // stays locked to the username and a conflicting value is refused.
+            val emailCheck: Either[SupervisorError, Option[Option[String]]] = email match
+              case None        => Right(None)
+              case Some(inner) =>
+                EmailPolicy.resolve(u.username, inner) match
+                  case Left(msg)  => Left(SupervisorError.InvalidEmail(msg))
+                  case Right(eff) => Right(Some(eff))
+            emailCheck match
+              case Left(err)       => Left(err)
+              case Right(effEmail) =>
+                val newRole = role.getOrElse(u.role)
+                // A rotation always writes the flag: the requested value, or false when
+                // absent -- an unflagged admin reset hands out a normal password and
+                // clears any pending must-change state. Role-only updates leave it alone.
+                val newFlag = password.map { pw =>
+                  val flag = mustChangePassword.getOrElse(false)
+                  userStore.upsertUser(
                     u.tenant,
                     u.username,
-                    hash,
+                    pw,
                     newRole,
-                    enabled = u.enabled,
-                    mustChangePassword = u.mustChangePassword,
-                    email = inner
+                    mustChangePassword = Some(flag),
+                    email = effEmail
                   )
+                  flag
                 }
-              }
-            // upsertUserIdentity only writes (tenant, username, role) on conflict, so the
-            // flag/email just persisted above survive; carry them on the returned value.
-            val updated =
-              u.copy(
-                role = newRole,
-                mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                email = email.getOrElse(u.email)
-              )
-            store.upsertUserIdentity(updated)
-            invalidateEffectiveCache()
-            Right(updated)
+                // Email can change on a role-only update -- there's no password rotation
+                // to piggyback the write on, so rewrite the row through the control-plane
+                // store with its already-persisted hash and current flags (both unchanged)
+                // so only email (and role) move. Skipped when the branch above already
+                // applied it in the same statement as the password rotation.
+                if password.isEmpty then
+                  effEmail.foreach { inner =>
+                    store.getPasswordHash(u.tenant, u.username).foreach { hash =>
+                      store.upsertUserWithHash(
+                        u.tenant,
+                        u.username,
+                        hash,
+                        newRole,
+                        enabled = u.enabled,
+                        mustChangePassword = u.mustChangePassword,
+                        email = inner
+                      )
+                    }
+                  }
+                // upsertUserIdentity only writes (tenant, username, role) on conflict, so
+                // the flag/email just persisted above survive; carry them on the returned
+                // value.
+                val updated =
+                  u.copy(
+                    role = newRole,
+                    mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
+                    email = effEmail.getOrElse(u.email)
+                  )
+                store.upsertUserIdentity(updated)
+                invalidateEffectiveCache()
+                Right(updated)
     }
   }
 

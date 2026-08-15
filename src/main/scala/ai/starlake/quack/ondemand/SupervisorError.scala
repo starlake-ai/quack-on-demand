@@ -30,3 +30,4 @@ enum SupervisorError(val message: String):
   case InvalidName(msg: String)     extends SupervisorError(msg)
   case Internal(msg: String)        extends SupervisorError(msg)
   case QuotaExceeded(msg: String)   extends SupervisorError(msg)
+  case InvalidEmail(msg: String)    extends SupervisorError(msg)
