@@ -1,0 +1,13 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0031-user-email-from-username
+      author: qod
+      changes:
+        # Backfill: an email-format username IS the user's email (see EmailFormat.matches;
+        # keep this POSIX pattern in sync). Only rows with no email yet are touched, so a
+        # user who already carries a distinct email is left alone. Idempotent.
+        - sql:
+            sql: >
+              UPDATE qodstate_user SET email = username
+               WHERE email IS NULL
+                 AND username ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'

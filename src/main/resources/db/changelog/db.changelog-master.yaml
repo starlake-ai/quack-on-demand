@@ -65,3 +65,5 @@ databaseChangeLog:
       file: db/changelog/0029-user-email.yaml
   - include:
       file: db/changelog/0030-user-lockout.yaml
+  - include:
+      file: db/changelog/0031-user-email-from-username.yaml
