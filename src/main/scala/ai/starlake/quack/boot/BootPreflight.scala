@@ -3,6 +3,7 @@ package ai.starlake.quack.boot
 import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.edge.auth.AuthQueryPreconditions
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.ondemand.state.EmailFormat
 import ai.starlake.quack.ondemand.state.UserStore
 import com.typesafe.scalalogging.LazyLogging
 
@@ -138,11 +139,16 @@ object BootPreflight extends LazyLogging:
       logger.warn("quack-on-demand.admin.username is empty - no admin user seeded.")
     else
       admins.foreach { name =>
-        val out = userStore.upsertUser(
+        // Same rule as EmailPolicy / the 0031 backfill: an email-format admin username
+        // IS its own email, so the seeded admin is reachable for reset and (when lockout
+        // is enabled) lockable, consistently on fresh and upgraded installs.
+        val seedEmail = if EmailFormat.matches(name) then Some(name) else None
+        val out       = userStore.upsertUser(
           tenant = None,
           username = name,
           plaintext = admin.password,
-          role = admin.role
+          role = admin.role,
+          email = Some(seedEmail)
         )
         val verb = if out.inserted then "created" else "updated"
         logger.info(

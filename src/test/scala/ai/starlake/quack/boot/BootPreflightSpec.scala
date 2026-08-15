@@ -1,6 +1,9 @@
 package ai.starlake.quack.boot
 
+import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.ondemand.state.LiquibaseRunner
+import ai.starlake.quack.ondemand.state.PostgresControlPlaneStore
+import ai.starlake.quack.ondemand.state.UserStore
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -110,4 +113,34 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
         columns should contain("locked_at")
         columns should contain("email")
       finally conn.close()
+  }
+
+  "seedAdminUsers" should "derive email = username for an email-format admin username" in
+    withFreshDb { url =>
+      val userStore = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      val store     = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        BootPreflight.seedAdminUsers(
+          userStore,
+          AdminConfig(username = "admin@localhost.local", password = "admin", role = "admin")
+        )
+        store.findUser(None, "admin@localhost.local").get.email shouldBe
+          Some("admin@localhost.local")
+      finally
+        userStore.close()
+        store.close()
+    }
+
+  it should "leave email NULL for a non-email admin username" in withFreshDb { url =>
+    val userStore = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    val store     = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      BootPreflight.seedAdminUsers(
+        userStore,
+        AdminConfig(username = "root", password = "admin", role = "admin")
+      )
+      store.findUser(None, "root").get.email shouldBe None
+    finally
+      userStore.close()
+      store.close()
   }

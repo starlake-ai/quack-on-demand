@@ -145,9 +145,9 @@ qod auth forgot-password --username alice --tenant acme
 qod auth reset-password
 ```
 
-Lockout only ever applies to rows with an `email` set (`qod user create/update --email`). Emailless users and the env-seeded superuser (`tenant IS NULL`, no email) can never be locked and have no self-service path - recover them with an admin password reset instead:
+Lockout only ever applies to rows with an `email` set (`qod user create/update --email`). A user with a non-email username and no email is never locked and has no self-service path - recover it with an admin password reset instead:
 
-An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically.
+An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically. This includes the seeded admin (`admin@localhost.local` by default): because its username is email-format, it is auto-assigned `email = username`, so it IS eligible for lockout when lockout is on, and for self-service reset. A locked superuser is still recoverable without the email flow: restarting the manager re-seeds the admin (resetting the password to `QOD_ADMIN_PASSWORD` and clearing `failed_attempts` / `locked_at` in the same statement), and the static `X-API-Key` bypasses login lockout entirely. Note that `admin@localhost.local` is not a routable mailbox, so the seeded admin's self-service email reset will not deliver by default - set `QOD_ADMIN_USERNAME` to a real deliverable address if you want the admin to self-recover by email, otherwise use restart or the API key.
 
 ```bash
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \

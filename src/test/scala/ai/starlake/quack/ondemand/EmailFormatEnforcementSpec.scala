@@ -73,3 +73,16 @@ class EmailFormatEnforcementSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
       out.left.toOption.get shouldBe a[SupervisorError.InvalidEmail]
   }
+
+  it should "allow a role-only update on an email-format user without touching the email" in
+    withSup { (sup, store, users) =>
+      sup.createUser(None, "root@corp.io", "pw", "admin", users).unsafeRunSync()
+      val id = store.findUser(None, "root@corp.io").get.id
+      // Outer-None email = no email change: the rule is skipped, so a role-only update
+      // must not 400 even though the username is email-format.
+      val out = sup
+        .updateUserPassword(id, password = None, role = Some("admin"), users, email = None)
+        .unsafeRunSync()
+      out.isRight shouldBe true
+      store.findUser(None, "root@corp.io").get.email shouldBe Some("root@corp.io")
+    }
