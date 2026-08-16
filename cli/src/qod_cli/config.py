@@ -95,6 +95,30 @@ def load_settings(profile: str = "default", overrides: dict | None = None) -> Se
     return Settings(**values)
 
 
+def default_profile() -> str:
+    """Sticky default profile from the file's top-level key; "default" when unset.
+
+    Resolution seen by the user: --profile flag > QOD_PROFILE env > this sticky
+    key (written by `qod config use`) > "default".
+    """
+    return str(_read_file().get("default_profile", "default"))
+
+
+def set_default_profile(name: str) -> None:
+    data = _read_file()
+    data["default_profile"] = name
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        tomli_w.dump(data, f)
+    os.chmod(path, 0o600)
+
+
+def list_profiles() -> dict:
+    """Raw per-profile value maps as stored ({} when the file has none)."""
+    return dict(_read_file().get("profiles", {}))
+
+
 def save_profile(profile: str, values: dict) -> None:
     data = _read_file()
     profiles = data.setdefault("profiles", {})

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import typer
 
 from . import __version__
-from .config import Settings, load_settings
+from .config import Settings, default_profile, load_settings
 from .registry import covers
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="quack-on-demand CLI")
@@ -25,13 +25,19 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def _root(
     ctx: typer.Context,
-    profile: str = typer.Option("default", "--profile", envvar="QOD_PROFILE", help="Named profile."),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        envvar="QOD_PROFILE",
+        help="Named profile; falls back to the sticky default set via `qod config use`.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON responses."),
     version: bool = typer.Option(
         False, "--version", callback=_version_callback, is_eager=True, help="Print version and exit."
     ),
 ) -> None:
-    ctx.obj = AppCtx(settings=load_settings(profile), json_output=json_output, profile=profile)
+    active = profile or default_profile()
+    ctx.obj = AppCtx(settings=load_settings(active), json_output=json_output, profile=active)
 
 
 @app.command()

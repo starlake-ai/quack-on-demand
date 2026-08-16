@@ -58,3 +58,57 @@ def test_save_merges_existing_keys():
     st = load_settings()
     assert st.token == "t2"
     assert st.manager_url == "http://a:1"
+
+
+def test_sticky_default_profile_roundtrip():
+    from qod_cli.config import default_profile, set_default_profile
+
+    assert default_profile() == "default"
+    save_profile("prod", {"manager_url": "http://prod:20900"})
+    set_default_profile("prod")
+    assert default_profile() == "prod"
+    # the sticky pointer must not clobber stored profiles
+    assert load_settings("prod").manager_url == "http://prod:20900"
+
+
+def test_sticky_default_drives_resolution_and_flag_env_win(runner):
+    from typer.testing import CliRunner
+
+    from qod_cli.config import set_default_profile
+    from qod_cli.main import app
+
+    save_profile("prod", {"manager_url": "http://prod:20900"})
+    save_profile("staging", {"manager_url": "http://staging:20900"})
+    set_default_profile("prod")
+    r = CliRunner().invoke(app, ["--json", "config", "profiles"])
+    assert r.exit_code == 0, r.output
+    import json as _json
+
+    rows = {row["profile"]: row for row in _json.loads(r.stdout)}
+    assert rows["prod"]["active"] is True and rows["prod"]["default"] is True
+    # explicit flag wins over the sticky default
+    r = CliRunner().invoke(app, ["--profile", "staging", "--json", "config", "profiles"])
+    rows = {row["profile"]: row for row in _json.loads(r.stdout)}
+    assert rows["staging"]["active"] is True and rows["prod"]["default"] is True
+    # env wins over sticky too
+    import os as _os
+
+    _os.environ["QOD_PROFILE"] = "staging"
+    try:
+        r = CliRunner().invoke(app, ["--json", "config", "profiles"])
+        rows = {row["profile"]: row for row in _json.loads(r.stdout)}
+        assert rows["staging"]["active"] is True
+    finally:
+        del _os.environ["QOD_PROFILE"]
+
+
+def test_config_use_refuses_unknown_profile():
+    from typer.testing import CliRunner
+
+    from qod_cli.config import default_profile
+    from qod_cli.main import app
+
+    r = CliRunner().invoke(app, ["config", "use", "nope"])
+    assert r.exit_code == 1
+    assert "unknown profile" in r.output
+    assert default_profile() == "default"
