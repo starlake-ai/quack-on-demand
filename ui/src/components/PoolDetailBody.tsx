@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api, errorMessage } from '../api/client';
 import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { DeleteIcon } from './Icons';
 import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import Tabs from './Tabs';
 
@@ -27,11 +28,21 @@ export default function PoolDetailBody({
 }) {
 
   const { superuser: isSuperuser } = useAuth();
+  const navigate = useNavigate();
   const [data, setData] = useState<PoolResponse | null>(null);
   const [cfg, setCfg]   = useState<ClientConfigResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [suspendErr, setSuspendErr] = useState<string | null>(null);
+  // The Suspend split-button's menu (Hibernate / Drain / Kill). Closed on any
+  // outside click via the document listener below.
+  const [suspendMenuOpen, setSuspendMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!suspendMenuOpen) return;
+    const close = () => setSuspendMenuOpen(false);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [suspendMenuOpen]);
   const [lockdownErr, setLockdownErr] = useState<string | null>(null);
 
   // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
@@ -180,22 +191,59 @@ export default function PoolDetailBody({
     }
   }
 
-  async function handleSuspendToggle() {
-    if (!data) return;
+  /** Shared tail of every suspend-menu action: confirm, run, refetch. */
+  async function runPoolAction(confirmText: string, action: () => Promise<unknown>) {
     setSuspendErr(null);
-    const next = !data.suspended;
-    if (!window.confirm(
-      next
-        ? `Suspend pool "${tenantDb}/${pool}"?\n\n` +
-          'The pool hibernates: nodes stop, but the pool is NOT deleted. Wake it later to resume serving queries.'
-        : `Wake pool "${tenantDb}/${pool}"?\n\n` +
-          'Nodes respawn and the pool resumes serving queries.'
-    )) return;
+    if (!window.confirm(confirmText)) return;
     try {
-      if (next) await api.suspendPool({ tenant, tenantDb, pool });
-      else await api.resumePool({ tenant, tenantDb, pool });
+      await action();
       const r = await api.poolStatus(tenant, tenantDb, pool);
       setData(r);
+    } catch (e) {
+      setSuspendErr(errorMessage(e));
+    }
+  }
+
+  function handleHibernate() {
+    void runPoolAction(
+      `Suspend pool "${tenantDb}/${pool}"?\n\n` +
+        'The pool hibernates: nodes stop, but the pool and its data are NOT deleted.\n' +
+        'It wakes automatically on the next incoming query (first statement waits for the node to spawn), or manually via the Wake button.',
+      () => api.suspendPool({ tenant, tenantDb, pool })
+    );
+  }
+
+  function handleWake() {
+    void runPoolAction(
+      `Wake pool "${tenantDb}/${pool}"?\n\n` +
+        'Nodes respawn and the pool resumes serving queries.',
+      () => api.resumePool({ tenant, tenantDb, pool })
+    );
+  }
+
+  function handleStop(force: boolean) {
+    const mode = force ? 'KILL' : 'DRAIN';
+    void runPoolAction(
+      `Stop pool "${tenantDb}/${pool}" (${mode})?\n\n` +
+        'The pool scales down to 0 nodes but is NOT deleted; scale it back up later.\n\n' +
+        (force
+          ? 'Nodes stop immediately; outstanding queries fail.'
+          : 'Nodes stop accepting new queries first, then shut down.'),
+      () => api.stopPool({ tenant, tenantDb, pool, force })
+    );
+  }
+
+  async function handleDelete() {
+    setSuspendErr(null);
+    if (!window.confirm(
+      `Delete pool "${tenantDb}/${pool}"?\n\n` +
+        'This permanently removes the pool and all its nodes.\n' +
+        'Running nodes are force-stopped; outstanding queries fail.'
+    )) return;
+    try {
+      await api.deletePool({ tenant, tenantDb, pool, force: true });
+      if (onBack) onBack();
+      else navigate(`/tenant/${encodeURIComponent(tenant)}`);
     } catch (e) {
       setSuspendErr(errorMessage(e));
     }
@@ -592,8 +640,68 @@ export default function PoolDetailBody({
               <option value="off">Lockdown: off</option>
             </select>
           )}
-          <button type="button" onClick={() => void handleSuspendToggle()}>
-            {data.suspended ? 'Wake' : 'Suspend'}
+          {data.suspended ? (
+            <button type="button" onClick={handleWake}>Wake</button>
+          ) : (
+            <div style={{ position: 'relative' }}>
+              <button
+                type="button"
+                onClick={() => setSuspendMenuOpen(o => !o)}
+                aria-haspopup="menu"
+                aria-expanded={suspendMenuOpen}
+              >
+                Suspend {'▾'}
+              </button>
+              {suspendMenuOpen && (
+                <div
+                  role="menu"
+                  className="card"
+                  style={{
+                    position: 'absolute', right: 0, top: '100%', zIndex: 10,
+                    marginTop: 4, padding: 4, minWidth: 200,
+                    display: 'flex', flexDirection: 'column', gap: 2,
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="link-button"
+                    style={{ textAlign: 'left' }}
+                    title="Hibernate: nodes stop, the pool keeps its role distribution and wakes on the next statement."
+                    onClick={() => { setSuspendMenuOpen(false); handleHibernate(); }}
+                  >
+                    Hibernate
+                  </button>
+                  <button
+                    type="button"
+                    className="link-button"
+                    style={{ textAlign: 'left' }}
+                    title="Drain: stop accepting new queries, then shut down. Scales to 0 nodes; the pool is kept."
+                    onClick={() => { setSuspendMenuOpen(false); handleStop(false); }}
+                  >
+                    Drain
+                  </button>
+                  <button
+                    type="button"
+                    className="link-button"
+                    style={{ textAlign: 'left' }}
+                    title="Kill: stop immediately; outstanding queries fail. Scales to 0 nodes; the pool is kept."
+                    onClick={() => { setSuspendMenuOpen(false); handleStop(true); }}
+                  >
+                    Kill
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            className="danger"
+            style={{ display: 'inline-flex', alignItems: 'center' }}
+            onClick={() => void handleDelete()}
+            aria-label={`Delete pool ${pool}`}
+            title="Delete: permanently remove the pool and all its nodes."
+          >
+            <DeleteIcon />
           </button>
           {onBack
             ? <button type="button" className="link-button" onClick={onBack}>← Back to pools</button>

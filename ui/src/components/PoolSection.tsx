@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
-import { api, errorMessage } from '../api/client';
+import { ApiError, api, errorMessage } from '../api/client';
 import type { PoolResponse, TenantDbResponse } from '../api/types';
 import PoolDetailBody from './PoolDetailBody';
-import { DeleteIcon } from './Icons';
 import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import { Modal } from './Modal';
 import CohortEditor, {
@@ -93,38 +92,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant]);
 
-  async function handleStop(p: PoolResponse, force: boolean) {
-    setError(null);
-    const mode = force ? 'FORCE' : 'DRAIN';
-    if (!window.confirm(
-      `Stop pool "${p.tenantDb}/${p.pool}" (${mode})?\n\n` +
-      'The pool scales down to 0 nodes but is NOT deleted; scale it back up later.\n\n' +
-      (force
-        ? 'Nodes stop immediately; outstanding queries fail.'
-        : 'Nodes stop accepting new queries first, then shut down.')
-    )) return;
-    try {
-      await api.stopPool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force });
-      await reloadPools();
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }
 
-  async function handleDelete(p: PoolResponse) {
-    setError(null);
-    if (!window.confirm(
-      `Delete pool "${p.tenantDb}/${p.pool}"?\n\n` +
-      'This permanently removes the pool and all its nodes. ' +
-      'Running nodes are force-stopped; outstanding queries fail.'
-    )) return;
-    try {
-      await api.deletePool({ tenant, tenantDb: p.tenantDb, pool: p.pool, force: true });
-      await reloadPools();
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }
 
   function openScale(p: PoolResponse) {
     setScaleRo(p.nodes.filter(n => n.role === 'READONLY'  || n.role === 'ReadOnly').length);
@@ -141,16 +109,39 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     if (!scaling) return;
     setScaleErr(null);
     const target = scaleRo + scaleWo + scaleDual;
+    const req = {
+      tenant, tenantDb: scaling.tenantDb, pool: scaling.pool,
+      targetSize: target,
+      roleDistribution: { writeonly: scaleWo, readonly: scaleRo, dual: scaleDual },
+      force: scaleForce,
+    };
     try {
-      await api.scalePool({
-        tenant, tenantDb: scaling.tenantDb, pool: scaling.pool,
-        targetSize: target,
-        roleDistribution: { writeonly: scaleWo, readonly: scaleRo, dual: scaleDual },
-        force: scaleForce,
-      });
+      await api.scalePool(req);
       setScaling(null);
       await reloadPools();
     } catch (e) {
+      // A hibernated pool refuses scaling (409 pool_suspended) so the sweep and
+      // the operator never fight; offer the resume-then-scale chain instead of
+      // parroting the refusal.
+      if (e instanceof ApiError && e.code === 'pool_suspended') {
+        const wake = window.confirm(
+          'This pool is hibernated (scaled to zero, reservation kept).\n\n' +
+          `Resume it and scale to ${target} node(s)?`
+        );
+        if (!wake) {
+          setScaleErr(String(e));
+          return;
+        }
+        try {
+          await api.resumePool({ tenant, tenantDb: scaling.tenantDb, pool: scaling.pool });
+          await api.scalePool(req);
+          setScaling(null);
+          await reloadPools();
+        } catch (e2) {
+          setScaleErr(String(e2));
+        }
+        return;
+      }
       setScaleErr(String(e));
     }
   }
@@ -309,41 +300,14 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   </label>
                 </td>
                 <td className="actions">
+                  {/* Lifecycle actions (Suspend menu, Delete) live in the pool
+                      detail panel; the list row keeps only Scale. */}
                   <button
                     type="button"
                     onClick={() => openScale(p)}
                     title="Resize this pool (per-role distribution)."
                   >
                     Scale
-                  </button>
-                  {' '}
-                  <button
-                    type="button"
-                    onClick={() => void handleStop(p, false)}
-                    aria-label={`Drain pool ${p.pool}`}
-                    title="Drain: stop accepting new queries, then shut down. Scales to 0 nodes; the pool is kept."
-                  >
-                    Drain
-                  </button>
-                  {' '}
-                  <button
-                    type="button"
-                    onClick={() => void handleStop(p, true)}
-                    aria-label={`Force-stop pool ${p.pool}`}
-                    title="Force: stop immediately; outstanding queries fail. Scales to 0 nodes; the pool is kept."
-                  >
-                    Force
-                  </button>
-                  {' '}
-                  <button
-                    type="button"
-                    className="danger"
-                    style={{ display: 'inline-flex', alignItems: 'center' }}
-                    onClick={() => void handleDelete(p)}
-                    aria-label={`Delete pool ${p.pool}`}
-                    title="Delete: permanently remove the pool and all its nodes."
-                  >
-                    <DeleteIcon />
                   </button>
                 </td>
               </tr>
