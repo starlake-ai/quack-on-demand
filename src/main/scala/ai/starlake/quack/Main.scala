@@ -727,6 +727,15 @@ object Main extends IOApp with LazyLogging:
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
         lockdownFor = sup.effectiveLockdown,
+        // DuckLake buckets are never directly addressable from tenant SQL under lockdown:
+        // every tenant-db dataPath bucket plus the managed root bucket (static config).
+        deniedBuckets = () =>
+          sup.duckLakeBuckets() ++
+            Option
+              .when(mgrCfg.managedObjectStore.enabled)(
+                mgrCfg.managedObjectStore.bucket.toLowerCase
+              )
+              .toSet,
         routingRefs = routingRefsCache,
         refsConfigFor = refsConfigFor,
         locality = localityTracker,

@@ -59,6 +59,10 @@ final class FlightSqlRouter(
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
     val lockdownFor: PoolKey => Boolean = _ => false,
+    /** Bucket keys holding DuckLake data (all tenant-db dataPaths + the managed root bucket),
+      * denied outright by the lockdown screen; consulted only on the lockdown branch.
+      */
+    val deniedBuckets: () => Set[String] = () => Set.empty,
     val routingRefs: ai.starlake.quack.route.RoutingRefsCache =
       new ai.starlake.quack.route.RoutingRefsCache(),
     val refsConfigFor: PoolKey => ai.starlake.acl.model.Config = _ =>
@@ -273,7 +277,7 @@ final class FlightSqlRouter(
     // effectiveSet = None screens as non-superuser (fail closed).
     val lockdownDenial =
       if lockdownFor(poolKey) && !effectiveSet.exists(_.user.tenant.isEmpty) then
-        LockdownScreen.screen(sql)
+        LockdownScreen.screen(sql, deniedBuckets())
       else None
 
     val aclCheck: Either[RouterFailure, Unit] = lockdownDenial match

@@ -845,6 +845,18 @@ final class PoolSupervisor(
       .map(t => tenantDbs.values.filter(_.tenantId == t.id).toList.sortBy(_.name))
       .getOrElse(Nil)
 
+  /** Bucket keys of every DuckLake dataPath the control plane knows: all tenant-db dataPaths
+    * (explicit or metastore-carried) plus the default-metastore root. Feeds the edge
+    * LockdownScreen's bucket denial; Main unions in the managed-store root bucket. Derived on
+    * demand from the in-memory maps, so HA replicas stay fresh through the existing topology
+    * snapshot refresh.
+    */
+  def duckLakeBuckets(): Set[String] =
+    val paths =
+      tenantDbs.values.flatMap(td => List(td.dataPath) ++ td.metastore.get("dataPath")) ++
+        defaultMetastore.get("dataPath")
+    paths.flatMap(ai.starlake.quack.model.BucketKeys.of).toSet
+
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>
       val nm = tenantDbName.toLowerCase

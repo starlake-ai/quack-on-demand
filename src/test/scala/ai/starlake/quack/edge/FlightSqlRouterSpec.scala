@@ -1402,6 +1402,38 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
 
+  it should "deny reads on a denied DuckLake bucket only when lockdown is on" in:
+    val (base, _, _) = setup()
+    val sql          = "SELECT * FROM read_parquet('s3://lakebucket/x.parquet')"
+    val locked       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      lockdownFor = _ => true,
+      deniedBuckets = () => Set("lakebucket")
+    )
+    val denied = locked
+      .execute("lockdown-b1", "alice", poolKey, sql, effectiveSet = Some(effWithPolicies(Nil)))
+      .unsafeRunSync()
+    denied.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    denied.swap.toOption.get.reason should include("'lakebucket'")
+
+    val unlocked = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      lockdownFor = _ => false,
+      deniedBuckets = () => Set("lakebucket")
+    )
+    unlocked
+      .execute("lockdown-b2", "alice", poolKey, sql, effectiveSet = Some(effWithPolicies(Nil)))
+      .unsafeRunSync()
+      .isRight shouldBe true
+
   it should "not consult the screen when disabled" in:
     val (router, _, _) = setup() // lockdownFor defaults to `_ => false`
     val out            = router

@@ -125,6 +125,59 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     (sup, b, st)
 
+  // ---------- duckLakeBuckets ----------
+
+  "PoolSupervisor.duckLakeBuckets" should "collect bucket keys from tenant-db dataPaths and the default metastore" in:
+    val sup = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = Map("dataPath" -> "s3://root-lake/ducklake")
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    // DuckDbFile kind: carries a dataPath without the DuckLake Postgres provisioning
+    // this unit test cannot run; bucket derivation is kind-agnostic.
+    sup
+      .createTenantDb(
+        "acme",
+        "sales",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_sales", "schemaName" -> "main"),
+        dataPath = "s3://acme-lake/acme_sales-a1b2c3d4/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    // Metastore-carried dataPath contributes too; the local file dataPath carries no bucket.
+    sup
+      .createTenantDb(
+        "acme",
+        "dev",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_dev", "schemaName" -> "main", "dataPath" -> "gs://ops-lake/x"),
+        dataPath = "/var/data/dev/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sup.duckLakeBuckets() shouldBe Set("acme-lake", "ops-lake", "root-lake")
+
+  it should "drop a bucket when its tenant-db is deleted" in:
+    val sup = freshSupervisor()
+    sup
+      .createTenantDb(
+        "acme",
+        "gone",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_gone", "schemaName" -> "main"),
+        dataPath = "s3://gone-lake/acme_gone-ffffffff/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sup.duckLakeBuckets() shouldBe Set("gone-lake")
+    val dbName =
+      sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("s3://gone-lake")).get.name
+    sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
+    sup.duckLakeBuckets() shouldBe Set.empty
+
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 
   "PoolSupervisor.createPool" should "start N nodes matching the role distribution" in:

@@ -1,5 +1,7 @@
 package ai.starlake.quack.edge.sql
 
+import ai.starlake.quack.model.BucketKeys
+
 import scala.collection.mutable.ListBuffer
 
 /** Statement screen for locked-down deployments (QOD_NODE_LOCKDOWN). Pure: the router consults it
@@ -79,10 +81,15 @@ object LockdownScreen:
 
   private val DriveLetter = "^[a-z]:[\\\\/]".r
 
-  def screen(sql: String): Option[String] =
-    splitStatements(sql).iterator.flatMap(screenOne).nextOption()
+  /** `deniedBuckets`: lowercased bucket/container keys holding DuckLake data (see
+    * [[ai.starlake.quack.model.BucketKeys]]); a remote literal addressing one of them is denied
+    * wherever the remote exemption would otherwise admit it (reads AND writes -- raw access
+    * bypasses per-table grants and can corrupt catalog-referenced data files).
+    */
+  def screen(sql: String, deniedBuckets: Set[String]): Option[String] =
+    splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
-  private def screenOne(stmt: String): Option[String] =
+  private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
     val lower = stripLeadingTrivia(stmt.toLowerCase)
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
@@ -97,14 +104,14 @@ object LockdownScreen:
         // A COPY statement reads/writes local files through its FROM/TO path literal; deny it
         // unless every string literal it carries is a remote object-store literal.
         val copyHit =
-          if first.contains("copy") then copyLocalPath(lower) else None
+          if first.contains("copy") then copyLocalPath(lower, deniedBuckets) else None
         // Settings statements still get the function scan: a denied function inside a
         // SET value must not slip through. The bare-path FROM check catches replacement scans
         // (SELECT * FROM '/etc/passwd.parquet') that carry no read-function call.
         settingHit
           .orElse(copyHit)
-          .orElse(deniedFunctionIn(lower))
-          .orElse(barePathFrom(lower))
+          .orElse(deniedFunctionIn(lower, deniedBuckets))
+          .orElse(barePathFrom(lower, deniedBuckets))
 
   /** Skips leading whitespace (including BOM, zero-width space and unicode space separators), `--`
     * line comments, and (nested) block comments so a comment prefix cannot hide the first token. An
@@ -210,45 +217,96 @@ object LockdownScreen:
   private def settingTargeted(lower: String, setting: String): Boolean =
     ("\\b" + setting + "\\b").r.findFirstIn(lower).isDefined
 
-  /** A denied function name (bare or double-quoted) followed by '(' anywhere in the statement.
-    * EVERY occurrence must pass the URL exemption or the statement is denied.
+  /** Per-literal safety verdict: Safe (remote, bucket allowed), Local (not provably a remote
+    * literal), or Bucket (remote literal on a denied DuckLake bucket).
     */
-  private def deniedFunctionIn(lower: String): Option[String] =
+  private enum LitVerdict:
+    case Safe
+    case Local
+    case Bucket(name: String)
+
+  /** A denied function name (bare or double-quoted) followed by '(' anywhere in the statement.
+    * EVERY occurrence must pass the URL exemption (remote literal on a non-denied bucket) or the
+    * statement is denied.
+    */
+  private def deniedFunctionIn(lower: String, deniedBuckets: Set[String]): Option[String] =
     DeniedFunctions.iterator
       .flatMap { fn =>
         val call        = ("(?:\"" + fn + "\"|(?<![a-zA-Z0-9_])" + fn + ")\\s*\\(").r
         val occurrences = call.findAllMatchIn(lower).toList
         if occurrences.isEmpty then None
-        else if UrlExempt.contains(fn) && occurrences.forall(m => allPathArgsRemote(lower, m.end))
-        then None
-        else Some(s"$fn over local paths is disabled on this deployment")
+        else if !UrlExempt.contains(fn) then
+          Some(s"$fn over local paths is disabled on this deployment")
+        else
+          val verdicts = occurrences.map(m => argsVerdict(lower, m.end, deniedBuckets))
+          if verdicts.forall(_ == LitVerdict.Safe) then None
+          else
+            verdicts
+              .collectFirst { case LitVerdict.Bucket(b) => bucketMessage(b) }
+              .orElse(Some(s"$fn over local paths is disabled on this deployment"))
       }
       .nextOption()
 
-  /** True when the argument list starting at `from` (index just past the open paren) proves every
-    * path-shaped argument is a string literal carrying a remote scheme. Handles a bare literal
-    * first argument (optionally followed by named args like `header = true`), or a list-literal
-    * first argument (`['s3://..', 'gs://..']`) where every element must be a remote literal.
-    * Anything the scanner cannot prove safe (non-literal args, unbalanced brackets, unterminated
-    * strings) answers false (deny).
+  /** Verdict for the argument list starting at `from` (index just past the open paren): Safe only
+    * when every path-shaped argument is a string literal carrying a remote scheme on a non-denied
+    * bucket. Handles a bare literal first argument (optionally followed by named args like `header
+    * = true`), or a list-literal first argument (`['s3://..', 'gs://..']`) where every element must
+    * be safe. Anything the scanner cannot prove safe (non-literal args, unbalanced brackets,
+    * unterminated strings) answers Local (deny).
     */
-  private def allPathArgsRemote(lower: String, from: Int): Boolean =
+  private def argsVerdict(lower: String, from: Int, deniedBuckets: Set[String]): LitVerdict =
     val rest    = lower.substring(from)
     val trimmed = rest.dropWhile(_.isWhitespace)
     if trimmed.startsWith("[") then
       val closing = trimmed.indexOf(']')
-      if closing < 0 then false
+      if closing < 0 then LitVerdict.Local
       else
-        val inner = trimmed.substring(1, closing)
-        val elems = splitTopLevel(inner)
-        elems.nonEmpty && elems.forall(e => isRemoteLiteral(e.trim))
+        val inner    = trimmed.substring(1, closing)
+        val elems    = splitTopLevel(inner)
+        val verdicts = elems.map(e => literalVerdict(e.trim, deniedBuckets))
+        if verdicts.isEmpty then LitVerdict.Local
+        else
+          verdicts
+            .collectFirst { case b: LitVerdict.Bucket => b }
+            .getOrElse(
+              if verdicts.forall(_ == LitVerdict.Safe) then LitVerdict.Safe else LitVerdict.Local
+            )
     else
-      // Bare first argument: it must itself be a remote string literal. Anything after it
+      // Bare first argument: it must itself be a safe remote string literal. Anything after it
       // (further positional args, or named args like `header = true`) doesn't matter for the
       // path-safety proof, but if the first thing isn't a quoted literal at all, fail closed.
       firstArg(trimmed) match
-        case Some(lit) => isRemoteLiteral(lit.trim)
-        case None      => false
+        case Some(lit) => literalVerdict(lit.trim, deniedBuckets)
+        case None      => LitVerdict.Local
+
+  private def literalVerdict(quoted: String, deniedBuckets: Set[String]): LitVerdict =
+    if !isRemoteLiteral(quoted) then LitVerdict.Local
+    else
+      deniedBucketOf(quoted, deniedBuckets) match
+        case Some(b) => LitVerdict.Bucket(b)
+        case None    => LitVerdict.Safe
+
+  /** The denied bucket a remote literal addresses, if any. Object-store schemes match on the
+    * BucketKeys authority; http(s) literals match a denied bucket appearing as the first path
+    * segment (path-style `https://endpoint/B/key`) or the leading host label (virtual-host
+    * `https://B.endpoint/key`) -- insurance against endpoint-form addressing, over-deny accepted.
+    */
+  private def deniedBucketOf(quoted: String, deniedBuckets: Set[String]): Option[String] =
+    if deniedBuckets.isEmpty then None
+    else
+      val inner = quoted.stripPrefix("'").stripSuffix("'")
+      if inner.startsWith("http://") || inner.startsWith("https://") then
+        val rest      = inner.substring(inner.indexOf("://") + 3)
+        val authority = rest.takeWhile(_ != '/')
+        val hostLabel = authority.takeWhile(c => c != '.' && c != ':')
+        val firstSeg  = rest.drop(authority.length).stripPrefix("/").takeWhile(_ != '/')
+        if deniedBuckets.contains(hostLabel) then Some(hostLabel)
+        else if deniedBuckets.contains(firstSeg) then Some(firstSeg)
+        else None
+      else BucketKeys.of(inner).filter(deniedBuckets.contains)
+
+  private def bucketMessage(bucket: String): String =
+    s"bucket '$bucket' holds DuckLake-managed data and is not directly addressable on this deployment"
 
   /** Extracts the first top-level, comma-separated argument text (up to the matching close-paren or
     * the first top-level comma), or None if the argument list is empty/unparseable.
@@ -302,32 +360,44 @@ object LockdownScreen:
       RemoteSchemes.exists(sch => s.substring(1).startsWith(sch))
 
   /** A COPY statement is denied when its PATH-position literal (the token right after FROM or TO)
-    * is NOT a remote object-store literal. Only the path position is tested, so option literals in
-    * the trailing `( ... )` (e.g. DELIMITER '|') do not over-deny a legit remote COPY. A COPY
-    * between tables (no path literal) is admitted. Fail closed: any non-remote path-position
-    * literal denies.
+    * is NOT a remote object-store literal, or is a remote literal on a denied DuckLake bucket
+    * (either direction: FROM is the raw-read bypass, TO the corruption path). Only the path
+    * position is tested, so option literals in the trailing `( ... )` (e.g. DELIMITER '|') do not
+    * over-deny a legit remote COPY. A COPY between tables (no path literal) is admitted. Fail
+    * closed: any non-remote path-position literal denies.
     */
-  private def copyLocalPath(lower: String): Option[String] =
-    if CopyPathLiteral
-        .findAllMatchIn(lower)
-        .map(m => "'" + m.group(1) + "'")
-        .exists(lit => !isRemoteLiteral(lit))
-    then Some("COPY over local paths is disabled on this deployment")
-    else None
+  private def copyLocalPath(lower: String, deniedBuckets: Set[String]): Option[String] =
+    CopyPathLiteral
+      .findAllMatchIn(lower)
+      .map(m => "'" + m.group(1) + "'")
+      .flatMap { lit =>
+        literalVerdict(lit, deniedBuckets) match
+          case LitVerdict.Safe      => None
+          case LitVerdict.Bucket(b) => Some(bucketMessage(b))
+          case LitVerdict.Local     => Some("COPY over local paths is disabled on this deployment")
+      }
+      .nextOption()
 
   /** Denies a bare filesystem path in FROM position (DuckDB replacement scan). Anchored to a
     * literal that immediately follows the FROM keyword AT STATEMENT LEVEL (paren depth 0), so
     * ordinary string literals in WHERE / VALUES, and a `from '<literal>'` inside a function call
     * (e.g. `trim(leading '/' from '/a/b.csv')`), stay admitted. A remote object-store literal is
-    * exempt.
+    * exempt unless it addresses a denied DuckLake bucket.
     */
-  private def barePathFrom(lower: String): Option[String] =
+  private def barePathFrom(lower: String, deniedBuckets: Set[String]): Option[String] =
     FromLiteral
       .findAllMatchIn(lower)
       .filter(m => parenDepthBefore(lower, m.start) == 0)
       .map(m => "'" + m.group(1) + "'")
-      .find(lit => !isRemoteLiteral(lit) && looksLikePath(lit))
-      .map(_ => "reading local files in FROM position is disabled on this deployment")
+      .flatMap { lit =>
+        deniedBucketOf(lit, deniedBuckets) match
+          case Some(b) => Some(bucketMessage(b))
+          case None    =>
+            if !isRemoteLiteral(lit) && looksLikePath(lit) then
+              Some("reading local files in FROM position is disabled on this deployment")
+            else None
+      }
+      .nextOption()
 
   /** Net open-paren depth in `lower[0, index)`, ignoring parens inside single-quoted strings. Used
     * to prove a FROM keyword sits at statement level, not inside a function-call argument list.

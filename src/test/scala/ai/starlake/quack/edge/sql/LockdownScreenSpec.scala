@@ -5,7 +5,11 @@ import org.scalatest.matchers.should.Matchers
 
 class LockdownScreenSpec extends AnyFlatSpec with Matchers:
 
-  private def denied(sql: String): Boolean = LockdownScreen.screen(sql).isDefined
+  private def denied(sql: String): Boolean = LockdownScreen.screen(sql, Set.empty).isDefined
+
+  // Bucket-denial variant: 'lakebucket' holds DuckLake data, 'staging' does not.
+  private def deniedB(sql: String): Boolean =
+    LockdownScreen.screen(sql, Set("lakebucket")).isDefined
 
   "statement kinds" should "deny ATTACH/DETACH/INSTALL/LOAD, admit ordinary SQL" in {
     denied("ATTACH 'x.db' AS other") shouldBe true
@@ -108,7 +112,76 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
   }
 
   "reasons" should "name the blocked construct" in {
-    LockdownScreen.screen("ATTACH 'x' AS y").get should include("ATTACH")
-    LockdownScreen.screen("SET lock_configuration=false").get should include("lock_configuration")
-    LockdownScreen.screen("SELECT read_text('/x')").get should include("read_text")
+    LockdownScreen.screen("ATTACH 'x' AS y", Set.empty).get should include("ATTACH")
+    LockdownScreen
+      .screen("SET lock_configuration=false", Set.empty)
+      .get should include("lock_configuration")
+    LockdownScreen.screen("SELECT read_text('/x')", Set.empty).get should include("read_text")
+  }
+
+  // ---- DuckLake bucket denial ----
+
+  "bucket denial" should "deny reads on a DuckLake bucket under every object-store scheme" in {
+    deniedB("SELECT * FROM read_parquet('s3://lakebucket/db-x/main/t/f.parquet')") shouldBe true
+    deniedB("SELECT * FROM read_parquet('s3a://lakebucket/x.parquet')") shouldBe true
+    deniedB("SELECT * FROM read_parquet('r2://lakebucket/x.parquet')") shouldBe true
+    deniedB("SELECT * FROM read_csv('gs://lakebucket/x.csv')") shouldBe true
+    deniedB("SELECT * FROM read_parquet('S3://LAKEBUCKET/X.PARQUET')") shouldBe true
+    deniedB("SELECT \"read_parquet\"('s3://lakebucket/x.parquet')") shouldBe true
+    deniedB("SELECT read_text('az://lakebucket/x.txt')") shouldBe true
+    deniedB(
+      "SELECT * FROM read_parquet('abfss://lakebucket@acct.dfs.core.windows.net/x.parquet')"
+    ) shouldBe true
+  }
+
+  it should "not be evadable with globs above the dataPath prefix" in {
+    deniedB("SELECT * FROM read_parquet('s3://lakebucket/*/main/*/*.parquet')") shouldBe true
+    deniedB("SELECT * FROM read_parquet('s3://lakebucket/**/*.parquet')") shouldBe true
+  }
+
+  it should "deny a list literal containing a DuckLake-bucket element" in {
+    deniedB(
+      "SELECT * FROM read_parquet(['s3://staging/a.parquet', 's3://lakebucket/b.parquet'])"
+    ) shouldBe true
+    deniedB("SELECT * FROM read_parquet(['s3://staging/a.parquet'])") shouldBe false
+  }
+
+  it should "deny FROM-position replacement scans on a DuckLake bucket" in {
+    deniedB("SELECT * FROM 's3://lakebucket/x.parquet'") shouldBe true
+    deniedB("SELECT * FROM 's3://staging/x.parquet'") shouldBe false
+  }
+
+  it should "deny COPY in both directions on a DuckLake bucket" in {
+    deniedB("COPY t TO 's3://lakebucket/main/t/f.parquet'") shouldBe true
+    deniedB("COPY t FROM 's3://lakebucket/x.csv'") shouldBe true
+    deniedB("COPY t TO 's3://staging/x.csv' (DELIMITER '|')") shouldBe false
+    deniedB("COPY a FROM b") shouldBe false
+  }
+
+  it should "deny https path-style and virtual-host forms of a DuckLake bucket" in {
+    deniedB(
+      "SELECT * FROM read_parquet('https://minio.local:9000/lakebucket/x.parquet')"
+    ) shouldBe true
+    deniedB(
+      "SELECT * FROM read_parquet('https://lakebucket.s3.amazonaws.com/x.parquet')"
+    ) shouldBe true
+    deniedB(
+      "SELECT * FROM read_parquet('https://minio.local:9000/staging/x.parquet')"
+    ) shouldBe false
+  }
+
+  it should "admit other buckets and everything with an empty deny-set" in {
+    deniedB("SELECT * FROM read_csv('s3://staging/x.csv', header = true)") shouldBe false
+    deniedB("SELECT * FROM read_parquet('gs://other/x.parquet')") shouldBe false
+    denied("SELECT * FROM read_parquet('s3://lakebucket/x.parquet')") shouldBe false
+    denied("COPY t TO 's3://lakebucket/x.parquet'") shouldBe false
+  }
+
+  it should "name the bucket in the denial reason" in {
+    LockdownScreen
+      .screen("COPY t TO 's3://lakebucket/x.parquet'", Set("lakebucket"))
+      .get should include("'lakebucket'")
+    LockdownScreen
+      .screen("SELECT * FROM read_parquet('s3://lakebucket/x.parquet')", Set("lakebucket"))
+      .get should include("'lakebucket'")
   }
