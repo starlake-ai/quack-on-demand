@@ -681,3 +681,41 @@ button.cancel-button[disabled] { background: #1a1a1a; color: #888; }
   letter-spacing: .04em;
   font-weight: 600;
 }
+
+/* Dropdown menu (e.g. the pool Suspend split-button). Anchored to a
+   position:relative wrapper; items are full-width rows with a hover wash
+   and an optional muted hint line. */
+.menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  z-index: 20;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.menu-item:hover { background: var(--bg-elev); }
+.menu-item .menu-hint {
+  display: block;
+  color: var(--text-mute);
+  font-size: 0.82em;
+  margin-top: 1px;
+}

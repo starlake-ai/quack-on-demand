@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, errorMessage } from '../api/client';
+import { ApiError, api, errorMessage } from '../api/client';
 import type { ClientConfigResponse, NodeInfo, PoolResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { DeleteIcon } from './Icons';
 import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
+import { Modal } from './Modal';
 import Tabs from './Tabs';
 
 
@@ -35,14 +36,34 @@ export default function PoolDetailBody({
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [suspendErr, setSuspendErr] = useState<string | null>(null);
   // The Suspend split-button's menu (Hibernate / Drain / Kill). Closed on any
-  // outside click via the document listener below.
+  // press OUTSIDE the widget. Two subtleties: listen on mousedown (the opening
+  // click's own bubble would otherwise reach a click listener attached in the
+  // same discrete-event flush and close the menu instantly), and scope by the
+  // wrapper ref so presses on the toggle or the items never count as outside.
   const [suspendMenuOpen, setSuspendMenuOpen] = useState(false);
+  const suspendMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!suspendMenuOpen) return;
-    const close = () => setSuspendMenuOpen(false);
-    document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
+    const close = (ev: MouseEvent) => {
+      if (
+        suspendMenuRef.current &&
+        ev.target instanceof Node &&
+        suspendMenuRef.current.contains(ev.target)
+      ) return;
+      setSuspendMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
   }, [suspendMenuOpen]);
+
+  // Scale modal state, moved here from the pool list (the detail panel owns
+  // every lifecycle action). Counter shape mirrors the create form.
+  const [scaleOpen, setScaleOpen]   = useState(false);
+  const [scaleRo, setScaleRo]       = useState(0);
+  const [scaleWo, setScaleWo]       = useState(0);
+  const [scaleDual, setScaleDual]   = useState(0);
+  const [scaleForce, setScaleForce] = useState(false);
+  const [scaleErr, setScaleErr]     = useState<string | null>(null);
   const [lockdownErr, setLockdownErr] = useState<string | null>(null);
 
   // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
@@ -188,6 +209,60 @@ export default function PoolDetailBody({
       setActionErr(null);
     } catch (e) {
       setActionErr(errorMessage(e));
+    }
+  }
+
+  function openScale() {
+    if (!data) return;
+    setScaleRo(data.nodes.filter(n => n.role === 'READONLY'  || n.role === 'ReadOnly').length);
+    setScaleWo(data.nodes.filter(n => n.role === 'WRITEONLY' || n.role === 'WriteOnly').length);
+    setScaleDual(data.nodes.filter(n => n.role === 'DUAL'    || n.role === 'Dual').length);
+    setScaleForce(false);
+    setScaleErr(null);
+    setScaleOpen(true);
+  }
+  function closeScale() { setScaleOpen(false); setScaleErr(null); }
+
+  async function submitScale(ev: React.FormEvent) {
+    ev.preventDefault();
+    setScaleErr(null);
+    const target = scaleRo + scaleWo + scaleDual;
+    const req = {
+      tenant, tenantDb, pool,
+      targetSize: target,
+      roleDistribution: { writeonly: scaleWo, readonly: scaleRo, dual: scaleDual },
+      force: scaleForce,
+    };
+    async function applyAndClose() {
+      await api.scalePool(req);
+      const r = await api.poolStatus(tenant, tenantDb, pool);
+      setData(r);
+      setScaleOpen(false);
+    }
+    try {
+      await applyAndClose();
+    } catch (e) {
+      // A hibernated pool refuses scaling (409 pool_suspended) so the sweep and
+      // the operator never fight; offer the resume-then-scale chain instead of
+      // parroting the refusal.
+      if (e instanceof ApiError && e.code === 'pool_suspended') {
+        const wake = window.confirm(
+          'This pool is hibernated (scaled to zero, reservation kept).\n\n' +
+          `Resume it and scale to ${target} node(s)?`
+        );
+        if (!wake) {
+          setScaleErr(String(e));
+          return;
+        }
+        try {
+          await api.resumePool({ tenant, tenantDb, pool });
+          await applyAndClose();
+        } catch (e2) {
+          setScaleErr(String(e2));
+        }
+        return;
+      }
+      setScaleErr(String(e));
     }
   }
 
@@ -640,10 +715,17 @@ export default function PoolDetailBody({
               <option value="off">Lockdown: off</option>
             </select>
           )}
+          <button
+            type="button"
+            onClick={openScale}
+            title="Resize this pool (per-role distribution)."
+          >
+            Scale
+          </button>
           {data.suspended ? (
             <button type="button" onClick={handleWake}>Wake</button>
           ) : (
-            <div style={{ position: 'relative' }}>
+            <div style={{ position: 'relative' }} ref={suspendMenuRef}>
               <button
                 type="button"
                 onClick={() => setSuspendMenuOpen(o => !o)}
@@ -653,41 +735,30 @@ export default function PoolDetailBody({
                 Suspend {'▾'}
               </button>
               {suspendMenuOpen && (
-                <div
-                  role="menu"
-                  className="card"
-                  style={{
-                    position: 'absolute', right: 0, top: '100%', zIndex: 10,
-                    marginTop: 4, padding: 4, minWidth: 200,
-                    display: 'flex', flexDirection: 'column', gap: 2,
-                  }}
-                >
+                <div role="menu" className="menu">
                   <button
                     type="button"
-                    className="link-button"
-                    style={{ textAlign: 'left' }}
-                    title="Hibernate: nodes stop, the pool keeps its role distribution and wakes on the next statement."
+                    className="menu-item"
                     onClick={() => { setSuspendMenuOpen(false); handleHibernate(); }}
                   >
                     Hibernate
+                    <span className="menu-hint">Nodes stop, reservation kept; auto-wakes on the next query.</span>
                   </button>
                   <button
                     type="button"
-                    className="link-button"
-                    style={{ textAlign: 'left' }}
-                    title="Drain: stop accepting new queries, then shut down. Scales to 0 nodes; the pool is kept."
+                    className="menu-item"
                     onClick={() => { setSuspendMenuOpen(false); handleStop(false); }}
                   >
                     Drain
+                    <span className="menu-hint">Finish running queries, then stop to 0 nodes; stays down.</span>
                   </button>
                   <button
                     type="button"
-                    className="link-button"
-                    style={{ textAlign: 'left' }}
-                    title="Kill: stop immediately; outstanding queries fail. Scales to 0 nodes; the pool is kept."
+                    className="menu-item"
                     onClick={() => { setSuspendMenuOpen(false); handleStop(true); }}
                   >
                     Kill
+                    <span className="menu-hint">Stop immediately; outstanding queries fail; stays down.</span>
                   </button>
                 </div>
               )}
@@ -723,6 +794,48 @@ export default function PoolDetailBody({
           { id: 'placement',   label: 'Placement',   body: placementTab },
         ]}
       />
+
+      {scaleOpen && (
+        <Modal maxWidth={480} scrollBackdrop onClose={closeScale}>
+            <div className="card-title">Scale {tenant}/{tenantDb}/{pool}</div>
+            <p className="subtle" style={{ marginTop: 0 }}>
+              Current size: {data.nodes.length}. Target: {scaleRo + scaleWo + scaleDual}.
+            </p>
+            {scaleErr && <p style={{ color: 'var(--bad)' }}>{scaleErr}</p>}
+            <form onSubmit={submitScale}>
+              <fieldset>
+                <legend>Role distribution</legend>
+                <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                  <label>WriteOnly <input
+                    type="number" min={0} step={1}
+                    value={scaleWo}
+                    onChange={e => setScaleWo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
+                  <label>ReadOnly  <input
+                    type="number" min={0} step={1}
+                    value={scaleRo}
+                    onChange={e => setScaleRo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
+                  <label>Dual      <input
+                    type="number" min={0} step={1}
+                    value={scaleDual}
+                    onChange={e => setScaleDual(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                    style={{ width: 72 }} /></label>
+                </div>
+              </fieldset>
+              {scaleRo + scaleWo + scaleDual < data.nodes.length && (
+                <label style={{ display: 'block', marginTop: '1rem', color: 'var(--bad)' }}>
+                  <input type="checkbox" checked={scaleForce} onChange={e => setScaleForce(e.target.checked)} />
+                  {' '}Force (skip graceful drain - outstanding queries fail)
+                </label>
+              )}
+              <div className="row" style={{ display: 'flex', gap: '.5rem', marginTop: '1rem', justifyContent: 'flex-end' }}>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeScale}>Cancel</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={scaleRo + scaleWo + scaleDual === 0}>Apply</button>
+              </div>
+            </form>
+        </Modal>
+      )}
     </>
   );
 }

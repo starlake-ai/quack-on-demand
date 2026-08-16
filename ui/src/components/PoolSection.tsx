@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ApiError, api, errorMessage } from '../api/client';
+import { api, errorMessage } from '../api/client';
 import type { PoolResponse, TenantDbResponse } from '../api/types';
 import PoolDetailBody from './PoolDetailBody';
 import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
@@ -26,15 +26,6 @@ export default function PoolSection({ tenant }: { tenant: string }) {
   // without leaving the Pools tab.
   const [browsing, setBrowsing]   = useState<{ tenantDb: string; pool: string } | null>(null);
 
-  // Per-row Scale modal state. `scaling` is the pool currently being
-  // resized (null = closed). The role counters mirror the same shape as
-  // the Scale modal in <PoolDetailBody>.
-  const [scaling, setScaling]   = useState<PoolResponse | null>(null);
-  const [scaleRo, setScaleRo]   = useState(0);
-  const [scaleWo, setScaleWo]   = useState(0);
-  const [scaleDual, setScaleDual] = useState(0);
-  const [scaleForce, setScaleForce] = useState(false);
-  const [scaleErr, setScaleErr]     = useState<string | null>(null);
 
   // Form state.
   const [tenantDb, setTenantDb]   = useState('');
@@ -94,57 +85,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
 
 
 
-  function openScale(p: PoolResponse) {
-    setScaleRo(p.nodes.filter(n => n.role === 'READONLY'  || n.role === 'ReadOnly').length);
-    setScaleWo(p.nodes.filter(n => n.role === 'WRITEONLY' || n.role === 'WriteOnly').length);
-    setScaleDual(p.nodes.filter(n => n.role === 'DUAL'    || n.role === 'Dual').length);
-    setScaleForce(false);
-    setScaleErr(null);
-    setScaling(p);
-  }
-  function closeScale() { setScaling(null); setScaleErr(null); }
 
-  async function submitScale(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (!scaling) return;
-    setScaleErr(null);
-    const target = scaleRo + scaleWo + scaleDual;
-    const req = {
-      tenant, tenantDb: scaling.tenantDb, pool: scaling.pool,
-      targetSize: target,
-      roleDistribution: { writeonly: scaleWo, readonly: scaleRo, dual: scaleDual },
-      force: scaleForce,
-    };
-    try {
-      await api.scalePool(req);
-      setScaling(null);
-      await reloadPools();
-    } catch (e) {
-      // A hibernated pool refuses scaling (409 pool_suspended) so the sweep and
-      // the operator never fight; offer the resume-then-scale chain instead of
-      // parroting the refusal.
-      if (e instanceof ApiError && e.code === 'pool_suspended') {
-        const wake = window.confirm(
-          'This pool is hibernated (scaled to zero, reservation kept).\n\n' +
-          `Resume it and scale to ${target} node(s)?`
-        );
-        if (!wake) {
-          setScaleErr(String(e));
-          return;
-        }
-        try {
-          await api.resumePool({ tenant, tenantDb: scaling.tenantDb, pool: scaling.pool });
-          await api.scalePool(req);
-          setScaling(null);
-          await reloadPools();
-        } catch (e2) {
-          setScaleErr(String(e2));
-        }
-        return;
-      }
-      setScaleErr(String(e));
-    }
-  }
 
   function resetForm() {
     setPoolName('');
@@ -266,7 +207,6 @@ export default function PoolSection({ tenant }: { tenant: string }) {
               <th align="left">Pool</th>
               <th align="right">Nodes</th>
               <th align="right">Enabled</th>
-              <th className="actions">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -298,17 +238,6 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     />
                     <span className="subtle">{p.disabled ? 'off' : 'on'}</span>
                   </label>
-                </td>
-                <td className="actions">
-                  {/* Lifecycle actions (Suspend menu, Delete) live in the pool
-                      detail panel; the list row keeps only Scale. */}
-                  <button
-                    type="button"
-                    onClick={() => openScale(p)}
-                    title="Resize this pool (per-role distribution)."
-                  >
-                    Scale
-                  </button>
                 </td>
               </tr>
             ))}
@@ -419,59 +348,6 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         </Modal>
       )}
 
-      {scaling && (
-        <Modal maxWidth={480} scrollBackdrop onClose={closeScale}>
-            <div className="card-title">Scale {scaling.tenant}/{scaling.tenantDb}/{scaling.pool}</div>
-            <p className="subtle" style={{ marginTop: 0 }}>
-              Current size: {scaling.nodes.length}. Target: {scaleRo + scaleWo + scaleDual}.
-            </p>
-            {scaleErr && <p style={{ color: 'var(--bad)' }}>{scaleErr}</p>}
-            <form onSubmit={submitScale}>
-              <fieldset>
-                <legend>Role distribution</legend>
-                {/* Keying each input by the pool's natural address forces a
-                    remount when the Scale modal opens for a different pool.
-                    Without the remount, WebKit's native spinner arrows do
-                    not always fire a `input` event on a controlled
-                    `<input value={0}>` whose DOM value already matches --
-                    re-mounting clears that stale-equality state so spinner
-                    clicks register as expected. The keys are stable across
-                    re-renders for the same pool, so React preserves focus
-                    and caret position. */}
-                <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-                  <label>WriteOnly <input
-                    key={`scale-wo-${scaling.pool}`}
-                    type="number" min={0} step={1}
-                    value={scaleWo}
-                    onChange={e => setScaleWo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
-                    style={{ width: 72 }} /></label>
-                  <label>ReadOnly  <input
-                    key={`scale-ro-${scaling.pool}`}
-                    type="number" min={0} step={1}
-                    value={scaleRo}
-                    onChange={e => setScaleRo(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
-                    style={{ width: 72 }} /></label>
-                  <label>Dual      <input
-                    key={`scale-dual-${scaling.pool}`}
-                    type="number" min={0} step={1}
-                    value={scaleDual}
-                    onChange={e => setScaleDual(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
-                    style={{ width: 72 }} /></label>
-                </div>
-              </fieldset>
-              {scaleRo + scaleWo + scaleDual < scaling.nodes.length && (
-                <label style={{ display: 'block', marginTop: '1rem', color: 'var(--bad)' }}>
-                  <input type="checkbox" checked={scaleForce} onChange={e => setScaleForce(e.target.checked)} />
-                  {' '}Force (skip graceful drain - outstanding queries fail)
-                </label>
-              )}
-              <div className="row" style={{ display: 'flex', gap: '.5rem', marginTop: '1rem', justifyContent: 'flex-end' }}>
-                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeScale}>Cancel</button>
-                <button type="submit" style={{ minWidth: '7rem' }} disabled={scaleRo + scaleWo + scaleDual === 0}>Apply</button>
-              </div>
-            </form>
-        </Modal>
-      )}
     </div>
   );
 }
