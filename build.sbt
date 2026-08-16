@@ -204,6 +204,12 @@ lazy val root = (project in file("."))
           // with "Cannot find vertx-version.txt on classpath" if the
           // assembly merge strategy discards it.
           case "vertx" :: _         => MergeStrategy.first
+          // Jakarta Mail resolves its transports through these registry files
+          // (javamail.default.address.map maps rfc822 -> smtp); discarding them
+          // makes every real SMTP send from the jar fail with
+          // "expected resource not found" (lockout notices, password resets).
+          case x :: Nil if x.startsWith("javamail.") || x == "mailcap" =>
+            MergeStrategy.first
           case _                    => MergeStrategy.discard
         }
       case "module-info.class"       => MergeStrategy.discard
