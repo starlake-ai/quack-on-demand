@@ -99,6 +99,20 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DISTRIB_DIR="$REPO_DIR/distrib"
 
+# Local-only overrides (SMTP credentials etc.); untracked, distinct from the
+# docker-compose-style .env. Exported so the JVM inherits them.
+# Explicitly-set environment always wins over the file: the file supplies
+# defaults, like every other QOD_* knob in this repo.
+if [[ -f "$REPO_DIR/.env.local" ]]; then
+  set -a
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    name="${line%%=*}"
+    [[ -n "${!name+x}" ]] || eval "$line"
+  done < "$REPO_DIR/.env.local"
+  set +a
+fi
+
 # Anchor CWD at the repo root so the JVM's child processes (spawn-quack-node.sh
 # invoked via `./scripts/spawn-quack-node.sh`) resolve correctly no matter where
 # the user called this script from.
