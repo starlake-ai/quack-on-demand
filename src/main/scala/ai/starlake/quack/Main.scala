@@ -1071,8 +1071,12 @@ object Main extends IOApp with LazyLogging:
            }) *>
         moduleStart *>
         // Modules may build their MutationGates only inside start(), so this reads
-        // them strictly after moduleStart and before the server binds.
-        sup.setMutationGates(modules.flatMap(_.mutationGates)) *>
+        // them strictly after moduleStart and before the server binds. The IO.defer
+        // is load-bearing: without it the modules.flatMap(_.mutationGates) argument
+        // evaluates when this IO chain is CONSTRUCTED (before anything runs), captures
+        // the pre-start empty list, and every gate silently never registers - live
+        // enforcement off while module suites (which wire gates directly) stay green.
+        IO.defer(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
         IO.delay(buildManagerServer()).flatMap { mgr =>
           mgr.serve.use { _ =>
             logger.info(
