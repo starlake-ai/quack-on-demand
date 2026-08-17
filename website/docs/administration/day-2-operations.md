@@ -58,7 +58,7 @@ Per-node fields surfaced via `qod --json pool list`:
 1. Click **Tenants** in the top navigation bar and select the target tenant.
 2. On the **Pools** tab, click the pool name to open its detail page.
 3. Click **Scale**.
-4. Set the new **Target size** (total node count) and adjust the **Role distribution** sliders (WriteOnly, ReadOnly, Dual). The distribution must sum to the target size.
+4. Set the **Role distribution** counts (WriteOnly, ReadOnly, Dual). The target size is their sum, shown above the form.
 5. Click **Apply**. The manager computes the diff: surplus nodes are stopped, and deficit nodes are spawned.
 
 ![Pool detail](/img/ui/pool-detail.png)
@@ -98,10 +98,12 @@ qod pool scale --tenant acme --db acme_tpch --pool bi --target-size 6 \
 
 **Steps (UI):**
 
-1. Click **Tenants**, select the tenant, and open the **Pools** tab.
-2. Two stop actions appear per pool:
+1. Click **Tenants**, select the tenant, open the **Pools** tab, and click the pool name to open its detail page.
+2. The **Suspend** menu in the header offers two stop actions:
    - **Drain** - graceful stop. Each node is marked as draining in the router so no new statements are routed to it, then the node process is stopped. Use this during planned maintenance when you want to stop routing new queries to the pool before it shuts down. Drain does not wait for in-flight queries to finish, so statements already executing on a node can still be interrupted.
-   - **Force** - immediate stop. Nodes are stopped without a draining period. Any statements in flight on those nodes are failed and returned to the client as errors. Use this when a pool is wedged and drain is not making progress.
+   - **Kill** - immediate stop (`force` on the REST and CLI surface). Nodes are stopped without a draining period. Any statements in flight on those nodes are failed and returned to the client as errors. Use this when a pool is wedged and drain is not making progress.
+
+   The menu's third entry, **Hibernate**, suspends the pool instead: also zero nodes, but the role distribution is kept and the first query wakes the pool automatically.
 3. After either action the pool row stays in the registry with zero nodes and a zero distribution. It is not deleted. Reconcile will not respawn nodes because the persisted distribution is zero.
 4. To bring the pool back: use **Scale** and set a non-zero target size.
 

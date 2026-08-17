@@ -21,9 +21,9 @@ DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the eng
 
 ### Project status
 
-**Beta.** In active use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
+**Stable.** In production use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
 
-The gateway is a **single-instance manager** by design: safely restartable, but not active-active yet. Worker pools scale horizontally; the manager itself is one process.
+The manager runs as a **single instance** by default (safely restartable), and supports opt-in **active-active HA** on Kubernetes (`replicaCount > 1`). Worker pools scale horizontally in both modes.
 
 **Documentation:** https://qod.starlake.ai - full guides, configuration reference, and REST API.
 Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://qod.starlake.ai/concepts/architecture) · [RBAC model](https://qod.starlake.ai/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)

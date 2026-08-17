@@ -82,8 +82,8 @@ Placeholders in `setupSql`:
 1. Go to **Tenants** -> **Databases** -> **Federation** for the relevant database.
 2. Find the federated source and open its secret list.
 3. Click the secret row and enter the new value. The `PUT` is an upsert; only the value field changes, not the `setupSql`.
-4. Go to the **Pools** tab and select the pool that uses this database.
-5. Click **Drain** to stop accepting new queries, then wait for in-flight statements to complete. Click **Scale** to bring nodes back up (or use **Force** if immediate replacement is acceptable). New nodes start with the updated secret value injected into their `setupSql`.
+4. Go to the **Pools** tab and click the name of the pool that uses this database to open its detail page.
+5. In the header, choose **Suspend** -> **Drain** to stop accepting new queries, then wait for in-flight statements to complete. Click **Scale** to bring nodes back up (or use **Suspend** -> **Kill** if immediate replacement is acceptable). New nodes start with the updated secret value injected into their `setupSql`.
 
 **Manifest (YAML)**
 
@@ -168,7 +168,7 @@ The import response is a JSON count: `{"tenants":2,"tenantDbs":3,"pools":4,...}`
 
 **Steps (UI)**:
 
-1. **Delete a pool**: Go to **Tenants**, select the tenant, open the **Pools** tab, select the pool, and click **Delete**. This stops all nodes and removes the pool from the registry. To stop nodes temporarily without removing the pool, click **Drain** instead.
+1. **Delete a pool**: Go to **Tenants**, select the tenant, open the **Pools** tab, click the pool name to open its detail page, and click the **Delete** (trash) button in the header. This stops all nodes and removes the pool from the registry. To stop nodes temporarily without removing the pool, use **Suspend** -> **Drain** instead.
 2. **Delete a tenant**: Once all pools are removed, go to **Tenants**, select the tenant, and click **Delete**.
 3. **Remove a user, role, or group**: Go to **Users**, select the tenant scope at the top, find the object on the appropriate tab, and click **Delete**.
 

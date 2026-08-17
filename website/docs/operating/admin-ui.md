@@ -80,17 +80,20 @@ Clicking **Federation** opens the federated-source panel, where DuckDB `ATTACH` 
 
 ### Pools
 
-The **Pools** tab lists each pool with its database, node count, an enable/disable toggle, and actions:
+The **Pools** tab lists each pool with its database, node count, and an enable/disable toggle. Clicking a pool name opens the pool detail inline; the lifecycle actions (Scale, Suspend, Delete) live on the detail page.
 
-- **Scale** opens a modal with the target role distribution (WriteOnly / ReadOnly / Dual counts) and, when scaling down, a **Force** checkbox that skips the graceful drain (outstanding queries fail).
-- **Drain** is the graceful stop (stop accepting new queries, then shut down); **Force** stops immediately.
-- **Delete** removes the pool from the registry after stopping it.
-
-The **New pool** form takes the role distribution, optional pool init SQL, optional CPU and memory limits for the pool's node pods (sliders; applied as both request and limit on Kubernetes), a **Create disabled** toggle (nodes spawn, but the edge rejects fresh handshakes until enabled), and the node-placement section described below. Clicking a pool name opens the pool detail inline.
+The **New pool** form takes the role distribution, optional pool init SQL, optional CPU and memory limits for the pool's node pods (sliders; applied as both request and limit on Kubernetes), a **Create disabled** toggle (nodes spawn, but the edge rejects fresh handshakes until enabled), and the node-placement section described below.
 
 ### Pool detail
 
-The pool detail page has tabs for **Nodes**, **Connections**, **Storage**, and **Placement**.
+The pool detail page has tabs for **Nodes**, **Connections**, **Storage**, and **Placement**. Its header carries the pool's lifecycle actions:
+
+- **Scale** opens a modal with the target role distribution (WriteOnly / ReadOnly / Dual counts; the target size is their sum) and, when scaling down, a **Force** checkbox that skips the graceful drain (outstanding queries fail).
+- **Suspend** is a menu with three ways to zero nodes: **Hibernate** (nodes stop, the role distribution is kept, and the first query wakes the pool automatically), **Drain** (finish routing, then stop; stays down), and **Kill** (stop immediately; outstanding queries fail; stays down). A hibernated pool shows a **Hibernated** badge and the menu is replaced by a **Wake** button.
+- **Delete** (the trash button) removes the pool from the registry after stopping it.
+- Superusers also get the pool's **Lockdown** override selector (`inherit | on | off`), described in [Hardening](/operating/hardening).
+
+![The pool Suspend menu with Hibernate, Drain, and Kill](/img/ui/pool-detail-suspend-menu.png)
 
 The **Nodes** tab shows the per-node table with role, host, and port, plus per-pool **CPU limit** and **Memory limit** editors (checkbox + slider, with a **Save** button; a note reminds that node restarts apply resource changes and that sizing is Kubernetes-only) and a per-node **Max concurrent** input (0 = unlimited, saved on blur). Superusers get the same **Quarantine** / **Restart** actions as on the Nodes page.
 
