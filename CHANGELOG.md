@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.5
+
+- **Security (please upgrade): federated secrets with an external reference are now
+  superuser-only.** A federated secret whose `externalRef` uses `env:` / `aws-sm:` /
+  `gcp-sm:` / `azure-kv:` / `vault:` is resolved from the MANAGER's own trust domain at node
+  spawn (`env:` reads the manager process environment; the KMS prefixes use its ambient
+  credentials) and the resolved value is inlined into the tenant's node setup SQL, which the
+  tenant can read back. A tenant admin could therefore author `env:QOD_SESSION_JWT_SECRET` on
+  their own database, read it out of a node table, and forge a superuser session. Authoring an
+  `externalRef` secret over REST/CLI now requires a superuser session
+  (`403 superuser_required`); tenant admins keep value-backed (inline) secrets, and
+  operator-run bootstrap / manifest imports (already superuser-gated) are unaffected. All
+  0.6.x releases carry this; upgrade if tenant admins can manage federation.
+- **Pool lifecycle actions moved to the pool detail page.** Scale, a Suspend menu
+  (Hibernate / Drain / Kill), and Delete now live in the pool detail header instead of the
+  tenant Pools list, which drops its Actions column. Scale keeps its Force option when
+  shrinking; Hibernate suspends to zero nodes and auto-wakes on the next query.
+- **CLI default profile.** `qod` now remembers a sticky default profile and adds a profiles
+  listing, so repeated commands no longer need the connection flags spelled out each time.
+- **Lockdown denies direct access to DuckLake buckets.** With node lockdown on, object-store
+  access is denied at bucket granularity: the derived deny-set covers each tenant-db's
+  DuckLake buckets plus the managed bucket, closing direct bucket reads that prefix rules
+  alone did not.
+- **Fixes.** The assembly bundles Jakarta Mail's registry files, so SMTP send no longer fails
+  on a missing provider registry; the boot sequence defers the mutation-gate read until after
+  modules start; `run-jar.sh` sources an untracked `.env.local` for local overrides.
+- Project status is now marked Stable (was Beta), and the docs note opt-in active-active HA
+  on Kubernetes.
+
 ## 0.6.4
 
 - **Account lockout (opt-in).** After a configurable number of failed logins a database
