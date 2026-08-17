@@ -61,6 +61,8 @@ qod federation secret set acme acme_fed fedpg --name PG_PWD \
 
 Secret values are always redacted on reads: a value-backed secret comes back as `***REDACTED***`, while `externalRef` is returned as-is. Delete a secret with `qod federation secret delete acme acme_fed fedpg PG_PWD`.
 
+**Authoring an `externalRef` secret requires a superuser session.** An `externalRef` directs the manager to resolve a value from its **own** trust domain at node startup (`env:` reads the manager process environment; the KMS prefixes use the manager's ambient cloud / Vault credentials), and that value is inlined into the tenant's node `setupSql`. To prevent a tenant admin from resolving the manager's own secrets (for example `env:QOD_SESSION_JWT_SECRET`) into a table they can read back, the REST/CLI `secret set` path accepts an `externalRef` only from a superuser session; a tenant admin gets `403 superuser_required`. Tenant admins can still author **value-backed** (inline) secrets for their own external credentials, and operator-run bootstrap / manifest imports (themselves superuser-gated) may carry `externalRef` secrets unchanged.
+
 ### Secret resolvers
 
 The resolver backend is selected by `QOD_FEDERATION_SECRET_STORE`. The default is `dispatch`, which routes per secret by `externalRef` prefix (inline `value` → `postgres`, `env:` → env, `aws-sm:` / `gcp-sm:` / `azure-kv:` / `vault:` → the matching cloud backend). The single-backend modes `postgres` and `env` are also valid. The single-backend modes `aws-sm` / `gcp-sm` / `azure-kv` / `vault` are **refused at config load** because the resolvers are stubs; deployments that use them through `externalRef` should run under `dispatch` instead. The `externalRef` format depends on the backend:

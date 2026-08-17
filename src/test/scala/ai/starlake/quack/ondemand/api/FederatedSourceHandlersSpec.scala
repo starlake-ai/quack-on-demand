@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{
   FederatedSourceStore,
@@ -18,7 +19,13 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
 
   TestPostgres.dropStrayTestDatabases("qodh")
 
-  private def withHandlers(test: (FederatedSourceHandlers, String) => Unit): Unit =
+  /** Yields the store + (tenantName, tenantDbName) => tenantDbId resolver over a
+    * freshly-migrated throwaway Postgres, so a test can build a handler with a
+    * custom `scopeOf`.
+    */
+  private def withEnv(
+      test: (FederatedSourceStore, (String, String) => Option[String], String) => Unit
+  ): Unit =
     if !TestPostgres.reachable then
       cancel(
         s"local Postgres not reachable at ${TestPostgres.pgHost}:${TestPostgres.pgPort}; skipping"
@@ -51,9 +58,11 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
         cp.listTenants().find(_.id == tenantName).flatMap { t =>
           cp.listTenantDbs(t.id).find(_.name == tenantDbName).map(_.id)
         }
-      val h = new FederatedSourceHandlers(fs, resolver)
-      test(h, "td-1")
+      test(fs, resolver, "td-1")
     finally Try(TestPostgres.dropDatabase(dbName))
+
+  private def withHandlers(test: (FederatedSourceHandlers, String) => Unit): Unit =
+    withEnv((fs, resolver, tdId) => test(new FederatedSourceHandlers(fs, resolver), tdId))
 
   // 1. POST source -> 200, GET it back, alias matches
   "FederatedSourceHandlers.createSource" should
@@ -155,4 +164,101 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       val r = h.listSources("acme", "no_such_db").unsafeRunSync()
       r.isLeft shouldBe true
       r.swap.toOption.value._1.code shouldBe 404
+    }
+
+  // --- externalRef secret authoring is superuser-only -----------------------
+  // Regression guard for the privilege-escalation finding: a tenant admin
+  // must not be able to author an `env:` / KMS externalRef secret (which
+  // resolves from the MANAGER's own trust domain at spawn), while a superuser
+  // and a value-backed tenant secret both stay allowed.
+
+  private val AdminTok = "admin-token"
+  private val SuperTok = "super-token"
+  private val scopes: String => Option[SessionScope] = {
+    case `AdminTok` => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+    case `SuperTok` => Some(SessionScope.Superuser)
+    case _          => None
+  }
+
+  private def seedSource(fs: FederatedSourceStore, resolver: (String, String) => Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): FederatedSourceHandlers =
+    val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf)
+    h.createSource(
+      "acme",
+      "acme_prod",
+      FederatedSourceCreateRequest(alias = "fedpg", setupSql = "INSTALL postgres;"),
+      Some(AdminTok)
+    ).unsafeRunSync().isRight shouldBe true
+    h
+
+  "FederatedSourceHandlers.upsertSecret" should
+    "reject an externalRef secret from a non-superuser (tenant admin) session with 403" in
+    withEnv { (fs, resolver, _) =>
+      val h = seedSource(fs, resolver)(scopes)
+      val r = h
+        .upsertSecret(
+          "acme",
+          "acme_prod",
+          "fedpg",
+          FederatedSecretUpsertRequest(name = "X", externalRef = Some("env:QOD_SESSION_JWT_SECRET")),
+          Some(AdminTok)
+        )
+        .unsafeRunSync()
+      r.isLeft shouldBe true
+      val (code, err) = r.swap.toOption.value
+      code.code shouldBe 403
+      err.error shouldBe "superuser_required"
+      // Nothing was written.
+      h.listSecrets("acme", "acme_prod", "fedpg")
+        .unsafeRunSync()
+        .toOption
+        .value
+        .secrets shouldBe empty
+    }
+
+  it should "allow a value-backed secret from a non-superuser (tenant admin) session" in
+    withEnv { (fs, resolver, _) =>
+      val h = seedSource(fs, resolver)(scopes)
+      val r = h
+        .upsertSecret(
+          "acme",
+          "acme_prod",
+          "fedpg",
+          FederatedSecretUpsertRequest(name = "PW", value = Some("my-own-pw")),
+          Some(AdminTok)
+        )
+        .unsafeRunSync()
+      r.isRight shouldBe true
+    }
+
+  it should "allow an externalRef secret from a superuser session" in
+    withEnv { (fs, resolver, _) =>
+      val h = seedSource(fs, resolver)(scopes)
+      val r = h
+        .upsertSecret(
+          "acme",
+          "acme_prod",
+          "fedpg",
+          FederatedSecretUpsertRequest(name = "X", externalRef = Some("env:SL_QOD_SECRET_FOO")),
+          Some(SuperTok)
+        )
+        .unsafeRunSync()
+      r.isRight shouldBe true
+    }
+
+  it should "allow an externalRef secret for a static-key / open-mode caller (no resolvable scope)" in
+    withEnv { (fs, resolver, _) =>
+      // Default scopeOf resolves nothing -> perimeter is the gate, handler admits.
+      val h = seedSource(fs, resolver)(_ => None)
+      val r = h
+        .upsertSecret(
+          "acme",
+          "acme_prod",
+          "fedpg",
+          FederatedSecretUpsertRequest(name = "X", externalRef = Some("env:SL_QOD_SECRET_FOO")),
+          None
+        )
+        .unsafeRunSync()
+      r.isRight shouldBe true
     }

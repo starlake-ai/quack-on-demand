@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -19,7 +20,8 @@ final class FederatedSourceHandlers(
     fedStore: FederatedSourceOps,
     resolver: (String, String) => Option[String],
     tenantIdResolver: String => Option[String] = _ => None,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    scopeOf: String => Option[SessionScope] = _ => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -51,6 +53,13 @@ final class FederatedSourceHandlers(
       description = s.description,
       disabled = s.disabled
     )
+
+  /** True when a RESOLVED session is present and it is not a superuser. Mirrors
+    * [[SuperuserCheck.reject]]: static-key and open-mode callers (no resolvable
+    * scope) are admitted here -- the perimeter (apiKeyGuard) is their gate.
+    */
+  private def superuserDenied(apiKey: Option[String]): Boolean =
+    SuperuserCheck.reject(apiKey)(scopeOf).isDefined
 
   private def toSecretResponse(s: FederatedSecret): FederatedSecretResponse =
     FederatedSecretResponse(
@@ -194,6 +203,33 @@ final class FederatedSourceHandlers(
                     StatusCode.BadRequest -> ErrorResponse(
                       "invalid",
                       "one of value or externalRef must be provided"
+                    )
+                  )
+                // An externalRef secret directs the manager to resolve a value
+                // from ITS OWN trust domain at node spawn: `env:` reads the
+                // manager process environment (System.getenv), and the KMS
+                // prefixes read the manager's ambient cloud / Vault credentials.
+                // That value is then inlined into the tenant's node setupSql,
+                // which the tenant can read back -- a privilege escalation from
+                // tenant admin to control-plane operator (e.g. exfiltrating
+                // QOD_SESSION_JWT_SECRET). Restrict externalRef authoring to
+                // superusers; tenant admins keep value-backed (inline) secrets.
+                // The bootstrap/manifest import paths bypass this handler and
+                // are separately superuser-gated.
+                case _ if req.externalRef.isDefined && superuserDenied(apiKey) =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.FederationSecretUpsert,
+                    "denied",
+                    tenant = tenantIdResolver(tenantName),
+                    target = Some(s"$alias/${req.name}")
+                  )
+                  Left(
+                    StatusCode.Forbidden -> ErrorResponse(
+                      "superuser_required",
+                      "authoring a federated secret with an externalRef requires a " +
+                        "superuser session; tenant admins may use a value-backed secret"
                     )
                   )
                 case _ =>

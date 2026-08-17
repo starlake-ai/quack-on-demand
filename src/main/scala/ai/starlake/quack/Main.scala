@@ -829,7 +829,8 @@ object Main extends IOApp with LazyLogging:
             fedHandlersStore,
             resolver,
             tenantIdResolver,
-            audit = auditRecorder
+            audit = auditRecorder,
+            scopeOf = sessionTokens.scopeOf
           )
         )
 
