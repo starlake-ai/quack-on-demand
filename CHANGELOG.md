@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **MCP server for AI agents.** The manager now serves an MCP (Model Context Protocol)
+  endpoint at `POST /mcp` on the REST port (stateless Streamable HTTP, `QOD_MCP_ENABLED`
+  default on), so agents like Claude Code can discover schemas, run SQL with full
+  RBAC/RLS/CLS enforcement, use DuckLake time travel, and (with an admin credential)
+  operate pools and nodes. Data tier: `run_sql` (row-capped via `QOD_MCP_MAX_ROWS`,
+  default 500), `list_databases`, `list_tables`, `describe_table`, `table_history`,
+  `list_snapshots`, `my_usage`. Admin tier: pool status/scale/suspend/resume, node
+  restart/quarantine, active statements + kill, maintenance, tag create/protect
+  (protect-only), audit search. Destructive and credential operations are deny-listed
+  with no code path from `/mcp`. Auth is a personal access token or the static API key;
+  session JWTs are refused.
+- **Personal access tokens (PATs).** Long-lived bearer credentials for agents and
+  scripts, minted from the profile page (UI), `qod auth pat create|list|revoke` (CLI),
+  or `POST /api/auth/pat/*` (REST). Only a SHA-256 hash is stored; the token is shown
+  once at mint. A PAT is accepted wherever a session token is, on both `/api` and
+  `/mcp`, with exactly its owner's scope (admin PATs manage; `role=user` PATs are
+  profile-only). PAT management itself is session-only: a PAT can never mint,
+  enumerate, or revoke tokens.
 - **BREAKING: an unset or empty `QOD_API_KEY` no longer leaves `/api` open.** Every
   non-public `/api` call now requires a session, a personal access token, or the static key;
   a keyless call answers 401 regardless of configuration. Keyless dev scripts must log in via

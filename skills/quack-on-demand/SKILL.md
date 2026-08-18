@@ -76,9 +76,11 @@ this profile).
 
 ## Auth flow (REST + UI)
 
-The REST API has two acceptable credentials:
+The REST API has three acceptable credentials:
 1. **Static** `X-API-Key` header matching `QOD_API_KEY` (if set; not set by default)
 2. **UI session token** minted via `POST /api/auth/login`
+3. **Personal access token** (`qod_pat_...`), sent the same way as a session token
+   (see "Personal access tokens and the MCP server" below)
 
 ```bash
 # Get a session token (admin role required)
@@ -91,7 +93,7 @@ TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
 curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
 ```
 
-If `QOD_API_KEY` is unset, the manager logs a loud warning at startup and `/api/...` accepts anonymous traffic - fine for local dev, never for prod.
+If `QOD_API_KEY` is unset (or empty), only the static-key arm is disabled: every non-public `/api/...` call still requires a session or PAT, and a keyless call answers 401. There is no open mode; keyless dev scripts must log in first.
 
 ### Regular-user login (profile only)
 
@@ -113,6 +115,50 @@ qod auth login --username alice --tenant acme
 qod profile usage --days 7
 qod profile statements --limit 20
 ```
+
+### Personal access tokens and the MCP server
+
+PATs are long-lived bearer credentials for agents and scripts. A PAT acts with exactly
+its owner's permissions (admin PATs reach the admin surface, `role=user` PATs are
+demoted to the profile allowlist) and is accepted wherever a session token is, on both
+`/api/*` and the MCP endpoint. Management is session-only: a PAT can never mint, list,
+or revoke PATs (`403 session_required`).
+
+```bash
+# Mint (session required; the token is printed ONCE - store it now)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/create \
+  -H 'Content-Type: application/json' -d '{"name":"claude-code"}'
+# {"id":"pat-...","name":"claude-code","token":"qod_pat_..."}
+
+# List (metadata only; the raw token is unrecoverable after mint)
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/list
+# Revoke
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/revoke \
+  -H 'Content-Type: application/json' -d '{"id":"pat-..."}'
+
+# CLI equivalents
+qod auth pat create --name claude-code [--expires-at 2027-01-01T00:00:00Z]
+qod auth pat list
+qod auth pat revoke --id pat-...
+```
+
+The MCP server lives at `POST /mcp` on the manager port (`QOD_MCP_ENABLED`, default
+true). Auth is `Authorization: Bearer <PAT or QOD_API_KEY>`; session JWTs are refused
+there. Point Claude Code at it with:
+
+```bash
+claude mcp add --transport http qod http://localhost:20900/mcp \
+  --header "Authorization: Bearer qod_pat_..."
+```
+
+MCP troubleshooting:
+- **401 on every call**: the bearer is a session JWT (refused by design) or a dead PAT
+  (revoked, expired, owner disabled). Mint a fresh PAT.
+- **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT or
+  the static key.
+- **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
+- **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
+- Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
 ### Account lockout and self-service password reset
 
