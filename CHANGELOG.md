@@ -2,6 +2,8 @@
 
 ## 0.6.5
 
+_Released 2026-08-17._
+
 - **Security (please upgrade): federated secrets with an external reference are now
   superuser-only.** A federated secret whose `externalRef` uses `env:` / `aws-sm:` /
   `gcp-sm:` / `azure-kv:` / `vault:` is resolved from the MANAGER's own trust domain at node
