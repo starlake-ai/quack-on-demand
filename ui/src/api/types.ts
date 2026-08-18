@@ -412,6 +412,35 @@ export interface ResetPasswordRequest {
   newPassword: string;
 }
 
+// ----- Auth: personal access tokens -----
+// Session-only management surface: a PAT can never mint, list, or revoke PATs
+// (the server answers 403 session_required). The raw token appears exactly once,
+// in PatCreateResponse; listings are metadata only.
+export interface PatCreateRequest {
+  name: string;
+  expiresAt?: string | null; // ISO-8601, must be in the future
+}
+
+export interface PatCreateResponse {
+  id: string;
+  name: string;
+  token: string;
+  expiresAt?: string | null;
+}
+
+export interface PatEntry {
+  id: string;
+  name: string;
+  createdAt: string;
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+  revoked: boolean;
+}
+
+export interface PatListResponse { tokens: PatEntry[]; }
+
+export interface PatRevokeRequest { id: string; }
+
 // ----- RBAC: roles -----
 export interface RoleResponse {
   id:          string;
