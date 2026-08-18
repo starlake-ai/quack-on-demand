@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.auth
 
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
-import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserStore}
+import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -31,16 +31,16 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
         users.close()
     finally Try(TestPostgres.dropDatabase(dbName))
 
-  /** The real store and the real row lookup; `grantsFor` uses the by-identity lookup `AuthHandlers`
-    * feeds `mintSessionFor` on the OIDC path. None of the cases below has a same-username row in a
-    * second tenant, so they hold identically under a row-only `grantsFor` (the DB-login shape) --
-    * the wiring choice stays open for the task that wires Main.
+  /** The real store, the real row lookup, and the row-only `grantsFor` the class documents as the
+    * required wiring (`mintSessionFor`'s `Db`-mode grant list). Deliberately NOT
+    * `UserStore.grantsForIdentity`: that one matches by username across tenants, and usernames are
+    * unique only per tenant, so it would let a PAT inherit a same-named foreign admin's tenants.
     */
   private def authOf(users: UserStore, pats: PatStore): PatAuthenticator =
     new PatAuthenticator(
       pats,
       id => users.userById(id),
-      u => users.grantsForIdentity(u.username, u.email)
+      u => List(UserGrant(u.tenant, u.role))
     )
 
   private def seed(
@@ -126,16 +126,25 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
     auth.resolve(expired) shouldBe None
   }
 
-  it should "refuse a session-JWT-shaped value without consulting the store" in withFreshDb {
+  it should "refuse a session-JWT-shaped value without any lookup" in withFreshDb {
     (_, users, pats) =>
       val (_, token) = seed(users, pats, None, "root", "admin")
-      val auth       = authOf(users, pats)
-      // Closing the pool turns any store call into a thrown SQLException, so a plain `None` here
-      // proves the prefix guard short-circuited before the lookup, while the prefixed token below
-      // proves the store WOULD have been consulted.
+      val lookups    = new java.util.concurrent.atomic.AtomicInteger(0)
+      val auth       = new PatAuthenticator(
+        pats,
+        id => { lookups.incrementAndGet(); users.userById(id) },
+        u => List(UserGrant(u.tenant, u.role))
+      )
+      // What is pinned is the end-to-end property: a non-PAT value costs no user lookup (the
+      // counter stays at zero) and no connection (the pool is closed, so any query would throw --
+      // the real token below shows the store IS otherwise on the path). It does NOT pin WHICH
+      // layer short-circuits: PatStore.verify carries the same prefix guard, so dropping the one
+      // in PatAuthenticator would keep this green. `PatStore` is final, so a stub that counts
+      // verify calls is not available to separate them.
       pats.close()
       auth.resolve("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.sig") shouldBe None
       auth.isAdmin("") shouldBe false
+      lookups.get() shouldBe 0
       an[Exception] should be thrownBy auth.resolve(token)
   }
 
@@ -144,6 +153,7 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       val (_, adminToken) = seed(users, pats, Some("t-acme"), "alice", "admin")
       val (_, userToken)  = seed(users, pats, Some("t-acme"), "bob", "user")
       val auth            = authOf(users, pats)
+      val before          = Instant.now()
 
       val adminSession = auth.sessionOf(adminToken).getOrElse(fail("admin PAT did not resolve"))
       adminSession.profile.username shouldBe "alice"
@@ -153,7 +163,9 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       adminSession.profile.groups shouldBe empty
       adminSession.profile.claims shouldBe empty
       adminSession.scope shouldBe SessionScope(superuser = false, Set("t-acme"))
-      adminSession.createdAt.isBefore(Instant.now().plusSeconds(5)) shouldBe true
+      // Minted now, not carried over from the token's own createdAt: bounded on BOTH sides.
+      adminSession.createdAt.isBefore(before.minusSeconds(1)) shouldBe false
+      adminSession.createdAt.isAfter(Instant.now().plusSeconds(5)) shouldBe false
 
       val userSession = auth.sessionOf(userToken).getOrElse(fail("user PAT did not resolve"))
       userSession.profile.role shouldBe "user"
