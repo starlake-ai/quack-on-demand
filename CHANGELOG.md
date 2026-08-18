@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.6.6
 
+_Released 2026-08-18._
+
+- **BREAKING: an unset or empty `QOD_API_KEY` no longer leaves `/api` open.** Every
+  non-public `/api` call now requires a session, a personal access token, or the static key;
+  a keyless call answers 401 regardless of configuration. Keyless dev scripts must log in via
+  `/api/auth/login` (or set `QOD_API_KEY`). Public endpoints (login, password reset, client
+  config) are unaffected.
 - **MCP server for AI agents.** The manager now serves an MCP (Model Context Protocol)
   endpoint at `POST /mcp` on the REST port (stateless Streamable HTTP, `QOD_MCP_ENABLED`
   default on), so agents like Claude Code can discover schemas, run SQL with full
@@ -20,11 +27,6 @@
   `/mcp`, with exactly its owner's scope (admin PATs manage; `role=user` PATs are
   profile-only). PAT management itself is session-only: a PAT can never mint,
   enumerate, or revoke tokens.
-- **BREAKING: an unset or empty `QOD_API_KEY` no longer leaves `/api` open.** Every
-  non-public `/api` call now requires a session, a personal access token, or the static key;
-  a keyless call answers 401 regardless of configuration. Keyless dev scripts must log in via
-  `/api/auth/login` (or set `QOD_API_KEY`). Public endpoints (login, password reset, client
-  config) are unaffected.
 
 ## 0.6.5
 
