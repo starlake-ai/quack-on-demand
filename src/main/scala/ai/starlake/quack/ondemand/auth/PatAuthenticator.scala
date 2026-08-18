@@ -19,16 +19,14 @@ final case class PatPrincipal(user: RbacUser, patId: String, scope: SessionScope
   * collapse to `None`) but deliberately says nothing about the owning user, so the `enabled` gate
   * lives HERE -- disabling a user must lock their tokens out without revoking them one by one.
   *
-  * Scope, from the owning row plus every other `qodstate_user` row the same identity holds
-  * (`grantsFor`, the lookup `AuthHandlers` feeds `mintSessionFor` for OIDC logins):
-  *   - `superuser` = the owning row is tenant-less, which is how the whole data plane
-  *     (`PostgresAclValidator`, the RLS/CLS rewriters, the handshake pool gate) defines a
-  *     superuser. NOTE the login path additionally requires `role = admin` on that row, so a
-  *     tenant-less NON-admin row -- already an ACL-bypassing superuser on the FlightSQL side --
-  *     resolves to a superuser scope here while being refused `admin_required` at password login.
-  *     That row shape is anomalous (every seeded / imported tenant-less row is an admin); the
-  *     divergence is called out so it is a decision, not an accident.
-  *   - `manageableTenants` = the tenants where this identity carries role `admin`, from the owning
+  * Scope, from the owning row plus any sibling grant `grantsFor` reports:
+  *   - `superuser` = the owning row is tenant-less AND carries role `admin`, the definition
+  *     `AuthHandlers.mintSessionFor` applies at login. A PAT authenticates AS its owning user, so
+  *     it must never outrank that user's own login session: a tenant-less non-admin row is demoted
+  *     to a profile-only principal here exactly as login refuses it `admin_required`. (The data
+  *     plane -- `PostgresAclValidator`, the RLS/CLS rewriters, the handshake pool gate -- keys its
+  *     own bypass off `tenant.isEmpty` alone; that is the FlightSQL side's rule, not this one.)
+  *   - `manageableTenants` = the tenants where this principal carries role `admin`, from the owning
   *     row or any sibling grant.
   *
   * Every entry point resolves from scratch (one store hit each, restamping `last_used_at`); a
@@ -53,7 +51,7 @@ final class PatAuthenticator(
         .flatMap(rec => userById(rec.userId).filter(_.enabled).map(user => (rec.id, user)))
         .map { (patId, user) =>
           val scope = scopeFor(user)
-          PatPrincipal(user, patId, scope, adminOf(user, scope))
+          PatPrincipal(user, patId, scope, adminOf(scope))
         }
 
   /** Authorization envelope for `token`, for the `TenantScopeCheck` gates that only need the scope.
@@ -88,7 +86,14 @@ final class PatAuthenticator(
     val manageable = (UserGrant(user.tenant, user.role) :: grantsFor(user)).collect {
       case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
     }.toSet
-    SessionScope(superuser = user.tenant.isEmpty, manageableTenants = manageable)
+    SessionScope(
+      superuser = user.tenant.isEmpty && user.role.equalsIgnoreCase("admin"),
+      manageableTenants = manageable
+    )
 
-  private def adminOf(user: RbacUser, scope: SessionScope): Boolean =
-    scope.superuser || user.role.equalsIgnoreCase("admin") || scope.manageableTenants.nonEmpty
+  /** `mintSessionFor`'s `isAdminPrincipal`. A separate "own row is admin" disjunct would be dead:
+    * the owning row's grant is folded into `manageableTenants` when it is tenant-scoped, and into
+    * `superuser` when it is not.
+    */
+  private def adminOf(scope: SessionScope): Boolean =
+    scope.superuser || scope.manageableTenants.nonEmpty

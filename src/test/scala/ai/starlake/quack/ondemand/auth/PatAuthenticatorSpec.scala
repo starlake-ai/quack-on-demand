@@ -67,6 +67,20 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       principal.isAdmin shouldBe true
   }
 
+  it should "demote a tenant-less NON-admin row to a profile-only principal" in withFreshDb {
+    (_, users, pats) =>
+      // A PAT authenticates as its owning user, so it may never outrank that user's own login
+      // session: `AuthHandlers.mintSessionFor` refuses this row `admin_required`, and the
+      // tenant-less-but-not-admin shape must not buy a superuser scope here either.
+      val (_, token) = seed(users, pats, None, "ghost", "user")
+      val auth       = authOf(users, pats)
+      val principal  = auth.resolve(token).getOrElse(fail("PAT did not resolve"))
+      principal.scope.superuser shouldBe false
+      principal.scope.manageableTenants shouldBe empty
+      principal.isAdmin shouldBe false
+      auth.sessionOf(token).map(_.profile.role) shouldBe Some("user")
+  }
+
   it should "scope a tenant-admin PAT to the tenants it administers" in withFreshDb {
     (_, users, pats) =>
       val (_, token) = seed(users, pats, Some("t-acme"), "alice", "admin")
