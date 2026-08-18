@@ -59,6 +59,7 @@ import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   LiquibaseRunner,
+  PatStore,
   PostgresControlPlaneStore,
   PostgresDbAdmin,
   UserStore
@@ -252,8 +253,7 @@ object Main extends IOApp with LazyLogging:
 
     // Personal access tokens live next to the user rows they reference (qodstate_pat
     // FKs qodstate_user); its own small Hikari pool, closed in the shutdown hook.
-    val patStore =
-      ai.starlake.quack.ondemand.state.PatStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    val patStore = PatStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
 
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
 
@@ -582,7 +582,9 @@ object Main extends IOApp with LazyLogging:
     val patHandlers = new ai.starlake.quack.ondemand.api.PatHandlers(
       pats = patStore,
       sessions = sessionTokens,
-      userIdOf = (tenant, username) => userStore.userIdOf(tenant, username),
+      // The whole row, not just its id: a disabled owner must be refused at MINT
+      // time too, not only when the resulting token is used.
+      userOf = (tenant, username) => store.findUser(tenant, username),
       audit = auditRecorder
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)

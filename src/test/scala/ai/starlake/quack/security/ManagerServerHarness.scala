@@ -260,11 +260,14 @@ object ManagerServerHarness:
       // unmounted and every pre-existing spec untouched. PatRestSpec passes a store
       // against a fresh test database.
       patStore: Option[ai.starlake.quack.ondemand.state.PatStore] = None,
-      // How the PAT handler resolves the session principal to the owning user-row id.
-      // Unset falls back to the fixture store (the in-memory analogue of Main's
-      // UserStore.userIdOf); PatRestSpec passes a real UserStore on the same database
-      // as `patStore` so the qodstate_pat FK resolves.
-      patUserIdOf: Option[(Option[String], String) => Option[String]] = None
+      // How the PAT handler resolves the session principal to the owning user row
+      // (the whole row: `enabled` decides whether a mint is refused). Unset falls back
+      // to the fixture store, the in-memory analogue of what Main wires; PatRestSpec
+      // passes a lookup against the same database as `patStore` so the qodstate_pat FK
+      // resolves.
+      patUserOf: Option[
+        (Option[String], String) => Option[ai.starlake.quack.ondemand.state.RbacUser]
+      ] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -320,7 +323,7 @@ object ManagerServerHarness:
       new ai.starlake.quack.ondemand.api.PatHandlers(
         pats,
         sessions,
-        patUserIdOf.getOrElse((tenant, username) => store.findUser(tenant, username).map(_.id)),
+        patUserOf.getOrElse((tenant, username) => store.findUser(tenant, username)),
         audit = audit
       )
     }

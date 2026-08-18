@@ -8,6 +8,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.sql.DriverManager
 import scala.util.Try
 
 /** End-to-end contract of the three personal-access-token REST routes
@@ -31,6 +32,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
 
   private val dbName = s"qodpatrest_test_${System.nanoTime()}"
 
+  // Shared across every case in the suite (one database, one Liquibase run): assertions
+  // must therefore filter the listing by the id they just minted and never assert an
+  // absolute token count.
   private var users: UserStore = null
   private var pats: PatStore   = null
 
@@ -75,7 +79,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       fix.store,
       staticApiKey = staticApiKey,
       patStore = Some(pats),
-      patUserIdOf = Some((tenant, username) => users.userIdOf(tenant, username))
+      // Whole row, as Main wires it: `enabled` is part of the handler's decision.
+      patUserOf =
+        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById))
     )
     try body(h)
     finally h.shutdown()
@@ -90,6 +96,28 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
 
   private def entryFlag(entry: io.circe.Json, name: String): Option[Boolean] =
     entry.hcursor.get[Boolean](name).toOption
+
+  /** Flip `qodstate_user.enabled` on the PAT database directly: the login fixture is the in-memory
+    * store, so this is how a session outlives the enablement of the row behind it.
+    */
+  private def setEnabled(tenant: Option[String], username: String, enabled: Boolean): Unit =
+    val c = DriverManager.getConnection(
+      TestPostgres.dbUrl(dbName),
+      TestPostgres.pgUser,
+      TestPostgres.pgPass
+    )
+    try
+      val ps = c.prepareStatement(
+        "UPDATE qodstate_user SET enabled = ? WHERE tenant IS NOT DISTINCT FROM ? AND username = ?"
+      )
+      try
+        ps.setBoolean(1, enabled)
+        ps.setString(2, tenant.orNull)
+        ps.setString(3, username)
+        ps.executeUpdate()
+        ()
+      finally ps.close()
+    finally c.close()
 
   private def rootSession(h: ManagerServerHarness.Harness): String =
     h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
@@ -138,6 +166,28 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       entryFlag(mine.head, "revoked") shouldBe Some(false)
       // The listing is metadata only: the raw secret is unrecoverable after mint.
       listed.body() should not include raw
+
+      // Both request-shape rejections, pinned on the same session.
+      val blankName = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        """{"name":"   "}""",
+        apiKey = Some(session)
+      )
+      withClue(s"blank-name body: ${blankName.body()}") {
+        blankName.statusCode() shouldBe 400
+        errorCode(blankName.body()) should contain("invalid_name")
+      }
+      val pastExpiry = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        s"""{"name":"stale","expiresAt":"${java.time.Instant.now().minusSeconds(60)}"}""",
+        apiKey = Some(session)
+      )
+      withClue(s"past-expiry body: ${pastExpiry.body()}") {
+        pastExpiry.statusCode() shouldBe 400
+        errorCode(pastExpiry.body()) should contain("invalid_expiry")
+      }
     }
 
   // ------------------------------------------------------------------
@@ -364,3 +414,40 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
     // Alice's token is untouched by the attempt.
     pats.verify(aliceRaw).map(_.id) shouldBe Some(aliceId)
   }
+
+  // ------------------------------------------------------------------
+  // 8. a disabled owner cannot mint (use-time is already gated by PatAuthenticator)
+  // ------------------------------------------------------------------
+
+  "a disabled owner" should "be refused 403 account_disabled on a still-live session" in
+    withHarness() { h =>
+      // Session minted while the row was still enabled: the JWT is stateless, so it
+      // outlives the disablement and the refusal has to come from the handler.
+      val session = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
+      setEnabled(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername, false)
+      try
+        val denied = post(
+          h.httpClient,
+          s"${h.baseUrl}/api/auth/pat/create",
+          """{"name":"after-disable"}""",
+          apiKey = Some(session)
+        )
+        withClue(s"create-while-disabled body: ${denied.body()}") {
+          denied.statusCode() shouldBe 403
+          errorCode(denied.body()) should contain("account_disabled")
+        }
+        // Same identity gate gates the read and the revoke.
+        val deniedList = post(
+          h.httpClient,
+          s"${h.baseUrl}/api/auth/pat/list",
+          "",
+          apiKey = Some(session)
+        )
+        withClue(s"list-while-disabled body: ${deniedList.body()}") {
+          deniedList.statusCode() shouldBe 403
+          errorCode(deniedList.body()) should contain("account_disabled")
+        }
+      finally
+        // The fixture rows are shared by the whole suite; leave bob usable.
+        setEnabled(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername, true)
+    }

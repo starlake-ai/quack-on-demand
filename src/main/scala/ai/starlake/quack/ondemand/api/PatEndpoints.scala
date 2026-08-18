@@ -35,7 +35,13 @@ object PatEndpoints:
       .in(jsonBody[PatCreateRequest])
       .out(jsonBody[PatCreateResponse])
 
-  /** The caller's own tokens, live and retired, metadata only. */
+  /** The caller's own tokens, live and retired, metadata only.
+    *
+    * CLIENT CONTRACT: this route declares NO body input, so callers MUST post an empty body. A JSON
+    * body sent here is never drained by the server, which desynchronizes the HTTP/1.1 connection --
+    * the NEXT request on that same (pooled, keep-alive) connection then fails with an EOF while
+    * reading the response. The same applies to any request the api-key guard rejects before decode.
+    */
   val list: PublicEndpoint[
     Option[String],
     (sttp.model.StatusCode, ErrorResponse),
