@@ -29,9 +29,13 @@ import java.time.temporal.ChronoUnit
   *
   * `tenantById` is a lookup seam (`PoolSupervisor.getTenantById` in production) and `now` is
   * injectable, so the whole contract is testable without Postgres.
+  *
+  * `sessionOf` is the composed bearer lookup (session JWT first, then PAT), not the raw
+  * `SessionTokenStore`: a personal access token authenticates AS its owning user and must see the
+  * same self-scoped profile a login session would.
   */
 final class ProfileHandlers(
-    tokens: SessionTokenStore,
+    sessionOf: String => Option[SessionTokenStore.Session],
     telemetry: TelemetryStore,
     stmtHistory: StatementHistoryStore,
     tenantById: String => Option[Tenant],
@@ -45,7 +49,7 @@ final class ProfileHandlers(
   private val DefaultLimit  = 50
 
   def usage(days: Option[Int], token: Option[String]): Out[UsageResponse] = IO.blocking {
-    sessionOf(token).map { s =>
+    requireSession(token).map { s =>
       val d       = clamp(days, DefaultDays, MaxDays)
       val toTs    = now()
       val fromTs  = toTs.minus(d.toLong, ChronoUnit.DAYS)
@@ -88,7 +92,7 @@ final class ProfileHandlers(
 
   def statements(limit: Option[Int], token: Option[String]): Out[StatementHistoryResponse] =
     IO.delay {
-      sessionOf(token).map { s =>
+      requireSession(token).map { s =>
         val n       = clamp(limit, DefaultLimit, MaxStatements)
         val aliases = visibleTenantAliases(s)
         // Snapshot the FULL window and filter before capping, so a noisier
@@ -107,15 +111,15 @@ final class ProfileHandlers(
     math.max(1, math.min(max, requested.getOrElse(default)))
 
   /** Resolve the caller's session, or the single error every profile route answers with. Every
-    * non-Ok lookup arm collapses to the same code on purpose: the client's remedy is identical (log
-    * in, then retry), and a caller presenting the static key has no identity at all.
+    * failed lookup collapses to the same code on purpose: the client's remedy is identical (log in,
+    * then retry), and a caller presenting the static key has no identity at all.
     */
-  private def sessionOf(
+  private def requireSession(
       token: Option[String]
   ): Either[(StatusCode, ErrorResponse), SessionTokenStore.Session] =
-    tokens.lookupResult(token.getOrElse("")) match
-      case SessionTokenStore.LookupResult.Ok(s) => Right(s)
-      case _                                    =>
+    token.flatMap(sessionOf) match
+      case Some(s) => Right(s)
+      case None    =>
         Left(
           (
             StatusCode.BadRequest,

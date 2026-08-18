@@ -267,7 +267,10 @@ object ManagerServerHarness:
       // resolves.
       patUserOf: Option[
         (Option[String], String) => Option[ai.starlake.quack.ondemand.state.RbacUser]
-      ] = None
+      ] = None,
+      // PAT admission on /api (guard + profile handlers). None keeps the guard
+      // session-and-static-key only, exactly like a Main boot without Postgres.
+      patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -334,7 +337,8 @@ object ManagerServerHarness:
     val historyApiHandlers = new HistoryHandlers(telemetryStore)
     val usageHandlers      = new UsageHandlers(telemetryStore)
     val profileHandlers    = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      sessions,
+      // Mirror Main: session JWT first, then PAT.
+      t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t))),
       telemetryStore,
       statementStore,
       id => sup.getTenantById(id)
@@ -509,7 +513,8 @@ object ManagerServerHarness:
       modulePublicPrefixes = modulePublicPrefixes,
       moduleStaticMounts = moduleStaticMounts,
       passwordReset = Some(passwordResetHandlers),
-      pat = patHandlers
+      pat = patHandlers,
+      patAuth = patAuth
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

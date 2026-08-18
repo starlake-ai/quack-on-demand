@@ -18,7 +18,7 @@ import java.time.Instant
   *   - superuser sees all
   *   - tenant-A admin sees only A's rows
   *   - static-key bypass sees all
-  *   - open mode sees all
+  *   - a keyless call with no static key configured is 401 (the former open mode is gone)
   *   - records carrying either the id or the display-name form pass the filter (mirrors the
   *     FlightSQL handshake convention; the router records the display name today but future changes
   *     might switch)
@@ -139,13 +139,12 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityH
     finally h.shutdown()
   }
 
-  it should "return all rows in open mode (no api key configured)" in {
+  it should "refuse a keyless call even with no api key configured (open mode is gone)" in {
     val (h, _) = bootTwoTenants(staticApiKey = None)
     try
       val resp = get(h.httpClient, s"${h.baseUrl}/api/node/statements")
-      withClue(s"open-mode body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        tenantsOf(resp.body()).size shouldBe 4
+      withClue(s"keyless body: ${resp.body()}") {
+        resp.statusCode() shouldBe 401
       }
     finally h.shutdown()
   }

@@ -254,6 +254,15 @@ object Main extends IOApp with LazyLogging:
     // Personal access tokens live next to the user rows they reference (qodstate_pat
     // FKs qodstate_user); its own small Hikari pool, closed in the shutdown hook.
     val patStore = PatStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // Resolves a PAT bearer to its owner's principal for /api admission. Grants are
+    // row-only BY CONTRACT (PatAuthenticator's scaladoc): a PAT is bound to one
+    // qodstate_user row, and an identity-keyed lookup would fold in the grants of a
+    // same-named user in another tenant.
+    val patAuthenticator = new ai.starlake.quack.ondemand.auth.PatAuthenticator(
+      patStore,
+      userById = userStore.userById,
+      grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.role))
+    )
 
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
 
@@ -594,7 +603,9 @@ object Main extends IOApp with LazyLogging:
     // Self-service surface for non-admin sessions; scopes strictly to the
     // session's own (tenant, username), so it takes no tenant/user input.
     val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      sessionTokens,
+      // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
+      // same self-scoped profile a login session would.
+      t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t)),
       telemetryStore,
       stmtHistory,
       id => sup.getTenantById(id)
@@ -999,7 +1010,8 @@ object Main extends IOApp with LazyLogging:
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         passwordReset = Some(passwordResetHandlers),
-        pat = Some(patHandlers)
+        pat = Some(patHandlers),
+        patAuth = Some(patAuthenticator)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

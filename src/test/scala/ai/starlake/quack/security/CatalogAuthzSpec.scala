@@ -16,7 +16,8 @@ import java.net.http.HttpResponse
   * [[ai.starlake.quack.ondemand.api.TagEndpoints]]: `apiKeyGuard` at the perimeter plus the
   * handler-level TenantScopeCheck gate. This spec pins: credential-less 401 (static key set),
   * cross-tenant 403 tenant_forbidden, superuser pass-through, 404 on an unknown tenant (no
-  * existence leak), listTenantDbs scope gating, and the open-mode dev path staying zero-config.
+  * existence leak), listTenantDbs scope gating, and the keyless 401 with no static key configured
+  * (the former open mode is gone).
   */
 class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
@@ -142,18 +143,17 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     finally h.shutdown()
   }
 
-  it should "keep the zero-config dev path: open mode (no static key) admits a same-tenant read" in {
-    // UI path regression: no static key, no cookie, no token. apiKeyGuard is
-    // open and TenantScopeCheck admits key-less callers, so the catalog
-    // browser keeps working on a dev laptop without any configuration.
+  it should "refuse a credential-less read even with no static key configured (open mode is gone)" in {
+    // The former zero-config open mode admitted this keyless read; the strict
+    // posture answers 401 and the dev path is a login (or QOD_API_KEY).
     val (h, _) = bootWithTwoTenants()
     try
       val resp = get(
         h.httpClient,
         schemasUrl(h, SecurityFixtures.TenantId, SecurityFixtures.TenantDbName)
       )
-      withClue(s"open-mode credential-less GET schemas body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
+      withClue(s"credential-less GET schemas body: ${resp.body()}") {
+        resp.statusCode() shouldBe 401
       }
     finally h.shutdown()
   }
@@ -162,7 +162,7 @@ class CatalogAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     val (h, _) = bootWithTwoTenants()
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
-      val resp = get(
+      val resp  = get(
         h.httpClient,
         s"${h.baseUrl}/api/catalog/tenant/${SecurityFixtures.TenantId}/database/${SecurityFixtures.TenantDbName}/snapshots?table=tpch1.region",
         apiKey = Some(token)

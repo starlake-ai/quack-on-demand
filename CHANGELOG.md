@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **BREAKING: an unset or empty `QOD_API_KEY` no longer leaves `/api` open.** Every
+  non-public `/api` call now requires a session, a personal access token, or the static key;
+  a keyless call answers 401 regardless of configuration. Keyless dev scripts must log in via
+  `/api/auth/login` (or set `QOD_API_KEY`). Public endpoints (login, password reset, client
+  config) are unaffected.
+
 ## 0.6.5
 
 _Released 2026-08-17._

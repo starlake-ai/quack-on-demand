@@ -1,8 +1,9 @@
 // src/test/scala/ai/starlake/quack/security/PatRestSpec.scala
 package ai.starlake.quack.security
 
+import ai.starlake.quack.ondemand.auth.PatAuthenticator
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
-import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserStore}
+import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import io.circe.parser.parse
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
@@ -68,7 +69,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
     ()
 
   /** Boot a harness wired to the shared PAT store, with `userIdOf` resolved through the real
-    * [[UserStore]] exactly as `Main` does.
+    * [[UserStore]] and `patAuth` composed into the guard exactly as `Main` does -- without it a PAT
+    * presented as the credential would die at the guard's 401 instead of reaching the handler's
+    * session-only gate that case 4 pins.
     */
   private def withHarness(
       staticApiKey: Option[String] = None
@@ -81,7 +84,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       patStore = Some(pats),
       // Whole row, as Main wires it: `enabled` is part of the handler's decision.
       patUserOf =
-        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById))
+        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
+      patAuth =
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.role))))
     )
     try body(h)
     finally h.shutdown()
@@ -260,9 +265,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       created.statusCode() shouldBe 200
       val raw = field(created.body(), "token").getOrElse(fail("no token in create response"))
 
-      // Open-mode harness on purpose: the api-key guard is out of the way, so what
-      // answers here is the handler's own session-only gate (which is what must hold
-      // once the guard learns to admit PATs as a bearer credential).
+      // The guard admits the PAT (patAuth is wired), so what answers here is the
+      // handler's own session-only gate: even a fully-admitted PAT cannot manage
+      // PATs.
       val denied = post(
         h.httpClient,
         s"${h.baseUrl}/api/auth/pat/create",

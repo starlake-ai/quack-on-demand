@@ -56,54 +56,65 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
     fix.store.createSnapshotTag(
       SnapshotTag("stag-dead", Tenant, TenantDb, "dead", VacuumedSnapshot)
     )
-    val h = ManagerServerHarness.boot(fix.store, catalogReader = Some((_, _) => stub.reader))
+    val h = ManagerServerHarness.boot(
+      fix.store,
+      staticApiKey = Some(Key),
+      catalogReader = Some((_, _) => stub.reader)
+    )
     try test(h, stub)
     finally h.shutdown()
+
+  // This spec pins selector RESOLUTION, not authz, so every call rides the
+  // static key; the guard itself is pinned by CatalogAuthzSpec.
+  private val Key = "catalog-asoftag-key"
 
   private def tableUrl(h: ManagerServerHarness.Harness, params: String): String =
     s"${h.baseUrl}/api/catalog/tenant/$Tenant/database/$TenantDb/schemas/tpch1/tables/region$params"
 
+  private def fetch(h: ManagerServerHarness.Harness, params: String) =
+    get(h.httpClient, tableUrl(h, params), apiKey = Some(Key))
+
   "the catalog table endpoint" should "resolve asOfTag to the tag's snapshot id" in withHarness {
     (h, stub) =>
-      val resp = get(h.httpClient, tableUrl(h, "?asOfTag=v1"))
+      val resp = fetch(h, "?asOfTag=v1")
       withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 200)
       stub.seenAsOf shouldBe Some(Some(LiveSnapshot))
   }
 
   it should "404 an unknown tag without touching the reader" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, "?asOfTag=nope"))
+    val resp = fetch(h, "?asOfTag=nope")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 404)
     resp.body() should include("tag 'nope' not found")
     stub.seenAsOf shouldBe None
   }
 
   it should "400 when both asOf and asOfTag are supplied" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, s"?asOf=$LiveSnapshot&asOfTag=v1"))
+    val resp = fetch(h, s"?asOf=$LiveSnapshot&asOfTag=v1")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 400)
     stub.seenAsOf shouldBe None
   }
 
   it should "return 410 a dangling tag (vacuumed snapshot)" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, "?asOfTag=dead"))
+    val resp = fetch(h, "?asOfTag=dead")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 410)
     resp.body() should include("snapshot_expired")
   }
 
   it should "still read latest when neither param is supplied" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, ""))
+    val resp = fetch(h, "")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 200)
     stub.seenAsOf shouldBe Some(None)
   }
 
   it should "keep the numeric asOf path intact" in withHarness { (h, stub) =>
-    val resp = get(h.httpClient, tableUrl(h, s"?asOf=$LiveSnapshot"))
+    val resp = fetch(h, s"?asOf=$LiveSnapshot")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 200)
     stub.seenAsOf shouldBe Some(Some(LiveSnapshot))
   }
 
   it should "400 invalid_selector on a malformed asOfTs without touching the reader" in withHarness {
     (h, stub) =>
-      val resp = get(h.httpClient, tableUrl(h, "?asOfTs=not-a-timestamp"))
+      val resp = fetch(h, "?asOfTs=not-a-timestamp")
       withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 400)
       resp.body() should include("invalid_selector")
       resp.body() should include("asOfTs must be ISO-8601")
@@ -112,7 +123,7 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
 
   it should "resolve asOfTs and return resolvedSnapshot in response" in withHarness { (h, stub) =>
     val ts   = "2026-01-01T00:00:00Z"
-    val resp = get(h.httpClient, tableUrl(h, s"?asOfTs=$ts"))
+    val resp = fetch(h, s"?asOfTs=$ts")
     withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 200)
     resp.body() should include("\"resolvedSnapshot\"")
     stub.seenAsOf shouldBe Some(Some(LiveSnapshot))
@@ -120,7 +131,7 @@ class CatalogAsOfTagSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
 
   it should "return 410 snapshot_expired when asOf points to a vacuumed snapshot" in withHarness {
     (h, stub) =>
-      val resp = get(h.httpClient, tableUrl(h, s"?asOf=$VacuumedSnapshot"))
+      val resp = fetch(h, s"?asOf=$VacuumedSnapshot")
       withClue(s"body: ${resp.body()}")(resp.statusCode() shouldBe 410)
       resp.body() should include("snapshot_expired")
   }
