@@ -76,7 +76,12 @@ final class ManagerServer(
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /
     // callers without Postgres) keeps the guard session-and-static-key only.
-    patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None
+    patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
+    // The MCP endpoint (POST /mcp), pre-built by Main when quack-on-demand.mcp.enabled.
+    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
+    // static key, never sessions), and the guard's path filter ignores non-/api paths
+    // anyway -- mounting it here keeps that invariant explicit.
+    mcpRoutes: Option[HttpRoutes[IO]] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -900,6 +905,8 @@ final class ManagerServer(
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withHttpApp(
-        (apiKeyGuard(apiRoutes) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
+        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(
+          HttpRoutes.empty[IO]
+        ) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
       )
       .build

@@ -270,7 +270,10 @@ object ManagerServerHarness:
       ] = None,
       // PAT admission on /api (guard + profile handlers). None keeps the guard
       // session-and-static-key only, exactly like a Main boot without Postgres.
-      patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None
+      patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
+      // Mount POST /mcp wired over the harness handlers, mirroring Main's
+      // mcp.enabled gate. Off by default so pre-existing specs see no new route.
+      mcpEnabled: Boolean = false
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -472,6 +475,52 @@ object ManagerServerHarness:
 
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
 
+    // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
+    // Main's wiring (composed scopeOf; PAT resolution via patAuth; static key shared
+    // with the api-key guard).
+    val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
+      if !mcpEnabled then None
+      else
+        val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
+          t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+        val mcpCatalog = catalogHandlers.getOrElse(
+          new CatalogHandlers((_, _) => noSnapshotReader, sup, store)
+        )
+        val mcpHistory = catalogHistoryHandlers.getOrElse(
+          new CatalogHistoryHandlers((_, _) => noSnapshotReader, sup)
+        )
+        val dataTools = new ai.starlake.quack.mcp.McpDataTools(
+          ai.starlake.quack.McpConfig(),
+          previewExecutor,
+          sup,
+          mcpCatalog,
+          mcpHistory,
+          tagHandlers,
+          tenantDbs,
+          profileHandlers,
+          mcpScopeOf
+        )
+        val adminTools = new ai.starlake.quack.mcp.McpAdminTools(
+          pools,
+          nodes,
+          activeStmtHandlers,
+          maintenanceHandlers,
+          tagHandlers,
+          auditHandlers,
+          mcpScopeOf
+        )
+        Some(
+          new ai.starlake.quack.mcp.McpRoutes(
+            ai.starlake.quack.McpConfig(),
+            staticApiKey.filter(_.nonEmpty),
+            patAuth.fold[String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal]](_ => None)(
+              pa => pa.resolve
+            ),
+            dataTools.tools ++ adminTools.tools,
+            serverVersion = "test-harness"
+          ).routes
+        )
+
     val mgr = new ManagerServer(
       mgrCfg,
       edgeCfg,
@@ -514,7 +563,8 @@ object ManagerServerHarness:
       moduleStaticMounts = moduleStaticMounts,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
-      patAuth = patAuth
+      patAuth = patAuth,
+      mcpRoutes = mcpRoutes
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

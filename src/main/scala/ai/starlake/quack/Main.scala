@@ -94,6 +94,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
+  given ProductHint[McpConfig]                 = ProductHint[McpConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -120,6 +121,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
   given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]
+  given ConfigReader[McpConfig]                = deriveReader[McpConfig]
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
@@ -967,6 +969,54 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
+      // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
+      // instances REST uses. Auth is PAT or the static key only; the run_sql path goes
+      // through routedExecutor(recordExecution = true) so DuckLake snapshots carry the
+      // acting user's author stamp exactly like FlightSQL writes.
+      val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
+        if !mgrCfg.mcp.enabled then None
+        else
+          val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
+            t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+          for
+            cat   <- catalogHandlers
+            hist  <- catalogHistoryHandlers
+            tagH  <- tagHandlers
+            maint <- maintenanceHandlers
+          yield
+            val dataTools = new ai.starlake.quack.mcp.McpDataTools(
+              mgrCfg.mcp,
+              routedExecutor(recordExecution = true),
+              sup,
+              cat,
+              hist,
+              tagH,
+              tenantDbs,
+              profileHandlers,
+              mcpScopeOf
+            )
+            val adminTools = new ai.starlake.quack.mcp.McpAdminTools(
+              pools,
+              nodes,
+              activeStmtHandlers,
+              maint,
+              tagH,
+              auditHandlers,
+              mcpScopeOf
+            )
+            new ai.starlake.quack.mcp.McpRoutes(
+              mgrCfg.mcp,
+              mgrCfg.apiKey.filter(_.nonEmpty),
+              patAuthenticator.resolve,
+              dataTools.tools ++ adminTools.tools,
+              serverVersion = "dev"
+            ).routes
+      if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
+        logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")
+      else if mgrCfg.mcp.enabled then
+        logger.info("mcp: serving POST /mcp (bearer auth: PAT or static API key)")
+      else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
+
       // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
       // so it MUST run after moduleStart; called from the IO chain below.
       def buildManagerServer(): ManagerServer = new ManagerServer(
@@ -1011,7 +1061,8 @@ object Main extends IOApp with LazyLogging:
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
-        patAuth = Some(patAuthenticator)
+        patAuth = Some(patAuthenticator),
+        mcpRoutes = mcpRoutes
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

@@ -78,7 +78,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | --- | --- | --- | --- | --- |
 | `quack-on-demand.host` | `QOD_ON_DEMAND_HOST` | `0.0.0.0` |  | Manager REST bind address (0.0.0.0 to listen on all interfaces). |
 | `quack-on-demand.port` | `QOD_ON_DEMAND_PORT` | `20900` |  | Manager REST + admin UI port. |
-| `quack-on-demand.apiKey` | `QOD_API_KEY` | `***` | yes | Static admin API key sent as X-API-Key. Unset = REST namespace is open. |
+| `quack-on-demand.apiKey` | `QOD_API_KEY` | `***` | yes | Static admin API key sent as X-API-Key. Unset or empty disables the static-key arm; /api then accepts only session and PAT credentials (never open). |
 | `quack-on-demand.runtimeType` | `QOD_RUNTIME_TYPE` | `local` |  | Quack node runtime backend: 'local' (child processes) or 'kubernetes'. |
 | `quack-on-demand.minPort` | `QOD_MIN_PORT` | `21900` |  | Lower bound of the port range LocalQuackBackend allocates child nodes from. |
 | `quack-on-demand.maxPort` | `QOD_MAX_PORT` | `22500` |  | Upper bound of the port range LocalQuackBackend allocates child nodes from. |
@@ -91,6 +91,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.drainTimeoutSec` | `QOD_DRAIN_TIMEOUT_SEC` | `60` |  | Seconds to wait for in-flight statements during graceful pool shutdown. |
 | `quack-on-demand.healthCheckIntervalSec` | `QOD_HEALTH_CHECK_INTERVAL_SEC` | `5` |  | Seconds between supervisor health checks against child nodes. |
 | `quack-on-demand.reconcileIntervalSec` | `QOD_RECONCILE_INTERVAL_SEC` | `30` |  | Seconds between supervisor reconcile passes that respawn dead nodes. 0 disables the periodic loop (reconcile still runs once at boot). |
+| `quack-on-demand.publicBaseUrl` | `QOD_PUBLIC_BASE_URL` | _(unset)_ |  | Externally visible base URL (e.g. https://qod.example.com) used to build password-reset links mailed to users. When empty the link is host-relative (/ui/reset-password?...) and Main logs a boot warning. |
 | `quack-on-demand.sessionIdleTtlSec` | `QOD_SESSION_IDLE_TTL_SEC` | `28800` |  | UI session idle TTL in seconds. A session unused for this long is dropped on the next access; each successful access slides the window. Manager restart still invalidates everything (sessions are heap-only). |
 
 ## `quack-on-demand.admin`
@@ -114,6 +115,8 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.auth.management.oidc.clientId` | `QOD_MGMT_OIDC_CLIENT_ID` | _(unset)_ |  | OIDC client id for admin-UI SSO (system scope). |
 | `quack-on-demand.auth.management.oidc.clientSecret` | `QOD_MGMT_OIDC_CLIENT_SECRET` | `***` | yes | OIDC client secret for admin-UI SSO (system scope). |
 | `quack-on-demand.auth.management.oidc.scopes` | `QOD_MGMT_OIDC_SCOPES` | `openid email profile` |  | OIDC scopes requested for admin-UI SSO. Default 'openid email profile'. |
+| `quack-on-demand.auth.lockout.enabled` | `QOD_AUTH_LOCKOUT_ENABLED` | `false` |  | Lock a database-backed user out after maxFailures consecutive bad passwords. Requires SMTP to be configured (quack-on-demand.smtp.host) so a locked-out user has a self-service reset path; Main refuses to boot otherwise. |
+| `quack-on-demand.auth.lockout.maxFailures` | `QOD_AUTH_LOCKOUT_MAX_FAILURES` | `10` |  | Consecutive failed logins before a database-backed user is locked out. |
 
 ## `quack-on-demand.autoscale`
 
@@ -208,6 +211,13 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.managedObjectStore.retainDays` | `QOD_MANAGED_STORE_RETAIN_DAYS` | `7` |  | Days a deleted tenant-db prefix is retained before the purge worker removes it. |
 | `quack-on-demand.managedObjectStore.purgeSweepSec` | `QOD_MANAGED_STORE_PURGE_SWEEP_SEC` | `300` |  | Purge worker sweep interval in seconds; clamped to a 60s floor. |
 
+## `quack-on-demand.mcp`
+
+| Key | Env var | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- |
+| `quack-on-demand.mcp.enabled` | `QOD_MCP_ENABLED` | `true` |  | Serve the MCP endpoint at POST /mcp. |
+| `quack-on-demand.mcp.maxRows` | `QOD_MCP_MAX_ROWS` | `500` |  | Hard cap on rows returned by the run_sql MCP tool. |
+
 ## `quack-on-demand.metrics`
 
 | Key | Env var | Default | Sensitive | Description |
@@ -227,6 +237,17 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.routing.cacheAware` | `QOD_ROUTING_CACHE_AWARE` | `true` |  | Cache-aware placement on object-store pools. false instantly reverts routing decisions to pure least-loaded; locality metrics and their memoized statement parse keep running. |
 | `quack-on-demand.routing.loadCapFactor` | `QOD_ROUTING_LOAD_CAP_FACTOR` | `2.0` |  | Load cap c: a table's home node is bypassed when its inFlight exceeds c x pool average. |
 | `quack-on-demand.routing.directoryMaxTables` | `QOD_ROUTING_DIRECTORY_MAX_TABLES` | `4096` |  | Per-pool bound on placement-directory entries (LRU-evicted). Safety bound. |
+
+## `quack-on-demand.smtp`
+
+| Key | Env var | Default | Sensitive | Description |
+| --- | --- | --- | --- | --- |
+| `quack-on-demand.smtp.host` | `QOD_SMTP_HOST` | _(unset)_ |  | SMTP relay host. Unset keeps the manager on the log-only mail sender. |
+| `quack-on-demand.smtp.port` | `QOD_SMTP_PORT` | `587` |  | SMTP relay port. |
+| `quack-on-demand.smtp.user` | `QOD_SMTP_USER` | _(unset)_ |  | SMTP auth username. Unset disables SMTP auth. |
+| `quack-on-demand.smtp.password` | `QOD_SMTP_PASSWORD` | `***` | yes | SMTP auth password. |
+| `quack-on-demand.smtp.from` | `QOD_SMTP_FROM` | `no-reply@quack-on-demand.local` |  | From address stamped on outgoing mail. |
+| `quack-on-demand.smtp.starttls` | `QOD_SMTP_STARTTLS` | `true` |  | Use STARTTLS when connecting to the SMTP relay. |
 
 ## `quack-on-demand.telemetry`
 
