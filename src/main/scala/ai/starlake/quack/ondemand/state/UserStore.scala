@@ -92,6 +92,12 @@ final class UserStore(
     try f(c)
     finally c.close()
 
+  /** The database name this store is connected to, parsed from the JDBC URL's final path segment
+    * (e.g. `jdbc:postgresql://host:5432/mydb` -> `mydb`). Lets a caller (tests, PAT wiring) open a
+    * second connection to the same database without re-deriving the URL.
+    */
+  val dbName: String = jdbcUrl.substring(jdbcUrl.lastIndexOf('/') + 1)
+
   /** Release the pool's idle connections. Idempotent. Called from Main's shutdown hook. */
   def close(): Unit = if !dataSource.isClosed then dataSource.close()
 
@@ -259,6 +265,54 @@ final class UserStore(
         ps.setString(1, id)
         val rs = ps.executeQuery()
         try if rs.next() then Some(rs.getString(1)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** The surrogate id of the `(tenant, username)` row, or `None` if no such row exists. `tenant =
+    * None` looks up the superuser row (`tenant IS NULL`). Used by callers (PAT minting, tests) that
+    * need to resolve a login identity to the FK value stored on other tables.
+    */
+  def userIdOf(tenant: Option[String], username: String): Option[String] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        "SELECT id FROM qodstate_user WHERE tenant IS NOT DISTINCT FROM ? AND username = ?"
+      )
+      try
+        ps.setString(1, tenant.orNull)
+        ps.setString(2, username)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(rs.getString(1)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** The row with this surrogate id, or `None` if it no longer exists. */
+  def userById(id: String): Option[RbacUser] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at " +
+          "FROM qodstate_user WHERE id = ?"
+      )
+      try
+        ps.setString(1, id)
+        val rs = ps.executeQuery()
+        try
+          if rs.next() then
+            Some(
+              RbacUser(
+                id = rs.getString("id"),
+                tenant = Option(rs.getString("tenant")),
+                username = rs.getString("username"),
+                role = rs.getString("role"),
+                enabled = rs.getBoolean("enabled"),
+                mustChangePassword = rs.getBoolean("must_change_password"),
+                email = Option(rs.getString("email")),
+                createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
+                updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
+              )
+            )
+          else None
         finally rs.close()
       finally ps.close()
     }
