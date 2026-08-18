@@ -83,7 +83,7 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
       telemetry: TelemetryStore = new StubTelemetry(Nil),
       history: StatementHistoryStore = new StatementHistoryStore()
   ): ProfileHandlers =
-    new ProfileHandlers(tokens, telemetry, history, tenantById, () => Now)
+    new ProfileHandlers(tokens.get, telemetry, history, tenantById, () => Now)
 
   private def sessionFor(
       tokens: SessionTokenStore,

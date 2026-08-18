@@ -341,6 +341,22 @@ final case class CatalogConfig(
     restoreTimeoutSec: Int = 300
 )
 
+/** MCP server for AI agents at POST /mcp. Auth: PAT or the static API key; session JWTs and
+  * passwords are never accepted there.
+  */
+final case class McpConfig(
+    @field @ConfigField(
+      envVar = "QOD_MCP_ENABLED",
+      description = "Serve the MCP endpoint at POST /mcp."
+    )
+    enabled: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_MCP_MAX_ROWS",
+      description = "Hard cap on rows returned by the run_sql MCP tool."
+    )
+    maxRows: Int = 500
+)
+
 final case class TelemetryConfig(
     @field
     @ConfigField(
@@ -415,7 +431,9 @@ final case class ManagerConfig(
     port: Int,
     @field @ConfigField(
       envVar = "QOD_API_KEY",
-      description = "Static admin API key sent as X-API-Key. Unset = REST namespace is open.",
+      description =
+        "Static admin API key sent as X-API-Key. Unset or empty disables the static-key arm; " +
+          "/api then accepts only session and PAT credentials (never open).",
       sensitive = true
     )
     apiKey: Option[String],
@@ -495,6 +513,7 @@ final case class ManagerConfig(
     autoscale: AutoscaleConfig = AutoscaleConfig(),
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
+    mcp: McpConfig = McpConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =

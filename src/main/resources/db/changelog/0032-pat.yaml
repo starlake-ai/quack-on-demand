@@ -1,0 +1,32 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0032-pat
+      author: qod
+      changes:
+        # Personal access tokens: long-lived bearer credentials for agents (MCP)
+        # and scripts. Only the SHA-256 hash of the token is stored; the raw
+        # value is shown once at mint time. Revocation and expiry are checked
+        # on every use via the unique token_hash index.
+        - createTable:
+            tableName: qodstate_pat
+            columns:
+              - column: { name: id,           type: TEXT, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: user_id,      type: TEXT, constraints: { nullable: false } }
+              - column: { name: name,         type: TEXT, constraints: { nullable: false } }
+              - column: { name: token_hash,   type: TEXT, constraints: { nullable: false, unique: true } }
+              - column: { name: created_at,   type: TIMESTAMP WITH TIME ZONE, constraints: { nullable: false } }
+              - column: { name: expires_at,   type: TIMESTAMP WITH TIME ZONE }
+              - column: { name: last_used_at, type: TIMESTAMP WITH TIME ZONE }
+              - column: { name: revoked_at,   type: TIMESTAMP WITH TIME ZONE }
+        - addForeignKeyConstraint:
+            constraintName: fk_qodstate_pat_user
+            baseTableName: qodstate_pat
+            baseColumnNames: user_id
+            referencedTableName: qodstate_user
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: idx_qodstate_pat_user
+            tableName: qodstate_pat
+            columns:
+              - column: { name: user_id }

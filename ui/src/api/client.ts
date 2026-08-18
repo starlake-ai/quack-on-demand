@@ -33,6 +33,9 @@ import type {
   WhoamiResponse,
   ForgotPasswordRequest,
   ResetPasswordRequest,
+  PatCreateRequest,
+  PatCreateResponse,
+  PatListResponse,
   StatementHistoryResponse,
   CatalogSchemaEntry,
   CatalogTableEntry,
@@ -185,6 +188,13 @@ export const api = {
   // tenant_forbidden) before the handler even runs.
   profileUsage:      (days?: number)  => get<UsageResponse>('/profile/usage' + (days ? `?days=${days}` : '')),
   profileStatements: (limit?: number) => get<StatementHistoryResponse>('/profile/statements' + (limit ? `?limit=${limit}` : '')),
+  // ----- pats -----
+  // Self-scoped like the profile routes above: identity comes from the session
+  // cookie, so there is NO tenant param anywhere (a stray one would trip the
+  // perimeter guard). Management is session-only; a PAT credential is refused.
+  createPat: (req: PatCreateRequest) => post<PatCreateResponse>('/auth/pat/create', req),
+  listPats:  () => post<PatListResponse>('/auth/pat/list'),
+  revokePat: (id: string) => post<void>('/auth/pat/revoke', { id }),
   // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
   authMode: (tenant?: string) =>
     get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),

@@ -113,6 +113,35 @@ def reset_password(ctx: typer.Context):
     call(ctx, "POST", "/api/auth/reset-password", body={"token": token, "newPassword": new})
 
 
+pat_app = typer.Typer(help="Personal access tokens for agents and scripts (MCP auth).")
+app.add_typer(pat_app, name="pat")
+
+
+@pat_app.command()
+@covers("POST", "/api/auth/pat/create", {"name": "--name", "expiresAt": "--expires-at"})
+def create(
+    ctx: typer.Context,
+    name: str = typer.Option(..., "--name", help="Label shown in listings."),
+    expires_at: str = typer.Option(None, "--expires-at", help="Optional ISO-8601 expiry."),
+):
+    """Create a PAT. The token is printed ONCE; store it now."""
+    call(ctx, "POST", "/api/auth/pat/create", body={"name": name, "expiresAt": expires_at})
+
+
+@pat_app.command("list")
+@covers("POST", "/api/auth/pat/list")
+def list_(ctx: typer.Context):
+    """List your PATs (never shows token values)."""
+    call(ctx, "POST", "/api/auth/pat/list")
+
+
+@pat_app.command()
+@covers("POST", "/api/auth/pat/revoke", {"id": "--id"})
+def revoke(ctx: typer.Context, id: str = typer.Option(..., "--id")):
+    """Revoke a PAT immediately."""
+    call(ctx, "POST", "/api/auth/pat/revoke", body={"id": id})
+
+
 @covers("POST", "/api/auth/logout")
 def logout(ctx: typer.Context):
     """Revoke the current session token."""

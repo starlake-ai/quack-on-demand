@@ -68,8 +68,32 @@ final class ManagerServer(
     // Public pre-session password recovery. None (tests / callers that don't wire
     // Postgres) leaves both routes unmounted; the paths still bypass the api-key
     // guard so a wired handler is reachable without a session.
-    passwordReset: Option[PasswordResetHandlers] = None
+    passwordReset: Option[PasswordResetHandlers] = None,
+    // Self-service personal access tokens. None (tests / callers that don't wire
+    // Postgres) leaves the three /api/auth/pat routes unmounted; Main always wires
+    // it since the store lives in the same control-plane database.
+    pat: Option[PatHandlers] = None,
+    // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
+    // header) is accepted wherever its owner's session JWT would be. None (tests /
+    // callers without Postgres) keeps the guard session-and-static-key only.
+    patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
+    // The MCP endpoint (POST /mcp), pre-built by Main when quack-on-demand.mcp.enabled.
+    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
+    // static key, never sessions), and the guard's path filter ignores non-/api paths
+    // anyway -- mounting it here keeps that invariant explicit.
+    mcpRoutes: Option[HttpRoutes[IO]] = None
 ) extends LazyLogging:
+
+  // The bearer-credential lookups, composed session-first: the JWT verify is a
+  // cheap in-memory operation, and PatAuthenticator self-rejects any token
+  // without the qod_pat_ prefix before touching the store, so the composition
+  // costs a session caller nothing and a PAT caller one prefix check.
+  private val scopeOfToken: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
+    t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+  private val isAdminToken: String => Boolean =
+    t => sessions.isAdmin(t) || patAuth.exists(_.isAdmin(t))
+  private val sessionOfToken: String => Option[SessionTokenStore.Session] =
+    t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
     * does not short-circuit on the first differing byte, closing the timing side-channel that
@@ -107,15 +131,20 @@ final class ManagerServer(
     */
   private def isProfileApi(path: String): Boolean =
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
-      path == "/api/profile/usage" || path == "/api/profile/statements"
+      path == "/api/profile/usage" || path == "/api/profile/statements" ||
+      // Personal access tokens are self-service for every principal, admin or
+      // not: the handlers scope every call to the session's own user id, so
+      // there is nothing here a regular user could reach beyond its own tokens.
+      path == "/api/auth/pat/create" || path == "/api/auth/pat/list" ||
+      path == "/api/auth/pat/revoke"
 
-  /** Gate on the api namespace. Two modes:
-    *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
-    *     fires so operators know the manager is exposed; this is the documented dev default. To
-    *     lock it down, set `QOD_API_KEY` (or use the UI which mints session tokens via
-    *     /api/auth/login).
-    *   - **`cfg.apiKey` set**: every `/api/...` request must carry an `X-API-Key` header matching
-    *     either the static key OR a known admin UI session token.
+  /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
+    * session token, a live personal access token (admitted with exactly its owner's scope, admin or
+    * profile-only), or -- when `cfg.apiKey` is set -- the static key via `X-API-Key`.
+    *
+    * An unset (or empty) `cfg.apiKey` only disables the static-key arm; it never opens the
+    * namespace. The former open mode is gone: a keyless dev workflow logs in through
+    * `/api/auth/login` (or sets `QOD_API_KEY`).
     *
     * Sessions come in two flavors since the regular-user profile feature: admin sessions (JWT
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
@@ -135,11 +164,9 @@ final class ManagerServer(
     // with a key no client ever sends.
     val staticConfigured = cfg.apiKey.filter(_.nonEmpty)
     if staticConfigured.isEmpty then
-      // ERROR (not warn): a security misconfiguration report must survive the
-      // quiet default log level (logback root defaults to ERROR).
-      logger.error(
-        "REST API is OPEN: QOD_API_KEY is not set. Set it (or rely on the " +
-          "UI login flow) before exposing the manager beyond localhost."
+      logger.info(
+        "QOD_API_KEY unset: static-key auth disabled; only session and PAT " +
+          "credentials are accepted on /api"
       )
     else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
 
@@ -172,15 +199,14 @@ final class ManagerServer(
         val staticMatch = (staticConfigured, headerToken) match
           case (Some(expected), Some(actual)) => constantTimeEq(actual, expected)
           case _                              => false
-        val sessionAdmin = provided.exists(sessions.isAdmin)
-        val openMode     = staticConfigured.isEmpty
+        val sessionAdmin = provided.exists(isAdminToken)
         // Resolved once: it decides both the non-admin demotion below and the
         // per-request tenant scope check further down.
-        val tokenScope      = provided.flatMap(sessions.scopeOf)
+        val tokenScope      = provided.flatMap(scopeOfToken)
         val nonAdminSession = tokenScope.isDefined && !sessionAdmin
 
         val admitted =
-          staticMatch || sessionAdmin || openMode || (nonAdminSession && isProfileApi(path))
+          staticMatch || sessionAdmin || (nonAdminSession && isProfileApi(path))
         // Strip control characters -- jsonb rejects NUL (0x00); cap length so
         // detail stays bounded. An unsanitized `%00` in the path would make
         // the insert throw and the attacker would erase their own trail.
@@ -196,7 +222,7 @@ final class ManagerServer(
             // Audited under the caller's REAL identity (recoverable from the
             // session), so a low-privilege insider sweeping admin endpoints
             // leaves a trail.
-            val caller   = provided.flatMap(sessions.get).map(_.profile)
+            val caller   = provided.flatMap(sessionOfToken).map(_.profile)
             val username = caller.map(_.username).getOrElse("unknown")
             // Rate-limited per principal, not per host: the recorder writes
             // synchronously on the request path, so one authenticated session
@@ -236,7 +262,7 @@ final class ManagerServer(
             OptionT.pure[IO](Response[IO](Status.Unauthorized))
         else
           // Per-request tenant scope check. Only applies when there is a known
-          // session (not the static key, not open mode). Body-tenant endpoints
+          // session (not the static key). Body-tenant endpoints
           // do their own check via TenantScopeCheck.reject.
           val queryTenant = req.uri.query.params.get("tenant")
           val pathTenant  = TenantScopeGuard.extractTenant(path, queryTenant)
@@ -266,10 +292,10 @@ final class ManagerServer(
       // JDBC calls go on `IO.blocking` since Hikari semantics are synchronous.
       List[ServerEndpoint[Any, IO]](
         CatalogEndpoints.listSchemasEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          IO.blocking(h.listSchemas(tenant, tenantDb, token)(sessions.scopeOf))
+          IO.blocking(h.listSchemas(tenant, tenantDb, token)(scopeOfToken))
         },
         CatalogEndpoints.listTablesEndpoint.serverLogic { case (tenant, tenantDb, schema, token) =>
-          IO.blocking(h.listTables(tenant, tenantDb, schema, token)(sessions.scopeOf))
+          IO.blocking(h.listTables(tenant, tenantDb, schema, token)(scopeOfToken))
         },
         CatalogEndpoints.getTableEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, asOf, asOfTag, asOfTsRaw, token) =>
@@ -278,14 +304,14 @@ final class ManagerServer(
               case Right(asOfTs) =>
                 IO.blocking(
                   h.getTable(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, token)(
-                    sessions.scopeOf
+                    scopeOfToken
                   )
                 )
         },
         CatalogEndpoints.listSnapshotsEndpoint.serverLogic {
           case (tenant, tenantDb, limit, before, table, token) =>
             IO.blocking(
-              h.listSnapshots(tenant, tenantDb, limit, before, table, token)(sessions.scopeOf)
+              h.listSnapshots(tenant, tenantDb, limit, before, table, token)(scopeOfToken)
             )
         }
       )
@@ -297,16 +323,16 @@ final class ManagerServer(
     val tagEndpoints: List[ServerEndpoint[Any, IO]] = tags.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         TagEndpoints.listTagsEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          h.list(tenant, tenantDb, token)(sessions.scopeOf)
+          h.list(tenant, tenantDb, token)(scopeOfToken)
         },
         TagEndpoints.createTagEndpoint.serverLogic { case (req, token) =>
-          h.create(req, token)(sessions.scopeOf)
+          h.create(req, token)(scopeOfToken)
         },
         TagEndpoints.deleteTagEndpoint.serverLogic { case (req, token) =>
-          h.delete(req, token)(sessions.scopeOf)
+          h.delete(req, token)(scopeOfToken)
         },
         TagEndpoints.protectTagEndpoint.serverLogic { case (req, token) =>
-          h.protect(req, token)(sessions.scopeOf)
+          h.protect(req, token)(scopeOfToken)
         }
       )
     }
@@ -316,20 +342,20 @@ final class ManagerServer(
     val maintenanceEndpoints: List[ServerEndpoint[Any, IO]] = maintenance.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         MaintenanceEndpoints.upsertPolicyEndpoint.serverLogic { case (req, token) =>
-          h.upsertPolicy(req, token)(sessions.scopeOf)
+          h.upsertPolicy(req, token)(scopeOfToken)
         },
         MaintenanceEndpoints.deletePolicyEndpoint.serverLogic { case (req, token) =>
-          h.deletePolicy(req, token)(sessions.scopeOf)
+          h.deletePolicy(req, token)(scopeOfToken)
         },
         MaintenanceEndpoints.listPoliciesEndpoint.serverLogic { case (tenant, tenantDb, token) =>
-          h.listPolicies(tenant, tenantDb, token)(sessions.scopeOf)
+          h.listPolicies(tenant, tenantDb, token)(scopeOfToken)
         },
         MaintenanceEndpoints.listRunsEndpoint.serverLogic {
           case (tenant, tenantDb, limit, before, token) =>
-            h.listRuns(tenant, tenantDb, limit, before, token)(sessions.scopeOf)
+            h.listRuns(tenant, tenantDb, limit, before, token)(scopeOfToken)
         },
         MaintenanceEndpoints.triggerRunEndpoint.serverLogic { case (req, token) =>
-          h.triggerRun(req, token)(sessions.scopeOf)
+          h.triggerRun(req, token)(scopeOfToken)
         }
       )
     }
@@ -345,17 +371,17 @@ final class ManagerServer(
               case Left(e)       => IO.pure(Left(e))
               case Right(asOfTs) =>
                 h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, token)(
-                  sessions.scopeOf
+                  scopeOfToken
                 )
         },
         TimeTravelEndpoints.schemaDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, token) =>
-            h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(sessions.scopeOf)
+            h.schemaDiff(tenant, tenantDb, schema, table, from, to, token)(scopeOfToken)
         },
         TimeTravelEndpoints.dataDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token) =>
             h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token)(
-              sessions.scopeOf
+              scopeOfToken
             )
         }
       )
@@ -365,10 +391,10 @@ final class ManagerServer(
     val undropEndpoints: List[ServerEndpoint[Any, IO]] = undrop.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         UndropEndpoints.recoverableEndpoint.serverLogic { case (tenant, tenantDb, limit, token) =>
-          h.recoverable(tenant, tenantDb, limit, token)(sessions.scopeOf)
+          h.recoverable(tenant, tenantDb, limit, token)(scopeOfToken)
         },
         UndropEndpoints.undropEndpoint.serverLogic { case (req, token) =>
-          h.undrop(req, token)(sessions.scopeOf)
+          h.undrop(req, token)(scopeOfToken)
         }
       )
     }
@@ -376,7 +402,7 @@ final class ManagerServer(
     // Restore (Spec 04). Session-gated per request via TenantScopeCheck inside the handler.
     val restoreEndpoints: List[ServerEndpoint[Any, IO]] = restore.toList.map { h =>
       RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
-        h.restore(req, token)(sessions.scopeOf)
+        h.restore(req, token)(scopeOfToken)
       }
     }
 
@@ -418,7 +444,7 @@ final class ManagerServer(
                   operation,
                   author,
                   token
-                )(sessions.scopeOf)
+                )(scopeOfToken)
               )
       }
     }
@@ -437,7 +463,7 @@ final class ManagerServer(
         profile.statements(limit, token)
       },
       NodeEndpoints.statementHistory.serverLogic { case (limit, token) =>
-        statementHistory.recent(limit, token)(sessions.scopeOf)
+        statementHistory.recent(limit, token)(scopeOfToken)
       },
       TelemetryEndpoints.auditList.serverLogic {
         case (family, tenant, actor, action, q, from, to, limit, before, noTenant, token) =>
@@ -453,21 +479,21 @@ final class ManagerServer(
             before,
             noTenant,
             token
-          )(sessions.scopeOf)
+          )(scopeOfToken)
       },
       TelemetryEndpoints.auditActions.serverLogic(token => auditHandlers.actions(token)),
       TelemetryEndpoints.historyTrends.serverLogic {
         case (granularity, from, to, tenant, pool, token) =>
-          history.trends(granularity, from, to, tenant, pool, token)(sessions.scopeOf)
+          history.trends(granularity, from, to, tenant, pool, token)(scopeOfToken)
       },
       TelemetryEndpoints.historyStatements.serverLogic {
         case (from, to, tenant, pool, user, status, q, limit, before, token) =>
           history.statements(from, to, tenant, pool, user, status, q, limit, before, token)(
-            sessions.scopeOf
+            scopeOfToken
           )
       },
       TelemetryEndpoints.usage.serverLogic { case (from, to, groupBy, tenant, pool, token) =>
-        usage.usage(from, to, groupBy, tenant, pool, token)(sessions.scopeOf)
+        usage.usage(from, to, groupBy, tenant, pool, token)(scopeOfToken)
       },
       AuthEndpoints.oidcStart.serverLogic { case (tenant, returnTo, proto) =>
         auth.oidcStart(tenant, returnTo, proto)
@@ -485,6 +511,17 @@ final class ManagerServer(
       }
     )
 
+    // Mounted only when a handler is wired (Main always wires one). Session-only by
+    // construction: the handler refuses a PAT presented as the credential, so these
+    // routes cannot be driven by the very tokens they manage.
+    val patEndpoints: List[ServerEndpoint[Any, IO]] = pat.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },
+        PatEndpoints.list.serverLogic(token => h.list(token)),
+        PatEndpoints.revoke.serverLogic { case (token, req) => h.revoke(token, req) }
+      )
+    }
+
     // Mounted only when a handler is wired; the paths are guard-exempt regardless
     // (see isPublicApi), so a wired handler is reachable pre-session.
     val passwordResetEndpoints: List[ServerEndpoint[Any, IO]] = passwordReset.toList.flatMap { h =>
@@ -496,100 +533,100 @@ final class ManagerServer(
 
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       RbacEndpoints.createUser.serverLogic { case (req, token) =>
-        users.createUser(req, token)(sessions.scopeOf)
+        users.createUser(req, token)(scopeOfToken)
       },
       RbacEndpoints.updateUser.serverLogic { case (req, token) =>
-        users.updateUser(req, token)(sessions.scopeOf)
+        users.updateUser(req, token)(scopeOfToken)
       },
       RbacEndpoints.deleteUser.serverLogic { case (req, token) =>
-        users.deleteUser(req, token)(sessions.scopeOf)
+        users.deleteUser(req, token)(scopeOfToken)
       },
       RbacEndpoints.listUsers.serverLogic { case (t, key) =>
-        users.listUsers(t, key)(sessions.scopeOf)
+        users.listUsers(t, key)(scopeOfToken)
       },
       RbacEndpoints.effectivePermissions.serverLogic { case (id, key) =>
-        users.effective(id, key)(sessions.scopeOf)
+        users.effective(id, key)(scopeOfToken)
       },
       RbacEndpoints.createRole.serverLogic { case (req, token) =>
-        roles.createRole(req, token)(sessions.scopeOf)
+        roles.createRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.deleteRole.serverLogic { case (req, token) =>
-        roles.deleteRole(req, token)(sessions.scopeOf)
+        roles.deleteRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.listRoles.serverLogic { case (t, key) =>
-        roles.listRoles(t, key)(sessions.scopeOf)
+        roles.listRoles(t, key)(scopeOfToken)
       },
       RbacEndpoints.grantRolePermission.serverLogic { case (req, token) =>
-        roles.grantPermission(req, token)(sessions.scopeOf)
+        roles.grantPermission(req, token)(scopeOfToken)
       },
       RbacEndpoints.revokeRolePermission.serverLogic { case (req, token) =>
-        roles.revokePermission(req, token)(sessions.scopeOf)
+        roles.revokePermission(req, token)(scopeOfToken)
       },
       RbacEndpoints.listRolePermissions.serverLogic { case (roleId, key) =>
-        roles.listPermissions(roleId, key)(sessions.scopeOf)
+        roles.listPermissions(roleId, key)(scopeOfToken)
       },
       RbacEndpoints.createGroup.serverLogic { case (req, token) =>
-        groups.createGroup(req, token)(sessions.scopeOf)
+        groups.createGroup(req, token)(scopeOfToken)
       },
       RbacEndpoints.deleteGroup.serverLogic { case (req, token) =>
-        groups.deleteGroup(req, token)(sessions.scopeOf)
+        groups.deleteGroup(req, token)(scopeOfToken)
       },
       RbacEndpoints.listGroups.serverLogic { case (t, key) =>
-        groups.listGroups(t, key)(sessions.scopeOf)
+        groups.listGroups(t, key)(scopeOfToken)
       },
       RbacEndpoints.addUserRoleMembership.serverLogic { case (req, token) =>
-        memberships.addUserRole(req, token)(sessions.scopeOf)
+        memberships.addUserRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.removeUserRoleMembership.serverLogic { case (req, token) =>
-        memberships.removeUserRole(req, token)(sessions.scopeOf)
+        memberships.removeUserRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.addUserGroupMembership.serverLogic { case (req, token) =>
-        memberships.addUserGroup(req, token)(sessions.scopeOf)
+        memberships.addUserGroup(req, token)(scopeOfToken)
       },
       RbacEndpoints.removeUserGroupMembership.serverLogic { case (req, token) =>
-        memberships.removeUserGroup(req, token)(sessions.scopeOf)
+        memberships.removeUserGroup(req, token)(scopeOfToken)
       },
       RbacEndpoints.addGroupRoleMembership.serverLogic { case (req, token) =>
-        memberships.addGroupRole(req, token)(sessions.scopeOf)
+        memberships.addGroupRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.removeGroupRoleMembership.serverLogic { case (req, token) =>
-        memberships.removeGroupRole(req, token)(sessions.scopeOf)
+        memberships.removeGroupRole(req, token)(scopeOfToken)
       },
       RbacEndpoints.listGroupRoleMembership.serverLogic { case (groupId, key) =>
-        memberships.listGroupRoles(groupId, key)(sessions.scopeOf)
+        memberships.listGroupRoles(groupId, key)(scopeOfToken)
       },
       RbacEndpoints.grantPoolPermission.serverLogic { case (req, token) =>
-        poolPermissions.grant(req, token)(sessions.scopeOf)
+        poolPermissions.grant(req, token)(scopeOfToken)
       },
       RbacEndpoints.revokePoolPermission.serverLogic { case (req, token) =>
-        poolPermissions.revoke(req, token)(sessions.scopeOf)
+        poolPermissions.revoke(req, token)(scopeOfToken)
       },
       RbacEndpoints.listPoolPermissions.serverLogic { case (t, u, g, key) =>
-        poolPermissions.list(t, u, g, key)(sessions.scopeOf)
+        poolPermissions.list(t, u, g, key)(scopeOfToken)
       },
       RbacEndpoints.createColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.create(req, token)(sessions.scopeOf)
+        columnPolicies.create(req, token)(scopeOfToken)
       },
       RbacEndpoints.updateColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.update(req, token)(sessions.scopeOf)
+        columnPolicies.update(req, token)(scopeOfToken)
       },
       RbacEndpoints.deleteColumnPolicy.serverLogic { case (req, token) =>
-        columnPolicies.delete(req, token)(sessions.scopeOf)
+        columnPolicies.delete(req, token)(scopeOfToken)
       },
       RbacEndpoints.listColumnPolicies.serverLogic { case (roleId, key) =>
-        columnPolicies.list(roleId, key)(sessions.scopeOf)
+        columnPolicies.list(roleId, key)(scopeOfToken)
       },
       RbacEndpoints.createRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.create(req, token)(sessions.scopeOf)
+        rowPolicies.create(req, token)(scopeOfToken)
       },
       RbacEndpoints.updateRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.update(req, token)(sessions.scopeOf)
+        rowPolicies.update(req, token)(scopeOfToken)
       },
       RbacEndpoints.deleteRowPolicy.serverLogic { case (req, token) =>
-        rowPolicies.delete(req, token)(sessions.scopeOf)
+        rowPolicies.delete(req, token)(scopeOfToken)
       },
       RbacEndpoints.listRowPolicies.serverLogic { case (roleId, key) =>
-        rowPolicies.list(roleId, key)(sessions.scopeOf)
+        rowPolicies.list(roleId, key)(scopeOfToken)
       }
     )
 
@@ -626,78 +663,76 @@ final class ManagerServer(
 
     val endpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       PoolEndpoints.createPool.serverLogic { case (req, token) =>
-        pools.createPool(req, token)(sessions.scopeOf)
+        pools.createPool(req, token)(scopeOfToken)
       },
       PoolEndpoints.scalePool.serverLogic { case (req, token) =>
-        pools.scalePool(req, token)(sessions.scopeOf)
+        pools.scalePool(req, token)(scopeOfToken)
       },
       PoolEndpoints.stopPool.serverLogic { case (req, token) =>
-        pools.stopPool(req, token)(sessions.scopeOf)
+        pools.stopPool(req, token)(scopeOfToken)
       },
       PoolEndpoints.deletePool.serverLogic { case (req, token) =>
-        pools.deletePool(req, token)(sessions.scopeOf)
+        pools.deletePool(req, token)(scopeOfToken)
       },
       PoolEndpoints.suspendPool.serverLogic { case (req, token) =>
-        pools.suspendPool(req, token)(sessions.scopeOf)
+        pools.suspendPool(req, token)(scopeOfToken)
       },
       PoolEndpoints.resumePool.serverLogic { case (req, token) =>
-        pools.resumePool(req, token)(sessions.scopeOf)
+        pools.resumePool(req, token)(scopeOfToken)
       },
-      PoolEndpoints.listPools.serverLogic(token => pools.listPools(token)(sessions.scopeOf)),
+      PoolEndpoints.listPools.serverLogic(token => pools.listPools(token)(scopeOfToken)),
       PoolEndpoints.poolStatus.serverLogic((t, td, p) => pools.poolStatus(t, td, p)),
       PoolEndpoints.setPoolDisabled.serverLogic { case (req, token) =>
-        pools.setPoolDisabled(req, token)(sessions.scopeOf)
+        pools.setPoolDisabled(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolResources.serverLogic { case (req, token) =>
-        pools.setResources(req, token)(sessions.scopeOf)
+        pools.setResources(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolTemplate.serverLogic { case (req, token) =>
-        pools.setPodTemplate(req, token)(sessions.scopeOf)
+        pools.setPodTemplate(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolLockdown.serverLogic { case (req, token) =>
-        pools.setLockdown(req, token)(sessions.scopeOf)
+        pools.setLockdown(req, token)(scopeOfToken)
       },
       PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
-        pools.setPoolAutoscale(req, token)(sessions.scopeOf)
+        pools.setPoolAutoscale(req, token)(scopeOfToken)
       },
       NodeEndpoints.setMaxConcurrent.serverLogic { case (req, token) =>
-        nodes.setMaxConcurrent(req, token)(sessions.scopeOf)
+        nodes.setMaxConcurrent(req, token)(scopeOfToken)
       },
       NodeEndpoints.quarantineNode.serverLogic { case (req, token) =>
-        nodes.quarantineNode(req, token)(sessions.scopeOf)
+        nodes.quarantineNode(req, token)(scopeOfToken)
       },
       NodeEndpoints.unquarantineNode.serverLogic { case (req, token) =>
-        nodes.unquarantineNode(req, token)(sessions.scopeOf)
+        nodes.unquarantineNode(req, token)(scopeOfToken)
       },
       NodeEndpoints.restartNode.serverLogic { case (req, token) =>
-        nodes.restartNode(req, token)(sessions.scopeOf)
+        nodes.restartNode(req, token)(scopeOfToken)
       },
       TenantEndpoints.createTenant.serverLogic { case (req, token) =>
-        tenants.createTenant(req, token)(sessions.scopeOf)
+        tenants.createTenant(req, token)(scopeOfToken)
       },
-      TenantEndpoints.listTenants.serverLogic(token =>
-        tenants.listTenants(token)(sessions.scopeOf)
-      ),
+      TenantEndpoints.listTenants.serverLogic(token => tenants.listTenants(token)(scopeOfToken)),
       TenantEndpoints.deleteTenant.serverLogic { case (req, token) =>
-        tenants.deleteTenant(req, token)(sessions.scopeOf)
+        tenants.deleteTenant(req, token)(scopeOfToken)
       },
       TenantEndpoints.setTenantDisabled.serverLogic { case (req, token) =>
-        tenants.setTenantDisabled(req, token)(sessions.scopeOf)
+        tenants.setTenantDisabled(req, token)(scopeOfToken)
       },
       TenantEndpoints.setTenantAuth.serverLogic { case (req, token) =>
-        tenants.setTenantAuth(req, token)(sessions.scopeOf)
+        tenants.setTenantAuth(req, token)(scopeOfToken)
       },
       TenantEndpoints.createTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.createTenantDb(req, token)(sessions.scopeOf)
+        tenantDbs.createTenantDb(req, token)(scopeOfToken)
       },
       TenantEndpoints.listTenantDbs.serverLogic { case (tenant, token) =>
-        tenantDbs.listTenantDbs(tenant, token)(sessions.scopeOf)
+        tenantDbs.listTenantDbs(tenant, token)(scopeOfToken)
       },
       TenantEndpoints.deleteTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.deleteTenantDb(req, token)(sessions.scopeOf)
+        tenantDbs.deleteTenantDb(req, token)(scopeOfToken)
       },
       TenantEndpoints.updateTenantDb.serverLogic { case (req, token) =>
-        tenantDbs.update(req, token)(sessions.scopeOf)
+        tenantDbs.update(req, token)(scopeOfToken)
       },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
@@ -722,18 +757,16 @@ final class ManagerServer(
           )
         )
       ),
-      Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(sessions.scopeOf)),
-      Endpoints.manifestExport.serverLogic(token => manifest.exportYaml(token)(sessions.scopeOf)),
+      Endpoints.serverConfig.serverLogic(token => serverConfig.list(token)(scopeOfToken)),
+      Endpoints.manifestExport.serverLogic(token => manifest.exportYaml(token)(scopeOfToken)),
       Endpoints.manifestImport.serverLogic { case (body, token) =>
-        manifest.importYaml(body, token)(sessions.scopeOf)
+        manifest.importYaml(body, token)(scopeOfToken)
       },
-      NodeEndpoints.activeStatements.serverLogic(token =>
-        activeStmts.list(token)(sessions.scopeOf)
-      ),
+      NodeEndpoints.activeStatements.serverLogic(token => activeStmts.list(token)(scopeOfToken)),
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
-        activeStmts.kill(req, token)(sessions.scopeOf)
+        activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then
@@ -872,6 +905,8 @@ final class ManagerServer(
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withHttpApp(
-        (apiKeyGuard(apiRoutes) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
+        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(
+          HttpRoutes.empty[IO]
+        ) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
       )
       .build

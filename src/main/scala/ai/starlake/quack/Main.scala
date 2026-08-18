@@ -59,6 +59,7 @@ import ai.starlake.quack.ondemand.runtime._
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   LiquibaseRunner,
+  PatStore,
   PostgresControlPlaneStore,
   PostgresDbAdmin,
   UserStore
@@ -93,6 +94,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
+  given ProductHint[McpConfig]                 = ProductHint[McpConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -119,6 +121,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
   given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]
+  given ConfigReader[McpConfig]                = deriveReader[McpConfig]
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
@@ -249,6 +252,19 @@ object Main extends IOApp with LazyLogging:
     val userStore =
       UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap, mgrCfg.auth.lockout)
     BootPreflight.seedAdminUsers(userStore, mgrCfg.admin)
+
+    // Personal access tokens live next to the user rows they reference (qodstate_pat
+    // FKs qodstate_user); its own small Hikari pool, closed in the shutdown hook.
+    val patStore = PatStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // Resolves a PAT bearer to its owner's principal for /api admission. Grants are
+    // row-only BY CONTRACT (PatAuthenticator's scaladoc): a PAT is bound to one
+    // qodstate_user row, and an identity-keyed lookup would fold in the grants of a
+    // same-named user in another tenant.
+    val patAuthenticator = new ai.starlake.quack.ondemand.auth.PatAuthenticator(
+      patStore,
+      userById = userStore.userById,
+      grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.role))
+    )
 
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
 
@@ -571,6 +587,17 @@ object Main extends IOApp with LazyLogging:
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
       publicBaseUrl = mgrCfg.publicBaseUrl.trim
     )
+    // Self-service personal access tokens. Identity comes from the session JWT and
+    // is resolved to the owning qodstate_user row id, which is what qodstate_pat
+    // keys (and FKs) on.
+    val patHandlers = new ai.starlake.quack.ondemand.api.PatHandlers(
+      pats = patStore,
+      sessions = sessionTokens,
+      // The whole row, not just its id: a disabled owner must be refused at MINT
+      // time too, not only when the resulting token is used.
+      userOf = (tenant, username) => store.findUser(tenant, username),
+      audit = auditRecorder
+    )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val historyApiHandlers = new ai.starlake.quack.ondemand.api.HistoryHandlers(telemetryStore)
@@ -578,7 +605,9 @@ object Main extends IOApp with LazyLogging:
     // Self-service surface for non-admin sessions; scopes strictly to the
     // session's own (tenant, username), so it takes no tenant/user input.
     val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      sessionTokens,
+      // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
+      // same self-scoped profile a login session would.
+      t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t)),
       telemetryStore,
       stmtHistory,
       id => sup.getTenantById(id)
@@ -940,6 +969,54 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
+      // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
+      // instances REST uses. Auth is PAT or the static key only; the run_sql path goes
+      // through routedExecutor(recordExecution = true) so DuckLake snapshots carry the
+      // acting user's author stamp exactly like FlightSQL writes.
+      val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
+        if !mgrCfg.mcp.enabled then None
+        else
+          val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
+            t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+          for
+            cat   <- catalogHandlers
+            hist  <- catalogHistoryHandlers
+            tagH  <- tagHandlers
+            maint <- maintenanceHandlers
+          yield
+            val dataTools = new ai.starlake.quack.mcp.McpDataTools(
+              mgrCfg.mcp,
+              routedExecutor(recordExecution = true),
+              sup,
+              cat,
+              hist,
+              tagH,
+              tenantDbs,
+              profileHandlers,
+              mcpScopeOf
+            )
+            val adminTools = new ai.starlake.quack.mcp.McpAdminTools(
+              pools,
+              nodes,
+              activeStmtHandlers,
+              maint,
+              tagH,
+              auditHandlers,
+              mcpScopeOf
+            )
+            new ai.starlake.quack.mcp.McpRoutes(
+              mgrCfg.mcp,
+              mgrCfg.apiKey.filter(_.nonEmpty),
+              patAuthenticator.resolve,
+              dataTools.tools ++ adminTools.tools,
+              serverVersion = "dev"
+            ).routes
+      if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
+        logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")
+      else if mgrCfg.mcp.enabled then
+        logger.info("mcp: serving POST /mcp (bearer auth: PAT or static API key)")
+      else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
+
       // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
       // so it MUST run after moduleStart; called from the IO chain below.
       def buildManagerServer(): ManagerServer = new ManagerServer(
@@ -982,7 +1059,10 @@ object Main extends IOApp with LazyLogging:
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
-        passwordReset = Some(passwordResetHandlers)
+        passwordReset = Some(passwordResetHandlers),
+        pat = Some(patHandlers),
+        patAuth = Some(patAuthenticator),
+        mcpRoutes = mcpRoutes
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -1106,6 +1186,7 @@ object Main extends IOApp with LazyLogging:
                   telemetryStore = telemetryStore,
                   store = store,
                   userStore = userStore,
+                  patStore = patStore,
                   catalogReaders = catalogReaders,
                   tracker = tracker,
                   modules = modules,

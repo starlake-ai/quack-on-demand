@@ -498,6 +498,43 @@ final case class AuthModeResponse(
     ssoProviderName: String = ""
 )
 
+// ----- Personal access tokens -----
+
+/** Mint request. `name` is an operator-facing label (what the token is for), not an identifier: it
+  * is never unique and never resolves anything. `expiresAt` absent means "no expiry" -- revocation
+  * is then the only way to retire the token.
+  */
+final case class PatCreateRequest(
+    name: String,
+    expiresAt: Option[java.time.Instant] = None
+)
+
+/** The ONLY response that ever carries the raw `token`: it is stored hashed, so a caller that loses
+  * this value must mint a new one.
+  */
+final case class PatCreateResponse(
+    id: String,
+    name: String,
+    token: String,
+    expiresAt: Option[java.time.Instant] = None
+)
+
+/** Listing row: metadata only, deliberately without the raw token or its hash. `revoked` collapses
+  * the store's `revokedAt` timestamp to the one bit a client acts on.
+  */
+final case class PatEntry(
+    id: String,
+    name: String,
+    createdAt: java.time.Instant,
+    expiresAt: Option[java.time.Instant] = None,
+    lastUsedAt: Option[java.time.Instant] = None,
+    revoked: Boolean = false
+)
+
+final case class PatListResponse(tokens: List[PatEntry] = Nil)
+
+final case class PatRevokeRequest(id: String)
+
 // ----- Recent statement history -----
 final case class StatementHistoryEntry(
     ts: String, // ISO-8601 UTC
@@ -1162,6 +1199,14 @@ object Dtos:
   given Codec[LoginResponse]         = ConfiguredCodec.derived
   given Codec[WhoamiResponse]        = ConfiguredCodec.derived
   given Codec[AuthModeResponse]      = ConfiguredCodec.derived
+
+  // Personal access tokens. ConfiguredCodec throughout so a body omitting an
+  // optional field (`expiresAt`) still decodes against the defaults.
+  given Codec[PatCreateRequest]  = ConfiguredCodec.derived
+  given Codec[PatCreateResponse] = ConfiguredCodec.derived
+  given Codec[PatEntry]          = ConfiguredCodec.derived
+  given Codec[PatListResponse]   = ConfiguredCodec.derived
+  given Codec[PatRevokeRequest]  = ConfiguredCodec.derived
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec

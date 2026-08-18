@@ -86,6 +86,7 @@ const sidebars: SidebarsConfig = {
         'connecting/clients',
         'connecting/authenticating',
         'connecting/sql',
+        'connecting/mcp',
         'connecting/dbeaver',
         'connecting/powerbi',
         'connecting/tableau',

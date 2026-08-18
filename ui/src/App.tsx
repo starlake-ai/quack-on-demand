@@ -140,6 +140,7 @@ function Shell() {
         {role === 'admin' && isSuperuser && (
           <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
         )}
+        <NavLink to="/profile"     className={({ isActive }) => isActive ? 'active' : ''}>Profile</NavLink>
         <span className="spacer" />
         {authEnabled ? (
           <>
@@ -170,6 +171,7 @@ function Shell() {
           <Route path="/audit"                                     element={<Audit />} />
           <Route path="/history"                                   element={<History />} />
           <Route path="/usage"                                     element={<Usage />} />
+          <Route path="/profile"                                   element={<Profile />} />
         </Routes>
       </main>
     </>

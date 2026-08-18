@@ -190,3 +190,66 @@ def test_reset_password_prompts_and_sends_token(runner, respx_mock):
 
     sent = json.loads(route.calls.last.request.content)
     assert sent == {"token": "tok-123", "newPassword": "newpw"}
+
+
+def test_pat_create_sends_name_and_prints_token(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/pat/create").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "pat-1", "name": "claude", "token": "qod_pat_abc123", "expiresAt": None},
+        )
+    )
+    result = runner.invoke(app, ["auth", "pat", "create", "--name", "claude"])
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"name": "claude", "expiresAt": None}
+    assert "qod_pat_abc123" in result.output
+
+
+def test_pat_create_sends_expiry(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/pat/create").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "pat-2",
+                "name": "ci",
+                "token": "qod_pat_xyz",
+                "expiresAt": "2027-01-01T00:00:00Z",
+            },
+        )
+    )
+    result = runner.invoke(
+        app,
+        ["auth", "pat", "create", "--name", "ci", "--expires-at", "2027-01-01T00:00:00Z"],
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"name": "ci", "expiresAt": "2027-01-01T00:00:00Z"}
+
+
+def test_pat_list_hits_the_list_route(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/pat/list").mock(
+        return_value=httpx.Response(200, json={"tokens": []})
+    )
+    result = runner.invoke(app, ["auth", "pat", "list"])
+    assert result.exit_code == 0
+    assert route.called
+
+
+def test_pat_revoke_sends_id(runner, respx_mock):
+    route = respx_mock.post(f"{BASE}/api/auth/pat/revoke").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    result = runner.invoke(app, ["auth", "pat", "revoke", "--id", "pat-1"])
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"id": "pat-1"}

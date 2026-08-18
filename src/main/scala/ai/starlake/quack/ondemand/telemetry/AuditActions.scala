@@ -18,6 +18,10 @@ object AuditActions:
   val AuthRevoke        = "auth.revoke"
   // Self-service credential rotation via the public POST /api/auth/change-password.
   val AuthPasswordChange = "auth.password.change"
+  // Personal access tokens: long-lived bearer credentials a user mints for itself.
+  // Audited under the acting session's identity; the raw token is never in the row.
+  val AuthPatCreate = "auth.pat.create"
+  val AuthPatRevoke = "auth.pat.revoke"
   // tenant + database
   val TenantCreate      = "tenant.create"
   val TenantDelete      = "tenant.delete"
@@ -107,6 +111,8 @@ object AuditActions:
     AuthLogout,
     AuthRevoke,
     AuthPasswordChange,
+    AuthPatCreate,
+    AuthPatRevoke,
     TenantCreate,
     TenantDelete,
     TenantSetDisabled,

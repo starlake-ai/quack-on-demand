@@ -21,12 +21,48 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
   // A. apiKeyGuard modes
   // ------------------------------------------------------------------
 
-  "apiKeyGuard" should "allow GET /api/tenants with no key when staticApiKey is None (open mode)" in {
+  "apiKeyGuard" should "refuse an unauthenticated /api call even with no static key configured" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
     try
+      // No open mode: an unset key means "static-key auth disabled", never
+      // "namespace open". Only a session (or PAT) credential admits.
       val resp = get(h.httpClient, s"${h.baseUrl}/api/tenant/list")
       withClue(s"GET /api/tenant/list body: ${resp.body()}") {
+        resp.statusCode() shouldBe 401
+      }
+      val token  = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val authed = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(token))
+      withClue(s"session GET /api/tenant/list body: ${authed.body()}") {
+        authed.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
+  it should "treat an empty static key exactly like an unset one" in {
+    val fix = SecurityFixtures.freshStore()
+    // Compose / k8s configs routinely materialize QOD_API_KEY="" -- pureconfig
+    // then yields Some(""), which must neither open the namespace nor become a
+    // matchable key.
+    val h = ManagerServerHarness.boot(fix.store, staticApiKey = Some(""))
+    try
+      val keyless = get(h.httpClient, s"${h.baseUrl}/api/tenant/list")
+      withClue(s"keyless body: ${keyless.body()}") {
+        keyless.statusCode() shouldBe 401
+      }
+      val emptyKey = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(""))
+      withClue(s"empty-key body: ${emptyKey.body()}") {
+        emptyKey.statusCode() shouldBe 401
+      }
+    finally h.shutdown()
+  }
+
+  it should "keep public endpoints keyless with no static key configured" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    try
+      val resp = get(h.httpClient, s"${h.baseUrl}/api/config/client")
+      withClue(s"GET /api/config/client body: ${resp.body()}") {
         resp.statusCode() shouldBe 200
       }
     finally h.shutdown()

@@ -5,7 +5,7 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.ondemand.ha.HaCoordinator
 import ai.starlake.quack.ondemand.module.ModuleEventBus
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{PostgresControlPlaneStore, UserStore}
+import ai.starlake.quack.ondemand.state.{PatStore, PostgresControlPlaneStore, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{EventJournal, TelemetryStore}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -33,6 +33,7 @@ final class ShutdownCoordinator(
     telemetryStore: TelemetryStore,
     store: PostgresControlPlaneStore,
     userStore: UserStore,
+    patStore: PatStore,
     catalogReaders: CatalogReaders,
     tracker: NodeLoadTracker,
     modules: List[ai.starlake.quack.spi.ManagerModule],
@@ -75,6 +76,8 @@ final class ShutdownCoordinator(
         try store.close()
         catch case _: Throwable => ()
         try userStore.close()
+        catch case _: Throwable => ()
+        try patStore.close()
         catch case _: Throwable => ()
           // Stop the idle-eviction sweeper, then close every cached
           // catalog reader's Hikari pool.

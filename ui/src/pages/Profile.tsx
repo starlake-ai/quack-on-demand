@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { api, ApiError, errorMessage } from '../api/client';
-import type { UsageDayEntry, StatementHistoryEntry } from '../api/types';
+import type { UsageDayEntry, StatementHistoryEntry, PatEntry } from '../api/types';
 
 function shortTs(iso: string): string {
   try {
@@ -65,6 +65,79 @@ export default function Profile() {
       setPwErr(errorMessage(e));
     } finally {
       setPwBusy(false);
+    }
+  }
+
+  // ---- personal access tokens ----
+  const [pats, setPats] = useState<PatEntry[]>([]);
+  const [patName, setPatName] = useState('');
+  const [patExpiry, setPatExpiry] = useState('');
+  const [patErr, setPatErr] = useState('');
+  const [patBusy, setPatBusy] = useState(false);
+  const [mintedName, setMintedName] = useState('');
+  const [mintedToken, setMintedToken] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  async function loadPats() {
+    try {
+      const resp = await api.listPats();
+      setPats(resp.tokens);
+    } catch (e) {
+      setPatErr(errorMessage(e));
+    }
+  }
+
+  useEffect(() => { loadPats(); }, []);
+
+  async function submitCreatePat(e: FormEvent) {
+    e.preventDefault();
+    setPatErr('');
+    setMintedToken('');
+    setCopied(false);
+    setPatBusy(true);
+    try {
+      const resp = await api.createPat({
+        name: patName.trim(),
+        // datetime-local yields a zone-less local timestamp; send it as ISO UTC.
+        expiresAt: patExpiry ? new Date(patExpiry).toISOString() : null,
+      });
+      setMintedName(resp.name);
+      setMintedToken(resp.token);
+      setPatName('');
+      setPatExpiry('');
+      await loadPats();
+    } catch (e) {
+      setPatErr(errorMessage(e));
+    } finally {
+      setPatBusy(false);
+    }
+  }
+
+  async function onRevokePat(p: PatEntry) {
+    if (!window.confirm(`Revoke token "${p.name}"? Clients using it stop working immediately.`)) {
+      return;
+    }
+    setPatErr('');
+    try {
+      await api.revokePat(p.id);
+      await loadPats();
+    } catch (e) {
+      setPatErr(errorMessage(e));
+    }
+  }
+
+  function patStatus(p: PatEntry): 'active' | 'revoked' | 'expired' {
+    if (p.revoked) return 'revoked';
+    if (p.expiresAt && new Date(p.expiresAt) < new Date()) return 'expired';
+    return 'active';
+  }
+
+  async function copyMinted() {
+    try {
+      await navigator.clipboard.writeText(mintedToken);
+      setCopied(true);
+    } catch {
+      // Clipboard can be unavailable (http origin); the token stays selectable.
     }
   }
 
@@ -158,6 +231,96 @@ export default function Profile() {
             {pwBusy ? 'Updating…' : 'Change password'}
           </button>
         </form>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">Personal access tokens</div>
+        <p className="subtle" style={{ marginTop: 0 }}>
+          Long-lived credentials for agents and scripts (MCP, CLI). A token acts with exactly your
+          permissions and can be revoked here at any time.
+        </p>
+        {patErr && <div className="login-err">{patErr}</div>}
+        {mintedToken && (
+          <div className="login-notice" style={{ marginBottom: 12 }}>
+            <div>
+              Token <strong>{mintedName}</strong> created. This token is shown only once.
+            </div>
+            <code
+              style={{
+                display: 'block',
+                margin: '8px 0',
+                padding: '6px 8px',
+                wordBreak: 'break-all',
+                userSelect: 'all',
+              }}
+            >
+              {mintedToken}
+            </code>
+            <button type="button" onClick={copyMinted}>
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        )}
+        <form onSubmit={submitCreatePat} style={{ maxWidth: 360 }}>
+          <label>
+            Name
+            <input
+              value={patName}
+              onChange={e => setPatName(e.target.value)}
+              placeholder="claude-code"
+            />
+          </label>
+          <label>
+            Expires (optional)
+            <input
+              type="datetime-local"
+              value={patExpiry}
+              onChange={e => setPatExpiry(e.target.value)}
+            />
+          </label>
+          <button type="submit" disabled={patBusy || !patName.trim()}>
+            {patBusy ? 'Creating…' : 'Create token'}
+          </button>
+        </form>
+        {pats.length > 0 && (
+          <table style={{ marginTop: 12 }}>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>Last used</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {pats.map(p => {
+                const status = patStatus(p);
+                return (
+                  <tr key={p.id}>
+                    <td>{p.name}</td>
+                    <td className="subtle">{shortTs(p.createdAt)}</td>
+                    <td className="subtle">{p.expiresAt ? shortTs(p.expiresAt) : '-'}</td>
+                    <td className="subtle">{p.lastUsedAt ? shortTs(p.lastUsedAt) : 'never'}</td>
+                    <td>
+                      <span className={`badge ${status === 'active' ? 'good' : 'bad'}`}>
+                        {status}
+                      </span>
+                    </td>
+                    <td>
+                      {status === 'active' && (
+                        <button className="danger" type="button" onClick={() => onRevokePat(p)}>
+                          Revoke
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
