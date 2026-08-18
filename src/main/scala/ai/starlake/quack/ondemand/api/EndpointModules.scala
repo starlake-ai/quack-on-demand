@@ -13,6 +13,7 @@ object EndpointModules:
     NodeEndpoints,
     TenantEndpoints,
     AuthEndpoints,
+    PatEndpoints,
     ProfileEndpoints,
     TelemetryEndpoints,
     FederatedSourceEndpoints,

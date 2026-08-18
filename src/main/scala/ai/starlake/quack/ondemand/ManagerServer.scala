@@ -68,7 +68,11 @@ final class ManagerServer(
     // Public pre-session password recovery. None (tests / callers that don't wire
     // Postgres) leaves both routes unmounted; the paths still bypass the api-key
     // guard so a wired handler is reachable without a session.
-    passwordReset: Option[PasswordResetHandlers] = None
+    passwordReset: Option[PasswordResetHandlers] = None,
+    // Self-service personal access tokens. None (tests / callers that don't wire
+    // Postgres) leaves the three /api/auth/pat routes unmounted; Main always wires
+    // it since the store lives in the same control-plane database.
+    pat: Option[PatHandlers] = None
 ) extends LazyLogging:
 
   /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
@@ -107,7 +111,12 @@ final class ManagerServer(
     */
   private def isProfileApi(path: String): Boolean =
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
-      path == "/api/profile/usage" || path == "/api/profile/statements"
+      path == "/api/profile/usage" || path == "/api/profile/statements" ||
+      // Personal access tokens are self-service for every principal, admin or
+      // not: the handlers scope every call to the session's own user id, so
+      // there is nothing here a regular user could reach beyond its own tokens.
+      path == "/api/auth/pat/create" || path == "/api/auth/pat/list" ||
+      path == "/api/auth/pat/revoke"
 
   /** Gate on the api namespace. Two modes:
     *   - **`cfg.apiKey` unset** (default zero-config): the namespace is open. A startup warning
@@ -485,6 +494,17 @@ final class ManagerServer(
       }
     )
 
+    // Mounted only when a handler is wired (Main always wires one). Session-only by
+    // construction: the handler refuses a PAT presented as the credential, so these
+    // routes cannot be driven by the very tokens they manage.
+    val patEndpoints: List[ServerEndpoint[Any, IO]] = pat.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },
+        PatEndpoints.list.serverLogic(token => h.list(token)),
+        PatEndpoints.revoke.serverLogic { case (token, req) => h.revoke(token, req) }
+      )
+    }
+
     // Mounted only when a handler is wired; the paths are guard-exempt regardless
     // (see isPublicApi), so a wired handler is reachable pre-session.
     val passwordResetEndpoints: List[ServerEndpoint[Any, IO]] = passwordReset.toList.flatMap { h =>
@@ -733,7 +753,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(sessions.scopeOf)
       }
-    ) ++ authEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

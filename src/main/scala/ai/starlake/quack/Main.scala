@@ -250,6 +250,11 @@ object Main extends IOApp with LazyLogging:
       UserStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap, mgrCfg.auth.lockout)
     BootPreflight.seedAdminUsers(userStore, mgrCfg.admin)
 
+    // Personal access tokens live next to the user rows they reference (qodstate_pat
+    // FKs qodstate_user); its own small Hikari pool, closed in the shutdown hook.
+    val patStore =
+      ai.starlake.quack.ondemand.state.PatStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
 
     val secretResolver: SecretResolver =
@@ -570,6 +575,15 @@ object Main extends IOApp with LazyLogging:
       // Same tenant resolution as login: id or display name -> surrogate id.
       resolveTenant = (raw: String) => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id),
       publicBaseUrl = mgrCfg.publicBaseUrl.trim
+    )
+    // Self-service personal access tokens. Identity comes from the session JWT and
+    // is resolved to the owning qodstate_user row id, which is what qodstate_pat
+    // keys (and FKs) on.
+    val patHandlers = new ai.starlake.quack.ondemand.api.PatHandlers(
+      pats = patStore,
+      sessions = sessionTokens,
+      userIdOf = (tenant, username) => userStore.userIdOf(tenant, username),
+      audit = auditRecorder
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
@@ -982,7 +996,8 @@ object Main extends IOApp with LazyLogging:
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
-        passwordReset = Some(passwordResetHandlers)
+        passwordReset = Some(passwordResetHandlers),
+        pat = Some(patHandlers)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -1106,6 +1121,7 @@ object Main extends IOApp with LazyLogging:
                   telemetryStore = telemetryStore,
                   store = store,
                   userStore = userStore,
+                  patStore = patStore,
                   catalogReaders = catalogReaders,
                   tracker = tracker,
                   modules = modules,

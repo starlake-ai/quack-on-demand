@@ -254,7 +254,17 @@ object ManagerServerHarness:
       moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
       // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
       // compiles unchanged; specs that want to observe emissions pass a recording sink.
-      events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop
+      events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop,
+      // Personal access tokens. qodstate_pat FKs qodstate_user, so the store is real
+      // Postgres or nothing: None (the default) leaves the three /api/auth/pat routes
+      // unmounted and every pre-existing spec untouched. PatRestSpec passes a store
+      // against a fresh test database.
+      patStore: Option[ai.starlake.quack.ondemand.state.PatStore] = None,
+      // How the PAT handler resolves the session principal to the owning user-row id.
+      // Unset falls back to the fixture store (the in-memory analogue of Main's
+      // UserStore.userIdOf); PatRestSpec passes a real UserStore on the same database
+      // as `patStore` so the qodstate_pat FK resolves.
+      patUserIdOf: Option[(Option[String], String) => Option[String]] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -304,6 +314,16 @@ object ManagerServerHarness:
       resolveTenant = raw => sup.getTenantById(raw).map(_.id),
       publicBaseUrl = ""
     )
+
+    // Mounted only when the spec supplies a (Postgres-backed) PAT store.
+    val patHandlers = patStore.map { pats =>
+      new ai.starlake.quack.ondemand.api.PatHandlers(
+        pats,
+        sessions,
+        patUserIdOf.getOrElse((tenant, username) => store.findUser(tenant, username).map(_.id)),
+        audit = audit
+      )
+    }
 
     val statementStore     = new StatementHistoryStore()
     val historyHandlers    = new StatementHistoryHandlers(statementStore, sup)
@@ -485,7 +505,8 @@ object ManagerServerHarness:
       moduleEndpoints = moduleEndpoints,
       modulePublicPrefixes = modulePublicPrefixes,
       moduleStaticMounts = moduleStaticMounts,
-      passwordReset = Some(passwordResetHandlers)
+      passwordReset = Some(passwordResetHandlers),
+      pat = patHandlers
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

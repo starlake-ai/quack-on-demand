@@ -2562,6 +2562,116 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/pat/create:
+    post:
+      operationId: postApiAuthPatCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatCreateResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session, Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/pat/list:
+    post:
+      operationId: postApiAuthPatList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatListResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/pat/revoke:
+    post:
+      operationId: postApiAuthPatRevoke
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatRevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session, Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/reset-password:
     post:
       operationId: postApiAuthReset-password
@@ -6017,6 +6127,74 @@ components:
         value:
           type: string
         effect:
+          type: string
+    PatCreateRequest:
+      title: PatCreateRequest
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    PatCreateResponse:
+      title: PatCreateResponse
+      type: object
+      required:
+      - id
+      - name
+      - token
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    PatEntry:
+      title: PatEntry
+      type: object
+      required:
+      - id
+      - name
+      - createdAt
+      - revoked
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+    PatListResponse:
+      title: PatListResponse
+      type: object
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/PatEntry'
+    PatRevokeRequest:
+      title: PatRevokeRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
           type: string
     PoolCohortDto:
       title: PoolCohortDto
