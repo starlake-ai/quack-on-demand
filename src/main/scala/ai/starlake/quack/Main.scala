@@ -421,6 +421,12 @@ object Main extends IOApp with LazyLogging:
 
     val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
 
+    // Starlake SSO handoff. Both are process-local and cheap; constructed unconditionally
+    // (like sessionTokens' denylist) even though the endpoints they back are only mounted
+    // when the integration is on -- see ManagementAuthConfig.slIntegrationOn.
+    val ssoTicketStore   = new SsoTicketStore()
+    val ssoRedeemLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter()
+
     // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
     // ManagerServer is constructed, so routes built inside start() are honored.
     val moduleCtx = ai.starlake.quack.spi.ManagerContext(
@@ -542,6 +548,14 @@ object Main extends IOApp with LazyLogging:
         )
       )
     }
+    // Starlake SSO integration: SL_ENABLED alone does nothing without SL_URL to hand the
+    // browser off to. Warn rather than refuse to boot -- unlike the lockout/SMTP gate, a
+    // misconfigured SSO integration only disables a menu link and two endpoints, not a whole
+    // auth path.
+    if mgrCfg.auth.management.slEnabled && mgrCfg.auth.management.slUrl.isEmpty then
+      logger.warn(
+        "SL_ENABLED=true but SL_URL is empty; the Starlake menu and logout callback are disabled"
+      )
     // Management-plane auth wiring; component contracts in ManagementAuthWiring.
     val mgmtAuth = ManagementAuthWiring.build(
       mgrCfg,
@@ -564,7 +578,9 @@ object Main extends IOApp with LazyLogging:
       sqlToken = mgmtAuth.sqlToken,
       audit = auditRecorder,
       events = moduleEventBus.sink,
-      changePasswordStore = Some(userStore)
+      changePasswordStore = Some(userStore),
+      ssoTickets = ssoTicketStore,
+      ssoRedeemLimiter = ssoRedeemLimiter
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT

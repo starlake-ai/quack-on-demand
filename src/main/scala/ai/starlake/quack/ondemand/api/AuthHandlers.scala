@@ -17,7 +17,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRateLimiter, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -92,7 +92,17 @@ final class AuthHandlers(
     /** Backing store for the pre-session change-password endpoint. `None` (tests, callers that
       * don't wire Postgres) makes the endpoint answer 503 auth_disabled.
       */
-    changePasswordStore: Option[ai.starlake.quack.ondemand.state.UserStore] = None
+    changePasswordStore: Option[ai.starlake.quack.ondemand.state.UserStore] = None,
+    /** Single-use ticket store backing the Starlake SSO handoff (`ssoTicket` / `ssoRedeem`).
+      * Defaults to a fresh in-process store so callers that don't explicitly wire one (tests,
+      * legacy code) still get working -- if unreachable -- endpoints.
+      */
+    ssoTickets: SsoTicketStore = new SsoTicketStore(),
+    /** Best-effort throttle on repeated failed `ssoRedeem` calls for the same ticket. Not a
+      * security control -- tickets are 128-bit random and single-use, so brute-forcing one is
+      * infeasible regardless -- just noise reduction for a caller retrying a stale ticket.
+      */
+    ssoRedeemLimiter: AuditRateLimiter = new AuditRateLimiter()
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -670,6 +680,49 @@ final class AuthHandlers(
       case SessionTokenStore.LookupResult.Revoked =>
         Left(
           (StatusCode.Unauthorized, ErrorResponse("revoked", "session token has been revoked"))
+        )
+  }
+
+  /** Mint a single-use Starlake SSO ticket carrying the caller's session grant. Session-authed
+    * (token via header or cookie, [[Endpoints.authToken]]); any valid session may call this,
+    * admin or not -- the minted grant mirrors whatever admin-ness the QoD session already has
+    * ([[SessionTokenStore.isAdmin]]'s exact `role` check), it grants nothing new. `401
+    * unauthorized` on no/invalid/expired/revoked session, collapsed to one code (unlike
+    * [[whoami]]) since the caller here is Starlake's redirect target, not a UI that needs to
+    * distinguish failure reasons.
+    */
+  def ssoTicket(token: Option[String]): Out[SsoTicketResponse] = IO {
+    val t = token.getOrElse("")
+    tokens.lookupResult(t) match
+      case SessionTokenStore.LookupResult.Ok(session) =>
+        val grant = SsoGrant(
+          sessionToken = t,
+          username = session.profile.username,
+          tenant = session.profile.tenant,
+          // Same derivation as SessionTokenStore.isAdmin: role, not scope.superuser.
+          admin = session.profile.role.equalsIgnoreCase("admin")
+        )
+        Right(SsoTicketResponse(ssoTickets.mint(grant)))
+      case _ =>
+        Left((StatusCode.Unauthorized, ErrorResponse("unauthorized", "session required")))
+  }
+
+  /** Redeem a Starlake SSO ticket for the QoD session grant it carries. Public: no
+    * X-API-Key/cookie input, the ticket itself is the (single-use, 128-bit random, short-TTL)
+    * credential. `401 invalid_ticket` on unknown / expired / already-redeemed.
+    */
+  def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] = IO {
+    ssoTickets.redeem(request.ticket) match
+      case Some(grant) =>
+        Right(SsoRedeemResponse(grant.sessionToken, grant.username, grant.tenant, grant.admin))
+      case None =>
+        // Best-effort accounting only; see the ssoRedeemLimiter doc on the constructor.
+        ssoRedeemLimiter.allow(s"sso-redeem:${request.ticket}")
+        Left(
+          (
+            StatusCode.Unauthorized,
+            ErrorResponse("invalid_ticket", "ticket unknown, expired, or already used")
+          )
         )
   }
 

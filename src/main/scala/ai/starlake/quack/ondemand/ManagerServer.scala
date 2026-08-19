@@ -119,6 +119,10 @@ final class ManagerServer(
       path == "/api/auth/oidc/start" || path == "/api/auth/oidc/callback" ||
       path == "/api/auth/oidc/logout" ||
       path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
+      // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
+      // Public even when the integration is off -- the route is unmounted in that case, so
+      // this only ever matters when `config.slIntegrationOn`.
+      path == "/api/auth/sso/redeem" ||
       modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
@@ -136,7 +140,11 @@ final class ManagerServer(
       // not: the handlers scope every call to the session's own user id, so
       // there is nothing here a regular user could reach beyond its own tokens.
       path == "/api/auth/pat/create" || path == "/api/auth/pat/list" ||
-      path == "/api/auth/pat/revoke"
+      path == "/api/auth/pat/revoke" ||
+      // Starlake SSO ticket mint: any valid session may hand its own grant to
+      // Starlake, admin or not -- the minted grant mirrors the session's own
+      // admin-ness, it grants nothing new.
+      path == "/api/auth/sso/ticket"
 
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token, a live personal access token (admitted with exactly its owner's scope, admin or
@@ -511,6 +519,17 @@ final class ManagerServer(
       }
     )
 
+    // Starlake SSO handoff. Mounted only when the integration is effectively on (SL_ENABLED=true
+    // AND SL_URL non-empty) -- see ManagementAuthConfig.slIntegrationOn. With the integration off
+    // (the default), these routes are absent entirely: not 404-from-router, unrouted.
+    val ssoEndpoints: List[ServerEndpoint[Any, IO]] =
+      if cfg.auth.management.slIntegrationOn then
+        List[ServerEndpoint[Any, IO]](
+          AuthEndpoints.ssoTicket.serverLogic(token => auth.ssoTicket(token)),
+          AuthEndpoints.ssoRedeem.serverLogic(req => auth.ssoRedeem(req))
+        )
+      else Nil
+
     // Mounted only when a handler is wired (Main always wires one). Session-only by
     // construction: the handler refuses a PAT presented as the credential, so these
     // routes cannot be driven by the very tokens they manage.
@@ -752,7 +771,10 @@ final class ManagerServer(
                 if cfg.auth.management.identitySource.trim.equalsIgnoreCase("oidc") then
                   issuerHost(cfg.auth.management.oidc.issuerUrl)
                 else "",
-              telemetryEnabled = serverConfig.telemetryEnabled
+              telemetryEnabled = serverConfig.telemetryEnabled,
+              starlakeUrl = Option.when(cfg.auth.management.slIntegrationOn)(
+                cfg.auth.management.slUrl
+              )
             )
           )
         )
@@ -766,7 +788,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

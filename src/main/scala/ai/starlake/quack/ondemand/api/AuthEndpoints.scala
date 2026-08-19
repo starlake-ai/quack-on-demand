@@ -211,3 +211,34 @@ object AuthEndpoints:
       .in(header[Option[String]]("X-Forwarded-Proto"))
       .out(htmlBodyUtf8)
       .out(setCookie("qod_sqltoken_state"))
+
+  // Starlake SSO handoff. Mounted only when `config.slIntegrationOn` (see ManagerServer).
+  //
+  // ssoTicket: session-authed (authToken reads header OR cookie); a logged-in QoD user mints a
+  // single-use ticket carrying their session grant. Non-admin sessions may call this too (see
+  // ManagerServer.isProfileApi) -- Starlake mirrors whatever admin-ness the QoD session already
+  // has, it doesn't grant anything new.
+  val ssoTicket: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    SsoTicketResponse,
+    Any
+  ] =
+    base.post
+      .in("auth" / "sso" / "ticket")
+      .in(authToken)
+      .out(jsonBody[SsoTicketResponse])
+
+  // ssoRedeem: public -- deliberately reads no X-API-Key/cookie. The ticket itself is the
+  // credential, single-use and 128-bit random with a short TTL (see SsoTicketStore); Starlake
+  // calls this server-to-server to exchange it for the caller's QoD session token.
+  val ssoRedeem: PublicEndpoint[
+    SsoRedeemRequest,
+    (sttp.model.StatusCode, ErrorResponse),
+    SsoRedeemResponse,
+    Any
+  ] =
+    base.post
+      .in("auth" / "sso" / "redeem")
+      .in(jsonBody[SsoRedeemRequest])
+      .out(jsonBody[SsoRedeemResponse])

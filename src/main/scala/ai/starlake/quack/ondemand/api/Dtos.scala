@@ -218,7 +218,10 @@ final case class ClientConfigResponse(
     ssoProviderName: String = "",
     // True iff telemetry.store != none; the UI uses this to show or hide
     // the audit-log page.
-    telemetryEnabled: Boolean = true
+    telemetryEnabled: Boolean = true,
+    // Starlake base URL when the SSO integration is on (SL_ENABLED=true and SL_URL
+    // non-empty); None otherwise. The UI renders the Starlake menu link only when set.
+    starlakeUrl: Option[String] = None
 )
 
 /** One row of the admin UI Config page: a single scalar from `application.conf` with its env-var
@@ -496,6 +499,20 @@ final case class AuthModeResponse(
     mode: String,
     // Cosmetic provider label (issuer host for a tenant, manager-wide provider for system).
     ssoProviderName: String = ""
+)
+
+// ----- Starlake SSO handoff -----
+// A logged-in QoD session mints a single-use ticket (POST .../sso/ticket, session-authed);
+// Starlake redeems it server-to-server (POST .../sso/redeem, public -- the ticket is the
+// credential) to obtain the caller's QoD session token without ever seeing the caller's
+// password. See ai.starlake.quack.ondemand.api.SsoTicketStore.
+final case class SsoTicketResponse(ticket: String)
+final case class SsoRedeemRequest(ticket: String)
+final case class SsoRedeemResponse(
+    token: String,
+    username: String,
+    tenant: Option[String],
+    admin: Boolean
 )
 
 // ----- Personal access tokens -----
@@ -1199,6 +1216,10 @@ object Dtos:
   given Codec[LoginResponse]         = ConfiguredCodec.derived
   given Codec[WhoamiResponse]        = ConfiguredCodec.derived
   given Codec[AuthModeResponse]      = ConfiguredCodec.derived
+
+  given Codec[SsoTicketResponse] = deriveCodec
+  given Codec[SsoRedeemRequest]  = deriveCodec
+  given Codec[SsoRedeemResponse] = deriveCodec
 
   // Personal access tokens. ConfiguredCodec throughout so a body omitting an
   // optional field (`expiresAt`) still decodes against the defaults.

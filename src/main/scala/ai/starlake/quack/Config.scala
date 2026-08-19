@@ -165,8 +165,27 @@ final case class ManagementAuthConfig(
         "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
     )
     publicBaseUrl: String = "",
-    oidc: ManagementOidcConfig = ManagementOidcConfig()
-)
+    oidc: ManagementOidcConfig = ManagementOidcConfig(),
+    @field @ConfigField(
+      envVar = "SL_ENABLED",
+      description =
+        "Enable the Starlake SSO integration (menu link, ticket endpoints, logout callback)"
+    )
+    slEnabled: Boolean = false,
+    @field @ConfigField(
+      envVar = "SL_URL",
+      description =
+        "Starlake base URL for the SSO handoff and logout callback, e.g. " +
+          "https://starlake.example.com"
+    )
+    slUrl: String = ""
+):
+  /** Effective enablement: `SL_ENABLED` alone is not enough to turn the integration on -- an
+    * empty `SL_URL` would mean redirecting the browser nowhere. Everything that gates the SSO
+    * surface (endpoint mounting, the client-config flag, the menu link) reads this, never
+    * `slEnabled` directly.
+    */
+  def slIntegrationOn: Boolean = slEnabled && slUrl.nonEmpty
 
 /** Phase 2 account lockout. Off by default so existing deployments boot unchanged. Enabling it
   * without a working SMTP relay would strand a locked-out user with no way back in -- Main's boot
