@@ -626,12 +626,17 @@ object Main extends IOApp with LazyLogging:
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
     val historyApiHandlers = new ai.starlake.quack.ondemand.api.HistoryHandlers(telemetryStore)
     val usageHandlers      = new ai.starlake.quack.ondemand.api.UsageHandlers(telemetryStore)
+    // One composed bearer lookup (session JWT first, then PAT) shared by every
+    // handler that needs the caller's identity, not just its scope.
+    val bearerSessionOf
+        : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
+      t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t))
     // Self-service surface for non-admin sessions; scopes strictly to the
     // session's own (tenant, username), so it takes no tenant/user input.
     val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
       // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
       // same self-scoped profile a login session would.
-      t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t)),
+      bearerSessionOf,
       telemetryStore,
       stmtHistory,
       id => sup.getTenantById(id)
@@ -844,7 +849,8 @@ object Main extends IOApp with LazyLogging:
             throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
 
-      val userHandlers       = new UserHandlers(sup, userStore, audit = auditRecorder)
+      val userHandlers =
+        new UserHandlers(sup, userStore, audit = auditRecorder, sessionOf = bearerSessionOf)
       val roleHandlers       = new RoleHandlers(sup, userHandlers, audit = auditRecorder)
       val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
       val membershipHandlers = new MembershipHandlers(sup, userHandlers, audit = auditRecorder)

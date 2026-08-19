@@ -76,6 +76,7 @@ def create(
         "role": "--role",
         "mustChangePassword": "--must-change-password",
         "email": "--email",
+        "enabled": "--enabled",
     },
 )
 def update(
@@ -95,6 +96,12 @@ def update(
         help="Omit = unchanged; empty string clears. "
         "Derived from and locked to the username when the username is itself in email format.",
     ),
+    enabled: bool = typer.Option(
+        None,
+        "--enabled/--no-enabled",
+        help="Omit = unchanged. --no-enabled locks the account (sign-in refused, "
+        "tokens stop working); --enabled unlocks.",
+    ),
 ):
     body: dict = {"id": user_id}
     if tenant is not None:
@@ -107,6 +114,8 @@ def update(
         body["mustChangePassword"] = must_change_password
     if email is not None:
         body["email"] = email
+    if enabled is not None:
+        body["enabled"] = enabled
     call(ctx, "POST", "/api/user/update", body=body)
 
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Admin user lock.** The edit-user panel (and `qod user update --no-enabled` / the
+  `enabled` field on `user/update`) can lock any account: sign-in is refused, tokens
+  stop working, and only an admin can unlock. A superuser may lock any user, a tenant
+  admin only their own tenant's users; locking yourself and locking the last enabled
+  superuser are refused, and `user/delete` now carries the same two guards, so a
+  deployment can never lock or delete itself out entirely. Note: a manager restart
+  re-creates a DELETED seeded admin but does NOT unlock a LOCKED one; recovery from a
+  lock is another admin, the static API key, or SQL. Any lock/unlock write also resets
+  the account-lockout counters, like every other admin write to a user row.
+
 ## 0.6.6
 
 _Released 2026-08-18._

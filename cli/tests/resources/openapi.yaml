@@ -7507,6 +7507,8 @@ components:
           type: boolean
         email:
           type: string
+        enabled:
+          type: boolean
     WhoamiResponse:
       title: WhoamiResponse
       type: object

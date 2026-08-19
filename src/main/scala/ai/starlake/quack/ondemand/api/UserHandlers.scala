@@ -27,7 +27,11 @@ import java.time.format.DateTimeFormatter
 final class UserHandlers(
     sup: PoolSupervisor,
     userStore: UserStore,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    // Composed bearer lookup (session JWT or PAT), for the self-lock guard.
+    // The default resolves nothing: a static-key caller has no identity and
+    // skips the self-check by construction.
+    sessionOf: String => Option[SessionTokenStore.Session] = _ => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -51,7 +55,7 @@ final class UserHandlers(
       tenant = u.tenant.map(tid => tenantNameForId.getOrElse(tid, tid)),
       username = u.username,
       role = u.role,
-      enabled = true,
+      enabled = u.enabled,
       roles = roles,
       groups = groups,
       poolGrants = grants,
@@ -152,6 +156,58 @@ final class UserHandlers(
                   Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
           }
 
+  // ---------- self + last-superuser guards (shared by update-lock and delete) ----------
+
+  /** The caller's own `qodstate_user` row ids, resolved from the session identity.
+    *
+    * Identity is (scope, username), never `profile.tenant` alone: a superuser session's
+    * `profile.tenant` mirrors the REQUESTED login scope, and an OIDC session's is always None, so
+    * the row tenant must come from the scope. A non-superuser without a profile tenant may manage
+    * several tenants, and usernames are unique only per tenant, so the caller can be ambiguous
+    * across their scope: every candidate row counts as "self" here, because for a destructive guard
+    * refusing a possible-self is the safe direction.
+    */
+  private def callerRowIds(apiKey: Option[String]): Set[String] =
+    apiKey
+      .flatMap(sessionOf)
+      .map { s =>
+        val tenants: Set[Option[String]] =
+          if s.scope.superuser then Set(None)
+          else
+            s.profile.tenant match
+              case Some(t) => Set(Some(t))
+              case None    => s.scope.manageableTenants.map(Some(_))
+        tenants.flatMap(t => sup.findUser(t, s.profile.username)).map(_.id)
+      }
+      .getOrElse(Set.empty)
+
+  /** Refuses removing the caller's own account, or the last enabled superuser, from the management
+    * plane. Self first (the clearer message when both would apply); the floor is
+    * identity-independent, so the static key and a removed admin's still-live session are covered.
+    * Both answers are 400.
+    *
+    * NOTE (HA): the floor's count-then-write is not atomic across replicas; two concurrent admin
+    * requests can each observe two enabled superusers and both pass, reaching zero. Narrow,
+    * admin-only, recoverable via the static key; a conditional UPDATE or per-guard advisory lock is
+    * on the HA hardening backlog.
+    */
+  private def selfAndFloorGuard(
+      apiKey: Option[String],
+      targetId: String,
+      selfError: ErrorResponse,
+      floorMessage: String
+  ): Option[(StatusCode, ErrorResponse)] =
+    if callerRowIds(apiKey).contains(targetId) then Some((StatusCode.BadRequest, selfError))
+    else
+      sup.findUserById(targetId) match
+        case Some(t) if t.tenant.isEmpty && t.role.equalsIgnoreCase("admin") && t.enabled =>
+          val enabledSuperusers =
+            sup.listSuperusers().count(x => x.role.equalsIgnoreCase("admin") && x.enabled)
+          if enabledSuperusers <= 1 then
+            Some((StatusCode.BadRequest, ErrorResponse("last_superuser", floorMessage)))
+          else None
+        case _ => None
+
   // ---------- /user/update ----------
 
   def updateUser(req: UserUpdateRequest, apiKey: Option[String])(
@@ -169,43 +225,73 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        // Map the wire DTO's single-level Option onto the store's two-level shape:
-        // omit (None) = unchanged, empty string = clear to NULL, non-empty = set.
-        val email: Option[Option[String]] = req.email.map(e => if e.isEmpty then None else Some(e))
-        sup
-          .updateUserPassword(
-            req.id,
-            req.password,
-            req.role,
-            userStore,
-            mustChangePassword = req.mustChangePassword,
-            email = email
-          )
-          .map {
-            case Right(u) =>
-              // NEVER include password in detail.
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.UserUpdate,
-                "ok",
-                tenant = u.tenant,
-                target = Some(u.username)
+        // Lock guardrails: both fire only on an explicit lock request. Order:
+        // self first (the clearer message when both would apply), then the
+        // last-enabled-superuser floor, which is identity-independent so the
+        // static key and a locked superuser's still-live session are covered.
+        val lockGuard: Option[(StatusCode, ErrorResponse)] =
+          if !req.enabled.contains(false) then None
+          else
+            selfAndFloorGuard(
+              apiKey,
+              req.id,
+              ErrorResponse("cannot_lock_self", "you cannot lock your own account"),
+              "cannot lock the last enabled superuser; enable another superuser first"
+            )
+        lockGuard match
+          case Some(err) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.UserUpdate,
+              "denied",
+              tenant = userTenant.flatten,
+              detail = Map("reason" -> err._2.error)
+            )
+            IO.pure(Left(err))
+          case None =>
+            // Map the wire DTO's single-level Option onto the store's two-level shape:
+            // omit (None) = unchanged, empty string = clear to NULL, non-empty = set.
+            val email: Option[Option[String]] =
+              req.email.map(e => if e.isEmpty then None else Some(e))
+            sup
+              .updateUserPassword(
+                req.id,
+                req.password,
+                req.role,
+                userStore,
+                mustChangePassword = req.mustChangePassword,
+                email = email,
+                enabled = req.enabled
               )
-              toResponseFor(u.id) match
-                case Some(r) => Right(r)
-                case None    =>
-                  Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
-            case Left(err) =>
-              err match
-                case SupervisorError.InvalidEmail(m) =>
-                  Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
-                case _ =>
-                  val code = err match
-                    case SupervisorError.NotFound(_) => StatusCode.NotFound
-                    case _                           => StatusCode.BadRequest
-                  Left((code, ErrorResponse("invalid_user", err.message)))
-          }
+              .map {
+                case Right(u) =>
+                  // NEVER include password in detail.
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.UserUpdate,
+                    "ok",
+                    tenant = u.tenant,
+                    target = Some(u.username),
+                    detail = req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty)
+                  )
+                  toResponseFor(u.id) match
+                    case Some(r) => Right(r)
+                    case None    =>
+                      Left(
+                        (StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found"))
+                      )
+                case Left(err) =>
+                  err match
+                    case SupervisorError.InvalidEmail(m) =>
+                      Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
+                    case _ =>
+                      val code = err match
+                        case SupervisorError.NotFound(_) => StatusCode.NotFound
+                        case _                           => StatusCode.BadRequest
+                      Left((code, ErrorResponse("invalid_user", err.message)))
+              }
 
   // ---------- /user/delete ----------
 
@@ -225,19 +311,47 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.deleteUser(req.id).map {
-          case Right(_) =>
+        // Same guards as the lock: delete would otherwise be the loophole that
+        // empties the enabled-superuser set the lock floor protects (a deleted
+        // seeded admin IS re-created at restart, unlike a locked one, but the
+        // deployment still loses its management plane until then).
+        selfAndFloorGuard(
+          apiKey,
+          req.id,
+          ErrorResponse("cannot_delete_self", "you cannot delete your own account"),
+          "cannot delete the last enabled superuser; enable another superuser first"
+        ) match
+          case Some(err) =>
             audit.rest(
               apiKey,
               "control-plane",
               AuditActions.UserDelete,
-              "ok",
+              "denied",
               tenant = userTenant.flatten,
-              target = usernameLookup
+              detail = Map("reason" -> err._2.error)
             )
-            Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
-        }
+            IO.pure(Left(err))
+          case None => deleteAdmitted(req, apiKey, userTenant, usernameLookup)
+
+  private def deleteAdmitted(
+      req: UserDeleteRequest,
+      apiKey: Option[String],
+      userTenant: Option[Option[String]],
+      usernameLookup: Option[String]
+  ): Out[Unit] =
+    sup.deleteUser(req.id).map {
+      case Right(_) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.UserDelete,
+          "ok",
+          tenant = userTenant.flatten,
+          target = usernameLookup
+        )
+        Right(())
+      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+    }
 
   // ---------- /user/list ----------
 

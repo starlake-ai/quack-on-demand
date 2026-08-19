@@ -671,7 +671,16 @@ final case class UserUpdateRequest(
     // Some(true) without a password is a 400.
     mustChangePassword: Option[Boolean] = None,
     // Omit (None) = unchanged; empty string = clear to no email; non-empty = set.
-    email: Option[String] = None
+    email: Option[String] = None,
+    // Omit (None) = unchanged. false locks the account: sign-in refused (as
+    // invalid_credentials), FlightSQL handshake refused, PATs dead at use and
+    // mint. true unlocks. "Locked" in the UI is exactly this flag inverted.
+    // Side effects of any write here: the row rewrite goes through the shared
+    // upsert, which resets the account-lockout counters (failed_attempts,
+    // locked_at) like every other admin write to the row. And unlike a DELETED
+    // seeded admin (re-created at restart), a LOCKED one stays locked across
+    // restarts: recovery is another admin, the static API key, or SQL.
+    enabled: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(
