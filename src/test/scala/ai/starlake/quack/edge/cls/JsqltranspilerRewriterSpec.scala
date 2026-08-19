@@ -9,84 +9,94 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
   private val rw = new JsqltranspilerRewriter
 
   private val maskEmail = RoleColumnPolicy(
-    id            = "cp-1",
-    roleId        = "r-1",
-    catalogName   = "*",
-    schemaName    = "tpch1",
-    tableName     = "customer",
-    columnName    = "c_email",
-    action        = "mask",
-    transformSql  = Some("'***'")
+    id = "cp-1",
+    roleId = "r-1",
+    catalogName = "*",
+    schemaName = "tpch1",
+    tableName = "customer",
+    columnName = "c_email",
+    action = "mask",
+    transformSql = Some("'***'")
   )
 
   private val schema = Map("customer" -> List("c_id", "c_email", "c_phone"))
 
   "rewrite" should "mask a directly-projected covered column" in {
     val out = rw.rewrite(
-      sql            = "SELECT c_email FROM customer",
-      schema         = schema,
-      policies       = List(maskEmail),
+      sql = "SELECT c_email FROM customer",
+      schema = schema,
+      policies = List(maskEmail),
       defaultCatalog = Some("acme_tpch"),
-      defaultSchema  = Some("tpch1")
+      defaultSchema = Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside a function call in the projection" in {
     val out = rw.rewrite(
       "SELECT length(c_email) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside CASE WHEN arms" in {
     val out = rw.rewrite(
       "SELECT CASE WHEN c_id > 0 THEN c_email ELSE 'fallback' END FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside CAST" in {
     val out = rw.rewrite(
       "SELECT CAST(c_email AS VARCHAR) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside IN list" in {
     val out = rw.rewrite(
       "SELECT c_id FROM customer WHERE c_email IN ('a@x', 'b@x')",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside BETWEEN" in {
     val out = rw.rewrite(
       "SELECT c_id FROM customer WHERE c_email BETWEEN 'a' AND 'z'",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside EXTRACT" in {
@@ -94,56 +104,66 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     // smoke test that the visitor descends into the inner expression.
     val out = rw.rewrite(
       "SELECT EXTRACT(YEAR FROM c_email) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside window PARTITION BY" in {
     val out = rw.rewrite(
       "SELECT row_number() OVER (PARTITION BY c_email) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside window ORDER BY" in {
     val out = rw.rewrite(
       "SELECT row_number() OVER (ORDER BY c_email) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside LIKE pattern" in {
     val out = rw.rewrite(
       "SELECT c_id FROM customer WHERE c_email LIKE '%@acme.com'",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "mask c_email inside row constructor" in {
     val out = rw.rewrite(
       "SELECT (c_id, c_email) FROM customer",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "expand multi-table SELECT * and mask per-table" in {
@@ -153,13 +173,15 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     )
     val out = rw.rewrite(
       "SELECT * FROM customer c JOIN orders o ON c.c_id = o.o_customer",
-      multi, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      multi,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
       case RewriteOutcome.Rewritten(sql) =>
-        sql should include ("'***'")
-        sql.toLowerCase should include ("o_id")
+        sql should include("'***'")
+        sql.toLowerCase should include("o_id")
       case other => fail(s"expected Rewritten, got $other")
   }
 
@@ -170,32 +192,36 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     )
     val out = rw.rewrite(
       "SELECT c_email FROM customer JOIN orders ON c_id = o_customer",
-      multi, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      multi,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "resolve CTE column c_email to the base table" in {
     val out = rw.rewrite(
       "WITH x AS (SELECT c_email FROM customer) SELECT c_email FROM x",
-      schema, List(maskEmail),
-      Some("acme_tpch"), Some("tpch1")
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
-      case RewriteOutcome.Rewritten(sql) => sql should include ("'***'")
-      case other                          => fail(s"expected Rewritten, got $other")
+      case RewriteOutcome.Rewritten(sql) => sql should include("'***'")
+      case other                         => fail(s"expected Rewritten, got $other")
   }
 
   it should "deny SELECT against an unknown table in STRICT mode" in {
     val out = rw.rewrite(
-      sql            = "SELECT c_email FROM unknown_table",
-      schema         = Map.empty, // resolver has no entry for unknown_table
-      policies       = List(maskEmail),
+      sql = "SELECT c_email FROM unknown_table",
+      schema = Map.empty, // resolver has no entry for unknown_table
+      policies = List(maskEmail),
       defaultCatalog = Some("acme_tpch"),
-      defaultSchema  = Some("tpch1"),
+      defaultSchema = Some("tpch1"),
       unresolvedMode = UnresolvedMode.Deny
     )
     out match
@@ -205,11 +231,11 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
 
   it should "pass through SELECT against an unknown table in LENIENT mode" in {
     val out = rw.rewrite(
-      sql            = "SELECT c_email FROM unknown_table",
-      schema         = Map.empty,
-      policies       = List(maskEmail),
+      sql = "SELECT c_email FROM unknown_table",
+      schema = Map.empty,
+      policies = List(maskEmail),
       defaultCatalog = Some("acme_tpch"),
-      defaultSchema  = Some("tpch1"),
+      defaultSchema = Some("tpch1"),
       unresolvedMode = UnresolvedMode.Pass
     )
     out match
@@ -219,16 +245,93 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
 
   it should "not mask a same-named column on a table the policy doesn't target" in {
     val multi = Map("other_table" -> List("c_id", "c_email"))
-    val out = rw.rewrite(
+    val out   = rw.rewrite(
       "SELECT c_email FROM other_table",
       multi,
       // Policy targets customer.c_email, not other_table.c_email
       List(maskEmail.copy(tableName = "customer")),
-      Some("acme_tpch"), Some("tpch1")
+      Some("acme_tpch"),
+      Some("tpch1")
     )
     out match
       case RewriteOutcome.Passthrough    => succeed
       case RewriteOutcome.Rewritten(sql) =>
-        fail(s"v1 over-mask regression: policy on customer.c_email leaked to other_table.c_email: $sql")
-      case other                          => fail(s"expected Passthrough, got $other")
+        fail(
+          s"v1 over-mask regression: policy on customer.c_email leaked to other_table.c_email: $sql"
+        )
+      case other => fail(s"expected Passthrough, got $other")
+  }
+  // ------------------------------------------------------------------
+  // SECURITY-FOLLOWUPS item 1: outer-scope aliases inside correlated subqueries
+  // ------------------------------------------------------------------
+
+  private val maskPhone = maskEmail.copy(id = "cp-2", columnName = "c_phone")
+
+  it should "mask an outer-aliased covered column inside a correlated EXISTS subquery" in {
+    val out = rw.rewrite(
+      "SELECT c.c_id FROM customer c WHERE EXISTS " +
+        "(SELECT 1 FROM customer c2 WHERE c2.c_id = c.c_id AND c.c_phone = '555')",
+      schema,
+      List(maskPhone),
+      Some("acme_tpch"),
+      Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) =>
+        sql should include("'***'")
+        // The outer-alias comparison against the true value must be gone.
+        (sql should not).include("c.c_phone = '555'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "mask an outer-aliased covered column inside a correlated IN subquery" in {
+    val multi = Map(
+      "customer" -> List("c_id", "c_email", "c_phone"),
+      "orders"   -> List("o_id", "o_cid", "o_note")
+    )
+    val out = rw.rewrite(
+      "SELECT c.c_id FROM customer c WHERE c.c_id IN " +
+        "(SELECT o_cid FROM orders WHERE orders.o_note = c.c_phone)",
+      multi,
+      List(maskPhone),
+      Some("acme_tpch"),
+      Some("tpch1")
+    )
+    out match
+      case RewriteOutcome.Rewritten(sql) =>
+        sql should include("'***'")
+        (sql should not).include("c.c_phone")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  // ------------------------------------------------------------------
+  // SECURITY-FOLLOWUPS item 2: unresolved tables nested in subqueries fail closed
+  // ------------------------------------------------------------------
+
+  it should "deny an unresolvable table nested inside a subquery in STRICT mode" in {
+    val out = rw.rewrite(
+      "SELECT 1 FROM information_schema.tables WHERE EXISTS (SELECT 1 FROM unknown_table)",
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1"),
+      UnresolvedMode.Deny
+    )
+    out match
+      case RewriteOutcome.Denied(_) => succeed
+      case other                    => fail(s"expected Denied, got $other")
+  }
+
+  it should "pass through an unresolvable subquery-nested table in LENIENT mode" in {
+    val out = rw.rewrite(
+      "SELECT 1 FROM information_schema.tables WHERE EXISTS (SELECT 1 FROM unknown_table)",
+      schema,
+      List(maskEmail),
+      Some("acme_tpch"),
+      Some("tpch1"),
+      UnresolvedMode.Pass
+    )
+    out match
+      case RewriteOutcome.Denied(reason) => fail(s"LENIENT must not deny: $reason")
+      case _                             => succeed
   }

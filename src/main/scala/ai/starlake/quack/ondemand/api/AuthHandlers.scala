@@ -719,7 +719,10 @@ final class AuthHandlers(
           username = session.profile.username,
           tenant = session.profile.tenant,
           // Same derivation as SessionTokenStore.isAdmin: role, not scope.superuser.
-          admin = session.profile.role.equalsIgnoreCase("admin")
+          admin = session.profile.role.equalsIgnoreCase("admin"),
+          // Distinct from `admin`: true only for a system-realm superuser, so the
+          // redeemer (Starlake) can tell a tenant-admin apart from a platform admin.
+          superuser = session.scope.superuser
         )
         val ticket = ssoTickets.mint(grant)
         // Audited under the acting session's identity, mirroring PAT create. The
@@ -761,7 +764,15 @@ final class AuthHandlers(
           "ok",
           tenant = grant.tenant
         )
-        Right(SsoRedeemResponse(grant.sessionToken, grant.username, grant.tenant, grant.admin))
+        Right(
+          SsoRedeemResponse(
+            grant.sessionToken,
+            grant.username,
+            grant.tenant,
+            grant.admin,
+            grant.superuser
+          )
+        )
       case None =>
         // No identity is recoverable from an unknown/expired/already-used ticket, so
         // this is audited anonymously -- deliberately unconditional (no rate limit):

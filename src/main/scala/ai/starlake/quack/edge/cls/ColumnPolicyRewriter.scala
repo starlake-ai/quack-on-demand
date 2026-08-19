@@ -90,73 +90,54 @@ final class ColumnPolicyRewriter(
   /** Pre-parse to enumerate FROM-item tables and fetch their column lists from the catalog.
     * Failures (unparseable SQL, missing catalog entry) silently omit the table - the resolver's
     * `unresolvedMode` then decides what to do.
+    *
+    * System-schema tables (information_schema, pg_catalog) are skipped: the tenant catalog only
+    * knows user tables (it returns Nil for them, which used to trip the STRICT resolver into a
+    * fail-closed deny of harmless metadata queries), and this map's bare-table-name keys land under
+    * the session's CURRENT_SCHEMA anyway, so they could never match a schema-qualified
+    * `information_schema.x` reference. Instead the inner [[JsqltranspilerRewriter]] seeds the
+    * resolver with DuckDB's fixed system-catalog shapes from [[SystemSchemaColumns]] under their
+    * real schema names. A system table not in that static set stays unresolved and keeps failing
+    * closed (worst case: a denied metadata query, never a leak).
     */
   private def buildSchema(sql: String, ctx: SchemaContext): IO[Map[String, List[String]]] =
     Try(CCJSqlParserUtil.parse(sql)) match
       case Failure(_)            => IO.pure(Map.empty)
       case Success(stmt: Select) =>
-        val tables = schemaKeys(collectTables(stmt, ctx))
+        val tables = collectTables(stmt, ctx)
         tables.toList
           .traverse { case (key, (cat, sch, tab)) =>
-            catalog.columnsOf(cat, sch, tab).map(cols => key -> cols)
+            if SystemSchemaColumns.isSystemSchema(sch) then
+              IO.pure(None) // resolved via SystemSchemaColumns inside the inner rewriter
+            else catalog.columnsOf(cat, sch, tab).map(cols => Some(key -> cols))
           }
-          .map(_.toMap)
+          .map(_.flatten.toMap)
       case Success(_) => IO.pure(Map.empty)
 
+  /** Every physical table referenced ANYWHERE in the statement, keyed by its raw (bare) name.
+    * [[net.sf.jsqlparser.util.TablesNamesFinder]] walks FROM items, joins, CTE bodies, set-op arms
+    * AND expression subqueries (EXISTS / IN / ANY / scalar) while excluding CTE names - the
+    * hand-rolled FROM-walker this replaces missed expression-nested subqueries, which left their
+    * tables out of the schema map entirely (the root of the subquery fail-open gap: a table the map
+    * never mentions can neither resolve nor deny).
+    */
   private def collectTables(
       stmt: Select,
       ctx: SchemaContext
   ): Map[String, (String, String, String)] =
-    val acc = scala.collection.mutable.Map.empty[String, (String, String, String)]
-    def visitSel(sel: Select): Unit = sel match
-      case ps: PlainSelect =>
-        Option(ps.getFromItem).foreach {
-          case t: net.sf.jsqlparser.schema.Table => indexTable(t, ctx, acc)
-          case sub: ParenthesedSelect            => visitSel(sub.getSelect)
-          case _                                 => ()
-        }
-        Option(ps.getJoins).foreach(_.asScala.foreach { j =>
-          Option(j.getFromItem).foreach {
-            case t: net.sf.jsqlparser.schema.Table => indexTable(t, ctx, acc)
-            case sub: ParenthesedSelect            => visitSel(sub.getSelect)
-            case _                                 => ()
-          }
-        })
-      case ps: ParenthesedSelect => visitSel(ps.getSelect)
-      case sol: SetOperationList =>
-        Option(sol.getSelects).foreach(_.asScala.foreach(visitSel))
-      case _ => ()
-    Option(stmt.getWithItemsList).foreach(_.asScala.foreach { wi =>
-      Option(wi.getParenthesedStatement).foreach {
-        case ps: ParenthesedSelect => visitSel(ps.getSelect)
-        case _                     => ()
-      }
-    })
-    visitSel(stmt)
-    acc.toMap
-
-  /** Key the schema map by the raw table name AND by each alias pointing at it, so the resolver
-    * accepts both `SELECT * FROM customer` and `SELECT c.* FROM customer c`. JSQLColumResolver uses
-    * the row's first element as the table-name match key.
-    */
-  private def schemaKeys(
-      tables: Map[String, (String, String, String)]
-  ): Map[String, (String, String, String)] =
-    // We seed the map with raw table names so the resolver's expansion of `c.*` finds
-    // the column list under the base table name. Alias-keyed entries are dropped because
-    // they would duplicate the same column list under a key that is just an alias, and the
-    // resolver only matches by table identifier.
-    tables.values.map { case (cat, sch, tab) => tab -> (cat, sch, tab) }.toMap
-
-  private def indexTable(
-      t: net.sf.jsqlparser.schema.Table,
-      ctx: SchemaContext,
-      acc: scala.collection.mutable.Map[String, (String, String, String)]
-  ): Unit =
-    val rawName    = t.getName
-    val schemaName = Option(t.getSchemaName).getOrElse(ctx.defaultSchema.getOrElse(""))
-    val catalog    = Option(t.getDatabase)
-      .flatMap(d => Option(d.getDatabaseName))
-      .getOrElse(ctx.defaultDatabase.getOrElse(""))
-    val key = Option(t.getAlias).map(_.getName).getOrElse(rawName)
-    acc(key) = (catalog, schemaName, rawName)
+    val names =
+      Try {
+        val finder = new net.sf.jsqlparser.util.TablesNamesFinder()
+        finder.getTableList(stmt: net.sf.jsqlparser.statement.Statement).asScala.toList
+      }.getOrElse(Nil)
+    def unquote(s: String) = s.stripPrefix("\"").stripSuffix("\"")
+    names.flatMap { raw =>
+      raw.split('.').toList.map(unquote) match
+        case tab :: Nil =>
+          Some(tab -> (ctx.defaultDatabase.getOrElse(""), ctx.defaultSchema.getOrElse(""), tab))
+        case sch :: tab :: Nil =>
+          Some(tab -> (ctx.defaultDatabase.getOrElse(""), sch, tab))
+        case cat :: sch :: tab :: Nil =>
+          Some(tab -> (cat, sch, tab))
+        case _ => None
+    }.toMap

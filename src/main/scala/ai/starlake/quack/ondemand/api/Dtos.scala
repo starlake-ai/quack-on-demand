@@ -512,7 +512,8 @@ final case class SsoRedeemResponse(
     token: String,
     username: String,
     tenant: Option[String],
-    admin: Boolean
+    admin: Boolean,
+    superuser: Boolean
 )
 
 // ----- Personal access tokens -----
