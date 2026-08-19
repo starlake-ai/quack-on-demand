@@ -156,6 +156,58 @@ final class UserHandlers(
                   Left((StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
           }
 
+  // ---------- self + last-superuser guards (shared by update-lock and delete) ----------
+
+  /** The caller's own `qodstate_user` row ids, resolved from the session identity.
+    *
+    * Identity is (scope, username), never `profile.tenant` alone: a superuser session's
+    * `profile.tenant` mirrors the REQUESTED login scope, and an OIDC session's is always None, so
+    * the row tenant must come from the scope. A non-superuser without a profile tenant may manage
+    * several tenants, and usernames are unique only per tenant, so the caller can be ambiguous
+    * across their scope: every candidate row counts as "self" here, because for a destructive guard
+    * refusing a possible-self is the safe direction.
+    */
+  private def callerRowIds(apiKey: Option[String]): Set[String] =
+    apiKey
+      .flatMap(sessionOf)
+      .map { s =>
+        val tenants: Set[Option[String]] =
+          if s.scope.superuser then Set(None)
+          else
+            s.profile.tenant match
+              case Some(t) => Set(Some(t))
+              case None    => s.scope.manageableTenants.map(Some(_))
+        tenants.flatMap(t => sup.findUser(t, s.profile.username)).map(_.id)
+      }
+      .getOrElse(Set.empty)
+
+  /** Refuses removing the caller's own account, or the last enabled superuser, from the management
+    * plane. Self first (the clearer message when both would apply); the floor is
+    * identity-independent, so the static key and a removed admin's still-live session are covered.
+    * Both answers are 400.
+    *
+    * NOTE (HA): the floor's count-then-write is not atomic across replicas; two concurrent admin
+    * requests can each observe two enabled superusers and both pass, reaching zero. Narrow,
+    * admin-only, recoverable via the static key; a conditional UPDATE or per-guard advisory lock is
+    * on the HA hardening backlog.
+    */
+  private def selfAndFloorGuard(
+      apiKey: Option[String],
+      targetId: String,
+      selfError: ErrorResponse,
+      floorMessage: String
+  ): Option[(StatusCode, ErrorResponse)] =
+    if callerRowIds(apiKey).contains(targetId) then Some((StatusCode.BadRequest, selfError))
+    else
+      sup.findUserById(targetId) match
+        case Some(t) if t.tenant.isEmpty && t.role.equalsIgnoreCase("admin") && t.enabled =>
+          val enabledSuperusers =
+            sup.listSuperusers().count(x => x.role.equalsIgnoreCase("admin") && x.enabled)
+          if enabledSuperusers <= 1 then
+            Some((StatusCode.BadRequest, ErrorResponse("last_superuser", floorMessage)))
+          else None
+        case _ => None
+
   // ---------- /user/update ----------
 
   def updateUser(req: UserUpdateRequest, apiKey: Option[String])(
@@ -174,47 +226,18 @@ final class UserHandlers(
         IO.pure(Left(err))
       case None =>
         // Lock guardrails: both fire only on an explicit lock request. Order:
-        // self-lock first (the clearer message when both would apply), then the
+        // self first (the clearer message when both would apply), then the
         // last-enabled-superuser floor, which is identity-independent so the
         // static key and a locked superuser's still-live session are covered.
         val lockGuard: Option[(StatusCode, ErrorResponse)] =
           if !req.enabled.contains(false) then None
           else
-            val callerId = apiKey
-              .flatMap(sessionOf)
-              .flatMap { s =>
-                // profile.tenant mirrors the REQUESTED login scope; a superuser
-                // logging in through a tenant login still owns a tenant-NULL row,
-                // so key the lookup off the session's superuser bit instead.
-                val rowTenant = if s.scope.superuser then None else s.profile.tenant
-                sup.findUser(rowTenant, s.profile.username)
-              }
-              .map(_.id)
-            if callerId.contains(req.id) then
-              Some(
-                (
-                  StatusCode.BadRequest,
-                  ErrorResponse("cannot_lock_self", "you cannot lock your own account")
-                )
-              )
-            else
-              sup.findUserById(req.id) match
-                case Some(t) if t.tenant.isEmpty && t.role.equalsIgnoreCase("admin") && t.enabled =>
-                  val enabledSuperusers = sup
-                    .listUsers(None)
-                    .count(x => x.tenant.isEmpty && x.role.equalsIgnoreCase("admin") && x.enabled)
-                  if enabledSuperusers <= 1 then
-                    Some(
-                      (
-                        StatusCode.BadRequest,
-                        ErrorResponse(
-                          "last_superuser",
-                          "cannot lock the last enabled superuser; enable another superuser first"
-                        )
-                      )
-                    )
-                  else None
-                case _ => None
+            selfAndFloorGuard(
+              apiKey,
+              req.id,
+              ErrorResponse("cannot_lock_self", "you cannot lock your own account"),
+              "cannot lock the last enabled superuser; enable another superuser first"
+            )
         lockGuard match
           case Some(err) =>
             audit.rest(
@@ -288,19 +311,47 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        sup.deleteUser(req.id).map {
-          case Right(_) =>
+        // Same guards as the lock: delete would otherwise be the loophole that
+        // empties the enabled-superuser set the lock floor protects (a deleted
+        // seeded admin IS re-created at restart, unlike a locked one, but the
+        // deployment still loses its management plane until then).
+        selfAndFloorGuard(
+          apiKey,
+          req.id,
+          ErrorResponse("cannot_delete_self", "you cannot delete your own account"),
+          "cannot delete the last enabled superuser; enable another superuser first"
+        ) match
+          case Some(err) =>
             audit.rest(
               apiKey,
               "control-plane",
               AuditActions.UserDelete,
-              "ok",
+              "denied",
               tenant = userTenant.flatten,
-              target = usernameLookup
+              detail = Map("reason" -> err._2.error)
             )
-            Right(())
-          case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
-        }
+            IO.pure(Left(err))
+          case None => deleteAdmitted(req, apiKey, userTenant, usernameLookup)
+
+  private def deleteAdmitted(
+      req: UserDeleteRequest,
+      apiKey: Option[String],
+      userTenant: Option[Option[String]],
+      usernameLookup: Option[String]
+  ): Out[Unit] =
+    sup.deleteUser(req.id).map {
+      case Right(_) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.UserDelete,
+          "ok",
+          tenant = userTenant.flatten,
+          target = usernameLookup
+        )
+        Right(())
+      case Left(err) => Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+    }
 
   // ---------- /user/list ----------
 

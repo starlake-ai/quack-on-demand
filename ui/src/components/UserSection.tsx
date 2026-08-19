@@ -374,6 +374,7 @@ export default function UserSection({
               </p>
             )}
             <form onSubmit={handleCreate}>
+              {error && <p className="login-err">{error}</p>}
               <label>
                 Username
                 <input value={newUsername} onChange={ev => setNewUsername(ev.target.value)} required />

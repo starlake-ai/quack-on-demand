@@ -904,6 +904,10 @@ final class PoolSupervisor(
   def findUser(tenant: Option[String], username: String): Option[RbacUser] =
     store.findUser(tenant, username)
 
+  /** All tenant-NULL rows, for the last-enabled-superuser floor (cheaper than listUsers). */
+  def listSuperusers(): List[RbacUser] =
+    store.listSuperusers()
+
   def tenantForRole(roleId: String): Option[String] =
     rbacResolver.role(roleId).map(_.tenantId)
 
@@ -2235,31 +2239,47 @@ final class PoolSupervisor(
                 // move. The password branch above never writes `enabled`, so a lock
                 // rides this rewrite even when a rotation happened in the same request.
                 val needRewrite = enabled.nonEmpty || (password.isEmpty && effEmail.nonEmpty)
-                if needRewrite then
-                  store.getPasswordHash(u.tenant, u.username).foreach { hash =>
-                    store.upsertUserWithHash(
-                      u.tenant,
-                      u.username,
-                      hash,
-                      newRole,
-                      enabled = enabled.getOrElse(u.enabled),
-                      mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                      email = effEmail.getOrElse(u.email)
-                    )
-                  }
-                // upsertUserIdentity only writes (tenant, username, role) on conflict, so
-                // the flag/email/enabled just persisted above survive; carry them on the
-                // returned value.
-                val updated =
-                  u.copy(
-                    role = newRole,
-                    mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                    email = effEmail.getOrElse(u.email),
-                    enabled = enabled.getOrElse(u.enabled)
-                  )
-                store.upsertUserIdentity(updated)
-                invalidateEffectiveCache()
-                Right(updated)
+                val rewriteOk: Either[SupervisorError, Unit] =
+                  if !needRewrite then Right(())
+                  else
+                    store.getPasswordHash(u.tenant, u.username) match
+                      case Some(hash) =>
+                        store.upsertUserWithHash(
+                          u.tenant,
+                          u.username,
+                          hash,
+                          newRole,
+                          enabled = enabled.getOrElse(u.enabled),
+                          mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
+                          email = effEmail.getOrElse(u.email)
+                        )
+                        Right(())
+                      case None =>
+                        // A row with no stored hash cannot be rewritten without inventing
+                        // a credential. Refuse loudly rather than answering ok while
+                        // writing nothing; unreachable for API-created rows because
+                        // password_hash is NOT NULL, so this only ever names corruption.
+                        Left(
+                          SupervisorError.Internal(
+                            s"user ${u.username} has no stored password hash; update refused"
+                          )
+                        )
+                rewriteOk match
+                  case Left(err) => Left(err)
+                  case Right(()) =>
+                    // upsertUserIdentity only writes (tenant, username, role) on conflict,
+                    // so the flag/email/enabled just persisted above survive; carry them
+                    // on the returned value.
+                    val updated =
+                      u.copy(
+                        role = newRole,
+                        mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
+                        email = effEmail.getOrElse(u.email),
+                        enabled = enabled.getOrElse(u.enabled)
+                      )
+                    store.upsertUserIdentity(updated)
+                    invalidateEffectiveCache()
+                    Right(updated)
     }
   }
 
