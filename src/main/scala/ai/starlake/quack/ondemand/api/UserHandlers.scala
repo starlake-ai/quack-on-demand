@@ -27,7 +27,11 @@ import java.time.format.DateTimeFormatter
 final class UserHandlers(
     sup: PoolSupervisor,
     userStore: UserStore,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    // Composed bearer lookup (session JWT or PAT), for the self-lock guard.
+    // The default resolves nothing: a static-key caller has no identity and
+    // skips the self-check by construction.
+    sessionOf: String => Option[SessionTokenStore.Session] = _ => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -169,45 +173,96 @@ final class UserHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        // Map the wire DTO's single-level Option onto the store's two-level shape:
-        // omit (None) = unchanged, empty string = clear to NULL, non-empty = set.
-        val email: Option[Option[String]] = req.email.map(e => if e.isEmpty then None else Some(e))
-        sup
-          .updateUserPassword(
-            req.id,
-            req.password,
-            req.role,
-            userStore,
-            mustChangePassword = req.mustChangePassword,
-            email = email,
-            enabled = req.enabled
-          )
-          .map {
-            case Right(u) =>
-              // NEVER include password in detail.
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.UserUpdate,
-                "ok",
-                tenant = u.tenant,
-                target = Some(u.username),
-                detail = req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty)
+        // Lock guardrails: both fire only on an explicit lock request. Order:
+        // self-lock first (the clearer message when both would apply), then the
+        // last-enabled-superuser floor, which is identity-independent so the
+        // static key and a locked superuser's still-live session are covered.
+        val lockGuard: Option[(StatusCode, ErrorResponse)] =
+          if !req.enabled.contains(false) then None
+          else
+            val callerId = apiKey
+              .flatMap(sessionOf)
+              .flatMap(s => sup.findUser(s.profile.tenant, s.profile.username))
+              .map(_.id)
+            if callerId.contains(req.id) then
+              Some(
+                (
+                  StatusCode.BadRequest,
+                  ErrorResponse("cannot_lock_self", "you cannot lock your own account")
+                )
               )
-              toResponseFor(u.id) match
-                case Some(r) => Right(r)
-                case None    =>
-                  Left((StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found")))
-            case Left(err) =>
-              err match
-                case SupervisorError.InvalidEmail(m) =>
-                  Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
-                case _ =>
-                  val code = err match
-                    case SupervisorError.NotFound(_) => StatusCode.NotFound
-                    case _                           => StatusCode.BadRequest
-                  Left((code, ErrorResponse("invalid_user", err.message)))
-          }
+            else
+              sup.findUserById(req.id) match
+                case Some(t) if t.tenant.isEmpty && t.role.equalsIgnoreCase("admin") && t.enabled =>
+                  val enabledSuperusers = sup
+                    .listUsers(None)
+                    .count(x => x.tenant.isEmpty && x.role.equalsIgnoreCase("admin") && x.enabled)
+                  if enabledSuperusers <= 1 then
+                    Some(
+                      (
+                        StatusCode.BadRequest,
+                        ErrorResponse(
+                          "last_superuser",
+                          "cannot lock the last enabled superuser; enable another superuser first"
+                        )
+                      )
+                    )
+                  else None
+                case _ => None
+        lockGuard match
+          case Some(err) =>
+            audit.rest(
+              apiKey,
+              "control-plane",
+              AuditActions.UserUpdate,
+              "denied",
+              tenant = userTenant.flatten,
+              detail = Map("reason" -> err._2.error)
+            )
+            IO.pure(Left(err))
+          case None =>
+            // Map the wire DTO's single-level Option onto the store's two-level shape:
+            // omit (None) = unchanged, empty string = clear to NULL, non-empty = set.
+            val email: Option[Option[String]] =
+              req.email.map(e => if e.isEmpty then None else Some(e))
+            sup
+              .updateUserPassword(
+                req.id,
+                req.password,
+                req.role,
+                userStore,
+                mustChangePassword = req.mustChangePassword,
+                email = email,
+                enabled = req.enabled
+              )
+              .map {
+                case Right(u) =>
+                  // NEVER include password in detail.
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.UserUpdate,
+                    "ok",
+                    tenant = u.tenant,
+                    target = Some(u.username),
+                    detail = req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty)
+                  )
+                  toResponseFor(u.id) match
+                    case Some(r) => Right(r)
+                    case None    =>
+                      Left(
+                        (StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found"))
+                      )
+                case Left(err) =>
+                  err match
+                    case SupervisorError.InvalidEmail(m) =>
+                      Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
+                    case _ =>
+                      val code = err match
+                        case SupervisorError.NotFound(_) => StatusCode.NotFound
+                        case _                           => StatusCode.BadRequest
+                      Left((code, ErrorResponse("invalid_user", err.message)))
+              }
 
   // ---------- /user/delete ----------
 

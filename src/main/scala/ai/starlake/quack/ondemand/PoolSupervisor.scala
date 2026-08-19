@@ -896,6 +896,14 @@ final class PoolSupervisor(
   def tenantForUser(userId: String): Option[Option[String]] =
     store.getUserById(userId).map(_.tenant)
 
+  /** Full user row by id; the lock guardrails need role + enabled, not just the tenant. */
+  def findUserById(userId: String): Option[RbacUser] =
+    store.getUserById(userId)
+
+  /** Full user row by (tenant, username); resolves a session identity to its row. */
+  def findUser(tenant: Option[String], username: String): Option[RbacUser] =
+    store.findUser(tenant, username)
+
   def tenantForRole(roleId: String): Option[String] =
     rbacResolver.role(roleId).map(_.tenantId)
 

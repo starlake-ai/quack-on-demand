@@ -102,3 +102,116 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
       login(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword) shouldBe 401
     finally h.shutdown()
   }
+
+  // ------------------------------------------------------------------
+  // Guardrails (Task 2)
+  // ------------------------------------------------------------------
+
+  "the lock guardrails" should "keep a tenant admin off a superuser row (pin)" in {
+    val (h, fix) = boot()
+    try
+      val alice = h.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val denied = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.rootUserId, Some(false)),
+        apiKey = Some(alice)
+      )
+      withClue(s"tenant-admin -> superuser body: ${denied.body()}") {
+        denied.statusCode() shouldBe 403
+        errorCode(denied.body()) should contain("tenant_forbidden")
+      }
+    finally h.shutdown()
+  }
+
+  it should "refuse self-lock with 400 cannot_lock_self and allow self-unlock" in {
+    val (h, fix) = boot()
+    try
+      val root   = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val denied = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.rootUserId, Some(false)),
+        apiKey = Some(root)
+      )
+      withClue(s"self-lock body: ${denied.body()}") {
+        denied.statusCode() shouldBe 400
+        errorCode(denied.body()) should contain("cannot_lock_self")
+      }
+      // Self-unlock (a no-op here) stays allowed: recovery must never be blocked.
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.rootUserId, Some(true)),
+        apiKey = Some(root)
+      ).statusCode() shouldBe 200
+    finally h.shutdown()
+  }
+
+  it should "never allow the last enabled superuser to be locked" in {
+    val (h, fix) = boot()
+    try
+      // Second superuser, seeded like the fixture ones so it can log in.
+      fix.store.upsertUserWithHash(
+        tenant = None,
+        username = "root2",
+        passwordHash = at.favre.lib.crypto.bcrypt.BCrypt
+          .withDefaults()
+          .hashToString(10, "root2pw".toCharArray),
+        role = "admin"
+      )
+      val root2Id = fix.store.findUser(None, "root2").get.id
+      val root    = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      // Mint root2's session BEFORE locking it: stateless JWTs outlive the lock,
+      // and this still-live session is exactly the hole the guard must close.
+      val root2 = h.mintToken("root2", "root2pw")
+
+      // Two enabled superusers: locking one is fine.
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(root2Id, Some(false)),
+        apiKey = Some(root)
+      ).statusCode() shouldBe 200
+
+      // root is now the last enabled superuser: root2's live session may not lock it...
+      val viaGhost = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.rootUserId, Some(false)),
+        apiKey = Some(root2)
+      )
+      withClue(s"ghost-session lock body: ${viaGhost.body()}") {
+        viaGhost.statusCode() shouldBe 400
+        errorCode(viaGhost.body()) should contain("last_superuser")
+      }
+      // ...and neither may the identity-less static key.
+      val viaKey = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.rootUserId, Some(false)),
+        apiKey = Some("lock-spec-key")
+      )
+      withClue(s"static-key lock body: ${viaKey.body()}") {
+        viaKey.statusCode() shouldBe 400
+        errorCode(viaKey.body()) should contain("last_superuser")
+      }
+    finally h.shutdown()
+  }
+
+  it should "let the static key lock a tenant user (no identity, no self-check)" in {
+    val (h, fix) = boot()
+    try
+      val locked = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.bobUserId, Some(false)),
+        apiKey = Some("lock-spec-key")
+      )
+      withClue(s"static-key lock body: ${locked.body()}")(locked.statusCode() shouldBe 200)
+    finally h.shutdown()
+  }
