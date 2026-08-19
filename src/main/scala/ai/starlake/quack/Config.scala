@@ -185,7 +185,7 @@ final case class ManagementAuthConfig(
     * surface (endpoint mounting, the client-config flag, the menu link) reads this, never
     * `slEnabled` directly.
     */
-  def slIntegrationOn: Boolean = slEnabled && slUrl.nonEmpty
+  def slIntegrationOn: Boolean = slEnabled && slUrl.trim.nonEmpty
 
 /** Phase 2 account lockout. Off by default so existing deployments boot unchanged. Enabling it
   * without a working SMTP relay would strand a locked-out user with no way back in -- Main's boot

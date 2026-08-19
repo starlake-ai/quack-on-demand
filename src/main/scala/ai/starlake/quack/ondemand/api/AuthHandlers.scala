@@ -721,7 +721,18 @@ final class AuthHandlers(
           // Same derivation as SessionTokenStore.isAdmin: role, not scope.superuser.
           admin = session.profile.role.equalsIgnoreCase("admin")
         )
-        Right(SsoTicketResponse(ssoTickets.mint(grant)))
+        val ticket = ssoTickets.mint(grant)
+        // Audited under the acting session's identity, mirroring PAT create. The
+        // minted ticket value is a bearer credential (like a raw PAT) and is never
+        // logged, so no `target`/`detail` carries it.
+        audit.rest(
+          token,
+          "auth",
+          AuditActions.AuthSsoTicketMint,
+          "ok",
+          tenant = session.profile.tenant
+        )
+        Right(SsoTicketResponse(ticket))
       case _ =>
         Left((StatusCode.Unauthorized, ErrorResponse("unauthorized", "session required")))
   }
@@ -738,8 +749,32 @@ final class AuthHandlers(
   def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] = IO {
     ssoTickets.redeem(request.ticket) match
       case Some(grant) =>
+        // Identity comes from the redeemed grant, not a caller credential -- redeem
+        // is public/unauthenticated. realm mirrors mintSessionFor: an empty tenant
+        // means the grant was minted from a system-scope session.
+        val realm = if grant.tenant.isEmpty then "system" else "tenant"
+        audit.restAs(
+          grant.username,
+          realm,
+          "auth",
+          AuditActions.AuthSsoTicketRedeem,
+          "ok",
+          tenant = grant.tenant
+        )
         Right(SsoRedeemResponse(grant.sessionToken, grant.username, grant.tenant, grant.admin))
       case None =>
+        // No identity is recoverable from an unknown/expired/already-used ticket, so
+        // this is audited anonymously -- deliberately unconditional (no rate limit):
+        // redeem is intentionally un-rate-limited (see ssoRedeem's doc), so this row
+        // is the only detection signal for ticket-guessing. The ticket value itself
+        // is never logged.
+        audit.restAs(
+          "anonymous",
+          "system",
+          "auth",
+          AuditActions.AuthSsoTicketRedeem,
+          "denied"
+        )
         Left(
           (
             StatusCode.Unauthorized,
