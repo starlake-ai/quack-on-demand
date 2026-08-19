@@ -116,3 +116,53 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
       .head shouldBe a[StatementResult.ControlFlow]
     SqlParser.extract("USE db1", config).statements.head shouldBe a[StatementResult.ControlFlow]
   }
+
+  // --- metadata enumeration: DESCRIBE / SHOW <table> reveal a table's shape, so they
+  // are Read accesses on that table rather than unconditionally admitted control flow ---
+
+  test("DESCRIBE extracts a Read access on the described table") {
+    extracted("DESCRIBE tpch1.customer").accesses shouldBe Set(
+      TableAccess(TableRef("db", "tpch1", "customer"), Verb.Read)
+    )
+  }
+
+  test("unqualified DESCRIBE resolves against the config defaults") {
+    extracted("DESCRIBE customer").accesses shouldBe Set(
+      TableAccess(TableRef("db", "main", "customer"), Verb.Read)
+    )
+  }
+
+  test("DuckDB's SHOW <table> alias is treated like DESCRIBE") {
+    extracted("SHOW tpch1.customer").accesses shouldBe Set(
+      TableAccess(TableRef("db", "tpch1", "customer"), Verb.Read)
+    )
+  }
+
+  test("unqualified SHOW COLUMNS FROM is treated like DESCRIBE") {
+    extracted("SHOW COLUMNS FROM customer").accesses shouldBe Set(
+      TableAccess(TableRef("db", "main", "customer"), Verb.Read)
+    )
+  }
+
+  test("qualified SHOW COLUMNS FROM and SHOW ALL TABLES stay denied fail-closed") {
+    // Neither form is in the grammar of the pinned parser, so both land on the
+    // ParseError arm: no change here, just pinning that they are not admitted.
+    SqlParser
+      .extract("SHOW COLUMNS FROM tpch1.customer", config)
+      .statements
+      .head shouldBe a[StatementResult.ParseError]
+    SqlParser
+      .extract("SHOW ALL TABLES", config)
+      .statements
+      .head shouldBe a[StatementResult.ParseError]
+  }
+
+  test("SHOW TABLES stays ControlFlow") {
+    SqlParser.extract("SHOW TABLES", config).statements.head shouldBe
+      a[StatementResult.ControlFlow]
+  }
+
+  test("SHOW DATABASES and SHOW SCHEMAS stay ControlFlow, whatever their case") {
+    for stmt <- List("SHOW DATABASES", "SHOW SCHEMAS", "show databases", "show schemas") do
+      SqlParser.extract(stmt, config).statements.head shouldBe a[StatementResult.ControlFlow]
+  }

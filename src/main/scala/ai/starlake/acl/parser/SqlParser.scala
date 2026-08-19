@@ -209,6 +209,10 @@ object SqlParser:
   private def selectReads(select: Option[Select]): TableExtraction =
     select.map(TableExtractor.extract).getOrElse(TableExtraction(Nil, Nil))
 
+  // SHOW <keyword> forms that jsqlparser also parses as ShowStatement but that name
+  // no table: they stay ControlFlow (v1 defers filtering them; see the spec).
+  private val ShowKeywordForms: Set[String] = Set("DATABASES", "SCHEMAS")
+
   private def processStatement(
       stmt: Statement,
       index: Int,
@@ -344,14 +348,34 @@ object SqlParser:
       case _: UnsupportedStatement =>
         StatementResult.ParseError(index, snippet, s"Unsupported or unparseable statement")
 
+      // DESCRIBE t / SHOW t / SHOW COLUMNS FROM t reveal a table's shape: that is a
+      // Read on the table, not control flow. Previously allowlisted, which let any
+      // principal describe any table (enumeration bypass); now grant-checked like a
+      // SELECT. SHOW TABLES / SHOW ALL TABLES stay ControlFlow: the edge metadata
+      // filter replaces them with the filtered information_schema query downstream.
+      case d: DescribeStatement =>
+        val (qTgt, errs) = TableQualifier.qualify(List(d.getTable), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+      case sc: ShowColumnsStatement =>
+        // Only the unqualified form reaches here; `SHOW COLUMNS FROM x.y` is not in
+        // the grammar and already fails closed on the parse-error arm.
+        val (qTgt, errs) = TableQualifier.qualify(List(new Table(sc.getTableName)), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+      case sh: ShowStatement if !ShowKeywordForms.contains(sh.getName.trim.toUpperCase) =>
+        val (qTgt, errs) = TableQualifier.qualify(List(new Table(sh.getName)), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+
       // Explicit allowlist of statement types that provably carry no grantable
       // table reference. Admitted unconditionally as ControlFlow. Anything NOT
       // on this list falls through to the fail-closed ParseError arm below, so a
       // new/unknown statement type can never be silently admitted with an empty
       // access set.
       case _: Commit | _: RollbackStatement | _: SavepointStatement | _: SetStatement |
-          _: ResetStatement | _: UseStatement | _: ShowStatement | _: ShowColumnsStatement |
-          _: ShowTablesStatement | _: DescribeStatement | _: SessionStatement =>
+          _: ResetStatement | _: UseStatement | _: ShowStatement | _: ShowTablesStatement |
+          _: SessionStatement =>
         StatementResult.ControlFlow(index, snippet, stmt.getClass.getSimpleName)
 
       case other =>
