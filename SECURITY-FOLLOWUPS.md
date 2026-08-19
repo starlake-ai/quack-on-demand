@@ -57,6 +57,46 @@ Result today: Passthrough (top-level `FROM tpch1.unknown_table` would Deny).
 Fix direction: extend the unresolved-table strictness check into subquery-nested
 FROM items so an unresolvable table denies regardless of nesting depth.
 
+## 3. Metadata access: implicit read with result filtering (design item)
+
+Today an operator must grant `RO` on `<tenantDb>.information_schema.*` (and
+`pg_catalog`) for a principal to browse the catalog. This is an obscure footgun
+(the failure is a cryptic ACL denial), and it is effectively mandatory for the
+Starlake integration: Starlake enumerates schemas/tables/columns to render its
+UI, so without metadata read the product does not function for that principal.
+So metadata should be readable without a bespoke grant.
+
+The wrong way to do it is a blanket "any RO principal may read raw
+information_schema": in DuckDB, `information_schema.tables` / `.columns` reflect
+the ENTIRE tenant-db catalog, not just the objects the principal is granted. A
+principal with `RO` on `customer` only would then be able to enumerate that
+`salaries`, `ssn_vault`, etc. exist and read their column names. That downgrades
+table-level ACL from "cannot read this table" to "cannot read its rows, but can
+see it exists and its shape"; a sensitively-named column leaks via metadata even
+when its values are CLS-masked.
+
+Target design (how Postgres / Snowflake / BigQuery do it): metadata is readable
+by any authenticated principal that can reach the pool, but the RESULT ROWS are
+filtered to the catalogs/schemas/tables the principal has at least `RO` on. This
+removes the footgun and keeps table-level ACL meaningful (no enumeration of
+ungranted objects). Key it on "authenticated principal reaching the pool", not
+"holds an RO grant somewhere", so a zero-grant user still gets a coherent
+(empty/filtered) catalog for the UI to load.
+
+Acceptable interim if filtered metadata is too large a lift now: implicit
+UNFILTERED read of the system schemas only (`information_schema`, `pg_catalog`)
+for any authenticated principal, shipped ONLY with an explicit documented
+posture: within a tenant-db, catalog shape (table/column existence) is visible
+to all its users, and only row/column VALUES are protected by RLS/CLS. Fine for
+a single-tenant analytics deployment of semi-trusted users; NOT acceptable where
+mutually-distrusting tenants share a tenant-db or where schema design is
+sensitive.
+
+This is an ACL-validator / edge change, separate from the CLS rewriter work
+above: the rewriter fix only stopped metadata queries from failing closed in the
+masking layer; the ACL grant requirement is the gate that currently forces the
+`information_schema` grant.
+
 ## Status of the related hardening already landed
 
 - Metadata queries over `information_schema` / `pg_catalog` no longer fail closed
