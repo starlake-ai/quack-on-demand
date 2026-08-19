@@ -182,7 +182,13 @@ final class UserHandlers(
           else
             val callerId = apiKey
               .flatMap(sessionOf)
-              .flatMap(s => sup.findUser(s.profile.tenant, s.profile.username))
+              .flatMap { s =>
+                // profile.tenant mirrors the REQUESTED login scope; a superuser
+                // logging in through a tenant login still owns a tenant-NULL row,
+                // so key the lookup off the session's superuser bit instead.
+                val rowTenant = if s.scope.superuser then None else s.profile.tenant
+                sup.findUser(rowTenant, s.profile.username)
+              }
               .map(_.id)
             if callerId.contains(req.id) then
               Some(
