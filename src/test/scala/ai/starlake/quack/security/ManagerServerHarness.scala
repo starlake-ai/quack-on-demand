@@ -148,14 +148,17 @@ object ManagerServerHarness:
       c.createStatement()
         .execute(
           """CREATE TABLE IF NOT EXISTS qodstate_user (
-          |  id            TEXT PRIMARY KEY,
-          |  tenant        TEXT,
-          |  username      TEXT NOT NULL,
-          |  password_hash TEXT NOT NULL,
-          |  role          TEXT NOT NULL DEFAULT 'user',
-          |  email         TEXT,
-          |  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          |  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          |  id                   TEXT PRIMARY KEY,
+          |  tenant               TEXT,
+          |  username             TEXT NOT NULL,
+          |  password_hash        TEXT NOT NULL,
+          |  role                 TEXT NOT NULL DEFAULT 'user',
+          |  email                TEXT,
+          |  must_change_password BOOLEAN,
+          |  failed_attempts      INT NOT NULL DEFAULT 0,
+          |  locked_at            TIMESTAMPTZ,
+          |  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          |  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
           |)""".stripMargin
         )
     finally c.close()

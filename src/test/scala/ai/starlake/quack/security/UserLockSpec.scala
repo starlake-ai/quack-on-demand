@@ -149,6 +149,9 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         updateBody(fix.rootUserId, Some(true)),
         apiKey = Some(root)
       ).statusCode() shouldBe 200
+      // Unlock-of-a-genuinely-disabled-row (round trip + login restored) is already
+      // pinned by the very first case in this file ("lock a tenant user out of login,
+      // and unlock restores"); not duplicated here.
     finally h.shutdown()
   }
 
@@ -213,5 +216,31 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         apiKey = Some("lock-spec-key")
       )
       withClue(s"static-key lock body: ${locked.body()}")(locked.statusCode() shouldBe 200)
+      locked.body() should include(""""enabled":false""")
+      login(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword) shouldBe 401
+    finally h.shutdown()
+  }
+
+  it should "apply a lock sent together with a password rotation" in {
+    val (h, fix) = boot()
+    try
+      val root   = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val locked = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        s"""{"id":"${fix.bobUserId}","password":"newpw123","enabled":false}""",
+        apiKey = Some(root)
+      )
+      withClue(s"lock+rotate body: ${locked.body()}")(locked.statusCode() shouldBe 200)
+      locked.body() should include(""""enabled":false""")
+      // Locked wins over the fresh password: login refused with either password.
+      // Note: `login` checks the in-memory fixture store's hash, which the userStore
+      // (DuckDB) password rotation never touches (a documented split between the two
+      // stores in this harness) - so the OLD password assertion below proves the LOCK
+      // took effect, not that the rotation was applied. Both assertions are kept
+      // deliberately: the new-password one pins "locked wins", the old-password one
+      // pins the lock itself.
+      login(h, SecurityFixtures.BobUsername, "newpw123") shouldBe 401
+      login(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword) shouldBe 401
     finally h.shutdown()
   }

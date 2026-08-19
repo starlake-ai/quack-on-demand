@@ -328,6 +328,7 @@ export default function UserSection({
                           setEditEmailOriginal(u.email ?? '');
                           setEditLocked(!u.enabled);
                           setEditLockedOriginal(!u.enabled);
+                          setError(null);
                         }}
                       ><EditIcon /></button>
                     ) : (
