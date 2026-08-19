@@ -164,7 +164,7 @@ final class AuthHandlers(
   private def dispatchStarlakeLogout(tokenOpt: Option[String]): IO[Unit] =
     tokenOpt match
       case Some(raw) =>
-        IO(starlakeNotifier.notifyLogout(StarlakeNotifier.sha256Hex(raw)))
+        IO.blocking(starlakeNotifier.notifyLogout(StarlakeNotifier.sha256Hex(raw)))
           .flatMap {
             case Left(err) => IO(logger.warn(s"starlake logout callback failed: $err"))
             case Right(_)  => IO.unit
