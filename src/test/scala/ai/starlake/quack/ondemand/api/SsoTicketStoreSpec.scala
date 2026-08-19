@@ -13,7 +13,8 @@ class SsoTicketStoreSpec extends AnyFlatSpec, Matchers:
     val store = new SsoTicketStore(now = () => clock.get(), ttlSeconds = 60)
     (clock, store)
 
-  private val grant = SsoGrant("tok-abc", "alice", Some("acme"), admin = false)
+  private val grant =
+    SsoGrant("tok-abc", "alice", Some("acme"), admin = false, superuser = false)
 
   "mint/redeem" should "round-trip a grant exactly once" in {
     val (_, store) = fixture
@@ -33,6 +34,24 @@ class SsoTicketStoreSpec extends AnyFlatSpec, Matchers:
     val ticket = store.mint(grant)
     clock.set(clock.get().plusSeconds(61))
     store.redeem(ticket) shouldBe None
+  }
+
+  it should "round-trip superuser=true for a superuser grant" in {
+    val (_, store) = fixture
+    val su = SsoGrant("tok-root", "root", None, admin = true, superuser = true)
+    val redeemed = store.redeem(store.mint(su))
+    redeemed shouldBe Some(su)
+    redeemed.get.superuser shouldBe true
+  }
+
+  it should "round-trip superuser=false, admin=true for a tenant-admin grant" in {
+    val (_, store) = fixture
+    val tenantAdmin =
+      SsoGrant("tok-ta", "alice", Some("acme"), admin = true, superuser = false)
+    val redeemed = store.redeem(store.mint(tenantAdmin))
+    redeemed shouldBe Some(tenantAdmin)
+    redeemed.get.admin shouldBe true
+    redeemed.get.superuser shouldBe false
   }
 
   it should "sweep expired entries on mint" in {

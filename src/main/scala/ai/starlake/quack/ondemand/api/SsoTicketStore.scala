@@ -12,7 +12,8 @@ final case class SsoGrant(
   sessionToken: String,
   username: String,
   tenant: Option[String],
-  admin: Boolean
+  admin: Boolean,
+  superuser: Boolean
 )
 
 /** In-process, single-use, short-TTL ticket store for the QoD to Starlake SSO
