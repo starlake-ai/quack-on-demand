@@ -66,6 +66,13 @@ em { color: var(--text-mute); font-style: normal; }
 }
 .app-nav a { color: var(--text-soft); padding: .25rem .6rem; border-radius: 6px; }
 .app-nav a.active, .app-nav a:hover { background: var(--bg-card); color: var(--text); text-decoration: none; }
+/* Top-level nav entry that isn't a route (e.g. Starlake SSO handoff): looks
+   like the sibling NavLinks even though it's a <button>, not an <a>. */
+.app-nav .nav-link-btn {
+  background: transparent; border: none; font: inherit; cursor: pointer;
+  color: var(--text-soft); padding: .25rem .6rem; border-radius: 6px;
+}
+.app-nav .nav-link-btn:hover { background: var(--bg-card); color: var(--text); }
 .app-nav .spacer { flex: 1; }
 .app-nav .user-pill {
   display: flex; align-items: center; gap: .5rem;

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
+import { api } from './api/client';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
 
@@ -72,13 +73,29 @@ import Config from './pages/Config';
 import Profile from './pages/Profile';
 import NavDropdown from './components/NavDropdown';
 
+// Mints a single-use SSO ticket then navigates top-level to Starlake's
+// handoff endpoint. The qod_session cookie rides along same-origin, so the
+// ticket mint call needs no extra credentials. Best-effort: on failure this
+// just logs and leaves the user on the current page (no alert, no redirect).
+async function goToStarlake(starlakeUrl: string) {
+  let ticket: string;
+  try {
+    ({ ticket } = await api.ssoTicket());
+  } catch (e) {
+    console.warn('Starlake SSO ticket mint failed', e);
+    return;
+  }
+  window.location.href =
+    `${starlakeUrl.replace(/\/$/, '')}/api/v1/auth/qod/sso?ticket=${encodeURIComponent(ticket)}`;
+}
+
 // Regular (non-admin) session: the server only lets this token reach
 // /api/auth/{whoami,logout} and /api/profile/{usage,statements}, so the
 // nav is stripped down to that self-service surface. No admin routes are
 // even mounted - a deep-link to e.g. /tenants would 403 admin_required on
 // first fetch anyway, so redirect to the one page that works instead.
 function ProfileShell() {
-  const { username, role, logout, authEnabled } = useAuth();
+  const { username, role, logout, authEnabled, starlakeUrl } = useAuth();
   return (
     <>
       <nav className="app-nav">
@@ -87,6 +104,11 @@ function ProfileShell() {
           Quack on Demand
         </span>
         <NavLink to="/profile" className={({ isActive }) => isActive ? 'active' : ''}>Profile</NavLink>
+        {starlakeUrl && (
+          <button type="button" className="nav-link-btn" onClick={() => { void goToStarlake(starlakeUrl); }}>
+            Starlake
+          </button>
+        )}
         <span className="spacer" />
         {authEnabled && (
           <>
@@ -108,7 +130,7 @@ function ProfileShell() {
 }
 
 function Shell() {
-  const { username, role, tenant, logout, authEnabled, telemetryEnabled } = useAuth();
+  const { username, role, tenant, logout, authEnabled, telemetryEnabled, starlakeUrl } = useAuth();
   // Config (resolved application.conf + manifest export/import) is a
   // cross-tenant view of the entire deployment, so it's superuser-only.
   // `tenant === null` flags the session as system-scoped; tenant-bound
@@ -141,6 +163,11 @@ function Shell() {
           <NavLink to="/config"    className={({ isActive }) => isActive ? 'active' : ''}>Config</NavLink>
         )}
         <NavLink to="/profile"     className={({ isActive }) => isActive ? 'active' : ''}>Profile</NavLink>
+        {starlakeUrl && (
+          <button type="button" className="nav-link-btn" onClick={() => { void goToStarlake(starlakeUrl); }}>
+            Starlake
+          </button>
+        )}
         <span className="spacer" />
         {authEnabled ? (
           <>

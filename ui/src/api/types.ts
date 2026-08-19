@@ -194,6 +194,9 @@ export interface ClientConfigResponse {
   identitySource?: 'db' | 'oidc';
   // Human-readable IdP label shown in the SSO redirect card (e.g. "Keycloak", "Google").
   ssoProviderName?: string;
+  // Base URL of the linked Starlake instance when the integration is on;
+  // null/absent when off. The UI hides the "Starlake" nav entry when unset.
+  starlakeUrl?: string | null;
 }
 
 /** One row of the Config page. `value` is masked ("(set)" / "(unset)")

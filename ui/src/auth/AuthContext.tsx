@@ -18,6 +18,9 @@ interface AuthState {
   ssoProviderName: string;
   // Mirrors ClientConfigResponse.telemetryEnabled; gates the History/Usage/Audit surfaces.
   telemetryEnabled: boolean;
+  // Mirrors ClientConfigResponse.starlakeUrl; null/undefined = integration off
+  // and the UI hides the "Starlake" nav entry. Set = base URL to redirect to.
+  starlakeUrl: string | null;
   login: (username: string, password: string, tenant?: string) => Promise<void>;
   logout: () => Promise<void>;
   // Redirect the browser to the OIDC start endpoint (oidc mode only).
@@ -40,6 +43,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [identitySource, setIdentitySource] = useState<'db' | 'oidc'>('db');
   const [ssoProviderName, setSsoProviderName] = useState<string>('');
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const [starlakeUrl, setStarlakeUrl] = useState<string | null>(null);
 
   // On mount:
   //   1. Ask the server whether auth is enabled (open endpoint, no token).
@@ -62,6 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setSsoProviderName(cfg.ssoProviderName ?? '');
       setTelemetryEnabled(cfg.telemetryEnabled !== false);
+      setStarlakeUrl(cfg.starlakeUrl ?? null);
       if (!cfg.authEnabled) {
         setAuthEnabled(false);
         setUsername(ANONYMOUS_USERNAME);
@@ -157,7 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, identitySource, ssoProviderName, telemetryEnabled, login, logout, ssoLogin }}>
+    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, identitySource, ssoProviderName, telemetryEnabled, starlakeUrl, login, logout, ssoLogin }}>
       {children}
     </AuthContext.Provider>
   );

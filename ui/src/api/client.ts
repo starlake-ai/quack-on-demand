@@ -175,6 +175,10 @@ export const api = {
   // Auth
   login:   (req: LoginRequest) => post<LoginResponse>('/auth/login', req),
   logout:  () => post<void>('/auth/logout'),
+  // Mints a single-use ticket for the Starlake SSO handoff; the session
+  // cookie rides along via FETCH_OPTS (same-origin). Callers redeem it by
+  // navigating top-level to `${starlakeUrl}/api/v1/auth/qod/sso?ticket=...`.
+  ssoTicket: () => post<{ ticket: string }>('/auth/sso/ticket'),
   changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
   // Public, pre-session: reachable without a X-API-Key or session cookie
