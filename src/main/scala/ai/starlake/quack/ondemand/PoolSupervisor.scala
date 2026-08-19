@@ -896,6 +896,14 @@ final class PoolSupervisor(
   def tenantForUser(userId: String): Option[Option[String]] =
     store.getUserById(userId).map(_.tenant)
 
+  /** Full user row by id; the lock guardrails need role + enabled, not just the tenant. */
+  def findUserById(userId: String): Option[RbacUser] =
+    store.getUserById(userId)
+
+  /** Full user row by (tenant, username); resolves a session identity to its row. */
+  def findUser(tenant: Option[String], username: String): Option[RbacUser] =
+    store.findUser(tenant, username)
+
   def tenantForRole(roleId: String): Option[String] =
     rbacResolver.role(roleId).map(_.tenantId)
 
@@ -2180,7 +2188,8 @@ final class PoolSupervisor(
       role: Option[String],
       userStore: ai.starlake.quack.ondemand.state.UserStore,
       mustChangePassword: Option[Boolean] = None,
-      email: Option[Option[String]] = None
+      email: Option[Option[String]] = None,
+      enabled: Option[Boolean] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("updateUserPassword") {
       if mustChangePassword.contains(true) && password.isEmpty then
@@ -2221,33 +2230,32 @@ final class PoolSupervisor(
                   )
                   flag
                 }
-                // Email can change on a role-only update -- there's no password rotation
-                // to piggyback the write on, so rewrite the row through the control-plane
-                // store with its already-persisted hash and current flags (both unchanged)
-                // so only email (and role) move. Skipped when the branch above already
-                // applied it in the same statement as the password rotation.
-                if password.isEmpty then
-                  effEmail.foreach { inner =>
-                    store.getPasswordHash(u.tenant, u.username).foreach { hash =>
-                      store.upsertUserWithHash(
-                        u.tenant,
-                        u.username,
-                        hash,
-                        newRole,
-                        enabled = u.enabled,
-                        mustChangePassword = u.mustChangePassword,
-                        email = inner
-                      )
-                    }
+                // enabled and/or email land via a row rewrite through the control-plane
+                // store with the already-persisted hash, so only the intended columns
+                // move. The password branch above never writes `enabled`, so a lock
+                // rides this rewrite even when a rotation happened in the same request.
+                val needRewrite = enabled.nonEmpty || (password.isEmpty && effEmail.nonEmpty)
+                if needRewrite then
+                  store.getPasswordHash(u.tenant, u.username).foreach { hash =>
+                    store.upsertUserWithHash(
+                      u.tenant,
+                      u.username,
+                      hash,
+                      newRole,
+                      enabled = enabled.getOrElse(u.enabled),
+                      mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
+                      email = effEmail.getOrElse(u.email)
+                    )
                   }
                 // upsertUserIdentity only writes (tenant, username, role) on conflict, so
-                // the flag/email just persisted above survive; carry them on the returned
-                // value.
+                // the flag/email/enabled just persisted above survive; carry them on the
+                // returned value.
                 val updated =
                   u.copy(
                     role = newRole,
                     mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                    email = effEmail.getOrElse(u.email)
+                    email = effEmail.getOrElse(u.email),
+                    enabled = enabled.getOrElse(u.enabled)
                   )
                 store.upsertUserIdentity(updated)
                 invalidateEffectiveCache()

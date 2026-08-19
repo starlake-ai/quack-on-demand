@@ -87,7 +87,7 @@ Purposes below are one line each; run `qod <noun> <verb> --help` for the full fl
 |---|---|
 | `qod user list` | List users. |
 | `qod user create` | Create a user (tenant-scoped, or `--superuser` for tenant-less); `--email` for password-reset links. |
-| `qod user update` | Update a user's tenant, password, role, or email. |
+| `qod user update` | Update a user's tenant, password, role, or email; `--no-enabled` locks the account, `--enabled` unlocks. |
 | `qod user delete` | Delete a user. |
 | `qod user effective` | Closure of roles, groups, table permissions, and pool grants. |
 

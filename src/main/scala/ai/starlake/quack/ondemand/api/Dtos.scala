@@ -654,7 +654,11 @@ final case class UserUpdateRequest(
     // Some(true) without a password is a 400.
     mustChangePassword: Option[Boolean] = None,
     // Omit (None) = unchanged; empty string = clear to no email; non-empty = set.
-    email: Option[String] = None
+    email: Option[String] = None,
+    // Omit (None) = unchanged. false locks the account: sign-in refused (as
+    // invalid_credentials), FlightSQL handshake refused, PATs dead at use and
+    // mint. true unlocks. "Locked" in the UI is exactly this flag inverted.
+    enabled: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(

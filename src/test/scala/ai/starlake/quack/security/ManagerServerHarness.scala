@@ -148,14 +148,17 @@ object ManagerServerHarness:
       c.createStatement()
         .execute(
           """CREATE TABLE IF NOT EXISTS qodstate_user (
-          |  id            TEXT PRIMARY KEY,
-          |  tenant        TEXT,
-          |  username      TEXT NOT NULL,
-          |  password_hash TEXT NOT NULL,
-          |  role          TEXT NOT NULL DEFAULT 'user',
-          |  email         TEXT,
-          |  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          |  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          |  id                   TEXT PRIMARY KEY,
+          |  tenant               TEXT,
+          |  username             TEXT NOT NULL,
+          |  password_hash        TEXT NOT NULL,
+          |  role                 TEXT NOT NULL DEFAULT 'user',
+          |  email                TEXT,
+          |  must_change_password BOOLEAN,
+          |  failed_attempts      INT NOT NULL DEFAULT 0,
+          |  locked_at            TIMESTAMPTZ,
+          |  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          |  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
           |)""".stripMargin
         )
     finally c.close()
@@ -285,8 +288,14 @@ object ManagerServerHarness:
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
 
-    val userStore            = makeDuckDbUserStore()
-    val userHandlers         = new UserHandlers(sup, userStore)
+    val userStore = makeDuckDbUserStore()
+    val sessions  = new SessionTokenStore
+    // Composed bearer lookup (session JWT first, then PAT), mirroring Main's
+    // wiring; needed by UserHandlers for the self-lock guard.
+    val bearerSessionOf
+        : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
+      t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
+    val userHandlers         = new UserHandlers(sup, userStore, sessionOf = bearerSessionOf)
     val roleHandlers         = new RoleHandlers(sup, userHandlers)
     val groupHandlers        = new GroupHandlers(sup, userHandlers)
     val membershipHandlers   = new MembershipHandlers(sup, userHandlers)
@@ -294,7 +303,6 @@ object ManagerServerHarness:
     val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
     val rowPolicyHandlers    = new RoleRowPolicyHandlers(sup)
 
-    val sessions     = new SessionTokenStore
     val authSvc      = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
     val authHandlers = new AuthHandlers(
       authService = authSvc,
@@ -341,7 +349,7 @@ object ManagerServerHarness:
     val usageHandlers      = new UsageHandlers(telemetryStore)
     val profileHandlers    = new ai.starlake.quack.ondemand.api.ProfileHandlers(
       // Mirror Main: session JWT first, then PAT.
-      t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t))),
+      bearerSessionOf,
       telemetryStore,
       statementStore,
       id => sup.getTenantById(id)

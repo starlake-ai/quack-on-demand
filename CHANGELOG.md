@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Admin user lock.** The edit-user panel (and `qod user update --no-enabled` / the
+  `enabled` field on `user/update`) can lock any account: sign-in is refused, tokens
+  stop working, and only an admin can unlock. A superuser may lock any user, a tenant
+  admin only their own tenant's users; locking yourself and locking the last enabled
+  superuser are refused, so a deployment can never lock itself out entirely.
+
 ## 0.6.6
 
 _Released 2026-08-18._

@@ -127,6 +127,11 @@ export default function UserSection({
   // The email value the edit form was opened with, so handleUpdate only
   // sends `email` when it actually changed (server: omit = unchanged).
   const [editEmailOriginal, setEditEmailOriginal] = useState('');
+  // "Locked" is the inverse of the wire field `enabled`. editLockedOriginal
+  // lets handleUpdate send `enabled` only when it actually changed (server:
+  // omit = unchanged).
+  const [editLocked, setEditLocked]                 = useState(false);
+  const [editLockedOriginal, setEditLockedOriginal] = useState(false);
 
   // Resolve the selected new-tenant to its provider so the form can
   // adapt. Superuser always uses the db backend (no IdP routing).
@@ -204,9 +209,10 @@ export default function UserSection({
         email: isEmailUsername(username)
           ? username.trim()
           : (editEmail === editEmailOriginal ? undefined : editEmail),
+        enabled: editLocked === editLockedOriginal ? undefined : !editLocked,
       });
       setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false);
-      setEditEmail(''); setEditEmailOriginal('');
+      setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false);
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -303,7 +309,11 @@ export default function UserSection({
                           </span>
                         ))}
                   </td>
-                  <td>{u.enabled ? '✓' : '✗'}</td>
+                  <td>
+                    {u.enabled
+                      ? '✓'
+                      : <span className="badge bad">locked</span>}
+                  </td>
                   <td className="actions">
                     {allowEdit ? (
                       <button
@@ -316,6 +326,9 @@ export default function UserSection({
                           setEditIsAdmin(u.role === 'admin');
                           setEditEmail(u.email ?? '');
                           setEditEmailOriginal(u.email ?? '');
+                          setEditLocked(!u.enabled);
+                          setEditLockedOriginal(!u.enabled);
+                          setError(null);
                         }}
                       ><EditIcon /></button>
                     ) : (
@@ -430,11 +443,12 @@ export default function UserSection({
         const u = rows.find(r => r.id === editingId);
         if (!u) return null;
         return (
-          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); }}>
+          <Modal maxWidth={480} onClose={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false); setError(null); }}>
               <div className="card-title">
                 Edit user <code>{u.username}</code>
                 {u.tenant ? <> in <code>{u.tenant}</code></> : <> (superuser)</>}
               </div>
+              {error && <p className="login-err">{error}</p>}
               <form onSubmit={ev => { ev.preventDefault(); void handleUpdate(u.id, u.username); }}>
                 <label>
                   New password
@@ -475,8 +489,22 @@ export default function UserSection({
                   />
                   {' '}Admin User
                 </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={editLocked}
+                    onChange={ev => setEditLocked(ev.target.checked)}
+                  />
+                  {' '}Locked
+                </label>
+                {editLocked && !editLockedOriginal && (
+                  <p className="subtle" style={{ marginTop: 0 }}>
+                    Sign-in is refused and the user's tokens stop working; only an
+                    admin can unlock. Live sessions expire on their own.
+                  </p>
+                )}
                 <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); }}>Cancel</button>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditingId(null); setEditPassword(''); setEditIsAdmin(false); setEditMustChange(false); setEditEmail(''); setEditEmailOriginal(''); setEditLocked(false); setEditLockedOriginal(false); setError(null); }}>Cancel</button>
                   <button type="submit" style={{ minWidth: '7rem' }}>Save</button>
                 </div>
               </form>
