@@ -115,6 +115,8 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | `quack-on-demand.auth.management.oidc.clientId` | `QOD_MGMT_OIDC_CLIENT_ID` | _(unset)_ |  | OIDC client id for admin-UI SSO (system scope). |
 | `quack-on-demand.auth.management.oidc.clientSecret` | `QOD_MGMT_OIDC_CLIENT_SECRET` | `***` | yes | OIDC client secret for admin-UI SSO (system scope). |
 | `quack-on-demand.auth.management.oidc.scopes` | `QOD_MGMT_OIDC_SCOPES` | `openid email profile` |  | OIDC scopes requested for admin-UI SSO. Default 'openid email profile'. |
+| `quack-on-demand.auth.management.slEnabled` | `SL_ENABLED` | `false` |  | Enable the Starlake SSO integration (menu link, ticket endpoints, logout callback) |
+| `quack-on-demand.auth.management.slUrl` | `SL_URL` | _(unset)_ |  | Starlake base URL for the SSO handoff and logout callback, e.g. https://starlake.example.com |
 | `quack-on-demand.auth.lockout.enabled` | `QOD_AUTH_LOCKOUT_ENABLED` | `false` |  | Lock a database-backed user out after maxFailures consecutive bad passwords. Requires SMTP to be configured (quack-on-demand.smtp.host) so a locked-out user has a self-service reset path; Main refuses to boot otherwise. |
 | `quack-on-demand.auth.lockout.maxFailures` | `QOD_AUTH_LOCKOUT_MAX_FAILURES` | `10` |  | Consecutive failed logins before a database-backed user is locked out. |
 
