@@ -2696,6 +2696,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/sso/redeem:
+    post:
+      operationId: postApiAuthSsoRedeem
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoRedeemRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoRedeemResponse'
+        '400':
+          description: 'Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/sso/ticket:
+    post:
+      operationId: postApiAuthSsoTicket
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoTicketResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/catalog/restore:
     post:
       description: 'Restore a live table to a prior snapshot as a NEW forward snapshot
@@ -5202,6 +5264,8 @@ components:
           type: string
         telemetryEnabled:
           type: boolean
+        starlakeUrl:
+          type: string
     ColumnPolicyDto:
       title: ColumnPolicyDto
       type: object
@@ -6839,6 +6903,41 @@ components:
           type: string
         disabled:
           type: boolean
+    SsoRedeemRequest:
+      title: SsoRedeemRequest
+      type: object
+      required:
+      - ticket
+      properties:
+        ticket:
+          type: string
+    SsoRedeemResponse:
+      title: SsoRedeemResponse
+      type: object
+      required:
+      - token
+      - username
+      - admin
+      - superuser
+      properties:
+        token:
+          type: string
+        username:
+          type: string
+        tenant:
+          type: string
+        admin:
+          type: boolean
+        superuser:
+          type: boolean
+    SsoTicketResponse:
+      title: SsoTicketResponse
+      type: object
+      required:
+      - ticket
+      properties:
+        ticket:
+          type: string
     StatementHistoryEntry:
       title: StatementHistoryEntry
       type: object
