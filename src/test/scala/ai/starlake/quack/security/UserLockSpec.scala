@@ -244,3 +244,88 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
       login(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword) shouldBe 401
     finally h.shutdown()
   }
+
+  // ------------------------------------------------------------------
+  // Guardrails on user/delete (follow-up wave)
+  // ------------------------------------------------------------------
+
+  "user/delete" should "refuse self-delete and deleting the last enabled superuser" in {
+    val (h, fix) = boot()
+    try
+      val root = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val self = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/delete",
+        s"""{"id":"${fix.rootUserId}"}""",
+        apiKey = Some(root)
+      )
+      withClue(s"self-delete body: ${self.body()}") {
+        self.statusCode() shouldBe 400
+        errorCode(self.body()) should contain("cannot_delete_self")
+      }
+      // Root is the fixture's only superuser: the identity-less static key may not
+      // delete it either (the floor, not the self-check, is what refuses here).
+      val viaKey = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/delete",
+        s"""{"id":"${fix.rootUserId}"}""",
+        apiKey = Some("lock-spec-key")
+      )
+      withClue(s"static-key delete-last body: ${viaKey.body()}") {
+        viaKey.statusCode() shouldBe 400
+        errorCode(viaKey.body()) should contain("last_superuser")
+      }
+      // A second enabled superuser lifts the floor.
+      fix.store.upsertUserWithHash(
+        tenant = None,
+        username = "root2",
+        passwordHash = at.favre.lib.crypto.bcrypt.BCrypt
+          .withDefaults()
+          .hashToString(10, "root2pw".toCharArray),
+        role = "admin"
+      )
+      val root2Id = fix.store.findUser(None, "root2").get.id
+      val lifted  = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/delete",
+        s"""{"id":"$root2Id"}""",
+        apiKey = Some(root)
+      )
+      withClue(s"delete-second-superuser body: ${lifted.body()}") {
+        lifted.statusCode() shouldBe 200
+      }
+    finally h.shutdown()
+  }
+
+  "the self-lock guard" should "resolve an OIDC-shaped identity through its manageable tenants" in {
+    val (h, fix) = boot()
+    try
+      // OIDC sessions carry profile.tenant = None with the grants in manageableTenants;
+      // a (None, username) lookup matches nothing for a tenant admin, leaving self-lock
+      // silently inert for such sessions. The guard must resolve through the scope.
+      val oidcAlice = h.tokens.mintWithScope(
+        ai.starlake.quack.edge.auth.AuthenticatedProfile(
+          username = SecurityFixtures.AliceUsername,
+          role = "admin",
+          groups = Set.empty,
+          claims = Map.empty,
+          authMethod = "oidc",
+          tenant = None
+        ),
+        ai.starlake.quack.ondemand.auth.SessionScope(
+          superuser = false,
+          manageableTenants = Set(SecurityFixtures.TenantId)
+        )
+      )
+      val denied = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(fix.aliceUserId, Some(false)),
+        apiKey = Some(oidcAlice)
+      )
+      withClue(s"oidc self-lock body: ${denied.body()}") {
+        denied.statusCode() shouldBe 400
+        errorCode(denied.body()) should contain("cannot_lock_self")
+      }
+    finally h.shutdown()
+  }

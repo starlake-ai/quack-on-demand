@@ -312,6 +312,14 @@ CASES = [
         ["user", "update", "u1", "--email", ""],
         "POST", "/api/user/update", {}, {"id": "u1", "email": ""},
     ),
+    (
+        ["user", "update", "u1", "--no-enabled"],
+        "POST", "/api/user/update", {}, {"id": "u1", "enabled": False},
+    ),
+    (
+        ["user", "update", "u1", "--enabled"],
+        "POST", "/api/user/update", {}, {"id": "u1", "enabled": True},
+    ),
     (["user", "delete", "u1"], "POST", "/api/user/delete", {}, {"id": "u1"}),
     (["user", "effective", "u1"], "GET", "/api/user/u1/effective", {}, None),
     (["role", "list", "--tenant", "acme"], "GET", "/api/role/list", {"tenant": "acme"}, None),
