@@ -120,9 +120,11 @@ final class ManagerServer(
       path == "/api/auth/oidc/logout" ||
       path == "/api/auth/sql-token/start" || path == "/api/auth/sql-token/callback" ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
-      // Public even when the integration is off -- the route is unmounted in that case, so
-      // this only ever matters when `config.slIntegrationOn`.
-      path == "/api/auth/sso/redeem" ||
+      // Gated on the integration flag, not just on the route being unmounted when off: with
+      // SL_ENABLED=false an anonymous POST here must fall through to the same 401 (with its
+      // audit row) that an unrecognized path got before this feature existed, not silently
+      // become "public" ahead of the route ever being wired.
+      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/redeem") ||
       modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
@@ -143,8 +145,11 @@ final class ManagerServer(
       path == "/api/auth/pat/revoke" ||
       // Starlake SSO ticket mint: any valid session may hand its own grant to
       // Starlake, admin or not -- the minted grant mirrors the session's own
-      // admin-ness, it grants nothing new.
-      path == "/api/auth/sso/ticket"
+      // admin-ness, it grants nothing new. Gated on the integration flag: with
+      // SL_ENABLED=false a non-admin session must still get 403 admin_required here
+      // exactly as before this feature existed, not a silent profile-allowlist grant
+      // ahead of the route ever being wired.
+      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
     * session token, a live personal access token (admitted with exactly its owner's scope, admin or

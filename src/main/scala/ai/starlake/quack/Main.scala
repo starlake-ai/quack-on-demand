@@ -421,11 +421,13 @@ object Main extends IOApp with LazyLogging:
 
     val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
 
-    // Starlake SSO handoff. Both are process-local and cheap; constructed unconditionally
-    // (like sessionTokens' denylist) even though the endpoints they back are only mounted
-    // when the integration is on -- see ManagementAuthConfig.slIntegrationOn.
-    val ssoTicketStore   = new SsoTicketStore()
-    val ssoRedeemLimiter = new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter()
+    // Starlake SSO handoff ticket store. Process-local and cheap; constructed unconditionally
+    // (like sessionTokens' denylist) even though the endpoints it backs are only mounted when
+    // the integration is on -- see ManagementAuthConfig.slIntegrationOn. No redeem-side rate
+    // limiter: the endpoint is public/unauthenticated, so a limiter keyed on the caller-supplied
+    // ticket string would itself be an unbounded, attacker-fed memory-retention vector while a
+    // 128-bit single-use 60s-TTL ticket is already infeasible to brute force without one.
+    val ssoTicketStore = new SsoTicketStore()
 
     // SPI contract: moduleStart runs m.start(ctx) for every module BEFORE the
     // ManagerServer is constructed, so routes built inside start() are honored.
@@ -579,8 +581,7 @@ object Main extends IOApp with LazyLogging:
       audit = auditRecorder,
       events = moduleEventBus.sink,
       changePasswordStore = Some(userStore),
-      ssoTickets = ssoTicketStore,
-      ssoRedeemLimiter = ssoRedeemLimiter
+      ssoTickets = ssoTicketStore
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT

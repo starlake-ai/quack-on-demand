@@ -17,7 +17,7 @@ import ai.starlake.quack.ondemand.auth.{
   SessionScope
 }
 import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRateLimiter, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -97,12 +97,7 @@ final class AuthHandlers(
       * Defaults to a fresh in-process store so callers that don't explicitly wire one (tests,
       * legacy code) still get working -- if unreachable -- endpoints.
       */
-    ssoTickets: SsoTicketStore = new SsoTicketStore(),
-    /** Best-effort throttle on repeated failed `ssoRedeem` calls for the same ticket. Not a
-      * security control -- tickets are 128-bit random and single-use, so brute-forcing one is
-      * infeasible regardless -- just noise reduction for a caller retrying a stale ticket.
-      */
-    ssoRedeemLimiter: AuditRateLimiter = new AuditRateLimiter()
+    ssoTickets: SsoTicketStore = new SsoTicketStore()
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -710,14 +705,17 @@ final class AuthHandlers(
   /** Redeem a Starlake SSO ticket for the QoD session grant it carries. Public: no
     * X-API-Key/cookie input, the ticket itself is the (single-use, 128-bit random, short-TTL)
     * credential. `401 invalid_ticket` on unknown / expired / already-redeemed.
+    *
+    * No rate limiting here on purpose: this endpoint is public and unauthenticated, so any
+    * limiter keyed on caller-supplied input (the ticket string) would itself be an unbounded,
+    * attacker-controlled memory-retention vector while providing no real protection -- a 128-bit
+    * single-use ticket with a 60s TTL is already infeasible to brute force.
     */
   def ssoRedeem(request: SsoRedeemRequest): Out[SsoRedeemResponse] = IO {
     ssoTickets.redeem(request.ticket) match
       case Some(grant) =>
         Right(SsoRedeemResponse(grant.sessionToken, grant.username, grant.tenant, grant.admin))
       case None =>
-        // Best-effort accounting only; see the ssoRedeemLimiter doc on the constructor.
-        ssoRedeemLimiter.allow(s"sso-redeem:${request.ticket}")
         Left(
           (
             StatusCode.Unauthorized,
