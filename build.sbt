@@ -5,6 +5,9 @@ import xerial.sbt.Sonatype.sonatypeCentralHost
 ThisBuild / scalaVersion := "3.7.4"
 ThisBuild / organization := "ai.starlake"
 
+// jsqltranspiler and jsqlparser are consumed as snapshots
+ThisBuild / resolvers += "central-snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
+
 // pureconfig's Mirror-based deriveReader macro recurses once per ManagerConfig
 // field; the scala3 compiler default (-Xmax-inlines:32) is exceeded once
 // ManagerConfig grows past ~28 fields (hit adding AutoscaleConfig). Bump with

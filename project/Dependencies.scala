@@ -47,7 +47,8 @@ object Dependencies {
 
   val jsqlParser            = "com.manticore-projects.jsqlformatter" % "jsqlparser" % Versions.jsqlParser
   // jsqltranspiler  provides JSQLColumResolver for column-level
-  // security rewriting. Shares the JSqlParser 5.3.218 ABI with jsqlParser above.
+  // security rewriting. Shares the JSqlParser ABI with jsqlParser above, so the
+  // two versions must move in lockstep (jsqlParser = what jsqltranspiler's pom pins).
   val jsqltranspiler        = "ai.starlake.jsqltranspiler" % "jsqltranspiler" % Versions.jsqltranspiler
   val catsCore              = "org.typelevel" %% "cats-core" % Versions.cats
   val kubernetesClient      = "io.fabric8" % "kubernetes-client" % Versions.fabric8
