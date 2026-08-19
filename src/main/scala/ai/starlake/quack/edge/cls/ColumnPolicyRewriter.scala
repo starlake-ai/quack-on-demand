@@ -90,6 +90,15 @@ final class ColumnPolicyRewriter(
   /** Pre-parse to enumerate FROM-item tables and fetch their column lists from the catalog.
     * Failures (unparseable SQL, missing catalog entry) silently omit the table - the resolver's
     * `unresolvedMode` then decides what to do.
+    *
+    * System-schema tables (information_schema, pg_catalog) are skipped: the tenant catalog only
+    * knows user tables (it returns Nil for them, which used to trip the STRICT resolver into a
+    * fail-closed deny of harmless metadata queries), and this map's bare-table-name keys land
+    * under the session's CURRENT_SCHEMA anyway, so they could never match a schema-qualified
+    * `information_schema.x` reference. Instead the inner [[JsqltranspilerRewriter]] seeds the
+    * resolver with DuckDB's fixed system-catalog shapes from [[SystemSchemaColumns]] under their
+    * real schema names. A system table not in that static set stays unresolved and keeps failing
+    * closed (worst case: a denied metadata query, never a leak).
     */
   private def buildSchema(sql: String, ctx: SchemaContext): IO[Map[String, List[String]]] =
     Try(CCJSqlParserUtil.parse(sql)) match
@@ -98,9 +107,11 @@ final class ColumnPolicyRewriter(
         val tables = schemaKeys(collectTables(stmt, ctx))
         tables.toList
           .traverse { case (key, (cat, sch, tab)) =>
-            catalog.columnsOf(cat, sch, tab).map(cols => key -> cols)
+            if SystemSchemaColumns.isSystemSchema(sch) then
+              IO.pure(None) // resolved via SystemSchemaColumns inside the inner rewriter
+            else catalog.columnsOf(cat, sch, tab).map(cols => Some(key -> cols))
           }
-          .map(_.toMap)
+          .map(_.flatten.toMap)
       case Success(_) => IO.pure(Map.empty)
 
   private def collectTables(

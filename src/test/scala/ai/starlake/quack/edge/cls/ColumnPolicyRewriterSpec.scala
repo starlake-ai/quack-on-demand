@@ -345,6 +345,165 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       case other          => fail(s"expected Denied, got $other")
   }
 
+  // -------- system-schema (information_schema / pg_catalog) resolution --------
+  //
+  // Metadata queries emitted by FlightSQL GetDbSchemas / catalog-browsing clients reference
+  // information_schema and pg_catalog tables the tenant catalog does not know (it returns Nil),
+  // which used to trip the resolver into a fail-closed deny for any principal carrying column
+  // policies. SystemSchemaColumns now seeds the resolver with DuckDB's fixed system-catalog
+  // shapes so these queries resolve; policies never target system schemas, so the rewrite is a
+  // no-op for them. Unknown system tables stay absent and keep failing closed.
+
+  private val maskPhone =
+    RoleColumnPolicy("cp-p", "r-1", "*", "tpch1", "customer", "c_phone", "mask", Some("'***'"))
+
+  private val getDbSchemasSql =
+    "SELECT catalog_name, schema_name AS db_schema_name FROM information_schema.schemata " +
+      "WHERE schema_name NOT IN ('information_schema','pg_catalog') ORDER BY 1,2"
+
+  private def rwDeny: ColumnPolicyRewriter =
+    new ColumnPolicyRewriter(defaultCat, unresolvedMode = UnresolvedMode.Deny, enabled = true)
+
+  private def shouldNotDeny(out: Outcome): Unit = out match
+    case Passthrough    => ()
+    case Rewritten(sql) => sql should not include "'***'"
+    case other          => fail(s"expected Passthrough/unmasked Rewritten, got $other")
+
+  it should "let the FlightSQL GetDbSchemas schemata query through for a principal with column policies" in {
+    shouldNotDeny(
+      rw.rewrite(getDbSchemasSql, StatementKind.Select, eff(tenantUser, List(maskPhone)), ctx)
+        .unsafeRunSync()
+    )
+  }
+
+  it should "let the GetDbSchemas schemata query through in Deny (STRICT) unresolved mode too" in {
+    shouldNotDeny(
+      rwDeny
+        .rewrite(getDbSchemasSql, StatementKind.Select, eff(tenantUser, List(maskPhone)), ctx)
+        .unsafeRunSync()
+    )
+  }
+
+  it should "let SELECT table_name FROM information_schema.tables through" in {
+    shouldNotDeny(
+      rwDeny
+        .rewrite(
+          "SELECT table_name FROM information_schema.tables",
+          StatementKind.Select,
+          eff(tenantUser, List(maskPhone)),
+          ctx
+        )
+        .unsafeRunSync()
+    )
+  }
+
+  it should "let SELECT * FROM information_schema.columns through (star expansion over the static shape)" in {
+    shouldNotDeny(
+      rwDeny
+        .rewrite(
+          "SELECT * FROM information_schema.columns WHERE table_schema='tpch1'",
+          StatementKind.Select,
+          eff(tenantUser, List(maskPhone)),
+          ctx
+        )
+        .unsafeRunSync()
+    )
+  }
+
+  it should "let SELECT * FROM pg_catalog.pg_tables through" in {
+    shouldNotDeny(
+      rwDeny
+        .rewrite(
+          "SELECT * FROM pg_catalog.pg_tables",
+          StatementKind.Select,
+          eff(tenantUser, List(maskPhone)),
+          ctx
+        )
+        .unsafeRunSync()
+    )
+  }
+
+  it should "keep failing closed for a system table NOT in the static set (Deny mode)" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT * FROM information_schema.no_such_system_table",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case DeniedUnresolvedTable | Denied(_) | PassthroughParseFailed => succeed
+      case other => fail(s"expected a fail-closed outcome, got $other")
+  }
+
+  // -------- no-bypass proofs: system-schema resolution must not weaken user-table masking --------
+
+  it should "still mask c_phone on a plain user-table SELECT" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT c_phone FROM tpch1.customer",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "still mask the user column in a mixed system-table/user-table statement" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT information_schema.tables.table_name, c.c_phone " +
+          "FROM information_schema.tables, tpch1.customer c",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql should include("'***'")
+        sql.toLowerCase should include("table_name")
+      case other => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "still mask (or deny) a user-table subquery hidden under an information_schema outer query" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT * FROM information_schema.tables " +
+          "WHERE table_name IN (SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case other => fail(s"expected mask or deny, got $other")
+  }
+
+  it should "not open a table-function side door alongside information_schema" in {
+    // query_table('tpch1.customer') is a table function; it is not indexed by the FROM walk and
+    // must stay on its pre-fix path (deny / fail-closed at the router), never an unmasked pass.
+    val out = rwDeny
+      .rewrite(
+        "SELECT it.table_name, q.c_phone " +
+          "FROM information_schema.tables it, query_table('tpch1.customer') q",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected deny/fail-closed or mask, got $other")
+  }
+
   // -------- KNOWN GAP (ignored below): unaliased aggregate produces broken SQL at the node --------
   //
   // Live repro (against a real DuckDB node, not reproducible at this unit level): with a mask

@@ -23,19 +23,43 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   ): RewriteOutcome =
     if policies.isEmpty then Passthrough
     else
-      val schemaDef: Array[Array[String]] = schema.toArray.map { case (tableKey, cols) =>
-        (tableKey +: cols).toArray
+      // Register the caller-provided tables under CURRENT_CATALOG/CURRENT_SCHEMA so SQL schema
+      // qualifiers (e.g. `tpch1.customer`) match them when tpch1 IS the current schema; a table
+      // with an empty column list is deliberately NOT registered (same as the old 3-arg
+      // JSQLColumResolver constructor), which keeps "catalog knows nothing" -> unresolvedMode.
+      // defaultCatalog/defaultSchema come from the caller's SchemaContext (the session-defaults
+      // pinned at handshake time).
+      val currentCatalog = defaultCatalog.getOrElse("")
+      val currentSchema  = defaultSchema.getOrElse("")
+      val metaData       = new JdbcMetaData(currentCatalog, currentSchema)
+      schema.foreach { case (tableKey, cols) =>
+        cols.foreach { col =>
+          metaData.addTable(
+            currentCatalog,
+            currentSchema,
+            tableKey,
+            new ai.starlake.transpiler.schema.JdbcColumn(col)
+          )
+        }
       }
-
-      // Use the 3-arg constructor so SQL schema qualifiers (e.g. `tpch1.customer`) match the
-      // schemaless rows in `schemaDef`. The 1-arg form leaves currentSchema="" and silently
-      // mismatches every schema-qualified table ref. defaultCatalog/defaultSchema come from the
-      // caller's SchemaContext (the session-defaults pinned at handshake time).
-      val resolver = new JSQLColumResolver(
-        defaultCatalog.getOrElse(""),
-        defaultSchema.getOrElse(""),
-        schemaDef
-      )
+      // Seed DuckDB's fixed system-catalog shapes under their REAL schema names so metadata
+      // queries (`information_schema.schemata`, `pg_catalog.pg_tables`, ...) resolve instead of
+      // tripping the STRICT resolver into a fail-closed deny. They must be schema-qualified
+      // entries: the flat `schema` map above lands under CURRENT_SCHEMA and can never match an
+      // `information_schema.x` reference. Column policies never target system schemas, so these
+      // seeds can only make a metadata query resolve, never unmask a user column; a system table
+      // absent from SystemSchemaColumns stays unresolved and keeps failing closed.
+      SystemSchemaColumns.all.foreach { case ((sysSchema, table), cols) =>
+        cols.foreach { col =>
+          metaData.addTable(
+            currentCatalog,
+            sysSchema,
+            table,
+            new ai.starlake.transpiler.schema.JdbcColumn(col)
+          )
+        }
+      }
+      val resolver = new JSQLColumResolver(metaData)
       resolver.setErrorMode(unresolvedMode match
         case UnresolvedMode.Deny => JdbcMetaData.ErrorMode.STRICT
         case UnresolvedMode.Pass => JdbcMetaData.ErrorMode.LENIENT)
@@ -431,7 +455,12 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                 val cur = it.next()
                 val nxt = visit(cur)
                 if nxt ne cur then it.set(nxt)
-            case _ => ()
+            case other =>
+              // e.g. `IN (SELECT c_phone FROM customer)`: the right side is a ParenthesedSelect,
+              // which visit() recurses into so a covered column inside the subquery is masked
+              // (otherwise the IN filter would act as a membership oracle on the true values).
+              val nxt = visit(other)
+              if nxt ne other then ix.setRightExpression(nxt)
           topLevelOverride = saved
           ix
 

@@ -163,3 +163,35 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     val sql = rewritten(go("SELECT * FROM customer", eff(odd, List(policy("c_owner = ${user}")))))
     sql should include("'o''brien'")
   }
+
+  // -------- system-schema metadata queries (FlightSQL GetDbSchemas and catalog browsing) --------
+  //
+  // The RLS rewriter has no schema resolver: it only jsqlparser-parses the statement and wraps
+  // tables that match a row policy. Metadata queries over information_schema / pg_catalog parse
+  // fine and match no user-table policy, so they must pass through untouched (never the
+  // PassthroughParseFailed arm, which the router denies fail-closed). These tests pin that the
+  // RLS path never needed the CLS system-schema fix.
+
+  it should "pass the FlightSQL GetDbSchemas schemata query through for a principal with row policies" in {
+    val sql =
+      "SELECT catalog_name, schema_name AS db_schema_name FROM information_schema.schemata " +
+        "WHERE schema_name NOT IN ('information_schema','pg_catalog') ORDER BY 1,2"
+    go(sql, eff(tenantUser, List(policy("c_region = 'eu'")))) shouldBe Passthrough
+  }
+
+  it should "pass information_schema and pg_catalog browsing queries through untouched" in {
+    val effSet = eff(tenantUser, List(policy("c_region = 'eu'")))
+    go("SELECT table_name FROM information_schema.tables", effSet) shouldBe Passthrough
+    go("SELECT * FROM pg_catalog.pg_tables", effSet) shouldBe Passthrough
+  }
+
+  it should "still wrap the user table when it appears alongside a system table" in {
+    val sql = rewritten(
+      go(
+        "SELECT it.table_name, c.c_id FROM information_schema.tables it, tpch1.customer c",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+    sql should include("information_schema.tables")
+  }
