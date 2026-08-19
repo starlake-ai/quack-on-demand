@@ -17,6 +17,11 @@ EXCLUSIONS = {
     "/api/auth/oidc/logout",      # browser session logout redirect
     "/api/auth/sql-token/start",  # opens the provider login page in a browser
     "/api/auth/sql-token/callback",  # provider redirect target
+    # Starlake SSO handoff: the manager mints a one-time ticket for the browser to
+    # carry to Starlake, which redeems it server-to-server. Neither leg is a CLI
+    # operation (no human at a terminal holds a ticket).
+    "/api/auth/sso/ticket",
+    "/api/auth/sso/redeem",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"
