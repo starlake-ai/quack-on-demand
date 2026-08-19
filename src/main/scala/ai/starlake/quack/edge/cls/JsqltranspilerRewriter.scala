@@ -495,6 +495,31 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           topLevelOverride = saved
           ce
 
+        case ex: net.sf.jsqlparser.expression.operators.relational.ExistsExpression =>
+          // `EXISTS (SELECT ...)`: the wrapped select must be descended exactly like the
+          // InExpression right side, otherwise a covered column inside the subquery is
+          // forwarded unmasked and EXISTS acts as a membership oracle on the true values.
+          val saved = topLevelOverride
+          topLevelOverride = None
+          val nxt = visit(ex.getRightExpression)
+          if nxt ne ex.getRightExpression then ex.setRightExpression(nxt)
+          topLevelOverride = saved
+          ex
+
+        case ac: net.sf.jsqlparser.expression.AnyComparisonExpression =>
+          // `x = ANY(SELECT ...)` / `= ALL` / `= SOME` (AnyType covers all three): descend into
+          // the quantified subquery so covered columns inside it are masked; otherwise the
+          // comparison is a true/false oracle on the masked values. The select field is final
+          // (no setter), so mutate it in place via applyPolicies like the ParenthesedSelect case.
+          val saved = topLevelOverride
+          topLevelOverride = None
+          Option(ac.getSelect).foreach { sel =>
+            val (innerChanged, _) = applyPolicies(sel, IndexedSeq.empty, policies)
+            if innerChanged then changed.set(true)
+          }
+          topLevelOverride = saved
+          ac
+
         case ps: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
           // Scalar subquery in expression position, e.g. `SELECT (SELECT c_email FROM customer)`.
           // JSqlParser 5.x represents this as a ParenthesedSelect inside the expression tree.

@@ -504,6 +504,115 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       case other          => fail(s"expected deny/fail-closed or mask, got $other")
   }
 
+  // -------- EXISTS / ANY / ALL / SOME subqueries must not leak covered columns --------
+  //
+  // Without visitor cases for ExistsExpression and AnyComparisonExpression the subquery is never
+  // descended, so a covered column inside it is forwarded unmasked and the EXISTS/ANY predicate
+  // acts as a true/false membership oracle on the masked values.
+
+  it should "mask (or deny) a covered column inside an ANY subquery" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE '555' = ANY(SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case other => fail(s"expected mask or deny, got $other")
+  }
+
+  it should "mask (or deny) a covered column inside an ALL subquery" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE '555' = ALL(SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case other => fail(s"expected mask or deny, got $other")
+  }
+
+  it should "mask (or deny) a covered column in an EXISTS subquery WHERE clause" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE EXISTS (SELECT 1 FROM tpch1.customer WHERE c_phone = '555')",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case other => fail(s"expected mask or deny, got $other")
+  }
+
+  it should "mask (or deny) a covered column in an EXISTS subquery projection" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE EXISTS (SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
+      case other => fail(s"expected mask or deny, got $other")
+  }
+
+  it should "mask the covered column in both the outer projection and a nested EXISTS subquery" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT c_phone FROM tpch1.customer " +
+          "WHERE EXISTS (SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) =>
+        sql.sliding("'***'".length).count(_ == "'***'") shouldBe 2
+      case other => fail(s"expected Rewritten with both occurrences masked, got $other")
+  }
+
+  it should "leave an EXISTS/ANY subquery that touches no covered column untouched" in {
+    val existsOut = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE EXISTS (SELECT c_id FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    existsOut shouldBe Passthrough
+    val anyOut = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE '1' = ANY(SELECT c_id FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    anyOut shouldBe Passthrough
+  }
+
   // -------- KNOWN GAP (ignored below): unaliased aggregate produces broken SQL at the node --------
   //
   // Live repro (against a real DuckDB node, not reproducible at this unit level): with a mask
