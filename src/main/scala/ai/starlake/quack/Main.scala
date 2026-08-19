@@ -566,6 +566,12 @@ object Main extends IOApp with LazyLogging:
     )
     val grantsForIdentity: GrantsLookup =
       (identity, email) => userStore.grantsForIdentity(identity, email)
+    // Best-effort logout callback to Starlake, only wired when the SSO integration is on --
+    // otherwise NoopStarlakeNotifier keeps logout free of any Starlake dependency.
+    val starlakeNotifier: StarlakeNotifier =
+      if mgrCfg.auth.management.slIntegrationOn then
+        new HttpStarlakeNotifier(mgrCfg.auth.management.slUrl)
+      else NoopStarlakeNotifier
     val authHandlers = new AuthHandlers(
       authService = authService,
       tokens = sessionTokens,
@@ -581,7 +587,8 @@ object Main extends IOApp with LazyLogging:
       audit = auditRecorder,
       events = moduleEventBus.sink,
       changePasswordStore = Some(userStore),
-      ssoTickets = ssoTicketStore
+      ssoTickets = ssoTicketStore,
+      starlakeNotifier = starlakeNotifier
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT

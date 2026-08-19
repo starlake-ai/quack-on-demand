@@ -20,6 +20,7 @@ import ai.starlake.quack.ondemand.state.{UserGrant, UserStore}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.IO
+import com.typesafe.scalalogging.LazyLogging
 import sttp.model.StatusCode
 import sttp.model.headers.{Cookie, CookieValueWithMeta}
 
@@ -97,8 +98,13 @@ final class AuthHandlers(
       * Defaults to a fresh in-process store so callers that don't explicitly wire one (tests,
       * legacy code) still get working -- if unreachable -- endpoints.
       */
-    ssoTickets: SsoTicketStore = new SsoTicketStore()
-):
+    ssoTickets: SsoTicketStore = new SsoTicketStore(),
+    /** Best-effort Starlake logout callback. Defaults to a no-op so callers that don't wire the
+      * integration (tests, legacy code, `slIntegrationOn == false`) fire nothing; Main selects
+      * [[HttpStarlakeNotifier]] only when the Starlake SSO integration is on.
+      */
+    starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier
+) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -149,6 +155,23 @@ final class AuthHandlers(
 
   private def clearCookie(forwardedProto: Option[String]): CookieValueWithMeta =
     cookie("", 0L, forwardedProto)
+
+  /** Best-effort Starlake logout callback, started as a detached fiber so QoD's own logout never
+    * blocks -- or fails -- on Starlake's availability. `starlakeNotifier` is [[NoopStarlakeNotifier]]
+    * (a no-op) unless the Starlake SSO integration is on, so this only ever reaches the network when
+    * `slIntegrationOn` is true. Failures are logged at warn and never surfaced to the caller.
+    */
+  private def dispatchStarlakeLogout(tokenOpt: Option[String]): IO[Unit] =
+    tokenOpt match
+      case Some(raw) =>
+        IO(starlakeNotifier.notifyLogout(StarlakeNotifier.sha256Hex(raw)))
+          .flatMap {
+            case Left(err) => IO(logger.warn(s"starlake logout callback failed: $err"))
+            case Right(_)  => IO.unit
+          }
+          .start
+          .void
+      case None => IO.unit
 
   private def stateCookie(value: String, forwardedProto: Option[String]): CookieValueWithMeta =
     cookie(value, 600L, forwardedProto)
@@ -235,19 +258,20 @@ final class AuthHandlers(
   def oidcLogout(
       sessionCookie: Option[String],
       forwardedProto: Option[String]
-  ): IO[(StatusCode, String, CookieValueWithMeta)] = IO.blocking {
-    sessionCookie match
-      case Some(tok) =>
-        val (actor, realm) = audit.actorOf(Some(tok))
-        tokens.revoke(tok)
-        audit.restAs(actor, realm, "auth", AuditActions.AuthRevoke, "ok")
-      case None => ()
-    // id_token_hint is not persisted in this iteration; RP-initiated logout still
-    // clears the local cookie and (when configured) hits the IdP end-session endpoint.
-    // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
-    val location = oidc.flatMap(_.endSessionUrl(OidcScope.System, None)).getOrElse("/ui/")
-    (StatusCode.Found, location, clearCookie(forwardedProto))
-  }
+  ): IO[(StatusCode, String, CookieValueWithMeta)] =
+    IO.blocking {
+      sessionCookie match
+        case Some(tok) =>
+          val (actor, realm) = audit.actorOf(Some(tok))
+          tokens.revoke(tok)
+          audit.restAs(actor, realm, "auth", AuditActions.AuthRevoke, "ok")
+        case None => ()
+      // id_token_hint is not persisted in this iteration; RP-initiated logout still
+      // clears the local cookie and (when configured) hits the IdP end-session endpoint.
+      // Logout uses the system end-session endpoint; per-tenant end-session is a follow-up.
+      val location = oidc.flatMap(_.endSessionUrl(OidcScope.System, None)).getOrElse("/ui/")
+      (StatusCode.Found, location, clearCookie(forwardedProto))
+    }.flatTap(_ => dispatchStarlakeLogout(sessionCookie))
 
   // ---- Browser SQL-token flow (/api/auth/sql-token) ----
 
@@ -624,15 +648,15 @@ final class AuthHandlers(
       cookie: Option[String],
       forwardedProto: Option[String] = None
   ): Out[CookieValueWithMeta] =
+    val tok = apiKey.orElse(cookie)
     // revoke() now always does JDBC (persist + NOTIFY the denylist), so this runs
     // on the blocking pool. `oidcLogout` already uses IO.blocking for the same call.
     IO.blocking {
-      val tok            = apiKey.orElse(cookie)
       val (actor, realm) = audit.actorOf(tok)
       tok.foreach(tokens.revoke)
       audit.restAs(actor, realm, "auth", AuditActions.AuthLogout, "ok")
-      Right(clearCookie(forwardedProto))
-    }
+    }.flatTap(_ => dispatchStarlakeLogout(tok))
+      .as(Right(clearCookie(forwardedProto)))
 
   /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT.
     *
