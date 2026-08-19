@@ -385,6 +385,9 @@ export interface UserUpdateRequest {
   mustChangePassword?: boolean;
   // Omit (undefined) = unchanged; empty string = clear to no email; non-empty = set.
   email?: string | null;
+  // Omit = unchanged. false locks the account (sign-in refused, tokens stop
+  // working); true unlocks. The UI presents this inverted as "Locked".
+  enabled?: boolean;
 }
 
 export interface UserDeleteRequest { id: string; }
