@@ -495,6 +495,19 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           topLevelOverride = saved
           ce
 
+        case ne: net.sf.jsqlparser.expression.NotExpression =>
+          // A leading NOT parses as a NotExpression wrapper (NOT ExistsExpression.isNot), so
+          // `NOT EXISTS (...)` and `NOT (x = ANY(...))` arrive here. Descend into the wrapped
+          // predicate like the other unary wrappers, otherwise the negated form leaks the
+          // covered column unmasked. (`x NOT IN (...)` stays an InExpression with isNot=true
+          // and rides the InExpression case below.)
+          val saved = topLevelOverride
+          topLevelOverride = None
+          val nxt = visit(ne.getExpression)
+          if nxt ne ne.getExpression then ne.setExpression(nxt)
+          topLevelOverride = saved
+          ne
+
         case ex: net.sf.jsqlparser.expression.operators.relational.ExistsExpression =>
           // `EXISTS (SELECT ...)`: the wrapped select must be descended exactly like the
           // InExpression right side, otherwise a covered column inside the subquery is

@@ -613,6 +613,86 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     anyOut shouldBe Passthrough
   }
 
+  // -------- NOT-wrapped predicates must descend too --------
+  //
+  // jsqlparser parses a leading NOT as a NotExpression wrapper (NOT ExistsExpression.isNot);
+  // without a visitor case for it the wrapped predicate is never descended and NOT EXISTS /
+  // NOT (= ANY) leak the covered column unmasked. `x NOT IN (...)` stays an InExpression with
+  // isNot=true, so it rides the existing InExpression case; pinned here as a guard anyway.
+
+  it should "mask a covered column inside a NOT EXISTS subquery WHERE clause" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM tpch1.customer " +
+          "WHERE NOT EXISTS (SELECT 1 FROM tpch1.customer c2 WHERE c2.c_phone = '555')",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "mask a covered column inside a NOT (= ANY) subquery" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE NOT ('555' = ANY(SELECT c_phone FROM tpch1.customer))",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "mask a covered column inside a NOT IN subquery" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM tpch1.customer " +
+          "WHERE '555' NOT IN (SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "mask a covered column in a NOT EXISTS subquery projection" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE NOT EXISTS (SELECT c_phone FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out match
+      case Rewritten(sql) => sql should include("'***'")
+      case other          => fail(s"expected Rewritten with mask, got $other")
+  }
+
+  it should "leave a NOT-wrapped predicate that touches no covered column untouched" in {
+    val out = rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables " +
+          "WHERE NOT EXISTS (SELECT c_id FROM tpch1.customer)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync()
+    out shouldBe Passthrough
+  }
+
   // -------- KNOWN GAP (ignored below): unaliased aggregate produces broken SQL at the node --------
   //
   // Live repro (against a real DuckDB node, not reproducible at this unit level): with a mask
