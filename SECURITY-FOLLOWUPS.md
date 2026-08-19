@@ -10,6 +10,10 @@ should be closed.
 
 ## 1. Correlated subquery: outer-table masked column not masked inside the subquery
 
+**FIXED** (fix/cls-subquery-scope): outer scopes' (alias -> table) bindings are threaded
+through every subquery descent (`applyPolicies(outerScope)` + `PolicyVisitor.outerTables`);
+local FROM items shadow outer ones, unqualified columns stay local-only.
+
 When the visitor descends into a subquery (IN / EXISTS / ANY / scalar), it builds
 `fromTables` only from that subquery's own FROM/JOIN items. A reference to the
 OUTER query's table via its outer-scope alias is therefore unknown inside the
@@ -36,6 +40,12 @@ table and its policy applies. This is a scope-threading change shared by every
 subquery-descent case, not a per-operator patch.
 
 ## 2. Unresolved table inside a subquery fails open
+
+**FIXED** (fix/cls-subquery-scope), two layers: `ColumnPolicyRewriter.collectTables` now
+enumerates tables at every depth via TablesNamesFinder (the old FROM-walker skipped
+expression subqueries entirely, so nested tables never reached the schema map), and the
+inner rewriter enforces STRICT table existence at any depth (`firstUnknownTable`,
+scanned on the original text so CTE names stay excluded).
 
 An unknown table at the top level correctly denies (fail-closed) under
 `UnresolvedMode.Deny` / STRICT. The same unknown table referenced only inside a

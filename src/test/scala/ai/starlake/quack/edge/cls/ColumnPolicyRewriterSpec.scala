@@ -369,22 +369,20 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     case Rewritten(sql) => sql should not include "'***'"
     case other          => fail(s"expected Passthrough/unmasked Rewritten, got $other")
 
-  it should "let the FlightSQL GetDbSchemas schemata query through for a principal with column policies" in {
+  it should "let the FlightSQL GetDbSchemas schemata query through for a principal with column policies" in
     shouldNotDeny(
       rw.rewrite(getDbSchemasSql, StatementKind.Select, eff(tenantUser, List(maskPhone)), ctx)
         .unsafeRunSync()
     )
-  }
 
-  it should "let the GetDbSchemas schemata query through in Deny (STRICT) unresolved mode too" in {
+  it should "let the GetDbSchemas schemata query through in Deny (STRICT) unresolved mode too" in
     shouldNotDeny(
       rwDeny
         .rewrite(getDbSchemasSql, StatementKind.Select, eff(tenantUser, List(maskPhone)), ctx)
         .unsafeRunSync()
     )
-  }
 
-  it should "let SELECT table_name FROM information_schema.tables through" in {
+  it should "let SELECT table_name FROM information_schema.tables through" in
     shouldNotDeny(
       rwDeny
         .rewrite(
@@ -395,9 +393,8 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         )
         .unsafeRunSync()
     )
-  }
 
-  it should "let SELECT * FROM information_schema.columns through (star expansion over the static shape)" in {
+  it should "let SELECT * FROM information_schema.columns through (star expansion over the static shape)" in
     shouldNotDeny(
       rwDeny
         .rewrite(
@@ -408,9 +405,8 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         )
         .unsafeRunSync()
     )
-  }
 
-  it should "let SELECT * FROM pg_catalog.pg_tables through" in {
+  it should "let SELECT * FROM pg_catalog.pg_tables through" in
     shouldNotDeny(
       rwDeny
         .rewrite(
@@ -421,7 +417,6 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         )
         .unsafeRunSync()
     )
-  }
 
   it should "keep failing closed for a system table NOT in the static set (Deny mode)" in {
     val out = rwDeny
@@ -500,8 +495,8 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out match
       case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => succeed
-      case Rewritten(sql) => sql should include("'***'")
-      case other          => fail(s"expected deny/fail-closed or mask, got $other")
+      case Rewritten(sql)                                             => sql should include("'***'")
+      case other => fail(s"expected deny/fail-closed or mask, got $other")
   }
 
   // -------- EXISTS / ANY / ALL / SOME subqueries must not leak covered columns --------
@@ -776,4 +771,38 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         sql shouldBe "SELECT c_mktsegment, min('***') AS phone FROM tpch1.customer GROUP BY 1"
         sql should include("AS phone")
       case other => fail(s"expected Rewritten, got $other")
+  }
+
+  // ------------------------------------------------------------------
+  // SECURITY-FOLLOWUPS items 1 + 2, pinned through the full layer (catalog +
+  // schema-map collection + inner rewriter)
+  // ------------------------------------------------------------------
+
+  it should "mask an outer-aliased covered column inside a correlated EXISTS subquery" in {
+    rw.rewrite(
+      "SELECT c.c_id FROM customer c WHERE EXISTS " +
+        "(SELECT 1 FROM customer c2 WHERE c2.c_id = c.c_id AND c.c_phone = '555')",
+      StatementKind.Select,
+      eff(tenantUser, List(maskPhone)),
+      ctx
+    ).unsafeRunSync() match
+      case Rewritten(sql) =>
+        sql should include("'***'")
+        (sql should not).include("c.c_phone = '555'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny an unresolvable table nested inside an EXISTS subquery in STRICT mode" in {
+    // The FROM-walker used to skip expression subqueries entirely, so the nested table
+    // never reached the schema map and the statement passed through unchecked.
+    rwDeny
+      .rewrite(
+        "SELECT 1 FROM information_schema.tables WHERE EXISTS (SELECT 1 FROM tpch1.no_such_table)",
+        StatementKind.Select,
+        eff(tenantUser, List(maskPhone)),
+        ctx
+      )
+      .unsafeRunSync() match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
   }

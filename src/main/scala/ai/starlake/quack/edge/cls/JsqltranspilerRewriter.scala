@@ -100,21 +100,81 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             case Right(parsed) =>
               parsed match
                 case sel: Select =>
-                  try
-                    val (changed, _) = applyPolicies(sel, projectionOrigins, policies)
-                    if changed then Rewritten(sel.toString) else Passthrough
-                  catch case e: DenyException => Denied(e.reason)
+                  // The resolver's STRICT mode only enforces table existence at the
+                  // top level; a table referenced ONLY inside a subquery (IN / EXISTS /
+                  // ANY / scalar) slips past it. Enforce the same fail-closed invariant
+                  // at every nesting depth ourselves before any masking runs.
+                  val nestedUnknown =
+                    if unresolvedMode == UnresolvedMode.Deny then
+                      firstUnknownTable(sql, schema, currentCatalog, currentSchema)
+                    else None
+                  nestedUnknown match
+                    case Some(name) => Denied(s"unresolvable table $name")
+                    case None       =>
+                      try
+                        val (changed, _) = applyPolicies(sel, projectionOrigins, policies)
+                        if changed then Rewritten(sel.toString) else Passthrough
+                      catch case e: DenyException => Denied(e.reason)
                 case _ =>
                   Passthrough
+
+  /** First table reference, at ANY depth, that neither the caller-provided schema nor the
+    * system-schema seeds know. CTE names are excluded by [[TablesNamesFinder]] itself. Matching is
+    * deliberately the same name space the resolver was fed: a bare name must be a schema key; a
+    * qualified name must be `[currentCatalog.]currentSchema.key` or a seeded system-schema table.
+    * This check can only ADD denials on top of the resolver's own STRICT pass, never admit.
+    */
+  private def firstUnknownTable(
+      originalSql: String,
+      schema: Map[String, List[String]],
+      currentCatalog: String,
+      currentSchema: String
+  ): Option[String] =
+    val names =
+      try
+        // Scan the ORIGINAL text, not the resolved statement: the resolver
+        // schema-qualifies CTE references (FROM x -> tpch1.x), which would defeat
+        // the finder's own WITH-name exclusion and false-deny every CTE read.
+        val parsed = CCJSqlParserUtil.parse(originalSql)
+        val finder = new net.sf.jsqlparser.util.TablesNamesFinder()
+        val list   = finder.getTableList(parsed)
+        scala.jdk.CollectionConverters.ListHasAsScala(list).asScala.toList
+      catch case _: Throwable => Nil
+    def unquote(s: String) = s.stripPrefix("\"").stripSuffix("\"")
+    // Known = the caller's catalog produced a NON-EMPTY column list for the name (an
+    // unknown table lands in the schema map with Nil, which the resolver also refuses
+    // to register), or the name is a seeded system-schema table.
+    def knownUserTable(name: String): Boolean =
+      schema.exists((k, cols) => k.equalsIgnoreCase(name) && cols.nonEmpty)
+    def known(raw: String): Boolean =
+      raw.split('.').toList.map(unquote).reverse match
+        case Nil                => true
+        case name :: Nil        => knownUserTable(name)
+        case name :: q1 :: rest =>
+          val sysKnown = SystemSchemaColumns.all.keys.exists { case (s, t) =>
+            s.equalsIgnoreCase(q1) && t.equalsIgnoreCase(name)
+          }
+          val qualifierOk = rest match
+            case Nil      => true
+            case c :: Nil => c.equalsIgnoreCase(currentCatalog)
+            case _        => false
+          val userKnown = q1.equalsIgnoreCase(currentSchema) && knownUserTable(name) && qualifierOk
+          sysKnown || userKnown
+    names.find(n => !known(n))
 
   /** Walk the resolved statement's projection items and replace any Column whose physical (table,
     * column) lineage matches a policy. Full visitor surface (CASE / CAST / OVER / IN / BETWEEN /
     * EXTRACT / WHERE / HAVING / GROUP / ORDER) is added in Task 5.
+    *
+    * `outerScope` threads the ENCLOSING queries' (alias -> table) bindings into subquery descent,
+    * so a correlated reference through an outer alias (`EXISTS (... WHERE c.c_phone = ...)`)
+    * resolves to its base table and its policy applies. Local FROM items shadow outer ones.
     */
   private def applyPolicies(
       sel: Select,
       origins: IndexedSeq[(String, String)],
-      policies: List[RoleColumnPolicy]
+      policies: List[RoleColumnPolicy],
+      outerScope: List[(String, String)] = Nil
   ): (Boolean, Select) =
     val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
     val visitor = new PolicyVisitor(policies, changed)
@@ -137,14 +197,16 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     sel match
       case sol: net.sf.jsqlparser.statement.select.SetOperationList =>
         // UNION / INTERSECT / EXCEPT: recurse into every arm. Each arm has its own FROM clause
-        // and its own per-column policy lookup; outer-query origins don't apply.
+        // and its own per-column policy lookup; outer-query origins don't apply, but a set
+        // operation nested in a correlated subquery still sees the enclosing scope.
         Option(sol.getSelects).foreach(_.forEach { arm =>
-          val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies)
+          val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies, outerScope)
           if armChanged then changed.set(true)
         })
       case wrap: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
         // Top-level parenthesized SELECT: unwrap and recurse.
-        val (innerChanged, _) = applyPolicies(wrap.getSelect, IndexedSeq.empty, policies)
+        val (innerChanged, _) =
+          applyPolicies(wrap.getSelect, IndexedSeq.empty, policies, outerScope)
         if innerChanged then changed.set(true)
       case ps: PlainSelect =>
         // FROM-tables of this select (key -> table). Single-table case lets the visitor resolve
@@ -152,6 +214,10 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         // (function args, BETWEEN bounds, CASE arms, etc.) where the resolver doesn't expand the
         // qualifier.
         visitor.fromTables = collectFromTables(ps)
+        visitor.outerTables = outerScope
+        // The scope a nested subquery of THIS select sees: local FROM items first
+        // (they shadow), then whatever this select itself inherited.
+        val childScope = visitor.fromTables ::: outerScope
         // FROM-item subquery: recurse so policies apply inside `FROM (SELECT ... FROM customer)`.
         // The outer projection still references the subquery via its alias and the projected name.
         // Before recursion (which would mutate inner Columns into transform literals) we snapshot
@@ -162,7 +228,10 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         Option(ps.getFromItem).foreach {
           case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
             derivedPolicies ++= deriveOuterPolicies(sub, policies)
-            val (innerChanged, _) = applyPolicies(sub.getSelect, IndexedSeq.empty, policies)
+            // Derived tables see the outer scope too: only legal for LATERAL, but
+            // over-masking an illegal reference is harmless (the engine rejects it).
+            val (innerChanged, _) =
+              applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope)
             if innerChanged then changed.set(true)
           case _ => ()
         }
@@ -170,7 +239,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           Option(j.getFromItem).foreach {
             case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
               derivedPolicies ++= deriveOuterPolicies(sub, policies)
-              val (innerChanged, _) = applyPolicies(sub.getSelect, IndexedSeq.empty, policies)
+              val (innerChanged, _) =
+                applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope)
               if innerChanged then changed.set(true)
             case _ => ()
           }
@@ -315,8 +385,11 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       policies: List[RoleColumnPolicy],
       changed: java.util.concurrent.atomic.AtomicBoolean
   ):
-    var topLevelOverride: Option[(String, String)]  = None
-    var fromTables: List[(String, String)]          = Nil
+    var topLevelOverride: Option[(String, String)] = None
+    var fromTables: List[(String, String)]         = Nil
+    // Enclosing queries' (alias -> table) bindings, threaded through subquery descent so
+    // correlated outer-alias references resolve; local fromTables always shadow these.
+    var outerTables: List[(String, String)]         = Nil
     var extraPolicies: List[RoleColumnPolicy]       = Nil
     private def allPolicies: List[RoleColumnPolicy] = extraPolicies ::: policies
 
@@ -324,10 +397,16 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     private def resolveTable(col: net.sf.jsqlparser.schema.Column): String =
       Option(col.getTable).map(_.getName) match
         case Some(key) =>
-          // Alias or table-name qualifier - look up the base table behind the alias.
-          fromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+          // Alias or table-name qualifier - local FROM items first, then the outer scope
+          // (a correlated subquery referencing the outer query's alias).
+          (fromTables ::: outerTables)
+            .find(_._1.equalsIgnoreCase(key))
+            .map(_._2)
+            .getOrElse(key)
         case None =>
-          // Unqualified - fall back to the single FROM item if there is exactly one.
+          // Unqualified - fall back to the single LOCAL FROM item if there is exactly
+          // one. Deliberately local-only: SQL resolves unqualified names innermost-first,
+          // and attributing them to an outer table would mis-key single-FROM lookups.
           if fromTables.size == 1 then fromTables.head._2 else ""
 
     /** Walk `expr` and return its replacement (same instance if nothing changed). */
@@ -527,7 +606,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           val saved = topLevelOverride
           topLevelOverride = None
           Option(ac.getSelect).foreach { sel =>
-            val (innerChanged, _) = applyPolicies(sel, IndexedSeq.empty, policies)
+            val (innerChanged, _) =
+              applyPolicies(sel, IndexedSeq.empty, policies, fromTables ::: outerTables)
             if innerChanged then changed.set(true)
           }
           topLevelOverride = saved
@@ -540,7 +620,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           // belong to the subquery itself, so the outer origins don't apply.
           val saved = topLevelOverride
           topLevelOverride = None
-          val (innerChanged, _) = applyPolicies(ps.getSelect, IndexedSeq.empty, policies)
+          val (innerChanged, _) =
+            applyPolicies(ps.getSelect, IndexedSeq.empty, policies, fromTables ::: outerTables)
           if innerChanged then changed.set(true)
           topLevelOverride = saved
           ps
