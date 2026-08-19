@@ -51,7 +51,7 @@ final class UserHandlers(
       tenant = u.tenant.map(tid => tenantNameForId.getOrElse(tid, tid)),
       username = u.username,
       role = u.role,
-      enabled = true,
+      enabled = u.enabled,
       roles = roles,
       groups = groups,
       poolGrants = grants,
@@ -179,7 +179,8 @@ final class UserHandlers(
             req.role,
             userStore,
             mustChangePassword = req.mustChangePassword,
-            email = email
+            email = email,
+            enabled = req.enabled
           )
           .map {
             case Right(u) =>
@@ -190,7 +191,8 @@ final class UserHandlers(
                 AuditActions.UserUpdate,
                 "ok",
                 tenant = u.tenant,
-                target = Some(u.username)
+                target = Some(u.username),
+                detail = req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty)
               )
               toResponseFor(u.id) match
                 case Some(r) => Right(r)
