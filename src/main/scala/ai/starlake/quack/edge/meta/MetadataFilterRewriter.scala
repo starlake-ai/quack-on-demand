@@ -46,11 +46,24 @@ enum MetadataFilterOutcome:
   * without an explicit information_schema grant; the ACL validator implicitly admits exactly the
   * references this class filters (same flag).
   *
-  * Fail-closed: a filterable reference this class cannot substitute denies the statement; it never
-  * passes one through unfiltered. The substitution walk alone cannot promise that (SQL puts tables
-  * in more places than it visits), so every filterable OCCURRENCE is counted up front and the
-  * counts must match: fewer substitutions than references, or a count that could not be taken, is a
-  * denial.
+  * Fail-closed, and DENIAL is how it stays that way: a filterable reference the substitution walk
+  * cannot reach is refused, not filtered. The walk alone cannot promise this (SQL puts tables in
+  * more places than it visits), so two independent counts of the statement's filterable references
+  * are taken up front and both must be covered by the substitutions:
+  *
+  *   - AST occurrences, tallied on jsqlparser's own traversal by node identity. Exact where the
+  *     traversal reaches, blind where it does not (ORDER BY, GROUP BY and window PARTITION BY
+  *     subqueries are NOT visited - the same blind spots as the walk, which is why one count is not
+  *     enough).
+  *   - A textual count of the raw statement with string literals and comments stripped. Coarser,
+  *     but it does not depend on knowing where the traversal stops, so it catches the positions
+  *     nothing else sees.
+  *
+  * A count that cannot be taken is also a denial. Two consequences are accepted deliberately: a
+  * reference in an unsupported position is denied rather than filtered, and a CROSS-CATALOG
+  * filterable reference sitting in a traversal blind spot is denied even though the walk leaves
+  * cross-catalog metadata alone on purpose (rare, fail-closed, and the validator would have
+  * grant-gated that reference anyway).
   */
 final class MetadataFilterRewriter(enabled: Boolean = true):
 
@@ -86,13 +99,19 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                   case Some(refs) =>
                     val walker = new Walker(grants, ctx)
                     walker.walkSelect(sel)
+                    // Cross-catalog references are left alone on purpose (they stay
+                    // grant-gated by the validator), so they are accounted for rather
+                    // than counted as unfiltered leftovers.
+                    val accounted = walker.substitutions + refs.crossCatalog
                     walker.failure match
                       case Some(reason) => Denied(reason)
                       case None         =>
-                        if refs > walker.substitutions then
+                        if refs.nodes > walker.substitutions ||
+                          textualRefCount(sql) > accounted
+                        then
                           Denied(
-                            "cannot filter every information_schema reference in this " +
-                              "statement; select from information_schema directly instead"
+                            "information_schema reference in a position this filter cannot " +
+                              "rewrite; query it directly in the FROM clause instead"
                           )
                         else if walker.substitutions > 0 then Rewritten(sel.toString)
                         else Passthrough
@@ -118,11 +137,13 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
       (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
     }
 
-  /** How many filterable references the statement carries, counted as table OCCURRENCES by
-    * jsqlparser's own full traversal (it reaches FROM items, joins, CTE bodies, set-op arms AND
-    * every expression position - function arguments, CASE arms, ORDER BY - that the substitution
-    * walk does not enter). Compared against the walker's substitution count, so a reference sitting
-    * where the walker cannot rewrite it denies the statement instead of riding through unfiltered.
+  /** How many filterable references the statement carries, counted as table OCCURRENCES on
+    * jsqlparser's own traversal, which reaches FROM items, joins, CTE bodies, set-op arms, WHERE /
+    * HAVING and the expression positions the substitution walk does not enter (function arguments,
+    * CASE arms). It does NOT reach ORDER BY, GROUP BY or window PARTITION BY subqueries: those are
+    * the textual tripwire's job ([[textualRefCount]]). Compared against the walker's substitution
+    * count, so a reference where the walker cannot rewrite it denies the statement instead of
+    * riding through unfiltered.
     *
     * Occurrences rather than [[net.sf.jsqlparser.util.TablesNamesFinder]]'s de-duplicated NAME list
     * is the load-bearing choice: with names, one substituted FROM item covers for every other
@@ -132,11 +153,11 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
     * None when the traversal fails: the caller denies, because a statement that breaks the counter
     * is precisely the shape the walk is most likely blind to.
     */
-  private def filterableOccurrences(sel: Select, ctx: SchemaContext): Option[Int] =
+  private def filterableOccurrences(sel: Select, ctx: SchemaContext): Option[RefCounts] =
     val counter = new FilterableOccurrences(ctx.defaultDatabase.getOrElse(""))
     Try {
       counter.getTableList(sel: Statement)
-      counter.count
+      RefCounts(counter.count, counter.crossCatalogCount)
     }.toOption
 
   private def hasWildcardAll(eff: EffectiveSet): Boolean =
@@ -263,14 +284,99 @@ object MetadataFilterRewriter:
     // Keyed on node IDENTITY, not on the table name: two references to the same table are two
     // occurrences (that is the whole point), while one node the traversal happens to visit twice
     // - a CTE body, which it reaches both through the WITH list and through the query - stays one.
-    private val seen =
+    private def identitySet =
       java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean])
 
-    def count: Int = seen.size
+    private val seen      = identitySet
+    private val crossSeen = identitySet
+
+    def count: Int             = seen.size
+    def crossCatalogCount: Int = crossSeen.size
 
     override def visit[S](table: Table, context: S): java.lang.Void =
       if filterableMeta(table, sessionCat).isDefined then seen.add(table)
+      else if crossCatalogFilterable(table, sessionCat) then crossSeen.add(table)
       super.visit(table, context)
+
+  /** A filterable information_schema table of some OTHER catalog. The substitution walk leaves
+    * these alone by design (cross-catalog metadata stays grant-gated by the validator rather than
+    * filtered), so the textual tripwire must not read them as unfiltered leftovers.
+    */
+  private def crossCatalogFilterable(t: Table, sessionCat: String): Boolean =
+    val schema = Option(t.getSchemaName).getOrElse("")
+    val cat    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
+    val name   = Option(t.getName).getOrElse("")
+    cat.nonEmpty && !cat.equalsIgnoreCase(sessionCat) &&
+    schema.equalsIgnoreCase(InformationSchema) && FilterableTables.contains(name.toLowerCase)
+
+  private final case class RefCounts(nodes: Int, crossCatalog: Int)
+
+  /** Textual tripwire: how many times the raw statement spells a filterable reference, once string
+    * literals and comments are removed so a statement merely mentioning the phrase is not denied.
+    * Qualification is not part of the match, since a session-catalog-qualified reference is
+    * substituted and a cross-catalog one is accounted for separately.
+    *
+    * This exists because the AST-side count can only see what jsqlparser's traversal visits, and
+    * that traversal skips ORDER BY, GROUP BY and window PARTITION BY subqueries - exactly where the
+    * substitution walk is blind too, so the two agreed with each other and both missed the
+    * reference. Text does not depend on knowing where the traversal stops.
+    */
+  private def textualRefCount(sql: String): Int =
+    TextualRefRe.findAllMatchIn(stripLiteralsAndComments(sql)).size
+
+  private val TextualRefRe =
+    """(?i)"?information_schema"?\s*\.\s*"?(?:schemata|tables|columns|views)"?\b""".r
+
+  private enum ScanState:
+    case Sql, Literal, LineComment, BlockComment
+
+  /** Drop single-quoted literals (`''` is an escaped quote, not a terminator), `--` line comments
+    * and slash-star block comments, so the tripwire counts references the engine would actually
+    * resolve. Double-quoted identifiers are KEPT: those are references.
+    *
+    * Dollar-quoted strings are not recognised, so a `$$...$$` literal naming a filterable table
+    * denies the statement. That is the fail-closed direction and DuckDB clients rarely emit it.
+    */
+  private[meta] def stripLiteralsAndComments(sql: String): String =
+    import ScanState._
+    val out   = new StringBuilder(sql.length)
+    var i     = 0
+    var state = Sql
+    while i < sql.length do
+      val c    = sql.charAt(i)
+      val next = if i + 1 < sql.length then sql.charAt(i + 1) else ' '
+      state match
+        case Sql =>
+          if c == '\'' then
+            state = Literal
+            i += 1
+          else if c == '-' && next == '-' then
+            state = LineComment
+            i += 2
+          else if c == '/' && next == '*' then
+            state = BlockComment
+            i += 2
+          else
+            out.append(c)
+            i += 1
+        case Literal =>
+          if c == '\'' && next == '\'' then i += 2
+          else if c == '\'' then
+            state = Sql
+            i += 1
+          else i += 1
+        case LineComment =>
+          if c == '\n' then
+            state = Sql
+            out.append(c)
+            i += 1
+          else i += 1
+        case BlockComment =>
+          if c == '*' && next == '/' then
+            state = Sql
+            i += 2
+          else i += 1
+    out.toString
 
   /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
     * the whole predicate to keep the SQL readable.

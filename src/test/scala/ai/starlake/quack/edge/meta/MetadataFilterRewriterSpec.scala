@@ -215,6 +215,68 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other     => fail(s"expected Denied, got $other")
   }
 
+  // Neither the substitution walk nor jsqlparser's traversal descends ORDER BY, GROUP BY or
+  // window PARTITION BY subqueries, so a reference hiding there is invisible to both. The
+  // textual tripwire is what denies these: it does not depend on knowing the traversal's gaps.
+
+  it should "deny a sole reference hidden in an ORDER BY subquery" in {
+    go(
+      "SELECT 1 FROM tpch1.customer ORDER BY (SELECT count(*) FROM information_schema.tables)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny a sole reference hidden in a GROUP BY existence oracle" in {
+    go(
+      "SELECT count(*) FROM tpch1.customer GROUP BY CASE WHEN EXISTS (SELECT 1 FROM " +
+        "information_schema.columns WHERE table_name = 'salaries' AND column_name = 'ssn') " +
+        "THEN 1 ELSE 0 END",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny a sole reference hidden in a window PARTITION BY subquery" in {
+    go(
+      "SELECT count(*) OVER (PARTITION BY (SELECT count(*) FROM information_schema.tables)) " +
+        "FROM tpch1.customer",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny an ORDER BY reference masked by a substituted FROM item" in {
+    go(
+      "SELECT table_name FROM information_schema.tables " +
+        "ORDER BY (SELECT count(*) FROM information_schema.tables)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "pass a cross-catalog filterable reference through (the validator gates it)" in {
+    go("SELECT * FROM other_db.information_schema.tables", eff(tenantUser)) shouldBe Passthrough
+  }
+
+  it should "not trip on the phrase inside a string literal" in {
+    go(
+      "SELECT * FROM tpch1.customer WHERE note = 'see information_schema.tables'",
+      eff(tenantUser)
+    ) shouldBe Passthrough
+  }
+
+  it should "not trip on the phrase inside comments" in {
+    go("-- see information_schema.tables\nSELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
+      Passthrough
+    go("/* see information_schema.views */ SELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
+      Passthrough
+  }
+
   it should "escape quotes in grant values" in {
     go(
       "SELECT * FROM information_schema.tables",
