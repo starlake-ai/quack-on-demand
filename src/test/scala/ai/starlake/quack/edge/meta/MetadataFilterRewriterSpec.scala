@@ -346,6 +346,91 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       Passthrough
   }
 
+  // Multi-statement batches. A single parse reads only the FIRST statement, so everything after
+  // the first semicolon used to reach the node untouched while the validator admitted the batch
+  // as a pure read. Each statement is processed on its own and the batch is re-serialized whole.
+
+  /** Every occurrence of the filterable table that is NOT the inside of a derived table, i.e. what
+    * would reach the node as an unfiltered catalog read.
+    */
+  private def bareRefs(sql: String): Int =
+    """(?i)FROM\s+information_schema\.tables(?!\s+WHERE\s+\()""".r.findAllMatchIn(sql).size
+
+  it should "filter a metadata read hiding after the first statement of a batch" in {
+    go("SELECT 1; SELECT * FROM information_schema.tables", eff(tenantUser)) match
+      case Rewritten(sql) =>
+        sql should include("SELECT 1")
+        sql should include("table_schema IN ('information_schema', 'pg_catalog')")
+        bareRefs(sql) shouldBe 0
+      case Denied(_) => succeed
+      case other     => fail(s"expected Rewritten or Denied, got $other")
+  }
+
+  it should "keep both statements of a batch, filtering only the metadata one" in {
+    go(
+      "SELECT * FROM tpch1.customer; SELECT * FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("tpch1.customer")
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        bareRefs(sql) shouldBe 0
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "preserve a leading USE while filtering the statement after it" in {
+    go(
+      "USE mem.main; SELECT table_name FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        // The printer spaces a qualified name as `mem . main`, so match the parts, not the gaps.
+        """(?i)USE\s+mem\s*\.\s*main""".r.findFirstIn(sql) should not be empty
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        bareRefs(sql) shouldBe 0
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "replace a SHOW TABLES that follows another statement in a batch" in {
+    go("USE mem.main; SHOW TABLES", eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+      case Rewritten(sql) =>
+        """(?i)USE\s+mem\s*\.\s*main""".r.findFirstIn(sql) should not be empty
+        sql should include("table_name AS name")
+        sql should include("table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny a SHOW TABLES variant that follows another statement in a batch" in {
+    go(
+      "USE mem.main; SHOW TABLES FROM tpch1",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
+  it should "filter every metadata statement of a batch, dropping none" in {
+    go(
+      "SELECT * FROM information_schema.columns; SELECT * FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("information_schema.columns")
+        sql should include("information_schema.tables")
+        java.util.regex.Pattern
+          .quote("table_name = 'customer'")
+          .r
+          .findAllMatchIn(sql)
+          .size shouldBe 2
+        bareRefs(sql) shouldBe 0
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny a batch whose write statement reads the catalog" in {
+    go(
+      "SELECT 1; CREATE TABLE mine AS SELECT * FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "mine", verb = "ALL"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
   it should "escape quotes in grant values" in {
     go(
       "SELECT * FROM information_schema.tables",

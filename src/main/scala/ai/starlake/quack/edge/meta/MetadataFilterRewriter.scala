@@ -89,55 +89,124 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
         // grant keeps today's unfiltered read.
         Passthrough
       else
+        // Fast path for a bare SHOW TABLES, which never reaches the parse path below.
         ShowTables.replace(sql, grants, ctx) match
           case Some(outcome) => outcome
           case None          =>
-            Try(CCJSqlParserUtil.parse(sql)).toOption match
-              case Some(sel: Select) =>
-                // Counted BEFORE the walk: the substitutions themselves introduce inner
-                // information_schema references the count would otherwise include too.
-                filterableOccurrences(sel, ctx) match
-                  case None =>
-                    // The reference count is what makes the fail-closed promise true, so
-                    // losing it denies rather than admits: a statement the counter chokes
-                    // on is exactly the shape the substitution walk is likely blind to.
-                    Denied(
-                      "cannot analyse the information_schema references in this statement"
-                    )
-                  case Some(refs) =>
-                    // Captured BEFORE the walk: the derived tables it injects each carry their
-                    // own FROM information_schema.X, which would inflate the count.
-                    val normalized = sel.toString
-                    val walker     = new Walker(grants, ctx)
-                    walker.walkSelect(sel)
-                    // Cross-catalog references are left alone on purpose (they stay
-                    // grant-gated by the validator), so they are accounted for rather
-                    // than counted as unfiltered leftovers.
-                    val accounted = walker.substitutions + refs.crossCatalog
-                    walker.failure match
-                      case Some(reason) => Denied(reason)
-                      case None         =>
-                        if refs.nodes > walker.substitutions ||
-                          textualRefCount(normalized) > accounted
-                        then
-                          Denied(
-                            "information_schema reference in a position this filter cannot " +
-                              "rewrite (or mentioned in a string literal); query it directly " +
-                              "in the FROM clause instead"
-                          )
-                        else if walker.substitutions > 0 then Rewritten(sel.toString)
-                        else Passthrough
-              case Some(st: ShowTablesStatement) =>
-                // A SHOW TABLES the textual fast path did not recognise (leading comment,
-                // odd whitespace) but jsqlparser did. Same treatment, so the form cannot
-                // dodge the filter by being spelled differently.
-                if ShowTables.isPlain(st) then ShowTables.filteredListing(grants, ctx)
-                else ShowTables.denial
-              case _ =>
-                // Non-SELECT or unparseable: nothing filterable that the ACL layer has not
-                // already gated (DESCRIBE / SHOW-table forms are Read accesses now;
-                // unparseable statements are denied upstream unless wildcard-ALL).
+            // parseStatements, NOT parse: parse truncates a batch to its first statement, so
+            // everything after the first semicolon reached the node untouched while the
+            // validator admitted the batch as a pure read. The parser is configured exactly as
+            // the ACL validator configures it (SqlParser.extract), so the two see the same
+            // statement list: a shape one of them splits and the other does not is a gap
+            // between them.
+            Try(parseBatch(sql)).toOption match
+              case None =>
+                // Unparseable. Unchanged contract: the validator denies these upstream, and it
+                // sees the whole batch rather than a truncation of it.
                 Passthrough
+              case Some(stmts) =>
+                val parts = stmts.getStatements.asScala.toList.map(processOne(_, grants, ctx))
+                parts.collectFirst { case StmtOutcome.Refused(reason) => reason } match
+                  // One refused statement denies the batch: the node executes it whole.
+                  case Some(reason) => Denied(reason)
+                  case None         =>
+                    val changed = parts.exists {
+                      case StmtOutcome.Changed(_) => true
+                      case _                      => false
+                    }
+                    // Nothing changed: forward the caller's ORIGINAL text, so a statement this
+                    // filter does not touch is never reshaped by a round trip through the
+                    // printer. Otherwise re-serialize every statement in order, which is also
+                    // what keeps the trailing ones from being dropped.
+                    if !changed then Passthrough
+                    else
+                      Rewritten(
+                        parts
+                          .map {
+                            case StmtOutcome.Kept(t)    => t
+                            case StmtOutcome.Changed(t) => t
+                            case StmtOutcome.Refused(_) => ""
+                          }
+                          .mkString("; ")
+                      )
+
+  /** One statement of the batch. Only SELECT and SHOW TABLES are rewritable; anything else keeps
+    * its text but may not smuggle a catalog read past the filter.
+    */
+  private def processOne(
+      st: Statement,
+      grants: List[RolePermission],
+      ctx: SchemaContext
+  ): StmtOutcome =
+    st match
+      case sel: Select               => processSelect(sel, grants, ctx)
+      case show: ShowTablesStatement =>
+        // Also the arm for a SHOW TABLES the textual fast path did not recognise (leading
+        // comment, odd whitespace). Without it the form executes natively and answers with the
+        // node's full listing.
+        if ShowTables.isPlain(show) then
+          StmtOutcome.Changed(ShowTables.filteredListingSql(grants, ctx))
+        else StmtOutcome.Refused(ShowTables.VariantRefusal)
+      case other =>
+        // USE / SET / txn control / DDL / DML: left exactly as written, but a filterable
+        // reference anywhere in it is refused. The validator's pure-read gate should already
+        // have denied such a batch; this arm does not rely on that.
+        val text = other.toString
+        if text.isBlank then
+          // An unsupported statement that serializes to nothing has swallowed whatever
+          // followed it in the batch (`BEGIN; SELECT ...` collapses to exactly this), so its
+          // text can neither be counted nor re-emitted. Refusing is the only safe reading.
+          StmtOutcome.Refused(AnalysisRefusal)
+        else if textualRefCount(text) > 0 then StmtOutcome.Refused(UnsupportedPositionRefusal)
+        else StmtOutcome.Kept(text)
+
+  private def processSelect(
+      sel: Select,
+      grants: List[RolePermission],
+      ctx: SchemaContext
+  ): StmtOutcome =
+    // Counted BEFORE the walk: the substitutions themselves introduce inner
+    // information_schema references the count would otherwise include too.
+    filterableOccurrences(sel, ctx) match
+      case None =>
+        // The reference count is what makes the fail-closed promise true, so losing it denies
+        // rather than admits: a statement the counter chokes on is exactly the shape the
+        // substitution walk is likely blind to.
+        StmtOutcome.Refused(AnalysisRefusal)
+      case Some(refs) =>
+        // Captured BEFORE the walk: the derived tables it injects each carry their own
+        // FROM information_schema.X, which would inflate the count.
+        val normalized = sel.toString
+        val walker     = new Walker(grants, ctx)
+        walker.walkSelect(sel)
+        // Cross-catalog references are left alone on purpose (they stay grant-gated by the
+        // validator), so they are accounted for rather than counted as unfiltered leftovers.
+        val accounted = walker.substitutions + refs.crossCatalog
+        walker.failure match
+          case Some(reason) => StmtOutcome.Refused(reason)
+          case None         =>
+            if refs.nodes > walker.substitutions || textualRefCount(normalized) > accounted then
+              StmtOutcome.Refused(UnsupportedPositionRefusal)
+            else if walker.substitutions > 0 then StmtOutcome.Changed(sel.toString)
+            else StmtOutcome.Kept(normalized)
+
+  /** Parse the caller's text as a batch, with `allowUnsupportedStatements` on so the statements the
+    * grammar does not model (`USE db.schema`, dialect-specific forms) come back as opaque nodes
+    * instead of failing the whole parse and blinding the filter. Mirrors the configuration in
+    * `SqlParser.extract`.
+    */
+  private def parseBatch(sql: String): net.sf.jsqlparser.statement.Statements =
+    CCJSqlParserUtil.parseStatements(
+      sql,
+      (parser: net.sf.jsqlparser.parser.CCJSqlParser) => {
+        val featureConfig = new net.sf.jsqlparser.parser.feature.FeatureConfiguration()
+        featureConfig.setValue(
+          net.sf.jsqlparser.parser.feature.Feature.allowUnsupportedStatements,
+          true
+        ): Unit
+        parser.withConfiguration(featureConfig): Unit
+      }
+    )
 
   /** Session-catalog Read-covering grants: verb RO/RW/ALL and catalog wildcard-or-equal to the
     * session database.
@@ -272,6 +341,23 @@ object MetadataFilterRewriter:
 
   private def lit(s: String): String = "'" + s.replace("'", "''") + "'"
 
+  /** Why one statement was refused. Any of these denies the whole batch. */
+  private[meta] val UnsupportedPositionRefusal: String =
+    "information_schema reference in a position this filter cannot rewrite (or mentioned in a " +
+      "string literal); query it directly in the FROM clause instead"
+
+  private[meta] val AnalysisRefusal: String =
+    "cannot analyse the information_schema references in this statement"
+
+  /** What one statement of a batch came to. `Kept` and `Changed` carry the statement's text; the
+    * distinction decides whether the batch is rewritten at all, so a batch nothing touched can
+    * forward the caller's original text instead of a re-serialized copy of it.
+    */
+  private enum StmtOutcome:
+    case Kept(text: String)
+    case Changed(text: String)
+    case Refused(reason: String)
+
   /** Some(tableName) when `t` names a filterable information_schema table of the session catalog.
     * The single rule both the substitution walk and [[FilterableOccurrences]] apply: they must
     * agree exactly, or the cross-check either denies valid statements or misses a leak.
@@ -384,8 +470,8 @@ object MetadataFilterRewriter:
     * [[replace]] is the textual fast path, matched BEFORE parsing, and returns None for anything
     * that is not a SHOW ... TABLES form. Forms it does not recognise (a leading comment, odd
     * whitespace) still parse to a `ShowTablesStatement`, which `rewrite` routes back here through
-    * [[isPlain]] / [[filteredListing]] / [[denial]] - the two paths must stay in agreement or the
-    * unrecognised spelling becomes an unfiltered bypass.
+    * [[isPlain]] / [[filteredListingSql]] / [[VariantRefusal]] - the two paths must stay in
+    * agreement or the unrecognised spelling becomes an unfiltered bypass.
     */
   private[meta] object ShowTables:
     private val ShowTablesPlainRe = """(?is)^\s*SHOW\s+TABLES\s*;?\s*$""".r
@@ -397,9 +483,10 @@ object MetadataFilterRewriter:
         ctx: SchemaContext
     ): Option[MetadataFilterOutcome] =
       sql match
-        case ShowTablesPlainRe() => Some(filteredListing(grants, ctx))
-        case ShowTablesAnyRe()   => Some(denial)
-        case _                   => None
+        case ShowTablesPlainRe() =>
+          Some(MetadataFilterOutcome.Rewritten(filteredListingSql(grants, ctx)))
+        case ShowTablesAnyRe() => Some(MetadataFilterOutcome.Denied(VariantRefusal))
+        case _                 => None
 
     /** True for a bare `SHOW TABLES`: no source database, no LIKE / WHERE selector, no modifier
       * (EXTENDED / FULL) and no selection mode. Everything else names or narrows a target this
@@ -413,16 +500,12 @@ object MetadataFilterRewriter:
     /** The filtered stand-in for a plain SHOW TABLES: DuckDB's native single-column `name` shape,
       * scoped to the session schema.
       */
-    def filteredListing(grants: List[RolePermission], ctx: SchemaContext): MetadataFilterOutcome =
+    def filteredListingSql(grants: List[RolePermission], ctx: SchemaContext): String =
       val pred   = predicateFor("tables", grants)
       val schema = lit(ctx.defaultSchema.getOrElse("main"))
-      MetadataFilterOutcome.Rewritten(
-        s"SELECT table_name AS name FROM information_schema.tables " +
-          s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
-      )
+      s"SELECT table_name AS name FROM information_schema.tables " +
+        s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
 
-    def denial: MetadataFilterOutcome =
-      MetadataFilterOutcome.Denied(
-        "SHOW TABLES variants are not supported with filtered metadata; " +
-          "query information_schema.tables instead"
-      )
+    val VariantRefusal: String =
+      "SHOW TABLES variants are not supported with filtered metadata; " +
+        "query information_schema.tables instead"

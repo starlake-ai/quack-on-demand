@@ -1773,6 +1773,31 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
 
+  it should "filter a metadata read hiding behind the first statement of a read batch" in:
+    // A single parse reads only the first statement, so the second used to reach the node
+    // untouched while the validator admitted the batch as a pure read: a zero-grant principal
+    // got the full catalog. Either outcome is safe, but the wire text must never carry an
+    // unfiltered catalog read.
+    val (router, capturedSql, _) =
+      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+    val out = router
+      .execute(
+        "meta-9",
+        "alice",
+        poolKey,
+        "SELECT 1; SELECT * FROM information_schema.tables",
+        effectiveSet = Some(effWithGrants(Nil))
+      )
+      .unsafeRunSync()
+    out match
+      case Left(f)  => f shouldBe a[RouterFailure.AccessDenied]
+      case Right(r) =>
+        r.close()
+        capturedSql() should include("table_schema IN ('information_schema', 'pg_catalog')")
+        """(?i)FROM\s+information_schema\.tables(?!\s+WHERE\s+\()""".r
+          .findAllMatchIn(capturedSql())
+          .size shouldBe 0
+
   it should "still deny a metadata read riding inside a multi-statement write batch" in:
     // The implicit admit is pure-read only: the rewriter passes non-Select statements
     // through untouched, so admitting this batch would let RW on `mine` materialize an
