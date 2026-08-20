@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **Closed a column/row-security bypass (S1).** A user restricted by a column mask
+  or row policy could previously launder the unmasked/unfiltered data by wrapping
+  the read in a write (`CREATE TABLE ... AS SELECT`, `INSERT ... SELECT`,
+  `CREATE VIEW ... AS SELECT`, and via subqueries in `MERGE`/`UPDATE`/`DELETE`),
+  because masking/filtering only ran for plain `SELECT`. Such statements are now
+  denied when their read side exposes a protected table: any read of a row-policy
+  table, and a masked-column read of a CLS table (a write that reads only unmasked
+  columns is still allowed, detected by running the write's inner SELECT through the
+  real column-policy rewriter; any read the guard cannot isolate fails closed).
+  Enforced only when ACL plus CLS/RLS are enabled; superusers are unaffected.
+  Closing this required making the read extractor complete-by-construction, which
+  also tightens table-level ACL: a table read previously hidden from the grant check
+  inside an `INSERT ... VALUES` subquery, a VALUES-derived FROM table, an expression
+  wrapper (`ANY(ARRAY[...])`, `COLLATE`, and the like), or a Select-clause subquery
+  (`GROUP BY`, `DISTINCT ON`, `QUALIFY`, named `WINDOW`, `GROUPING SETS`) is now
+  grant-checked, so a principal without `RO` on such a table now gets a deny where
+  the read used to slip through. Known limitation: a masked column referenced only in
+  a `JOIN ON` condition of a write's read side is not detected (an inference-only
+  channel, matching the base CLS SELECT path), and write-side row enforcement
+  (scoping a policy-holder's own `UPDATE`/`DELETE` on a row-policy table to their
+  rows) is a separate open follow-up, not part of this fix.
+
 - **Filtered metadata.** Any authenticated principal can read the session database's
   `information_schema` (schemata/tables/columns/views) without a grant; result rows are
   filtered to the objects the principal holds at least RO on, so table-level ACL stays
