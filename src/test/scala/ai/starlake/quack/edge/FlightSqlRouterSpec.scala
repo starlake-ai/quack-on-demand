@@ -673,10 +673,19 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
 
   /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter. Returns
-    * (router, lastSqlSentToBackend ref, node).
+    * (router, lastSqlSentToBackend ref, node). `metadataFilter` and `validator` default to today's
+    * router defaults, so the CLS call sites below are unaffected.
     */
   private def setupWithRewriter(
-      rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter
+      rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
+        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+          new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+        ),
+      metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
+        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
+      validator: StatementValidator = StatementValidator.allowAll,
+      readers: Int = 1,
+      stub: () => QuackResponse = defaultStub
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -709,10 +718,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup
       .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
       .unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, readers)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
 
-    // Mutable cell that the override captures.
+    // Mutable cell that the override captures: holds the LAST SQL the backend saw,
+    // so a retried statement overwrites the first attempt's text.
     var capturedSql: String = ""
     val client              = new QuackHttpClient(
       TestArrow.sharedAllocator,
@@ -721,7 +731,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     ):
       override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
         capturedSql = sql
-        IO.pure(TestArrow.okResponse())
+        IO.pure(stub())
 
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
@@ -730,7 +740,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sessions,
       tracker,
       adapter,
-      columnPolicyRewriter = rewriter
+      validator = validator,
+      columnPolicyRewriter = rewriter,
+      metadataFilterRewriter = metadataFilter
     )
     (router, () => capturedSql, node)
 
@@ -1624,3 +1636,182 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     inTx.toOption.get.nodeId shouldBe other
     inTx.toOption.get.close()
     decisionCount(reg, "pinned-move") shouldBe 1.0
+
+  // ---- MetadataFilterRewriter integration tests ----
+  //
+  // The pool is InMemory, so the session catalog the router hands the rewriter is
+  // "memory" and the session schema is "main"; grants must name that catalog to be
+  // read-covering (see FlightSqlRouter.perKindDb).
+
+  private val metaFilterOn = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true)
+
+  private def grant(catalog: String, schema: String, table: String, verb: String) =
+    ai.starlake.quack.ondemand.state.RolePermission(
+      id = s"rp-$catalog-$schema-$table-$verb",
+      roleId = "r-1",
+      catalogName = catalog,
+      schemaName = schema,
+      tableName = table,
+      verb = verb,
+      grantedAt = Some(Instant.now())
+    )
+
+  private def effWithGrants(
+      ps: List[ai.starlake.quack.ondemand.state.RolePermission]
+  ): ai.starlake.quack.ondemand.rbac.EffectiveSet =
+    ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, ps, Nil)
+
+  private val customerOnly = Some(effWithGrants(List(grant("memory", "tpch1", "customer", "RO"))))
+
+  "the metadata filter step" should "narrow an information_schema read to the granted objects" in:
+    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val out                      = router
+      .execute(
+        "meta-1",
+        "alice",
+        poolKey,
+        "SELECT table_name FROM information_schema.tables",
+        effectiveSet = customerOnly
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
+
+  it should "leave the statement untouched when the filter is disabled" in:
+    val (router, capturedSql, _) = setupWithRewriter()
+    val out                      = router
+      .execute(
+        "meta-2",
+        "alice",
+        poolKey,
+        "SELECT table_name FROM information_schema.tables",
+        effectiveSet = customerOnly
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("FROM information_schema.tables")
+    capturedSql() should not include "table_schema = 'tpch1'"
+
+  it should "leave a superuser's information_schema read unfiltered" in:
+    val root = ai.starlake.quack.ondemand.state.RbacUser("u-0", None, "root", "admin")
+    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val out                      = router
+      .execute(
+        "meta-3",
+        "root",
+        poolKey,
+        "SELECT table_name FROM information_schema.tables",
+        effectiveSet = Some(ai.starlake.quack.ondemand.rbac.EffectiveSet(root, Nil, Nil, Nil, Nil))
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("FROM information_schema.tables")
+    capturedSql() should not include "qod_meta"
+
+  it should "replace a plain SHOW TABLES with the filtered listing" in:
+    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val out                      = router
+      .execute("meta-4", "alice", poolKey, "SHOW TABLES", effectiveSet = customerOnly)
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("table_name AS name")
+    capturedSql() should include("table_schema = 'main'")
+
+  it should "deny a SHOW TABLES variant without ever reaching a node" in:
+    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val out                      = router
+      .execute("meta-5", "alice", poolKey, "SHOW TABLES FROM tpch1", effectiveSet = customerOnly)
+      .unsafeRunSync()
+    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    capturedSql() shouldBe ""
+
+  it should "resend the FILTERED statement when the first node fails transiently" in:
+    // Two readers so retryOnce has a fallback. The retry MUST carry the metadata
+    // rewrite: resending the caller's text would answer the retry unfiltered.
+    val calls           = new java.util.concurrent.atomic.AtomicInteger(0)
+    val transientThenOk = () =>
+      if calls.getAndIncrement() == 0 then QuackResponse.Failed(QuackError.Transient("gone"), 1L)
+      else TestArrow.okResponse()
+    val (router, capturedSql, _) =
+      setupWithRewriter(metadataFilter = metaFilterOn, readers = 2, stub = transientThenOk)
+    val out = router
+      .execute(
+        "meta-6",
+        "alice",
+        poolKey,
+        "SELECT table_name FROM information_schema.tables",
+        effectiveSet = customerOnly
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    calls.get() shouldBe 2
+    // capturedSql holds the LAST wire text, i.e. the retry's.
+    capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
+
+  // The validator and the rewriter mount from the same flag, so the pair must agree:
+  // what the validator implicitly admits is exactly what the rewriter then filters.
+
+  private val filteredMetaValidator = new ai.starlake.quack.edge.sql.PostgresAclValidator(
+    defaultDatabase = "memory",
+    defaultSchema = "main",
+    filteredMetadata = true,
+    tenantCatalogs = _ => Set("memory")
+  )
+
+  it should "admit and filter an ungranted metadata read under the real validator" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+    val out = router
+      .execute(
+        "meta-7",
+        "alice",
+        poolKey,
+        "SELECT table_name FROM information_schema.tables",
+        effectiveSet = customerOnly
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
+
+  it should "filter a metadata read hiding behind the first statement of a read batch" in:
+    // A single parse reads only the first statement, so the second used to reach the node
+    // untouched while the validator admitted the batch as a pure read: a zero-grant principal
+    // got the full catalog. Either outcome is safe, but the wire text must never carry an
+    // unfiltered catalog read.
+    val (router, capturedSql, _) =
+      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+    val out = router
+      .execute(
+        "meta-9",
+        "alice",
+        poolKey,
+        "SELECT 1; SELECT * FROM information_schema.tables",
+        effectiveSet = Some(effWithGrants(Nil))
+      )
+      .unsafeRunSync()
+    out match
+      case Left(f)  => f shouldBe a[RouterFailure.AccessDenied]
+      case Right(r) =>
+        r.close()
+        capturedSql() should include("table_schema IN ('information_schema', 'pg_catalog')")
+        """(?i)FROM\s+information_schema\.tables(?!\s+WHERE\s+\()""".r
+          .findAllMatchIn(capturedSql())
+          .size shouldBe 0
+
+  it should "still deny a metadata read riding inside a multi-statement write batch" in:
+    // The implicit admit is pure-read only: the rewriter passes non-Select statements
+    // through untouched, so admitting this batch would let RW on `mine` materialize an
+    // UNFILTERED catalog copy. Flat-set rule, pinned end to end.
+    val (router, capturedSql, _) =
+      setupWithRewriter(metadataFilter = metaFilterOn, validator = filteredMetaValidator)
+    val out = router
+      .execute(
+        "meta-8",
+        "alice",
+        poolKey,
+        "INSERT INTO main.mine SELECT 1; SELECT * FROM information_schema.tables",
+        effectiveSet = Some(effWithGrants(List(grant("memory", "main", "mine", "RW"))))
+      )
+      .unsafeRunSync()
+    out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    capturedSql() shouldBe ""

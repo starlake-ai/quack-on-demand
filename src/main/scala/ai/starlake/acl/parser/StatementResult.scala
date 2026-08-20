@@ -43,9 +43,11 @@ enum StatementResult:
   case ParseError(index: Int, sqlSnippet: String, message: String)
 
   /** Statement parsed to a type on the explicit no-table-refs allowlist: COMMIT, ROLLBACK,
-    * SAVEPOINT, SET, RESET, USE, SHOW, DESCRIBE. The validator admits these unconditionally.
-    * Statement types NOT on the allowlist are reported as [[ParseError]] instead, so the validator
-    * fails closed on anything the parser does not positively recognize as table-free.
+    * SAVEPOINT, SET, RESET, USE, SHOW TABLES, SHOW DATABASES / SCHEMAS. The validator admits these
+    * unconditionally. Statement types NOT on the allowlist are reported as [[ParseError]] instead,
+    * so the validator fails closed on anything the parser does not positively recognize as
+    * table-free. `DESCRIBE t` / `SHOW t` / `SHOW COLUMNS FROM t` are NOT here: they name a table
+    * and are extracted as `Read` accesses on it.
     */
   case ControlFlow(index: Int, sqlSnippet: String, statementType: String)
 

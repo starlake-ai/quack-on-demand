@@ -32,12 +32,20 @@ import com.typesafe.scalalogging.LazyLogging
   * regardless of the session's tenant. Default is a no-op lookup that returns `Set.empty`, which
   * makes wildcard catalog matches fail-closed: callers that don't wire a real lookup get the safer
   * behavior.
+  *
+  * `filteredMetadata` mirrors `quack-flightsql.acl.filteredMetadata` (QOD_ACL_FILTERED_METADATA):
+  * when on, a PURE-READ statement's Read accesses on the SESSION catalog's filterable
+  * `information_schema` tables are admitted without a grant, because the edge
+  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter]] (mounted from the same flag) narrows
+  * those rows to the principal's granted objects. Defaults to `false` so a caller that constructs
+  * the validator without the rewriter keeps the grant-required posture.
   */
 final class PostgresAclValidator(
     defaultDatabase: String = "",
     defaultSchema: String = "main",
     dialect: String = "duckdb",
-    tenantCatalogs: String => Set[String] = _ => Set.empty
+    tenantCatalogs: String => Set[String] = _ => Set.empty,
+    filteredMetadata: Boolean = false
 ) extends StatementValidator,
       LazyLogging:
 
@@ -155,10 +163,51 @@ final class PostgresAclValidator(
         .flatten
         .toSet
 
-      if accesses.isEmpty then
-        // Pure ControlFlow (or every arm yielded zero refs). Admit
-        // unconditionally -- there is nothing to authorize.
-        logger.info(s"ACL ALLOWED: user=${context.username} no table refs")
+      // Filtered-metadata implicit admit: Read accesses on the session catalog's
+      // filterable information_schema tables are answered by the edge metadata
+      // filter (same flag), so they need no grant here. Everything else about
+      // system schemas (writes, DDL, unlisted tables, cross-catalog refs) still
+      // requires a grant. The flag wires from the SAME AclConfig value that
+      // mounts the rewriter, so admit-without-filter cannot happen.
+      //
+      // SESSION catalog only. Never the tenant catalog set: the rewriter filters
+      // only session-catalog references, so admitting a SIBLING tenant-db's
+      // information_schema here would be admit-without-filter (unfiltered
+      // enumeration of a catalog the principal may hold zero grants on).
+      // `context.defaultDatabase.getOrElse(defaultDatabase)` is the same
+      // expression `parserConfigFor` uses, so the admit and the parser's
+      // qualification of an unqualified `information_schema.tables` agree on the
+      // catalog by construction.
+      val sessionCatalog = context.defaultDatabase.getOrElse(defaultDatabase)
+      // PURE-READ statements only: the metadata rewriter filters Select
+      // statements and passes everything else through untouched, so dropping an
+      // info-schema Read that rides inside an INSERT / CTAS / MERGE would be
+      // admit-without-filter (unfiltered catalog copy into a table the principal
+      // owns).
+      val pureRead                = accesses.forall(_.verb == Verb.Read)
+      val gated: Set[TableAccess] =
+        if !filteredMetadata || !pureRead then accesses
+        else
+          accesses.filterNot { ta =>
+            ta.verb == Verb.Read &&
+            ta.table.schema.equalsIgnoreCase("information_schema") &&
+            ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables
+              .contains(ta.table.table.toLowerCase) &&
+            ta.table.database.equalsIgnoreCase(sessionCatalog)
+          }
+
+      if gated.isEmpty then
+        // Pure ControlFlow (or every arm yielded zero refs), or an
+        // all-metadata statement whose every access the implicit admit above
+        // dropped. Admit unconditionally -- there is nothing left to
+        // authorize. The log still names the ORIGINAL accesses so the audit
+        // trail shows what was read.
+        logger.info(
+          s"ACL ALLOWED: user=${context.username} no gated table refs" +
+            (if accesses.isEmpty then ""
+             else
+               s" accesses=${accesses.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")}")
+        )
         Allowed
       else
         // Pre-compute the catalogs admissible via wildcard for this session.
@@ -169,7 +218,7 @@ final class PostgresAclValidator(
         val sessionCatalogs: Set[String] =
           eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty)
 
-        val unauthorized = accesses.filterNot { ta =>
+        val unauthorized = gated.filterNot { ta =>
           eff.permissions.exists(p =>
             verbCovers(p.verb, ta.verb) &&
               catalogMatch(p.catalogName, ta.table.database, sessionCatalogs) &&

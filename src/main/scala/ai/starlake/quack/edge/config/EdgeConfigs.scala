@@ -19,15 +19,23 @@ case class AclConfig(
       envVar = "QOD_ACL_DIALECT",
       description = "Statement parser dialect for ACL extraction."
     )
-    dialect: String
+    dialect: String,
+    @field @ConfigField(
+      envVar = "QOD_ACL_FILTERED_METADATA",
+      description = "Implicitly admit reads of the session catalog's information_schema " +
+        "(schemata/tables/columns/views) and filter the result rows to the " +
+        "principal's granted objects. false = the pre-0.6.7 grant-required posture."
+    )
+    filteredMetadata: Boolean = true
 )
 
 object AclConfig:
   // kebab-case reader (matches application.conf) to dodge the
   // default mangling of "s3" / "gcs" style keys.
-  given ConfigReader[AclConfig] = ConfigReader.forProduct2(
+  given ConfigReader[AclConfig] = ConfigReader.forProduct3(
     "enabled",
-    "dialect"
+    "dialect",
+    "filteredMetadata"
   )(AclConfig.apply)
 
 /** Node-lockdown knob (QOD_NODE_LOCKDOWN). When enabled, every statement from a non-superuser

@@ -800,7 +800,14 @@ object Main extends IOApp with LazyLogging:
         routingInstruments = routingInstruments,
         placement = placementDirectory,
         cacheAwareRouting = mgrCfg.routing.cacheAware,
-        loadCapFactor = mgrCfg.routing.loadCapFactor
+        loadCapFactor = mgrCfg.routing.loadCapFactor,
+        // Same AclConfig value BootFactories hands the validator's implicit admit: the
+        // admit is only safe while the filter that narrows those rows is mounted, so the
+        // two must never be able to disagree. With ACL off nothing is admitted implicitly
+        // and there is no principal to filter for, hence the conjunction.
+        metadataFilterRewriter = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(
+          enabled = aclCfg.enabled && aclCfg.filteredMetadata
+        )
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a

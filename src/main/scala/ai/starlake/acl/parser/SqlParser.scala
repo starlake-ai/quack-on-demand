@@ -46,14 +46,16 @@ object SqlParser:
   /** DuckLake time-travel clauses (`AT (VERSION => n)` / `AT (TIMESTAMP => expr)`) are not in
     * JSqlParser's grammar (verified on the pinned fork 5.3.218: any statement carrying one is a
     * ParseException, which the validator denies fail-closed). For ACL purposes a time-travel read
-    * of a table is exactly a read of that table, so the clause is removed before parsing. The scan
-    * is quote-aware: single-quoted literals and double-quoted identifiers are copied verbatim; the
-    * AT keyword must be a standalone word whose parenthesized group starts with VERSION or
-    * TIMESTAMP followed by =>; parens inside the group are balanced, and single-quoted literals or
-    * double-quoted identifiers inside the group may contain parens without desyncing the depth
-    * counter.
+    * of a table is exactly a read of that table, so the clause is removed before parsing. Public
+    * because the edge metadata filter must strip EXACTLY the same clauses before its own parse: the
+    * two parsing the same text is what keeps the validator from admitting a statement the filter
+    * never got to see. The scan is quote-aware: single-quoted literals and double-quoted
+    * identifiers are copied verbatim; the AT keyword must be a standalone word whose parenthesized
+    * group starts with VERSION or TIMESTAMP followed by =>; parens inside the group are balanced,
+    * and single-quoted literals or double-quoted identifiers inside the group may contain parens
+    * without desyncing the depth counter.
     */
-  private[parser] def stripTimeTravelClauses(sql: String): String =
+  def stripTimeTravelClauses(sql: String): String =
     val out                           = new StringBuilder
     var i                             = 0
     val n                             = sql.length
@@ -209,6 +211,10 @@ object SqlParser:
   private def selectReads(select: Option[Select]): TableExtraction =
     select.map(TableExtractor.extract).getOrElse(TableExtraction(Nil, Nil))
 
+  // SHOW <keyword> forms that jsqlparser also parses as ShowStatement but that name
+  // no table: they stay ControlFlow (v1 defers filtering them; see the spec).
+  private val ShowKeywordForms: Set[String] = Set("DATABASES", "SCHEMAS")
+
   private def processStatement(
       stmt: Statement,
       index: Int,
@@ -344,14 +350,35 @@ object SqlParser:
       case _: UnsupportedStatement =>
         StatementResult.ParseError(index, snippet, s"Unsupported or unparseable statement")
 
+      // DESCRIBE t / SHOW t / SHOW COLUMNS FROM t reveal a table's shape: that is a
+      // Read on the table, not control flow. Previously allowlisted, which let any
+      // principal describe any table (enumeration bypass); now grant-checked like a
+      // SELECT. Plain SHOW TABLES stays ControlFlow and is replaced or denied by the
+      // edge metadata filter downstream; SHOW ALL TABLES never parses (denied
+      // fail-closed).
+      case d: DescribeStatement =>
+        val (qTgt, errs) = TableQualifier.qualify(List(d.getTable), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+      case sc: ShowColumnsStatement =>
+        // Only the unqualified form reaches here; `SHOW COLUMNS FROM x.y` is not in
+        // the grammar and already fails closed on the parse-error arm.
+        val (qTgt, errs) = TableQualifier.qualify(List(new Table(sc.getTableName)), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+      case sh: ShowStatement if !ShowKeywordForms.contains(sh.getName.trim.toUpperCase) =>
+        val (qTgt, errs) = TableQualifier.qualify(List(new Table(sh.getName)), config)
+        StatementResult
+          .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
+
       // Explicit allowlist of statement types that provably carry no grantable
       // table reference. Admitted unconditionally as ControlFlow. Anything NOT
       // on this list falls through to the fail-closed ParseError arm below, so a
       // new/unknown statement type can never be silently admitted with an empty
       // access set.
       case _: Commit | _: RollbackStatement | _: SavepointStatement | _: SetStatement |
-          _: ResetStatement | _: UseStatement | _: ShowStatement | _: ShowColumnsStatement |
-          _: ShowTablesStatement | _: DescribeStatement | _: SessionStatement =>
+          _: ResetStatement | _: UseStatement | _: ShowStatement | _: ShowTablesStatement |
+          _: SessionStatement =>
         StatementResult.ControlFlow(index, snippet, stmt.getClass.getSimpleName)
 
       case other =>

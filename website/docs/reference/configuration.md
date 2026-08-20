@@ -26,6 +26,7 @@ Every scalar accepts the listed `QOD_*` / `PROXY_*` environment-variable overrid
 | --- | --- | --- | --- | --- |
 | `quack-flightsql.acl.enabled` | `QOD_ACL_ENABLED` | `false` |  | Enable table-level RBAC (per-statement EffectiveSet check). |
 | `quack-flightsql.acl.dialect` | `QOD_ACL_DIALECT` | `duckdb` |  | Statement parser dialect for ACL extraction. |
+| `quack-flightsql.acl.filteredMetadata` | `QOD_ACL_FILTERED_METADATA` | `true` |  | Implicitly admit reads of the session catalog's information_schema (schemata/tables/columns/views) and filter the result rows to the principal's granted objects. false = the pre-0.6.7 grant-required posture. |
 
 ## `quack-flightsql.auth`
 

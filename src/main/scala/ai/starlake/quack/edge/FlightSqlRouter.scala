@@ -74,7 +74,15 @@ final class FlightSqlRouter(
     val placement: ai.starlake.quack.route.PlacementDirectory =
       new ai.starlake.quack.route.PlacementDirectory(),
     val cacheAwareRouting: Boolean = true,
-    val loadCapFactor: Double = 2.0
+    val loadCapFactor: Double = 2.0,
+    /** System-catalog filter, mounted from the same flag as the ACL validator's implicit admit
+      * (`quack-flightsql.acl.filteredMetadata`). Disabled by default so a construction site that
+      * does not wire it keeps the grant-required posture rather than an admit-without-filter one.
+      * Appended at the TAIL deliberately: `Main` passes the leading arguments positionally, so a
+      * mid-list insertion would silently shift `registry` / `journal`.
+      */
+    val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
+      new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false)
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -372,11 +380,32 @@ final class FlightSqlRouter(
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             Right(s)
 
-    // ACL -> CLS -> RLS pipeline; every denial arm has already journaled itself.
-    // Bound to resultIO so one flatTap below emits exactly one StatementExecuted
-    // event on every exit path, including the denial arms.
+    // System-catalog filtering runs LAST, on the CLS+RLS output: its substitutions inject
+    // derived tables the other two rewriters have no policy for, and running it first would
+    // hand them SQL that no longer names the tables their policies key off.
+    def metadataFiltered(rewrittenSql: String): Either[RouterFailure, String] =
+      effectiveSet match
+        // No RBAC principal bound: the validator has already denied anything tenant-scoped,
+        // so nothing filterable survives to here.
+        case None      => Right(rewrittenSql)
+        case Some(eff) =>
+          metadataFilterRewriter.rewrite(rewrittenSql, eff, schemaCtx) match
+            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough =>
+              Right(rewrittenSql)
+            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Rewritten(s)   => Right(s)
+            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Denied(reason) =>
+              val f = RouterFailure.AccessDenied(s"access denied: $reason")
+              maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+              Left(f)
+
+    // ACL -> CLS -> RLS -> metadata-filter pipeline; every denial arm has already
+    // journaled itself. Bound to resultIO so one flatTap below emits exactly one
+    // StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, QueryResult]] =
-      aclCheck.flatMap(_ => clsRewritten()).flatMap(rlsRewritten) match
+      aclCheck
+        .flatMap(_ => clsRewritten())
+        .flatMap(rlsRewritten)
+        .flatMap(metadataFiltered) match
         case Left(f)         => IO.pure(Left(f))
         case Right(finalSql) =>
           resolveSnapshot(poolKey).flatMap {
@@ -534,8 +563,9 @@ final class FlightSqlRouter(
                                 )
                               )
                             else
-                              // Retry MUST send finalSql (CLS + RLS applied): retrying the
-                              // pre-RLS SQL would return rows the row policy should filter.
+                              // Retry MUST send finalSql (CLS + RLS + metadata filter applied):
+                              // retrying the caller's text would return rows the row policy
+                              // should filter and catalog rows the metadata filter should hide.
                               retryOnce(
                                 connectionId,
                                 user,
