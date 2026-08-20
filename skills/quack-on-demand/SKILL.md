@@ -439,6 +439,13 @@ whole feature off manager-wide and go back to the pre-0.6.7 grant-required postu
 - Plain `SHOW TABLES` answers the filtered listing. The `FROM` / `IN` / `LIKE` variants
   are denied while the filter is active: query `information_schema.tables` instead.
   `SHOW ALL TABLES` stays denied under ACL, as before.
+- Known limitation: when a statement is metadata-rewritten, a DuckLake time-travel
+  clause (`AT (VERSION => n)` / `AT (TIMESTAMP => ...)`) on a co-referenced table in the
+  same statement is dropped, so that table reads at the current version. This only
+  affects the unusual shape of joining `information_schema` with a time-traveled table
+  in one query; a standalone `SELECT ... FROM t AT (VERSION => n)` is unaffected. Not a
+  data-exposure issue (the metadata is still filtered); run the time-travel read as its
+  own statement if you need the historical snapshot.
 
 ### Revoking access
 
