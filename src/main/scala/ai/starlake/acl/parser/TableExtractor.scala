@@ -69,7 +69,13 @@ private[parser] class TableExtractorVisitor:
     visitSelect(select)
 
   private def visitSelect(select: Select): Unit =
-    if select != null && visited.add(select) then matchSelect(select)
+    if select != null && visited.add(select) then
+      matchSelect(select)
+      // Symmetric completeness: descend reflectively into every child of the SELECT node too, so a
+      // subquery in a clause the hand-walk omits (GROUP BY, DISTINCT ON, QUALIFY, named WINDOW,
+      // GROUPING SETS, ...) cannot be dropped. recordBareTable = true because a bare Table reached
+      // directly from a SELECT/holder is a real FROM/JOIN read, not a column qualifier.
+      descendChildren(select, recordBareTable = true)
 
   private def matchSelect(select: Select): Unit =
     select match
@@ -162,7 +168,11 @@ private[parser] class TableExtractorVisitor:
       }
 
   private[parser] def visitFromItem(fromItem: FromItem): Unit =
-    if fromItem != null && visited.add(fromItem) then matchFromItem(fromItem)
+    if fromItem != null && visited.add(fromItem) then
+      matchFromItem(fromItem)
+      // Symmetric completeness for FROM items too (e.g. a PIVOT expression or a nested from-item
+      // that carries a subquery). recordBareTable = true for the same reason as visitSelect.
+      descendChildren(fromItem, recordBareTable = true)
 
   private def matchFromItem(fromItem: FromItem): Unit =
     fromItem match
@@ -219,8 +229,9 @@ private[parser] class TableExtractorVisitor:
       // child of this node reflectively. This subsumes each arm's own recursion (the visited
       // set dedups it) AND reaches children the arms miss - window/aggregate clauses
       // (OVER ORDER BY / PARTITION BY, FILTER, WITHIN GROUP) and any wrapper type - so no
-      // nested subquery is ever silently dropped.
-      descendChildren(expr)
+      // nested subquery is ever silently dropped. recordBareTable = false: a bare Table reached
+      // from an expression is a column qualifier (Column.getTable), not a read source.
+      descendChildren(expr, recordBareTable = false)
 
   private def matchExpression(expr: Expression): Unit =
     expr match
@@ -297,34 +308,45 @@ private[parser] class TableExtractorVisitor:
         ()
 
   /** Reflectively descend into every child of `node` that can carry a table reference, so no
-    * subquery is dropped regardless of which wrapper or clause holds it. Routes each accessor value
-    * by its RUNTIME type; the accessor list is memoized per class so leaves stay cheap.
+    * subquery is dropped regardless of which wrapper, clause, or holder carries it. Called on every
+    * expression, select, and from-item node (and, via routeChild's fallback, every intermediate
+    * holder), so completeness is structural rather than a per-clause enumeration. Routes each
+    * accessor value by its RUNTIME type; the accessor list is memoized per class so leaves stay
+    * cheap. `recordBareTable` is true when descending a select / from-item / holder (a bare Table
+    * child is then a real FROM/JOIN read) and false when descending an expression (a bare Table is
+    * a column qualifier).
     */
-  private def descendChildren(node: Expression): Unit =
+  private def descendChildren(node: AnyRef, recordBareTable: Boolean): Unit =
     TableExtractorVisitor.childAccessors(node.getClass).foreach { m =>
-      try routeChild(m.invoke(node))
+      try routeChild(m.invoke(node), recordBareTable)
       catch case _: Throwable => ()
     }
 
   /** Route one reflectively-fetched child value to the right walk. `Expression` is tested before
-    * `Select` so a `ParenthesedSelect` (which is both) goes through the visited-guarded expression
-    * path; collections and arrays are iterated one level and their elements routed the same way.
+    * `Select` so a `ParenthesedSelect` (both) takes the visited-guarded expression path. A bare
+    * `Table` records only when it was reached from a select / from-item / holder; reached from an
+    * expression it is a column qualifier and is skipped. Any other jsqlparser node is an
+    * intermediate holder (GroupByElement, Distinct, WindowDefinition, Join, Top, Pivot, ...): guard
+    * it and descend reflectively, so no holder type needs to be enumerated by hand.
     */
-  private def routeChild(value: Any): Unit =
+  private def routeChild(value: Any, recordBareTable: Boolean): Unit =
     value match
-      case null          => ()
-      case e: Expression => visitExpression(e)
-      case s: Select     => visitSelect(s)
-      // A bare Table reached through an expression accessor is a column qualifier
-      // (e.g. Column.getTable in `c.c_id`), already surfaced via the FROM clause if it is a
-      // read source; recording it here would wrongly add aliases as table accesses. Only
-      // descend into non-Table from-items (derived tables, table functions, lateral, ...).
-      case _: Table                  => ()
+      case null                      => ()
+      case e: Expression             => visitExpression(e)
+      case t: Table                  => if recordBareTable then visitFromItem(t)
+      case s: Select                 => visitSelect(s)
       case fi: FromItem              => visitFromItem(fi)
       case oe: OrderByElement        => Option(oe.getExpression).foreach(visitExpression)
-      case it: java.lang.Iterable[?] => it.asScala.foreach(routeChild)
-      case arr: Array[?]             => arr.foreach(routeChild)
-      case _                         => ()
+      case si: SelectItem[?]         => Option(si.getExpression).foreach(visitExpression)
+      case it: java.lang.Iterable[?] => it.asScala.foreach(routeChild(_, recordBareTable))
+      case arr: Array[?]             => arr.foreach(routeChild(_, recordBareTable))
+      case holder: AnyRef if isJsqlNode(holder) =>
+        if visited.add(holder) then descendChildren(holder, recordBareTable)
+      case _ => ()
+
+  private def isJsqlNode(value: AnyRef): Boolean =
+    val n = value.getClass.getName
+    n.startsWith("net.sf.jsqlparser.") && !n.startsWith("net.sf.jsqlparser.parser.")
 
 private[parser] object TableExtractorVisitor:
   import java.lang.reflect.Method
@@ -332,10 +354,13 @@ private[parser] object TableExtractorVisitor:
   private val accessorCache =
     new java.util.concurrent.ConcurrentHashMap[Class[?], Array[Method]]()
 
-  /** The no-arg `get*` accessors of `cls` whose return type can hold a table reference: an
-    * `Expression`, `Select`, `FromItem`, `OrderByElement`, any collection (`Iterable`, so a raw
-    * `List<OrderByElement>` or `List<Expression>` is reached), or an array. Memoized per class so
-    * the common leaf path (Column, literals: no such accessor) stays cheap.
+  /** The no-arg `get*` accessors of `cls` that can reach a child AST node: return type is a
+    * collection (`Iterable`, so a raw `List<OrderByElement>` / `List<Join>` / `List<SelectItem>` is
+    * reached), an array, or any jsqlparser AST type OUTSIDE the `net.sf.jsqlparser.parser` package.
+    * The parser package (SimpleNode and friends) is excluded so the walk never follows an upward
+    * parent link into a cycle; primitives, String, and other library types are excluded so leaves
+    * (Column, literals) cost only the memoized lookup. routeChild filters values further by runtime
+    * type, so admitting the whole AST-node space here is safe and makes the walk complete.
     */
   def childAccessors(cls: Class[?]): Array[Method] =
     accessorCache.computeIfAbsent(
@@ -345,11 +370,12 @@ private[parser] object TableExtractorVisitor:
           val rt = m.getReturnType
           m.getParameterCount == 0 &&
           m.getName.startsWith("get") &&
-          (classOf[Expression].isAssignableFrom(rt) ||
-            classOf[Select].isAssignableFrom(rt) ||
-            classOf[FromItem].isAssignableFrom(rt) ||
-            classOf[OrderByElement].isAssignableFrom(rt) ||
-            classOf[java.lang.Iterable[?]].isAssignableFrom(rt) ||
-            rt.isArray)
+          (classOf[java.lang.Iterable[?]].isAssignableFrom(rt) ||
+            rt.isArray ||
+            isJsqlAstType(rt))
         }
     )
+
+  private def isJsqlAstType(rt: Class[?]): Boolean =
+    val n = rt.getName
+    n.startsWith("net.sf.jsqlparser.") && !n.startsWith("net.sf.jsqlparser.parser.")

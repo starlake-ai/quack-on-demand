@@ -104,6 +104,23 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
       "testdb.public.other" -> Verb.Read
     )
 
+  it should "surface a subquery read hidden in a GROUP BY clause" in:
+    // Select-level clause omitted by the hand-walk; reached by the symmetric descend on the SELECT.
+    assertAccesses(
+      "INSERT INTO t SELECT a FROM s GROUP BY (SELECT x FROM other)",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in a DISTINCT ON clause" in:
+    assertAccesses(
+      "INSERT INTO t SELECT DISTINCT ON ((SELECT x FROM other)) a FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
   // ---------- UPDATE ----------
 
   "SqlParser UPDATE" should "mark a bare UPDATE as Write on the target" in:

@@ -278,3 +278,33 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       ctx
     ) shouldBe a[Deny]
   }
+
+  // Subqueries in SELECT-level clauses the hand-walk omitted (reached by the symmetric descend).
+  private val selectClauseForms = List(
+    "SELECT %s FROM tpch1.s GROUP BY (SELECT c_id FROM tpch1.customer)"      -> "group by",
+    "SELECT DISTINCT ON ((SELECT c_id FROM tpch1.customer)) %s FROM tpch1.s" -> "distinct on",
+    "SELECT %s FROM tpch1.s QUALIFY row_number() OVER (ORDER BY (SELECT c_id FROM tpch1.customer)) = 1" -> "qualify",
+    "SELECT %s FROM tpch1.s WINDOW w AS (ORDER BY (SELECT c_id FROM tpch1.customer))" -> "named window",
+    "SELECT %s FROM tpch1.s GROUP BY GROUPING SETS ((a), ((SELECT c_id FROM tpch1.customer)))" -> "grouping sets"
+  )
+
+  selectClauseForms.foreach { case (body, label) =>
+    it should s"deny an RLS read hidden in a $label clause" in {
+      val sql = s"INSERT INTO tpch1.t ${body.format("a")}"
+      guardWithCls().check(
+        sql,
+        StatementKind.Dml,
+        eff(tenantUser, rows = List(rowPolicy)),
+        ctx
+      ) shouldBe a[Deny]
+    }
+  }
+
+  it should "deny a masked read hidden in a GROUP BY clause (colHit fires)" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.t SELECT a FROM tpch1.s GROUP BY (SELECT c_email FROM tpch1.customer)",
+      StatementKind.Dml,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
