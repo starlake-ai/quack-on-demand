@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.policy
 
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter, SchemaContext}
+import ai.starlake.quack.edge.cls.{ColumnCatalog, SchemaContext}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy, RoleRowPolicy}
@@ -32,15 +32,19 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
   private val ctx =
     SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
 
-  // A rewriter that knows customer's columns, so SELECT * expands and masks c_email.
+  // A catalog that knows customer's columns, so SELECT * expands and masks c_email.
   private def guardWithCls(clsOn: Boolean = true, rlsOn: Boolean = true): ProtectedWriteGuard =
     val cat = new ColumnCatalog.MapCatalog(
       Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region"))
     )
+    new ProtectedWriteGuard(cat, clsEnabled = clsOn, rlsEnabled = rlsOn)
+
+  // A guard whose catalog does NOT know customer, so the Deny-mode oracle cannot resolve it.
+  private def guardEmptyCatalog: ProtectedWriteGuard =
     new ProtectedWriteGuard(
-      new ColumnPolicyRewriter(cat, enabled = true),
-      clsEnabled = clsOn,
-      rlsEnabled = rlsOn
+      new ColumnCatalog.MapCatalog(Map.empty),
+      clsEnabled = true,
+      rlsEnabled = true
     )
 
   "check" should "allow a write reading only unmasked columns of a CLS table" in {
@@ -179,4 +183,33 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       eff(tenantUser, cols = List(maskEmail)),
       ctx
     ) shouldBe a[Deny]
+  }
+
+  it should "deny a write reading a CLS table the catalog cannot resolve (Deny-mode oracle)" in {
+    guardEmptyCatalog.check(
+      "CREATE TABLE tpch1.leak AS SELECT c_email FROM tpch1.customer",
+      StatementKind.Ddl,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
+
+  it should "deny a batch that launders a masked read in a sibling statement" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.x SELECT o_id FROM tpch1.orders; " +
+        "CREATE TABLE tpch1.leak AS SELECT c_email FROM tpch1.customer",
+      StatementKind.Ddl,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
+
+  it should "allow a benign multi-statement batch that reads only unmasked columns" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.x SELECT o_id FROM tpch1.orders; " +
+        "INSERT INTO tpch1.y SELECT c_id FROM tpch1.customer",
+      StatementKind.Dml,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe Allow
   }
