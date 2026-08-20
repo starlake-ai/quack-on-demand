@@ -46,8 +46,11 @@ enum MetadataFilterOutcome:
   * without an explicit information_schema grant; the ACL validator implicitly admits exactly the
   * references this class filters (same flag).
   *
-  * Fail-closed: a filterable reference this walker cannot substitute denies the statement; it never
-  * passes one through unfiltered.
+  * Fail-closed: a filterable reference this class cannot substitute denies the statement; it never
+  * passes one through unfiltered. The substitution walk alone cannot promise that (SQL puts tables
+  * in more places than it visits), so every filterable OCCURRENCE is counted up front and the
+  * counts must match: fewer substitutions than references, or a count that could not be taken, is a
+  * denial.
   */
 final class MetadataFilterRewriter(enabled: Boolean = true):
 
@@ -71,20 +74,28 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
             Try(CCJSqlParserUtil.parse(sql)).toOption match
               case Some(sel: Select) =>
                 // Counted BEFORE the walk: the substitutions themselves introduce inner
-                // information_schema references the finder would otherwise count too.
-                val refs   = filterableRefCount(sel, ctx)
-                val walker = new Walker(grants, ctx)
-                walker.walkSelect(sel)
-                walker.failure match
-                  case Some(reason) => Denied(reason)
-                  case None         =>
-                    if refs > walker.substitutions then
-                      Denied(
-                        "cannot filter every information_schema reference in this statement; " +
-                          "select from information_schema directly instead"
-                      )
-                    else if walker.substitutions > 0 then Rewritten(sel.toString)
-                    else Passthrough
+                // information_schema references the count would otherwise include too.
+                filterableOccurrences(sel, ctx) match
+                  case None =>
+                    // The reference count is what makes the fail-closed promise true, so
+                    // losing it denies rather than admits: a statement the counter chokes
+                    // on is exactly the shape the substitution walk is likely blind to.
+                    Denied(
+                      "cannot analyse the information_schema references in this statement"
+                    )
+                  case Some(refs) =>
+                    val walker = new Walker(grants, ctx)
+                    walker.walkSelect(sel)
+                    walker.failure match
+                      case Some(reason) => Denied(reason)
+                      case None         =>
+                        if refs > walker.substitutions then
+                          Denied(
+                            "cannot filter every information_schema reference in this " +
+                              "statement; select from information_schema directly instead"
+                          )
+                        else if walker.substitutions > 0 then Rewritten(sel.toString)
+                        else Passthrough
               case Some(st: ShowTablesStatement) =>
                 // A SHOW TABLES the textual fast path did not recognise (leading comment,
                 // odd whitespace) but jsqlparser did. Same treatment, so the form cannot
@@ -107,28 +118,26 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
       (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
     }
 
-  /** How many filterable references the statement carries, as jsqlparser's own table-name finder
-    * sees them (it descends FROM items, joins, CTE bodies, set-op arms AND expression subqueries,
-    * including the function-argument positions the substitution walker does not enter). Compared
-    * against the walker's substitution count, so a reference sitting in a position the walker
-    * cannot rewrite denies the statement instead of riding through unfiltered. The finder may
-    * de-duplicate repeated names, hence the one-sided `refs > substitutions` test: it can only ever
-    * under-count, never manufacture a false denial.
+  /** How many filterable references the statement carries, counted as table OCCURRENCES by
+    * jsqlparser's own full traversal (it reaches FROM items, joins, CTE bodies, set-op arms AND
+    * every expression position - function arguments, CASE arms, ORDER BY - that the substitution
+    * walk does not enter). Compared against the walker's substitution count, so a reference sitting
+    * where the walker cannot rewrite it denies the statement instead of riding through unfiltered.
+    *
+    * Occurrences rather than [[net.sf.jsqlparser.util.TablesNamesFinder]]'s de-duplicated NAME list
+    * is the load-bearing choice: with names, one substituted FROM item covers for every other
+    * reference to the same table, and `SELECT coalesce((SELECT ... FROM information_schema.tables),
+    * 'x') FROM information_schema.tables` walks straight out with its subquery unfiltered.
+    *
+    * None when the traversal fails: the caller denies, because a statement that breaks the counter
+    * is precisely the shape the walk is most likely blind to.
     */
-  private def filterableRefCount(sel: Select, ctx: SchemaContext): Int =
-    val names = Try(new TablesNamesFinder().getTableList(sel: Statement).asScala.toList)
-      .getOrElse(Nil)
-    def unquote(s: String) = s.stripPrefix("\"").stripSuffix("\"")
-    val sessionCat         = ctx.defaultDatabase.getOrElse("")
-    names.count { raw =>
-      raw.split('.').toList.map(unquote) match
-        case sch :: tab :: Nil =>
-          sch.equalsIgnoreCase(InformationSchema) && FilterableTables.contains(tab.toLowerCase)
-        case cat :: sch :: tab :: Nil =>
-          cat.equalsIgnoreCase(sessionCat) && sch.equalsIgnoreCase(InformationSchema) &&
-          FilterableTables.contains(tab.toLowerCase)
-        case _ => false
-    }
+  private def filterableOccurrences(sel: Select, ctx: SchemaContext): Option[Int] =
+    val counter = new FilterableOccurrences(ctx.defaultDatabase.getOrElse(""))
+    Try {
+      counter.getTableList(sel: Statement)
+      counter.count
+    }.toOption
 
   private def hasWildcardAll(eff: EffectiveSet): Boolean =
     eff.permissions.exists(p =>
@@ -141,12 +150,12 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
   /** FromItem walker. Mirrors the RLS traversal surface: PlainSelect FROM + JOIN items,
     * WHERE/HAVING/projection expression subqueries, set-op arms, CTE bodies. Substitution happens
     * on FromItems only (tables appear nowhere else). Anything outside that surface is caught by the
-    * [[filterableRefCount]] cross-check rather than by this walk.
+    * [[filterableOccurrences]] cross-check rather than by this walk.
     */
   private final class Walker(grants: List[RolePermission], ctx: SchemaContext):
     var failure: Option[String] = None
 
-    /** Filterable references this walker replaced, checked against [[filterableRefCount]]. */
+    /** Filterable references this walker replaced, checked against [[filterableOccurrences]]. */
     var substitutions: Int = 0
 
     def walkSelect(sel: Select): Unit =
@@ -202,15 +211,7 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
 
     /** Some(tableName) when `t` is a filterable session-catalog information_schema table. */
     private def filterableName(t: Table): Option[String] =
-      val schema     = Option(t.getSchemaName).getOrElse("")
-      val cat        = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
-      val name       = Option(t.getName).getOrElse("")
-      val sessionCat = ctx.defaultDatabase.getOrElse("")
-      val catOk      = cat.isEmpty || cat.equalsIgnoreCase(sessionCat)
-      if catOk && schema.equalsIgnoreCase(InformationSchema) &&
-        FilterableTables.contains(name.toLowerCase)
-      then Some(name.toLowerCase)
-      else None
+      filterableMeta(t, ctx.defaultDatabase.getOrElse(""))
 
     /** The derived table replacing `t`, carrying t's alias (or its name when it had none) so outer
       * `alias.col` references still resolve. Built by parsing a one-off `SELECT * FROM (...) x`
@@ -238,10 +239,43 @@ object MetadataFilterRewriter:
 
   private def lit(s: String): String = "'" + s.replace("'", "''") + "'"
 
+  /** Some(tableName) when `t` names a filterable information_schema table of the session catalog.
+    * The single rule both the substitution walk and [[FilterableOccurrences]] apply: they must
+    * agree exactly, or the cross-check either denies valid statements or misses a leak.
+    */
+  private def filterableMeta(t: Table, sessionCat: String): Option[String] =
+    val schema = Option(t.getSchemaName).getOrElse("")
+    val cat    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
+    val name   = Option(t.getName).getOrElse("")
+    val catOk  = cat.isEmpty || cat.equalsIgnoreCase(sessionCat)
+    if catOk && schema.equalsIgnoreCase(InformationSchema) &&
+      FilterableTables.contains(name.toLowerCase)
+    then Some(name.toLowerCase)
+    else None
+
+  /** Counts filterable table OCCURRENCES by riding jsqlparser's own complete traversal and tallying
+    * each visited [[net.sf.jsqlparser.schema.Table]] node, instead of reading the finder's
+    * de-duplicated name list.
+    */
+  private final class FilterableOccurrences(sessionCat: String)
+      extends TablesNamesFinder[java.lang.Void]:
+
+    // Keyed on node IDENTITY, not on the table name: two references to the same table are two
+    // occurrences (that is the whole point), while one node the traversal happens to visit twice
+    // - a CTE body, which it reaches both through the WITH list and through the query - stays one.
+    private val seen =
+      java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean])
+
+    def count: Int = seen.size
+
+    override def visit[S](table: Table, context: S): java.lang.Void =
+      if filterableMeta(table, sessionCat).isDefined then seen.add(table)
+      super.visit(table, context)
+
   /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
     * the whole predicate to keep the SQL readable.
     */
-  def predicateFor(meta: String, grants: List[RolePermission]): String =
+  private[meta] def predicateFor(meta: String, grants: List[RolePermission]): String =
     val w = RolePermission.Wildcard
     if meta == "schemata" then
       val clauses = grants.map { g =>

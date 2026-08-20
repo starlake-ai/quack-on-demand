@@ -191,6 +191,30 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other     => fail(s"expected Denied, got $other")
   }
 
+  // The cross-check counts filterable table OCCURRENCES, not the de-duplicated names
+  // jsqlparser's finder reports: with names, one substituted FROM item would mask every other
+  // unreachable reference to the SAME table, which is a full enumeration bypass.
+
+  it should "deny an unreachable reference masked by a substituted one (function argument)" in {
+    go(
+      "SELECT coalesce((SELECT string_agg(table_name, ',') FROM information_schema.tables), 'x') " +
+        "FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny an unreachable reference masked by a substituted one (CASE existence oracle)" in {
+    go(
+      "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables " +
+        "WHERE table_name = 'secret') THEN 1 ELSE 0 END FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
   it should "escape quotes in grant values" in {
     go(
       "SELECT * FROM information_schema.tables",
