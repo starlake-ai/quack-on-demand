@@ -101,9 +101,13 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
             // between them.
             Try(parseBatch(sql)).toOption match
               case None =>
-                // Unparseable. Unchanged contract: the validator denies these upstream, and it
-                // sees the whole batch rather than a truncation of it.
-                Passthrough
+                // Unparseable. Forwarding it used to rest on the validator denying it upstream,
+                // which held only while the two parsers read the statement identically - the
+                // time-travel strip was the counterexample. The fail-closed reading is structural
+                // now: text this filter could not analyse, naming a filterable table, is refused
+                // rather than forwarded on trust. Text naming none still passes, so an ordinary
+                // unsupported statement is unaffected.
+                if textualRefCount(sql) > 0 then Denied(AnalysisRefusal) else Passthrough
               case Some(stmts) =>
                 val parts = stmts.getStatements.asScala.toList.map(processOne(_, grants, ctx))
                 parts.collectFirst { case StmtOutcome.Refused(reason) => reason } match
@@ -192,12 +196,17 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
 
   /** Parse the caller's text as a batch, with `allowUnsupportedStatements` on so the statements the
     * grammar does not model (`USE db.schema`, dialect-specific forms) come back as opaque nodes
-    * instead of failing the whole parse and blinding the filter. Mirrors the configuration in
-    * `SqlParser.extract`.
+    * instead of failing the whole parse and blinding the filter. Mirrors `SqlParser.extract`
+    * exactly - same time-travel strip, same feature configuration - because any difference in how
+    * the validator and this filter read a statement is a statement one of them admits and the other
+    * never sees.
     */
   private def parseBatch(sql: String): net.sf.jsqlparser.statement.Statements =
     CCJSqlParserUtil.parseStatements(
-      sql,
+      // DuckLake's `AT (VERSION => n)` is not in the grammar, and a clause sitting AFTER a
+      // filterable reference collapses the statement into an opaque tail that no longer mentions
+      // it - while the validator, parsing the stripped text, has already admitted the read.
+      ai.starlake.acl.parser.SqlParser.stripTimeTravelClauses(sql),
       (parser: net.sf.jsqlparser.parser.CCJSqlParser) => {
         val featureConfig = new net.sf.jsqlparser.parser.feature.FeatureConfiguration()
         featureConfig.setValue(

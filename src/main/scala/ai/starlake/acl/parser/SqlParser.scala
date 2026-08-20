@@ -46,14 +46,16 @@ object SqlParser:
   /** DuckLake time-travel clauses (`AT (VERSION => n)` / `AT (TIMESTAMP => expr)`) are not in
     * JSqlParser's grammar (verified on the pinned fork 5.3.218: any statement carrying one is a
     * ParseException, which the validator denies fail-closed). For ACL purposes a time-travel read
-    * of a table is exactly a read of that table, so the clause is removed before parsing. The scan
-    * is quote-aware: single-quoted literals and double-quoted identifiers are copied verbatim; the
-    * AT keyword must be a standalone word whose parenthesized group starts with VERSION or
-    * TIMESTAMP followed by =>; parens inside the group are balanced, and single-quoted literals or
-    * double-quoted identifiers inside the group may contain parens without desyncing the depth
-    * counter.
+    * of a table is exactly a read of that table, so the clause is removed before parsing. Public
+    * because the edge metadata filter must strip EXACTLY the same clauses before its own parse: the
+    * two parsing the same text is what keeps the validator from admitting a statement the filter
+    * never got to see. The scan is quote-aware: single-quoted literals and double-quoted
+    * identifiers are copied verbatim; the AT keyword must be a standalone word whose parenthesized
+    * group starts with VERSION or TIMESTAMP followed by =>; parens inside the group are balanced,
+    * and single-quoted literals or double-quoted identifiers inside the group may contain parens
+    * without desyncing the depth counter.
     */
-  private[parser] def stripTimeTravelClauses(sql: String): String =
+  def stripTimeTravelClauses(sql: String): String =
     val out                           = new StringBuilder
     var i                             = 0
     val n                             = sql.length

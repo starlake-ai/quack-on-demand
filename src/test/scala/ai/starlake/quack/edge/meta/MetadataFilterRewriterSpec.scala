@@ -431,6 +431,78 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     ) should matchPattern { case Denied(_) => }
   }
 
+  // Time travel. The ACL validator strips `AT (VERSION => n)` before parsing, so it sees clean
+  // SQL and admits the metadata read. The rewriter must strip the same clauses or it parses
+  // something the validator never saw - and an AT clause AFTER the reference used to collapse the
+  // statement into an opaque tail that no longer mentioned information_schema at all.
+
+  it should "filter a metadata read when a time-travel clause follows it" in {
+    go(
+      "SELECT it.* FROM information_schema.tables it, tpch1.customer AT (VERSION => 1) c",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        bareRefs(sql) shouldBe 0
+      case Denied(_) => succeed
+      case other     => fail(s"expected Rewritten or Denied, got $other")
+  }
+
+  it should "filter a metadata read when a time-travel clause precedes it" in {
+    go(
+      "SELECT it.* FROM tpch1.customer AT (VERSION => 1) c, information_schema.tables it",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        bareRefs(sql) shouldBe 0
+      case Denied(_) => succeed
+      case other     => fail(s"expected Rewritten or Denied, got $other")
+  }
+
+  it should "deny an unparseable statement that names a filterable table" in {
+    // Two arms: text the parser rejects outright, and text it swallows into an opaque
+    // statement that serializes to nothing.
+    go("'unterminated information_schema.tables", eff(tenantUser)) should matchPattern {
+      case Denied(_) =>
+    }
+    go("SELECT * FROM information_schema.tables WHERE ((", eff(tenantUser)) should matchPattern {
+      case Denied(_) =>
+    }
+  }
+
+  /** The filter's fail-closed story rests on it reading each statement the same way the ACL
+    * validator does. Where it cannot account for a statement at all, the validator must be refusing
+    * that statement - otherwise the pair admits something neither one filtered, which is exactly
+    * how the time-travel gap above leaked. Pinned on shapes that truncate at a choke point, leaving
+    * an opaque tail that no longer mentions the table.
+    */
+  it should "only pass a statement it cannot account for when the ACL parser refuses it" in {
+    val adversarial = List(
+      "SELECT * FROM information_schema.tables WHERE x IN (SELECT",
+      "SELECT * FROM information_schema.tables WHERE ((",
+      "SELECT it.* FROM information_schema.tables it, tpch1.customer AT (VERSION => 1) c"
+    )
+    val cfg = ai.starlake.acl.model.Config.forDuckDB("acme_tpch", "tpch1")
+    for stmt <- adversarial do
+      go(stmt, eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+        case Passthrough =>
+          val results = ai.starlake.acl.parser.SqlParser.extract(stmt, cfg).statements
+          val refused = results.exists {
+            case _: ai.starlake.acl.parser.StatementResult.ParseError => true
+            case _                                                    => false
+          }
+          withClue(s"$stmt: rewriter passed it, so the validator must refuse it: ") {
+            refused shouldBe true
+          }
+        case _ => succeed // filtered or denied here: nothing left to trust the validator for
+  }
+
+  it should "still pass an unparseable statement that names nothing filterable" in {
+    go("THIS IS NOT SQL", eff(tenantUser)) shouldBe Passthrough
+    go("USE mem", eff(tenantUser)) shouldBe Passthrough
+  }
+
   it should "escape quotes in grant values" in {
     go(
       "SELECT * FROM information_schema.tables",
