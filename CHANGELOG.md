@@ -11,7 +11,8 @@
   table, and a masked-column read of a CLS table (a write that reads only unmasked
   columns is still allowed, detected by running the write's inner SELECT through the
   real column-policy rewriter; any read the guard cannot isolate fails closed).
-  Enforced only when ACL plus CLS/RLS are enabled; superusers are unaffected.
+  Enforced whenever CLS/RLS enforcement is enabled (independent of `acl.enabled`,
+  like the CLS/RLS rewriters themselves); superusers are unaffected.
   Closing this required making the read extractor complete-by-construction, which
   also tightens table-level ACL: a table read previously hidden from the grant check
   inside an `INSERT ... VALUES` subquery, a VALUES-derived FROM table, an expression
