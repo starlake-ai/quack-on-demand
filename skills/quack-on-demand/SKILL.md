@@ -397,6 +397,49 @@ Retrieve `<userId>` and `<poolId>` from `/api/user/list?tenant=acme` and `/api/p
 
 Use the same `role/permission/grant` endpoint with `verb` set to `INSERT` / `UPDATE` / `DELETE` for DML writes, or `CREATE` / `DROP` / `ALTER` for DDL. Use `ALL` to cover every verb on a table at once. The validator collapses granular verbs to `Read`, `Write`, or `Ddl` per table at enforcement time.
 
+### Metadata browsing (information_schema)
+
+Since the filtered-metadata feature, **no grant is needed to browse metadata**. Any
+authenticated principal may read the session database's `information_schema`
+(`schemata` / `tables` / `columns` / `views`); the manager rewrites the query so the
+rows come back filtered to the objects the principal already holds at least RO on. A
+user granted only `acme_tpch.tpch1.customer` sees that one table plus the system rows,
+never the rest of the schema. This is what makes a JDBC/ADBC client's table tree
+(DBeaver, ADBC `GetTables`) work for a grantless-on-`information_schema` principal:
+those catalog RPCs are `information_schema` queries underneath and used to come back
+denied.
+
+An **explicit** `information_schema` grant is still meaningful: it is the escape hatch
+that turns the filter off for that principal and restores the unfiltered read (useful
+for a tooling or admin account that must see the whole catalog):
+
+```bash
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
+  -H 'Content-Type: application/json' \
+  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"information_schema\",\"table\":\"*\",\"verb\":\"RO\"}"
+```
+
+The grant must name `information_schema` literally (a wildcard schema does not count as
+the escape hatch) and its catalog must be the session database or `*`.
+
+Superusers and holders of a wildcard `ALL` grant are never filtered either. To turn the
+whole feature off manager-wide and go back to the pre-0.6.7 grant-required posture, set
+`QOD_ACL_FILTERED_METADATA=false`.
+
+**Denial semantics** (all fail-closed, and all only when ACL is on):
+
+- The filter rewrites `information_schema` references it finds in `FROM` position. A
+  reference sitting in `ORDER BY`, `GROUP BY` or a window clause, or a filterable name
+  merely **mentioned inside a string literal**, is *denied* with a message ending
+  `query it directly in the FROM clause instead`. The remedy is to move the reference
+  into the `FROM` clause (or drop the literal mention) and re-run.
+- `DESCRIBE <t>`, `SHOW <t>` and `SHOW COLUMNS FROM <t>` now require RO on the target
+  table. They previously bypassed the ACL entirely. This applies whenever ACL is on,
+  independent of `QOD_ACL_FILTERED_METADATA`.
+- Plain `SHOW TABLES` answers the filtered listing. The `FROM` / `IN` / `LIKE` variants
+  are denied while the filter is active: query `information_schema.tables` instead.
+  `SHOW ALL TABLES` stays denied under ACL, as before.
+
 ### Revoking access
 
 ```bash

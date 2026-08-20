@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Filtered metadata.** Any authenticated principal can read the session database's
+  `information_schema` (schemata/tables/columns/views) without a grant; result rows are
+  filtered to the objects the principal holds at least RO on, so table-level ACL stays
+  meaningful (no enumeration of ungranted objects). This also fixes catalog browsing in
+  JDBC/ADBC clients: the FlightSQL catalog RPCs (`GetCatalogs` / `GetDbSchemas` /
+  `GetTables`, the DBeaver and ADBC table-tree path) run as `information_schema` queries
+  under the hood and so came back DENIED for any principal without an explicit grant;
+  they now return the grant-scoped tree. Explicit `information_schema` grants keep
+  today's unfiltered read; `QOD_ACL_FILTERED_METADATA=false` restores the old
+  grant-required posture. Also closed: `DESCRIBE <t>` / `SHOW <t>` / `SHOW COLUMNS FROM
+  <t>` previously bypassed the ACL entirely and now require RO on the target (applies
+  whenever ACL is on, independent of the new flag); plain `SHOW TABLES` answers the
+  filtered listing, and its `FROM`/`IN`/`LIKE` variants are denied while the filter is
+  active (query `information_schema.tables` instead). `SHOW ALL TABLES` is unchanged
+  (already denied under ACL). The filter is fail-closed: an `information_schema`
+  reference in a position it cannot rewrite (ORDER BY, GROUP BY, a window clause) or a
+  filterable name merely mentioned in a string literal is denied rather than passed
+  through unfiltered.
+
 - **Admin user lock.** The edit-user panel (and `qod user update --no-enabled` / the
   `enabled` field on `user/update`) can lock any account: sign-in is refused, tokens
   stop working, and only an admin can unlock. A superuser may lock any user, a tenant
