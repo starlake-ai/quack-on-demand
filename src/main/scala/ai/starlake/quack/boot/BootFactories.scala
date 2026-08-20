@@ -97,7 +97,8 @@ object BootFactories extends LazyLogging:
         if mgrCfg.defaultMetastore.schemaName.nonEmpty then mgrCfg.defaultMetastore.schemaName
         else "main"
       logger.info(
-        s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema)"
+        s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema, " +
+          s"filteredMetadata=${aclCfg.filteredMetadata})"
       )
       new PostgresAclValidator(
         defaultDatabase = defaultDb,
@@ -113,5 +114,9 @@ object BootFactories extends LazyLogging:
           sup
             .getTenantById(tenantId)
             .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
-            .getOrElse(Set.empty)
+            .getOrElse(Set.empty),
+        // Same AclConfig value that mounts the edge metadata rewriter, so the
+        // validator can never admit an information_schema read the rewriter
+        // would then leave unfiltered.
+        filteredMetadata = aclCfg.filteredMetadata
       )

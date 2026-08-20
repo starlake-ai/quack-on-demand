@@ -240,3 +240,127 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
       attachedCtx("SELECT * FROM tpch1.customer", eff)
     ) shouldBe Allowed
   }
+
+  // ---- filtered-metadata implicit admit --------------------------------
+  //
+  // With QOD_ACL_FILTERED_METADATA on, a Read of the SESSION catalog's
+  // filterable information_schema tables needs no grant: the edge metadata
+  // rewriter (mounted from the same flag) narrows the returned rows to the
+  // principal's granted objects. Everything else about system schemas stays
+  // grant-gated. `acme_other` is a SIBLING tenant-db of the same tenant, so
+  // these fixtures can pin that the admit keys off the session catalog and
+  // not off the tenant catalog set.
+
+  private val filteredMeta = new PostgresAclValidator(
+    defaultDatabase = "acme_tpch",
+    defaultSchema = "main",
+    tenantCatalogs = t => if t == "t-1" then Set("acme_tpch", "acme_other") else Set.empty,
+    filteredMetadata = true
+  )
+
+  "filteredMetadata" should "implicitly admit a session-catalog information_schema read" in {
+    val eff = effectiveWith(permissions = Nil)
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM information_schema.tables", eff)
+    ) shouldBe Allowed
+  }
+
+  it should "implicitly admit the fully-qualified session-catalog form" in {
+    val eff = effectiveWith(permissions = Nil)
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM acme_tpch.information_schema.columns", eff)
+    ) shouldBe Allowed
+  }
+
+  it should "drop only the metadata access, still gating the ordinary tables beside it" in {
+    val granted = effectiveWith(List(perm("acme_tpch", "tpch1", "customer", "RO")))
+    filteredMeta.validate(
+      mkAcmeCtx(
+        "SELECT t.table_name, c.c_custkey FROM information_schema.tables t, tpch1.customer c",
+        granted
+      )
+    ) shouldBe Allowed
+
+    val ungranted = effectiveWith(permissions = Nil)
+    filteredMeta.validate(
+      mkAcmeCtx(
+        "SELECT t.table_name, c.c_custkey FROM information_schema.tables t, tpch1.customer c",
+        ungranted
+      )
+    ) match
+      case Denied(msg, _) =>
+        msg should include("tpch1.customer")
+        msg should not include "information_schema"
+      case other => fail(s"expected Denied, got $other")
+  }
+
+  it should "still gate cross-catalog information_schema, writes, and unlisted tables" in {
+    val eff = effectiveWith(permissions = Nil)
+
+    // Catalog outside the tenant entirely.
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM other_db.information_schema.tables", eff)
+    ) shouldBe a[Denied]
+
+    // SIBLING tenant-db: acme_other IS one of the tenant's catalogs, but it is
+    // not the session catalog, so the rewriter would never filter it. Admitting
+    // it here would be admit-without-filter.
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM acme_other.information_schema.tables", eff)
+    ) shouldBe a[Denied]
+
+    // Write verb on a filterable table.
+    filteredMeta.validate(
+      mkAcmeCtx("INSERT INTO information_schema.tables VALUES ('x')", eff)
+    ) shouldBe a[Denied]
+
+    // Filterable-table allowlist: key_column_usage is not one of them.
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM information_schema.key_column_usage", eff)
+    ) shouldBe a[Denied]
+  }
+
+  it should "not implicitly admit metadata reads embedded in write/DDL statements" in {
+    // The metadata rewriter only filters Select statements and passes everything
+    // else through untouched, so an info-schema Read riding inside an INSERT or a
+    // CTAS must keep needing a grant: dropping it would let any principal holding
+    // RW/DDL on their own schema materialize an UNFILTERED catalog copy.
+    val eff = effectiveWith(
+      List(
+        perm("acme_tpch", "tpch1", "*", "RW"),
+        perm("acme_tpch", "tpch1", "*", "DDL")
+      )
+    )
+
+    filteredMeta.validate(
+      mkAcmeCtx("INSERT INTO tpch1.mine SELECT table_name FROM information_schema.tables", eff)
+    ) match
+      case Denied(msg, _) => msg should include("information_schema")
+      case other          => fail(s"expected Denied, got $other")
+
+    filteredMeta.validate(
+      mkAcmeCtx(
+        "CREATE TABLE tpch1.mine2 AS SELECT table_name FROM information_schema.tables",
+        eff
+      )
+    ) match
+      case Denied(msg, _) => msg should include("information_schema")
+      case other          => fail(s"expected Denied, got $other")
+  }
+
+  it should "keep requiring the grant when the flag is off" in {
+    val eff = effectiveWith(permissions = Nil)
+    catalogAware.validate(mkAcmeCtx("SELECT * FROM information_schema.tables", eff)) match
+      case Denied(msg, _) => msg should include("information_schema")
+      case other          => fail(s"expected Denied, got $other")
+  }
+
+  it should "still deny unparseable statements for non-wildcard principals with the flag on" in {
+    // The rewriter passes jsqlparser-unparseable statements through untouched, so
+    // the fail-closed posture for anything DuckDB parses and jsqlparser does not
+    // rests entirely on this denial.
+    val eff = effectiveWith(permissions = Nil)
+    filteredMeta.validate(
+      mkAcmeCtx("SELCT * FRM information_schema.tables WHRE", eff)
+    ) shouldBe a[Denied]
+  }
