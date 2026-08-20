@@ -698,6 +698,12 @@ object Main extends IOApp with LazyLogging:
       val columnPolicyRewriter =
         EdgeRewriters.columnPolicyRewriter(sup, catalogReaders, stmtInstruments)
       val rowPolicyRewriter = EdgeRewriters.rowPolicyRewriter()
+      // The guard resolves columns through the same catalog as the SELECT-path rewriter, so
+      // its Deny-mode oracle and the rewriter agree on which columns a masked read exposes.
+      val protectedWriteGuard =
+        EdgeRewriters.protectedWriteGuard(
+          EdgeRewriters.columnCatalog(sup, catalogReaders, stmtInstruments)
+        )
 
       val journalDropped: Int => Unit = n =>
         metricsReg.composite
@@ -807,7 +813,8 @@ object Main extends IOApp with LazyLogging:
         // and there is no principal to filter for, hence the conjunction.
         metadataFilterRewriter = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(
           enabled = aclCfg.enabled && aclCfg.filteredMetadata
-        )
+        ),
+        protectedWriteGuard = protectedWriteGuard
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a

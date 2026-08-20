@@ -82,7 +82,15 @@ final class FlightSqlRouter(
       * mid-list insertion would silently shift `registry` / `journal`.
       */
     val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-      new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false)
+      new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
+    /** Protected-write guard: denies a non-SELECT statement whose read side exposes a CLS-masked or
+      * RLS-protected table (closes the write-wrapping bypass where a masked or filtered read
+      * launders into a CTAS / INSERT ... SELECT). Inert by default so a construction site that does
+      * not wire it admits every write. TAIL param for the same reason as `metadataFilterRewriter`:
+      * `Main` passes the leading arguments positionally.
+      */
+    val protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
+      ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -315,6 +323,21 @@ final class FlightSqlRouter(
       defaultDatabase = ctx.defaultDatabase,
       defaultSchema = ctx.defaultSchema
     )
+
+    // Protected-write guard: runs AFTER the ACL gate, BEFORE the CLS/RLS rewriters. A
+    // non-SELECT statement whose read side exposes a masked or row-filtered table is
+    // denied outright (the rewriters wrap SELECTs, not the read half of a write, so
+    // without this step a CTAS / INSERT ... SELECT would launder protected values).
+    // effectiveSet = None skips: no RBAC principal is bound, so no policy applies here
+    // (the validator has already denied anything tenant-scoped).
+    def protectedWrite(): Either[RouterFailure, Unit] = effectiveSet match
+      case None      => Right(())
+      case Some(eff) =>
+        protectedWriteGuard.check(sql, kind, eff, schemaCtx) match
+          case ai.starlake.quack.edge.policy.GuardOutcome.Allow        => Right(())
+          case ai.starlake.quack.edge.policy.GuardOutcome.Deny(reason) =>
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+            Left(RouterFailure.AccessDenied(reason))
     import cats.effect.unsafe.implicits.global
     // Shared CLS deny arm: instrument tag, journal, wire error.
     def clsDenied(tag: String, reason: String): Either[RouterFailure, String] =
@@ -403,6 +426,7 @@ final class FlightSqlRouter(
     // StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, QueryResult]] =
       aclCheck
+        .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)
         .flatMap(metadataFiltered) match

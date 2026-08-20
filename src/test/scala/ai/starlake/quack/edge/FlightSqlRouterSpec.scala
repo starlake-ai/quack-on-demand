@@ -685,7 +685,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
       validator: StatementValidator = StatementValidator.allowAll,
       readers: Int = 1,
-      stub: () => QuackResponse = defaultStub
+      stub: () => QuackResponse = defaultStub,
+      protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
+        ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -742,7 +744,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       adapter,
       validator = validator,
       columnPolicyRewriter = rewriter,
-      metadataFilterRewriter = metadataFilter
+      metadataFilterRewriter = metadataFilter,
+      protectedWriteGuard = protectedWriteGuard
     )
     (router, () => capturedSql, node)
 
@@ -845,6 +848,97 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val failure = out.left.get
     failure shouldBe a[RouterFailure.AccessDenied]
     failure.reason should include("access denied")
+
+  // ---- ProtectedWriteGuard integration tests ----
+  //
+  // The InMemory pool hands the guard a session catalog of "memory" / schema "main",
+  // so the mask/row policy is keyed on ("memory","main","customer") (catalog wildcard
+  // "*"). The catalog knows customer's columns so the guard's Deny-mode oracle can
+  // decide precisely which reads project a masked column.
+
+  private def maskCustomerEmail =
+    ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+      "cp-pw",
+      "r-1",
+      "*",
+      "main",
+      "customer",
+      "c_email",
+      "mask",
+      Some("'***'")
+    )
+
+  private def rowPolicyCustomer =
+    ai.starlake.quack.ondemand.state.RoleRowPolicy(
+      "rp-pw",
+      "r-1",
+      "*",
+      "main",
+      "customer",
+      "c_region = 'X'"
+    )
+
+  private def effWithRowPolicies(
+      ps: List[ai.starlake.quack.ondemand.state.RoleRowPolicy]
+  ): ai.starlake.quack.ondemand.rbac.EffectiveSet =
+    ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, Nil, ps)
+
+  private def guardKnowingCustomer =
+    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
+      ),
+      clsEnabled = true,
+      rlsEnabled = true
+    )
+
+  it should "deny laundering a masked column through CTAS end-to-end" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val out = router
+      .execute(
+        "pw-1",
+        "alice",
+        poolKey,
+        "CREATE TABLE main.scratch AS SELECT c_email FROM main.customer",
+        effectiveSet = Some(effWithPolicies(List(maskCustomerEmail)))
+      )
+      .unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    out.left.get shouldBe a[RouterFailure.AccessDenied]
+    // The guard denied before routing, so nothing reached the node.
+    capturedSql() shouldBe ""
+
+  it should "allow a write reading only unmasked columns end-to-end" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val out = router
+      .execute(
+        "pw-2",
+        "alice",
+        poolKey,
+        "INSERT INTO main.scratch SELECT c_id FROM main.customer",
+        effectiveSet = Some(effWithPolicies(List(maskCustomerEmail)))
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    capturedSql() should include("c_id")
+
+  it should "deny any read of an RLS table through a write end-to-end" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val out = router
+      .execute(
+        "pw-3",
+        "alice",
+        poolKey,
+        "CREATE TABLE main.scratch AS SELECT c_id FROM main.customer",
+        effectiveSet = Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      .unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    out.left.get shouldBe a[RouterFailure.AccessDenied]
+    capturedSql() shouldBe ""
 
   // ---- ActiveStatementRegistry integration tests ----
 
