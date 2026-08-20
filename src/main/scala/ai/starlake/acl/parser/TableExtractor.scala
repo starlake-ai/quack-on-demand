@@ -43,6 +43,12 @@ private[parser] class TableExtractorVisitor:
   val unsupported: mutable.ListBuffer[String] = mutable.ListBuffer.empty
   private val cteNames: mutable.Set[String]   = mutable.Set.empty
 
+  // Identity-keyed set of AST nodes already walked, so the explicit arms and the unconditional
+  // descendChildren pass cannot re-walk the same subtree: keeps the walk O(n) and cycle-proof even
+  // though every node is now reachable from two directions (its arm and its parent's descend).
+  private val visited: java.util.Set[AnyRef] =
+    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]())
+
   def result: TableExtraction = TableExtraction(tables.toList, unsupported.toList)
 
   def process(select: Select): Unit =
@@ -63,6 +69,9 @@ private[parser] class TableExtractorVisitor:
     visitSelect(select)
 
   private def visitSelect(select: Select): Unit =
+    if select != null && visited.add(select) then matchSelect(select)
+
+  private def matchSelect(select: Select): Unit =
     select match
       case ps: PlainSelect       => visitPlainSelect(ps)
       case sol: SetOperationList => visitSetOperationList(sol)
@@ -153,6 +162,9 @@ private[parser] class TableExtractorVisitor:
       }
 
   private[parser] def visitFromItem(fromItem: FromItem): Unit =
+    if fromItem != null && visited.add(fromItem) then matchFromItem(fromItem)
+
+  private def matchFromItem(fromItem: FromItem): Unit =
     fromItem match
       case table: Table =>
         val name = table.getUnquotedName
@@ -201,6 +213,16 @@ private[parser] class TableExtractorVisitor:
         unsupported += s"unrecognized FROM item ${other.getClass.getSimpleName}"
 
   private[parser] def visitExpression(expr: Expression): Unit =
+    if expr != null && visited.add(expr) then
+      matchExpression(expr)
+      // Completeness backstop: after the explicit arms, unconditionally descend into every
+      // child of this node reflectively. This subsumes each arm's own recursion (the visited
+      // set dedups it) AND reaches children the arms miss - window/aggregate clauses
+      // (OVER ORDER BY / PARTITION BY, FILTER, WITHIN GROUP) and any wrapper type - so no
+      // nested subquery is ever silently dropped.
+      descendChildren(expr)
+
+  private def matchExpression(expr: Expression): Unit =
     expr match
       case psel: ParenthesedSelect =>
         visitParenthesedSelect(psel)
@@ -269,22 +291,40 @@ private[parser] class TableExtractorVisitor:
       case ext: ExtractExpression =>
         val inner = ext.getExpression
         if inner != null then visitExpression(inner)
-      case other =>
-        // Backstop for expression node types this walker does not model explicitly.
-        // Many wrappers (Parenthesis, ArrayConstructor, COLLATE, INTERVAL, ...) hold a
-        // child expression that can itself be a subquery; silently dropping them lets a
-        // masked/filtered read launder into a write. Reflectively descend into any no-arg
-        // getter returning an Expression or a Select so no nested subquery escapes. True
-        // leaves (Column, literals) have no such getter, so this is a no-op for them; the
-        // per-class accessor list is memoized to keep that path cheap.
-        TableExtractorVisitor.childAccessors(other.getClass).foreach { m =>
-          try
-            m.invoke(other) match
-              case e: Expression => visitExpression(e)
-              case s: Select     => visitSelect(s)
-              case _             => ()
-          catch case _: Throwable => ()
-        }
+      case _ =>
+        // Leaves (Column, literals) and any node the explicit arms do not model: descendChildren
+        // (called by visitExpression right after this) reaches their children reflectively.
+        ()
+
+  /** Reflectively descend into every child of `node` that can carry a table reference, so no
+    * subquery is dropped regardless of which wrapper or clause holds it. Routes each accessor value
+    * by its RUNTIME type; the accessor list is memoized per class so leaves stay cheap.
+    */
+  private def descendChildren(node: Expression): Unit =
+    TableExtractorVisitor.childAccessors(node.getClass).foreach { m =>
+      try routeChild(m.invoke(node))
+      catch case _: Throwable => ()
+    }
+
+  /** Route one reflectively-fetched child value to the right walk. `Expression` is tested before
+    * `Select` so a `ParenthesedSelect` (which is both) goes through the visited-guarded expression
+    * path; collections and arrays are iterated one level and their elements routed the same way.
+    */
+  private def routeChild(value: Any): Unit =
+    value match
+      case null          => ()
+      case e: Expression => visitExpression(e)
+      case s: Select     => visitSelect(s)
+      // A bare Table reached through an expression accessor is a column qualifier
+      // (e.g. Column.getTable in `c.c_id`), already surfaced via the FROM clause if it is a
+      // read source; recording it here would wrongly add aliases as table accesses. Only
+      // descend into non-Table from-items (derived tables, table functions, lateral, ...).
+      case _: Table                  => ()
+      case fi: FromItem              => visitFromItem(fi)
+      case oe: OrderByElement        => Option(oe.getExpression).foreach(visitExpression)
+      case it: java.lang.Iterable[?] => it.asScala.foreach(routeChild)
+      case arr: Array[?]             => arr.foreach(routeChild)
+      case _                         => ()
 
 private[parser] object TableExtractorVisitor:
   import java.lang.reflect.Method
@@ -292,18 +332,24 @@ private[parser] object TableExtractorVisitor:
   private val accessorCache =
     new java.util.concurrent.ConcurrentHashMap[Class[?], Array[Method]]()
 
-  /** The no-arg `get*` accessors of `cls` whose return type is an `Expression` or a `Select`, i.e.
-    * the child nodes a subquery could hide behind. Memoized per class so the common leaf path
-    * (Column, literals: no such accessor) stays cheap.
+  /** The no-arg `get*` accessors of `cls` whose return type can hold a table reference: an
+    * `Expression`, `Select`, `FromItem`, `OrderByElement`, any collection (`Iterable`, so a raw
+    * `List<OrderByElement>` or `List<Expression>` is reached), or an array. Memoized per class so
+    * the common leaf path (Column, literals: no such accessor) stays cheap.
     */
   def childAccessors(cls: Class[?]): Array[Method] =
     accessorCache.computeIfAbsent(
       cls,
       c =>
         c.getMethods.filter { m =>
+          val rt = m.getReturnType
           m.getParameterCount == 0 &&
           m.getName.startsWith("get") &&
-          (classOf[Expression].isAssignableFrom(m.getReturnType) ||
-            classOf[Select].isAssignableFrom(m.getReturnType))
+          (classOf[Expression].isAssignableFrom(rt) ||
+            classOf[Select].isAssignableFrom(rt) ||
+            classOf[FromItem].isAssignableFrom(rt) ||
+            classOf[OrderByElement].isAssignableFrom(rt) ||
+            classOf[java.lang.Iterable[?]].isAssignableFrom(rt) ||
+            rt.isArray)
         }
     )

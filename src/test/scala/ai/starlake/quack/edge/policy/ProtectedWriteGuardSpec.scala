@@ -249,3 +249,32 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       ctx
     ) shouldBe a[Deny]
   }
+
+  // Subqueries hidden in window / aggregate clauses (arm-preempted / raw-list children).
+  private val windowAggForms = List(
+    "OVER (ORDER BY (SELECT %s FROM tpch1.customer))"         -> "over order by",
+    "OVER (PARTITION BY (SELECT %s FROM tpch1.customer))"     -> "over partition by",
+    "FILTER (WHERE b IN (SELECT %s FROM tpch1.customer))"     -> "aggregate filter",
+    "WITHIN GROUP (ORDER BY (SELECT %s FROM tpch1.customer))" -> "within group order by"
+  )
+
+  windowAggForms.foreach { case (clause, label) =>
+    it should s"deny an RLS read hidden in a $label clause" in {
+      val sql = s"INSERT INTO tpch1.t SELECT rank() ${clause.format("c_id")} FROM tpch1.s"
+      guardWithCls().check(
+        sql,
+        StatementKind.Dml,
+        eff(tenantUser, rows = List(rowPolicy)),
+        ctx
+      ) shouldBe a[Deny]
+    }
+  }
+
+  it should "deny a masked read hidden in a window PARTITION BY clause (colHit fires)" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.t SELECT rank() OVER (PARTITION BY (SELECT c_email FROM tpch1.customer)) FROM tpch1.s",
+      StatementKind.Dml,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }

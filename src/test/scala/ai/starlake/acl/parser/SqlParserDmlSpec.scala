@@ -86,6 +86,24 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
       "testdb.public.other" -> Verb.Read
     )
 
+  it should "surface a subquery read hidden in a window PARTITION BY clause" in:
+    // Arm-preempted child: AnalyticExpression's explicit arm walked only getExpression;
+    // descendChildren reaches its partition/order/filter children.
+    assertAccesses(
+      "INSERT INTO t SELECT rank() OVER (PARTITION BY (SELECT x FROM other)) FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in an aggregate FILTER clause" in:
+    assertAccesses(
+      "INSERT INTO t SELECT sum(a) FILTER (WHERE b IN (SELECT x FROM other)) FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
   // ---------- UPDATE ----------
 
   "SqlParser UPDATE" should "mark a bare UPDATE as Write on the target" in:
