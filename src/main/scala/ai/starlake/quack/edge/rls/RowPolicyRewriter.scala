@@ -52,7 +52,6 @@ object RowPolicyRewriter:
     */
   case object PassthroughParseFailed extends Outcome
 
-  private val Wildcard   = RoleRowPolicy.Wildcard
   private val TokenRegex = "\\$\\{[a-zA-Z]+\\}".r
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
@@ -198,8 +197,11 @@ class RowPolicyRewriter(enabled: Boolean = true):
       schema: String,
       table: String
   ): Boolean =
-    def matchesPart(policyPart: String, actual: String): Boolean =
-      policyPart == Wildcard || policyPart.equalsIgnoreCase(actual)
-    matchesPart(p.tableName, table) &&
-    matchesPart(p.schemaName, schema) &&
-    matchesPart(p.catalogName, catalog)
+    ai.starlake.quack.edge.policy.PolicyCoverage.covers(
+      p.catalogName,
+      p.schemaName,
+      p.tableName,
+      catalog,
+      schema,
+      table
+    )
