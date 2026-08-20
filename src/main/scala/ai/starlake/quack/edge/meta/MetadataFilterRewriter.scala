@@ -55,15 +55,22 @@ enum MetadataFilterOutcome:
   *     traversal reaches, blind where it does not (ORDER BY, GROUP BY and window PARTITION BY
   *     subqueries are NOT visited - the same blind spots as the walk, which is why one count is not
   *     enough).
-  *   - A textual count of the raw statement with string literals and comments stripped. Coarser,
-  *     but it does not depend on knowing where the traversal stops, so it catches the positions
-  *     nothing else sees.
+  *   - A textual count of the statement as the caller wrote it, RAW: no literal or comment
+  *     stripping. Coarser, but it does not depend on knowing where the traversal stops, so it
+  *     catches the positions nothing else sees, and counting unmodified text cannot under-count by
+  *     construction. Stripping would need the engine's full lexer, and a stripper that
+  *     desynchronises swallows the real reference along with the fake literal - which is exactly
+  *     how the previous version leaked (see [[MetadataFilterRewriter.textualRefCount]]).
   *
-  * A count that cannot be taken is also a denial. Two consequences are accepted deliberately: a
-  * reference in an unsupported position is denied rather than filtered, and a CROSS-CATALOG
-  * filterable reference sitting in a traversal blind spot is denied even though the walk leaves
-  * cross-catalog metadata alone on purpose (rare, fail-closed, and the validator would have
-  * grant-gated that reference anyway).
+  * Neither tier subsumes the other: text sees positions the traversal skips, the AST sees quoting
+  * forms the regex cannot read through.
+  *
+  * A count that cannot be taken is also a denial. Three consequences are accepted deliberately: a
+  * reference in an unsupported position is denied rather than filtered; a statement that merely
+  * MENTIONS a filterable table in a string literal or a comment is denied on the phantom match; and
+  * a CROSS-CATALOG filterable reference sitting in a traversal blind spot is denied even though the
+  * walk leaves cross-catalog metadata alone on purpose (rare, fail-closed, and the validator would
+  * have grant-gated that reference anyway).
   */
 final class MetadataFilterRewriter(enabled: Boolean = true):
 
@@ -111,7 +118,8 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                         then
                           Denied(
                             "information_schema reference in a position this filter cannot " +
-                              "rewrite; query it directly in the FROM clause instead"
+                              "rewrite (or mentioned in a literal/comment); query it directly " +
+                              "in the FROM clause instead"
                           )
                         else if walker.substitutions > 0 then Rewritten(sel.toString)
                         else Passthrough
@@ -311,72 +319,29 @@ object MetadataFilterRewriter:
 
   private final case class RefCounts(nodes: Int, crossCatalog: Int)
 
-  /** Textual tripwire: how many times the raw statement spells a filterable reference, once string
-    * literals and comments are removed so a statement merely mentioning the phrase is not denied.
-    * Qualification is not part of the match, since a session-catalog-qualified reference is
-    * substituted and a cross-catalog one is accounted for separately.
+  /** Textual tripwire: how many times the RAW statement spells a filterable reference. No literal
+    * or comment stripping happens first, and that is the point - a count taken on unmodified text
+    * can only ever OVER-count (a phrase inside a literal or a comment becomes a phantom match, and
+    * a phantom match denies), never under-count.
     *
-    * This exists because the AST-side count can only see what jsqlparser's traversal visits, and
+    * The stripper this replaces desynchronised on an apostrophe inside a double-quoted identifier
+    * (`SELECT "a'b" ... ORDER BY (SELECT ... FROM information_schema.tables ...)`) and swallowed
+    * the real reference along with the fake literal. Getting that right means reimplementing
+    * DuckDB's lexer - `e'...'` backslash escapes, `$$` and `$tag$` dollar quoting, nested block
+    * comments - and every one of those has the same desync-and-swallow failure mode. Over-denial is
+    * the cheap side of that trade.
+    *
+    * This tier exists because the AST count can only see what jsqlparser's traversal visits, and
     * that traversal skips ORDER BY, GROUP BY and window PARTITION BY subqueries - exactly where the
     * substitution walk is blind too, so the two agreed with each other and both missed the
-    * reference. Text does not depend on knowing where the traversal stops.
+    * reference. Text does not depend on knowing where the traversal stops. Conversely the AST tier
+    * catches quoting forms the regex cannot see through, so both are kept.
     */
   private def textualRefCount(sql: String): Int =
-    TextualRefRe.findAllMatchIn(stripLiteralsAndComments(sql)).size
+    TextualRefRe.findAllMatchIn(sql).size
 
   private val TextualRefRe =
     """(?i)"?information_schema"?\s*\.\s*"?(?:schemata|tables|columns|views)"?\b""".r
-
-  private enum ScanState:
-    case Sql, Literal, LineComment, BlockComment
-
-  /** Drop single-quoted literals (`''` is an escaped quote, not a terminator), `--` line comments
-    * and slash-star block comments, so the tripwire counts references the engine would actually
-    * resolve. Double-quoted identifiers are KEPT: those are references.
-    *
-    * Dollar-quoted strings are not recognised, so a `$$...$$` literal naming a filterable table
-    * denies the statement. That is the fail-closed direction and DuckDB clients rarely emit it.
-    */
-  private[meta] def stripLiteralsAndComments(sql: String): String =
-    import ScanState._
-    val out   = new StringBuilder(sql.length)
-    var i     = 0
-    var state = Sql
-    while i < sql.length do
-      val c    = sql.charAt(i)
-      val next = if i + 1 < sql.length then sql.charAt(i + 1) else ' '
-      state match
-        case Sql =>
-          if c == '\'' then
-            state = Literal
-            i += 1
-          else if c == '-' && next == '-' then
-            state = LineComment
-            i += 2
-          else if c == '/' && next == '*' then
-            state = BlockComment
-            i += 2
-          else
-            out.append(c)
-            i += 1
-        case Literal =>
-          if c == '\'' && next == '\'' then i += 2
-          else if c == '\'' then
-            state = Sql
-            i += 1
-          else i += 1
-        case LineComment =>
-          if c == '\n' then
-            state = Sql
-            out.append(c)
-            i += 1
-          else i += 1
-        case BlockComment =>
-          if c == '*' && next == '/' then
-            state = Sql
-            i += 2
-          else i += 1
-    out.toString
 
   /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
     * the whole predicate to keep the SQL readable.

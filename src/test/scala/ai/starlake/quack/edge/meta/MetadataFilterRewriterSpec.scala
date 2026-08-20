@@ -259,22 +259,47 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other     => fail(s"expected Denied, got $other")
   }
 
+  it should "deny an ORDER BY reference behind an apostrophe in a quoted identifier" in {
+    go(
+      """SELECT "a'b" FROM tpch1.customer """ +
+        "ORDER BY (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'z')",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny a GROUP BY oracle behind an apostrophe in a quoted identifier" in {
+    go(
+      """SELECT "a'b" FROM tpch1.customer GROUP BY CASE WHEN EXISTS (SELECT 1 FROM """ +
+        "information_schema.columns WHERE table_name = 'salaries') THEN 1 ELSE 0 END",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
   it should "pass a cross-catalog filterable reference through (the validator gates it)" in {
     go("SELECT * FROM other_db.information_schema.tables", eff(tenantUser)) shouldBe Passthrough
   }
 
-  it should "not trip on the phrase inside a string literal" in {
+  // The tripwire counts the RAW statement, so a phrase inside a literal or a comment is a phantom
+  // match and denies. That over-denial is the accepted price of never under-counting: recognising
+  // literals means reimplementing the engine's lexer, and a lexer that desynchronises swallows the
+  // real reference instead. These two pin the surface so a future change cannot widen it silently.
+
+  it should "deny the phrase inside a string literal (accepted over-denial)" in {
     go(
       "SELECT * FROM tpch1.customer WHERE note = 'see information_schema.tables'",
       eff(tenantUser)
-    ) shouldBe Passthrough
+    ) should matchPattern { case Denied(_) => }
   }
 
-  it should "not trip on the phrase inside comments" in {
-    go("-- see information_schema.tables\nSELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
-      Passthrough
-    go("/* see information_schema.views */ SELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
-      Passthrough
+  it should "deny the phrase inside comments (accepted over-denial)" in {
+    go("-- see information_schema.tables\nSELECT * FROM tpch1.customer", eff(tenantUser)) should
+      matchPattern { case Denied(_) => }
+    go("/* see information_schema.views */ SELECT * FROM tpch1.customer", eff(tenantUser)) should
+      matchPattern { case Denied(_) => }
   }
 
   it should "escape quotes in grant values" in {
