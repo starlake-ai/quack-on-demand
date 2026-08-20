@@ -231,3 +231,21 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       ctx
     ) shouldBe a[Deny]
   }
+
+  it should "deny a write reading a masked table through a VALUES-derived table" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.t SELECT * FROM (VALUES ((SELECT c_email FROM tpch1.customer))) v",
+      StatementKind.Dml,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
+
+  it should "deny a write reading an RLS table through a VALUES-derived table" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.t SELECT * FROM (VALUES ((SELECT c_id FROM tpch1.customer))) v",
+      StatementKind.Dml,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) shouldBe a[Deny]
+  }

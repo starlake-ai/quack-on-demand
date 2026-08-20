@@ -68,6 +68,24 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
       "testdb.public.other" -> Verb.Read
     )
 
+  it should "surface a subquery read inside a VALUES-derived FROM table" in:
+    // The symmetric hole: a VALUES used as a derived table also carries subqueries.
+    assertAccesses(
+      "INSERT INTO t SELECT * FROM (VALUES ((SELECT x FROM other))) v",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read nested in an expression wrapper (ARRAY constructor)" in:
+    // The visitExpression backstop: wrappers like ARRAY[...] hold child expressions
+    // that can be subqueries; they must not be silently dropped.
+    assertAccesses(
+      "INSERT INTO t SELECT a FROM s WHERE a = ANY(ARRAY[(SELECT x FROM other)])",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
   // ---------- UPDATE ----------
 
   "SqlParser UPDATE" should "mark a bare UPDATE as Write on the target" in:

@@ -189,7 +189,11 @@ private[parser] class TableExtractorVisitor:
             val onExpressions = j.getOnExpressions
             if onExpressions != null then onExpressions.asScala.foreach(visitExpression)
           }
-      case _: Values             => () // VALUES carries no table refs
+      case v: Values =>
+        // A VALUES used as a derived table, e.g. `FROM (VALUES ((SELECT c FROM s))) v`,
+        // can embed a subquery just like the INSERT ... VALUES form. Walk its
+        // expressions so those reads surface instead of being silently dropped.
+        Option(v.getExpressions).foreach(visitExpression)
       case sol: SetOperationList => visitSetOperationList(sol)
       case plain: PlainSelect    => visitPlainSelect(plain)
       case other                 =>
@@ -265,4 +269,41 @@ private[parser] class TableExtractorVisitor:
       case ext: ExtractExpression =>
         val inner = ext.getExpression
         if inner != null then visitExpression(inner)
-      case _ => () // Leaf expressions (Column, LongValue, StringValue, etc.) -- no-op
+      case other =>
+        // Backstop for expression node types this walker does not model explicitly.
+        // Many wrappers (Parenthesis, ArrayConstructor, COLLATE, INTERVAL, ...) hold a
+        // child expression that can itself be a subquery; silently dropping them lets a
+        // masked/filtered read launder into a write. Reflectively descend into any no-arg
+        // getter returning an Expression or a Select so no nested subquery escapes. True
+        // leaves (Column, literals) have no such getter, so this is a no-op for them; the
+        // per-class accessor list is memoized to keep that path cheap.
+        TableExtractorVisitor.childAccessors(other.getClass).foreach { m =>
+          try
+            m.invoke(other) match
+              case e: Expression => visitExpression(e)
+              case s: Select     => visitSelect(s)
+              case _             => ()
+          catch case _: Throwable => ()
+        }
+
+private[parser] object TableExtractorVisitor:
+  import java.lang.reflect.Method
+
+  private val accessorCache =
+    new java.util.concurrent.ConcurrentHashMap[Class[?], Array[Method]]()
+
+  /** The no-arg `get*` accessors of `cls` whose return type is an `Expression` or a `Select`, i.e.
+    * the child nodes a subquery could hide behind. Memoized per class so the common leaf path
+    * (Column, literals: no such accessor) stays cheap.
+    */
+  def childAccessors(cls: Class[?]): Array[Method] =
+    accessorCache.computeIfAbsent(
+      cls,
+      c =>
+        c.getMethods.filter { m =>
+          m.getParameterCount == 0 &&
+          m.getName.startsWith("get") &&
+          (classOf[Expression].isAssignableFrom(m.getReturnType) ||
+            classOf[Select].isAssignableFrom(m.getReturnType))
+        }
+    )
