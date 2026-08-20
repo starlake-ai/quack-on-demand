@@ -1,0 +1,238 @@
+package ai.starlake.quack.edge.meta
+
+import ai.starlake.quack.edge.cls.SchemaContext
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
+import ai.starlake.quack.ondemand.state.{RbacUser, RolePermission}
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+
+class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
+
+  import MetadataFilterOutcome._
+
+  private val rw  = new MetadataFilterRewriter(enabled = true)
+  private val ctx =
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
+
+  private val tenantUser =
+    RbacUser(id = "u-1", tenant = Some("acme"), username = "alice", role = "user")
+  private val superuser =
+    RbacUser(id = "u-0", tenant = None, username = "root", role = "admin")
+
+  private def grant(cat: String, sch: String, tab: String, verb: String = "RO") =
+    RolePermission("rp-x", "r-1", cat, sch, tab, verb)
+
+  private def eff(user: RbacUser, perms: RolePermission*) =
+    EffectiveSet(user, Nil, Nil, perms.toList, Nil)
+
+  /** Run the rewrite and echo, at info level, the original SQL, the grants in scope and the
+    * outcome, so the test report shows the before/after of every case.
+    */
+  private def go(
+      sql: String,
+      effSet: EffectiveSet,
+      rewriter: MetadataFilterRewriter = rw
+  ): MetadataFilterOutcome =
+    val outcome = rewriter.rewrite(sql, effSet, ctx)
+    val grants  =
+      effSet.permissions.map(p => s"${p.catalogName}.${p.schemaName}.${p.tableName}:${p.verb}")
+    val result = outcome match
+      case Rewritten(s)   => s
+      case Passthrough    => s"$sql  [passthrough]"
+      case Denied(reason) => s"[denied] $reason"
+    info(s"original: $sql")
+    info(s"grants:   ${if grants.isEmpty then "(none)" else grants.mkString("  ;  ")}")
+    info(s"result:   $result")
+    outcome
+
+  "rewrite" should "wrap information_schema.tables with a single-table grant predicate" in {
+    go(
+      "SELECT table_name FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("information_schema.tables")
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        sql should include("table_schema IN ('information_schema', 'pg_catalog')")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "OR multiple grants and honor wildcards" in {
+    go(
+      "SELECT * FROM information_schema.columns",
+      eff(
+        tenantUser,
+        grant("acme_tpch", "tpch1", "customer"),
+        grant("*", "sales", "*"),
+        grant("acme_tpch", "*", "orders", verb = "RW")
+      )
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        sql should include("table_schema = 'sales'")
+        sql should include("table_name = 'orders'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "ignore grants on other catalogs and non-Read verbs" in {
+    go(
+      "SELECT * FROM information_schema.tables",
+      eff(
+        tenantUser,
+        grant("other_db", "tpch1", "customer"),
+        grant("acme_tpch", "tpch1", "orders", verb = "DDL")
+      )
+    ) match
+      case Rewritten(sql) =>
+        (sql should not).include("customer")
+        (sql should not).include("orders")
+        sql should include("table_schema IN ('information_schema', 'pg_catalog')")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "filter schemata on schema_name and make a table grant expose its schema" in {
+    go(
+      "SELECT schema_name FROM information_schema.schemata",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("schema_name = 'tpch1'")
+        sql should include("schema_name IN ('information_schema', 'pg_catalog')")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "produce the system-only predicate for a zero-grant principal" in {
+    go("SELECT * FROM information_schema.tables", eff(tenantUser)) match
+      case Rewritten(sql) =>
+        sql should include("table_schema IN ('information_schema', 'pg_catalog')")
+        (sql should not).include(" OR ")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "preserve the alias of the wrapped reference" in {
+    go(
+      "SELECT t.table_name FROM information_schema.tables t",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql.toLowerCase should include(") t")
+        sql should include("t.table_name")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap a reference nested inside a subquery" in {
+    go(
+      "SELECT 1 WHERE EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'x')",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap a reference nested inside a CTE body" in {
+    go(
+      "WITH t AS (SELECT table_name FROM information_schema.tables) SELECT * FROM t",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap a reference on the right-hand side of a join" in {
+    go(
+      "SELECT * FROM tpch1.customer c JOIN information_schema.columns ic ON TRUE",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+        sql should include("information_schema.columns")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap every arm of a set operation" in {
+    go(
+      "SELECT table_name FROM information_schema.tables " +
+        "UNION ALL SELECT table_name FROM information_schema.views",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("information_schema.tables")
+        sql should include("information_schema.views")
+        java.util.regex.Pattern
+          .quote("table_name = 'customer'")
+          .r
+          .findAllMatchIn(sql)
+          .size shouldBe 2
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap both legs of a self-join on the same filterable table" in {
+    go(
+      "SELECT * FROM information_schema.tables a, information_schema.tables b",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        java.util.regex.Pattern
+          .quote("table_name = 'customer'")
+          .r
+          .findAllMatchIn(sql)
+          .size shouldBe 2
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny a filterable reference the substitution walker cannot reach (fail-closed)" in {
+    go(
+      "SELECT coalesce((SELECT count(*) FROM information_schema.tables), 0)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
+  it should "escape quotes in grant values" in {
+    go(
+      "SELECT * FROM information_schema.tables",
+      eff(tenantUser, grant("acme_tpch", "tp'ch", "cust'omer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("'tp''ch'")
+        sql should include("'cust''omer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "pass through superusers, explicit information_schema grants, wildcard-ALL, and disabled" in {
+    val stmt = "SELECT * FROM information_schema.tables"
+    go(stmt, eff(superuser)) shouldBe Passthrough
+    go(stmt, eff(tenantUser, grant("acme_tpch", "information_schema", "*"))) shouldBe Passthrough
+    go(stmt, eff(tenantUser, grant("*", "*", "*", verb = "ALL"))) shouldBe Passthrough
+    go(stmt, eff(tenantUser), rewriter = new MetadataFilterRewriter(enabled = false)) shouldBe
+      Passthrough
+  }
+
+  it should "pass through statements touching no filterable table" in {
+    go("SELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe Passthrough
+    go("SELECT * FROM pg_catalog.pg_tables", eff(tenantUser)) shouldBe Passthrough
+    go("SELECT * FROM information_schema.key_column_usage", eff(tenantUser)) shouldBe Passthrough
+  }
+
+  it should "replace SHOW TABLES with the filtered current-schema listing" in {
+    go("SHOW TABLES", eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+      case Rewritten(sql) =>
+        sql should include("table_name AS name")
+        sql should include("table_schema = 'tpch1'")
+        sql should include("table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny SHOW TABLES variants it cannot rewrite (fail-closed)" in {
+    for stmt <- List("SHOW TABLES FROM tpch1", "SHOW TABLES IN tpch1", "SHOW TABLES LIKE 'c%'") do
+      go(stmt, eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+        case Denied(_) => succeed
+        case other     => fail(s"$stmt: expected Denied, got $other")
+  }
+
+  it should "leave unparseable non-SHOW statements untouched" in {
+    go("THIS IS NOT SQL", eff(tenantUser)) shouldBe Passthrough
+  }

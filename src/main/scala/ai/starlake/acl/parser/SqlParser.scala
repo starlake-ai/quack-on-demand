@@ -351,8 +351,9 @@ object SqlParser:
       // DESCRIBE t / SHOW t / SHOW COLUMNS FROM t reveal a table's shape: that is a
       // Read on the table, not control flow. Previously allowlisted, which let any
       // principal describe any table (enumeration bypass); now grant-checked like a
-      // SELECT. SHOW TABLES / SHOW ALL TABLES stay ControlFlow: the edge metadata
-      // filter replaces them with the filtered information_schema query downstream.
+      // SELECT. Plain SHOW TABLES stays ControlFlow and is replaced or denied by the
+      // edge metadata filter downstream; SHOW ALL TABLES never parses (denied
+      // fail-closed).
       case d: DescribeStatement =>
         val (qTgt, errs) = TableQualifier.qualify(List(d.getTable), config)
         StatementResult
