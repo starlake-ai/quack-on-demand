@@ -233,6 +233,24 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
         case other     => fail(s"$stmt: expected Denied, got $other")
   }
 
+  it should "replace a comment-prefixed SHOW TABLES that dodges the textual fast path" in {
+    go("/* c */ SHOW TABLES", eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))) match
+      case Rewritten(sql) =>
+        sql should include("table_name AS name")
+        sql should include("table_schema = 'tpch1'")
+        sql should include("table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny a comment-prefixed SHOW TABLES variant" in {
+    go(
+      "/* c */ SHOW TABLES FROM tpch1",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Denied(_) => succeed
+      case other     => fail(s"expected Denied, got $other")
+  }
+
   it should "leave unparseable non-SHOW statements untouched" in {
     go("THIS IS NOT SQL", eff(tenantUser)) shouldBe Passthrough
   }

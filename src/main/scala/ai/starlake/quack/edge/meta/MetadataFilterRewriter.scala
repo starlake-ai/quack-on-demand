@@ -15,6 +15,7 @@ import net.sf.jsqlparser.expression.{
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.Statement
+import net.sf.jsqlparser.statement.show.ShowTablesStatement
 import net.sf.jsqlparser.util.TablesNamesFinder
 import net.sf.jsqlparser.statement.select.{
   FromItem,
@@ -84,6 +85,12 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                       )
                     else if walker.substitutions > 0 then Rewritten(sel.toString)
                     else Passthrough
+              case Some(st: ShowTablesStatement) =>
+                // A SHOW TABLES the textual fast path did not recognise (leading comment,
+                // odd whitespace) but jsqlparser did. Same treatment, so the form cannot
+                // dodge the filter by being spelled differently.
+                if ShowTables.isPlain(st) then ShowTables.filteredListing(grants, ctx)
+                else ShowTables.denial
               case _ =>
                 // Non-SELECT or unparseable: nothing filterable that the ACL layer has not
                 // already gated (DESCRIBE / SHOW-table forms are Read accesses now;
@@ -254,13 +261,18 @@ object MetadataFilterRewriter:
       if clauses.contains("TRUE") then "TRUE"
       else (SystemRowClauseTab :: clauses).distinct.mkString("(", ") OR (", ")")
 
-  /** SHOW TABLES handling, string-matched BEFORE parsing (jsqlparser models it as a statement the
-    * filter walker never sees). Plain SHOW TABLES is replaced by the filtered listing matching
-    * DuckDB's native single-column `name` output; any other SHOW ... TABLES form is DENIED
-    * fail-closed (those parse as ShowTablesStatement and would otherwise ride the ControlFlow admit
-    * unfiltered). SHOW ALL TABLES never reaches a filtered principal (UnsupportedStatement ->
-    * ParseError -> denied by the validator upstream); the catch-all deny here is defense in depth
-    * only. Returns None for anything that is not a SHOW ... TABLES form.
+  /** SHOW TABLES handling (jsqlparser models it as a statement the filter walker never sees). Plain
+    * SHOW TABLES is replaced by the filtered listing matching DuckDB's native single-column `name`
+    * output; any other SHOW ... TABLES form is DENIED fail-closed, since it would otherwise ride
+    * the ControlFlow admit unfiltered. SHOW ALL TABLES never reaches a filtered principal
+    * (UnsupportedStatement -> ParseError -> denied by the validator upstream); the catch-all deny
+    * here is defense in depth only.
+    *
+    * [[replace]] is the textual fast path, matched BEFORE parsing, and returns None for anything
+    * that is not a SHOW ... TABLES form. Forms it does not recognise (a leading comment, odd
+    * whitespace) still parse to a `ShowTablesStatement`, which `rewrite` routes back here through
+    * [[isPlain]] / [[filteredListing]] / [[denial]] - the two paths must stay in agreement or the
+    * unrecognised spelling becomes an unfiltered bypass.
     */
   private[meta] object ShowTables:
     private val ShowTablesPlainRe = """(?is)^\s*SHOW\s+TABLES\s*;?\s*$""".r
@@ -272,20 +284,32 @@ object MetadataFilterRewriter:
         ctx: SchemaContext
     ): Option[MetadataFilterOutcome] =
       sql match
-        case ShowTablesPlainRe() =>
-          val pred   = predicateFor("tables", grants)
-          val schema = lit(ctx.defaultSchema.getOrElse("main"))
-          Some(
-            MetadataFilterOutcome.Rewritten(
-              s"SELECT table_name AS name FROM information_schema.tables " +
-                s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
-            )
-          )
-        case ShowTablesAnyRe() =>
-          Some(
-            MetadataFilterOutcome.Denied(
-              "SHOW TABLES variants are not supported with filtered metadata; " +
-                "query information_schema.tables instead"
-            )
-          )
-        case _ => None
+        case ShowTablesPlainRe() => Some(filteredListing(grants, ctx))
+        case ShowTablesAnyRe()   => Some(denial)
+        case _                   => None
+
+    /** True for a bare `SHOW TABLES`: no source database, no LIKE / WHERE selector, no modifier
+      * (EXTENDED / FULL) and no selection mode. Everything else names or narrows a target this
+      * replacement cannot reproduce, so it is denied.
+      */
+    def isPlain(st: ShowTablesStatement): Boolean =
+      st.getDbName == null && st.getLikeExpression == null && st.getWhereCondition == null &&
+        st.getSelectionMode == null &&
+        Option(st.getModifiers).forall(_.isEmpty)
+
+    /** The filtered stand-in for a plain SHOW TABLES: DuckDB's native single-column `name` shape,
+      * scoped to the session schema.
+      */
+    def filteredListing(grants: List[RolePermission], ctx: SchemaContext): MetadataFilterOutcome =
+      val pred   = predicateFor("tables", grants)
+      val schema = lit(ctx.defaultSchema.getOrElse("main"))
+      MetadataFilterOutcome.Rewritten(
+        s"SELECT table_name AS name FROM information_schema.tables " +
+          s"WHERE table_schema = $schema AND ($pred) ORDER BY name"
+      )
+
+    def denial: MetadataFilterOutcome =
+      MetadataFilterOutcome.Denied(
+        "SHOW TABLES variants are not supported with filtered metadata; " +
+          "query information_schema.tables instead"
+      )
