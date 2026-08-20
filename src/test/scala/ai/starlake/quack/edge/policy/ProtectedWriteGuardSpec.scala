@@ -213,3 +213,21 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       ctx
     ) shouldBe Allow
   }
+
+  it should "deny an INSERT VALUES that embeds a subquery reading a masked column" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.audit VALUES ((SELECT c_email FROM tpch1.customer LIMIT 1))",
+      StatementKind.Dml,
+      eff(tenantUser, cols = List(maskEmail)),
+      ctx
+    ) shouldBe a[Deny]
+  }
+
+  it should "deny an INSERT VALUES that embeds a subquery reading an RLS table" in {
+    guardWithCls().check(
+      "INSERT INTO tpch1.audit VALUES ((SELECT c_id FROM tpch1.customer LIMIT 1))",
+      StatementKind.Dml,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) shouldBe a[Deny]
+  }

@@ -64,9 +64,13 @@ private[parser] class TableExtractorVisitor:
 
   private def visitSelect(select: Select): Unit =
     select match
-      case ps: PlainSelect                                 => visitPlainSelect(ps)
-      case sol: SetOperationList                           => visitSetOperationList(sol)
-      case _: Values                                       => () // VALUES clause, no tables
+      case ps: PlainSelect       => visitPlainSelect(ps)
+      case sol: SetOperationList => visitSetOperationList(sol)
+      case v: Values             =>
+        // A VALUES row can embed a scalar subquery, e.g.
+        // `INSERT INTO t VALUES ((SELECT c FROM s))`. Walk its expressions so those
+        // reads surface as grantable table refs instead of being silently dropped.
+        Option(v.getExpressions).foreach(visitExpression)
       case ls: LateralSubSelect                            => visitParenthesedSelect(ls)
       case psel: ParenthesedSelect                         => visitParenthesedSelect(psel)
       case fq: net.sf.jsqlparser.statement.piped.FromQuery =>

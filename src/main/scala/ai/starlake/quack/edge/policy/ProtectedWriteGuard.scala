@@ -17,7 +17,7 @@ import net.sf.jsqlparser.statement.Statement
 import net.sf.jsqlparser.statement.create.table.CreateTable
 import net.sf.jsqlparser.statement.create.view.CreateView
 import net.sf.jsqlparser.statement.insert.Insert
-import net.sf.jsqlparser.statement.select.Select
+import net.sf.jsqlparser.statement.select.{Select, Values}
 
 import scala.jdk.CollectionConverters._
 
@@ -127,7 +127,10 @@ final class ProtectedWriteGuard(
   /** This statement's inner read SELECT for the write shapes we model precisely, else None. */
   private def innerSelect(ast: Statement): Option[Select] =
     ast match
-      case i: Insert      => Option(i.getSelect)
+      // An INSERT ... VALUES exposes a Values node (a Select subtype), not a query the
+      // oracle can mask. Exclude it so a VALUES that embeds a subquery read of a covered
+      // table has no isolable query select and fails closed.
+      case i: Insert      => Option(i.getSelect).filterNot(_.isInstanceOf[Values])
       case c: CreateTable => Option(c.getSelect)
       case v: CreateView  => Option(v.getSelect)
       case _              => None
