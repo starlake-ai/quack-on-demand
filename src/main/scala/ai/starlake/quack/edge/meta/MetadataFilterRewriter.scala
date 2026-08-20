@@ -55,22 +55,23 @@ enum MetadataFilterOutcome:
   *     traversal reaches, blind where it does not (ORDER BY, GROUP BY and window PARTITION BY
   *     subqueries are NOT visited - the same blind spots as the walk, which is why one count is not
   *     enough).
-  *   - A textual count of the statement as the caller wrote it, RAW: no literal or comment
-  *     stripping. Coarser, but it does not depend on knowing where the traversal stops, so it
-  *     catches the positions nothing else sees, and counting unmodified text cannot under-count by
-  *     construction. Stripping would need the engine's full lexer, and a stripper that
-  *     desynchronises swallows the real reference along with the fake literal - which is exactly
-  *     how the previous version leaked (see [[MetadataFilterRewriter.textualRefCount]]).
+  *   - A textual count over jsqlparser's NORMALIZED re-serialization of the statement. Coarser, but
+  *     `toString` prints the whole AST, so it sees the positions the traversal skips, and sees them
+  *     in the printer's canonical spelling rather than the caller's: comments gone, whitespace
+  *     uniform, quoting from a finite deterministic set. Counting the caller's own text instead
+  *     cannot work - a comment between the schema name and the dot separates tokens for the lexer
+  *     but not for a regex, so the reference reads as one to the parser and none to the count (see
+  *     [[MetadataFilterRewriter.textualRefCount]]).
   *
-  * Neither tier subsumes the other: text sees positions the traversal skips, the AST sees quoting
-  * forms the regex cannot read through.
+  * Neither tier subsumes the other: the serialized text sees positions the traversal skips, the AST
+  * sees quoting forms the regex cannot read through.
   *
   * A count that cannot be taken is also a denial. Three consequences are accepted deliberately: a
   * reference in an unsupported position is denied rather than filtered; a statement that merely
-  * MENTIONS a filterable table in a string literal or a comment is denied on the phantom match; and
-  * a CROSS-CATALOG filterable reference sitting in a traversal blind spot is denied even though the
-  * walk leaves cross-catalog metadata alone on purpose (rare, fail-closed, and the validator would
-  * have grant-gated that reference anyway).
+  * MENTIONS a filterable table inside a STRING LITERAL is denied on the phantom match (literals
+  * survive serialization, comments do not); and a CROSS-CATALOG filterable reference sitting in a
+  * traversal blind spot is denied even though the walk leaves cross-catalog metadata alone on
+  * purpose (rare, fail-closed, and the validator would have grant-gated that reference anyway).
   */
 final class MetadataFilterRewriter(enabled: Boolean = true):
 
@@ -104,7 +105,10 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                       "cannot analyse the information_schema references in this statement"
                     )
                   case Some(refs) =>
-                    val walker = new Walker(grants, ctx)
+                    // Captured BEFORE the walk: the derived tables it injects each carry their
+                    // own FROM information_schema.X, which would inflate the count.
+                    val normalized = sel.toString
+                    val walker     = new Walker(grants, ctx)
                     walker.walkSelect(sel)
                     // Cross-catalog references are left alone on purpose (they stay
                     // grant-gated by the validator), so they are accounted for rather
@@ -114,11 +118,11 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                       case Some(reason) => Denied(reason)
                       case None         =>
                         if refs.nodes > walker.substitutions ||
-                          textualRefCount(sql) > accounted
+                          textualRefCount(normalized) > accounted
                         then
                           Denied(
                             "information_schema reference in a position this filter cannot " +
-                              "rewrite (or mentioned in a literal/comment); query it directly " +
+                              "rewrite (or mentioned in a string literal); query it directly " +
                               "in the FROM clause instead"
                           )
                         else if walker.substitutions > 0 then Rewritten(sel.toString)
@@ -319,29 +323,33 @@ object MetadataFilterRewriter:
 
   private final case class RefCounts(nodes: Int, crossCatalog: Int)
 
-  /** Textual tripwire: how many times the RAW statement spells a filterable reference. No literal
-    * or comment stripping happens first, and that is the point - a count taken on unmodified text
-    * can only ever OVER-count (a phrase inside a literal or a comment becomes a phantom match, and
-    * a phantom match denies), never under-count.
+  /** Textual tripwire: how many times a filterable reference is spelled in jsqlparser's NORMALIZED
+    * re-serialization of the statement (`Select.toString`), taken before any substitution.
     *
-    * The stripper this replaces desynchronised on an apostrophe inside a double-quoted identifier
-    * (`SELECT "a'b" ... ORDER BY (SELECT ... FROM information_schema.tables ...)`) and swallowed
-    * the real reference along with the fake literal. Getting that right means reimplementing
-    * DuckDB's lexer - `e'...'` backslash escapes, `$$` and `$tag$` dollar quoting, nested block
-    * comments - and every one of those has the same desync-and-swallow failure mode. Over-denial is
-    * the cheap side of that trade.
+    * Serializing and matching there, rather than on the caller's text or on a stripped copy of it,
+    * is what makes the count trustworthy in both directions:
     *
-    * This tier exists because the AST count can only see what jsqlparser's traversal visits, and
-    * that traversal skips ORDER BY, GROUP BY and window PARTITION BY subqueries - exactly where the
-    * substitution walk is blind too, so the two agreed with each other and both missed the
-    * reference. Text does not depend on knowing where the traversal stops. Conversely the AST tier
-    * catches quoting forms the regex cannot see through, so both are kept.
+    *   - It cannot under-count. `toString` prints the COMPLETE AST by contract, so every Table node
+    *     the parser resolved appears - including the ORDER BY, GROUP BY and window PARTITION BY
+    *     positions the visitor traversal never reaches - and it appears in the finite,
+    *     deterministic form the printer emits, not in the attacker's spelling. Missing a reference
+    *     would take an AST node that does not serialize, which could not round-trip.
+    *   - It is immune to lexical trickery. Comments are gone (an interior comment between the
+    *     schema name and the dot separates tokens for the lexer but not for a regex, so such a
+    *     reference counted as zero against the caller's text while the parser read it as one),
+    *     whitespace is canonical, and quoting is the printer's.
+    *
+    * It can still OVER-count: a filterable name inside a string literal survives serialization and
+    * phantom-matches, which denies. That direction is accepted.
+    *
+    * The AST occurrence count is kept alongside it, since the two are blind to different things.
     */
-  private def textualRefCount(sql: String): Int =
-    TextualRefRe.findAllMatchIn(sql).size
+  private def textualRefCount(normalizedSql: String): Int =
+    TextualRefRe.findAllMatchIn(normalizedSql).size
 
+  /** Tolerates every quote form the printer can emit around either identifier. */
   private val TextualRefRe =
-    """(?i)"?information_schema"?\s*\.\s*"?(?:schemata|tables|columns|views)"?\b""".r
+    """(?i)["`\[]?information_schema["`\]]?\s*\.\s*["`\[]?(?:schemata|tables|columns|views)["`\]]?\b""".r
 
   /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
     * the whole predicate to keep the SQL readable.

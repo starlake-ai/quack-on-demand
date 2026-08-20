@@ -279,14 +279,58 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other     => fail(s"expected Denied, got $other")
   }
 
+  // Interior comments separate tokens for the lexer but not for a regex, so a reference spelled
+  // information_schema/**/.tables is one reference to the parser and none to raw text. The
+  // tripwire therefore counts jsqlparser's re-serialization, where such spellings are canonical.
+
+  it should "deny an ORDER BY reference with a comment before the dot" in {
+    go(
+      "SELECT 1 FROM tpch1.customer ORDER BY (SELECT count(*) FROM information_schema/**/.tables)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
+  it should "deny an ORDER BY reference with a comment after the dot" in {
+    go(
+      "SELECT 1 FROM tpch1.customer ORDER BY (SELECT count(*) FROM information_schema./**/tables)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
+  it should "deny an ORDER BY reference split by a line comment" in {
+    go(
+      "SELECT 1 FROM tpch1.customer ORDER BY (SELECT count(*) FROM information_schema--x\n.tables)",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
+  it should "deny a GROUP BY oracle spelled with an interior comment" in {
+    go(
+      "SELECT count(*) FROM tpch1.customer GROUP BY CASE WHEN EXISTS (SELECT 1 FROM " +
+        "information_schema/**/.columns WHERE table_name = 'salaries') THEN 1 ELSE 0 END",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) should matchPattern { case Denied(_) => }
+  }
+
+  it should "still rewrite an interior-comment reference in a reachable position" in {
+    go(
+      "SELECT * FROM information_schema/**/.tables",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("table_schema = 'tpch1' AND table_name = 'customer'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
   it should "pass a cross-catalog filterable reference through (the validator gates it)" in {
     go("SELECT * FROM other_db.information_schema.tables", eff(tenantUser)) shouldBe Passthrough
   }
 
-  // The tripwire counts the RAW statement, so a phrase inside a literal or a comment is a phantom
-  // match and denies. That over-denial is the accepted price of never under-counting: recognising
-  // literals means reimplementing the engine's lexer, and a lexer that desynchronises swallows the
-  // real reference instead. These two pin the surface so a future change cannot widen it silently.
+  // Where the tripwire counts decides these two, and the answer has moved twice: it counted a
+  // stripped copy of the caller's text (both passed), then the raw text (both denied), and now
+  // jsqlparser's re-serialization. Comments do not survive serialization, so a mention in one
+  // passes again; a string literal does survive, so a mention in one still denies. Both stay as
+  // pins of the accepted over-denial surface.
 
   it should "deny the phrase inside a string literal (accepted over-denial)" in {
     go(
@@ -295,11 +339,11 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
     ) should matchPattern { case Denied(_) => }
   }
 
-  it should "deny the phrase inside comments (accepted over-denial)" in {
-    go("-- see information_schema.tables\nSELECT * FROM tpch1.customer", eff(tenantUser)) should
-      matchPattern { case Denied(_) => }
-    go("/* see information_schema.views */ SELECT * FROM tpch1.customer", eff(tenantUser)) should
-      matchPattern { case Denied(_) => }
+  it should "not trip on the phrase inside comments" in {
+    go("-- see information_schema.tables\nSELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
+      Passthrough
+    go("/* see information_schema.views */ SELECT * FROM tpch1.customer", eff(tenantUser)) shouldBe
+      Passthrough
   }
 
   it should "escape quotes in grant values" in {
