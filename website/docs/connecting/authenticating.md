@@ -52,3 +52,5 @@ To remove the skip-verify flag, install a CA-signed certificate and point the ed
 ## Relationship to the REST session
 
 The username/password you use here is the same credential set the admin UI accepts, but the mechanisms are separate: the UI mints a session token for `/api/*` calls, while the edge authenticates each Flight connection with Basic or JWT. A REST `X-API-Key` or UI session token is not a Flight credential.
+
+Personal access tokens (`qod_pat_...`) are a third credential: they authenticate the [MCP server](/connecting/mcp) for AI agents, and on `/api/*` a PAT in the `X-API-Key` header is accepted wherever its owner's session would be. The Flight edge does not accept PATs.

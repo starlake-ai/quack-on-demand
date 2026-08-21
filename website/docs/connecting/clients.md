@@ -5,6 +5,8 @@ title: Connecting clients
 
 Clients talk to the FlightSQL edge (default `:31338`), not the REST API. Any Arrow Flight SQL driver works: the JDBC driver (DBeaver, Spark, any JDBC tool), ADBC (Python, Go, and others), or a third-party Flight SQL ODBC driver. This page covers the connection target and per-client recipes; see [Authenticating](/connecting/authenticating) for credentials and TLS, and [Supported SQL](/connecting/sql) for what you can run.
 
+AI agents (Claude Code, Claude Desktop, Cursor) are the one exception: they connect to the manager's embedded [MCP server](/connecting/mcp) on the REST port instead of the FlightSQL edge.
+
 ## The connection target
 
 A connection needs four things, because the edge applies **no defaults**: every client must fully address its target.
@@ -173,3 +175,4 @@ Once a CA-signed cert is installed, drop `disableCertificateVerification=true`. 
 
 - [Authenticating](/connecting/authenticating) - Basic vs JWT, and TLS.
 - [Supported SQL](/connecting/sql) - the dialect, transactions, and querying federated catalogs.
+- [MCP server](/connecting/mcp) - connect AI agents with a personal access token.

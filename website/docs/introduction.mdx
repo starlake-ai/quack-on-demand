@@ -36,6 +36,7 @@ Reach for Quack on Demand when you want to:
 - **Isolate tenants**: keep each tenant's databases, users, and compute separate, with its own auth provider.
 - **Federate external sources** (Postgres, S3 / Iceberg, anything DuckDB can attach) behind the same SQL surface and the same access model.
 - **Standardize on Arrow Flight SQL** clients: JDBC, ADBC, ODBC, PyArrow, DBeaver, and Spark all connect the same way.
+- **Give AI agents governed data access**: an embedded [MCP server](/connecting/mcp) lets agents such as Claude Code discover schemas and run SQL with the same per-statement access control as any other client.
 
 ## When not to use it
 
@@ -55,6 +56,7 @@ It is the wrong tool when:
 | Routing | Statement classification, least-loaded node selection (cache-aware on object-store pools), transaction pinning, retry-once |
 | Storage | DuckLake catalogs over a filesystem or S3-compatible object store |
 | Federation | Attach external catalogs (Postgres, S3/Iceberg) under the same ACL |
+| AI agents | Embedded MCP server with personal-access-token auth; every tool call goes through the same RBAC |
 | Operations | Prometheus / cloud metrics, a config manifest for backup and restore, an admin UI |
 | Deployment | A single Docker container on one node (ideal for a single tenant), or Kubernetes for multi-host fleets and manager HA |
 
