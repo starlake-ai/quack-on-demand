@@ -128,6 +128,72 @@ final class StatementInstruments(registry: MeterRegistry):
   def recordRowPolicyRewriteDuration(tenant: String, pool: String, ms: Long): Unit =
     resolveRowRewriteTimer(tenant, pool).record(Duration.ofMillis(ms))
 
+  private val metadataFilterTimerCache =
+    new java.util.concurrent.ConcurrentHashMap[(String, String), Timer]()
+
+  private def resolveMetadataFilterTimer(tenant: String, pool: String): Timer =
+    metadataFilterTimerCache.computeIfAbsent(
+      (tenant, pool),
+      _ =>
+        Timer
+          .builder("metadata_filter_duration_seconds")
+          .tag("tenant", tenant)
+          .tag("pool", pool)
+          .register(registry)
+    )
+
+  /** Increment the metadata-filter counter. `outcome` is one of: `rewritten`, `passthrough`,
+    * `denied`.
+    */
+  def recordMetadataFilter(tenant: String, pool: String, outcome: String): Unit =
+    registry
+      .counter(
+        "metadata_filter_rewrites_total",
+        "tenant",
+        tenant,
+        "pool",
+        pool,
+        "outcome",
+        outcome
+      )
+      .increment()
+
+  /** Observe the wall-clock duration of a metadata-filter pass. */
+  def recordMetadataFilterDuration(tenant: String, pool: String, ms: Long): Unit =
+    resolveMetadataFilterTimer(tenant, pool).record(Duration.ofMillis(ms))
+
+  private val protectedWriteTimerCache =
+    new java.util.concurrent.ConcurrentHashMap[(String, String), Timer]()
+
+  private def resolveProtectedWriteTimer(tenant: String, pool: String): Timer =
+    protectedWriteTimerCache.computeIfAbsent(
+      (tenant, pool),
+      _ =>
+        Timer
+          .builder("protected_write_check_duration_seconds")
+          .tag("tenant", tenant)
+          .tag("pool", pool)
+          .register(registry)
+    )
+
+  /** Increment the protected-write guard counter. `outcome` is one of: `allow`, `deny`. */
+  def recordProtectedWrite(tenant: String, pool: String, outcome: String): Unit =
+    registry
+      .counter(
+        "protected_write_checks_total",
+        "tenant",
+        tenant,
+        "pool",
+        pool,
+        "outcome",
+        outcome
+      )
+      .increment()
+
+  /** Observe the wall-clock duration of a protected-write guard check. */
+  def recordProtectedWriteDuration(tenant: String, pool: String, ms: Long): Unit =
+    resolveProtectedWriteTimer(tenant, pool).record(Duration.ofMillis(ms))
+
 object StatementInstruments:
 
   /** Singleton no-op used when callers don't need real metric recording. Backed by an empty

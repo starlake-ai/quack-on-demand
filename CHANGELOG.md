@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Metrics for the metadata-filter and protected-write steps.** The FlightSQL
+  pipeline now records `metadata_filter_rewrites_total{outcome}` /
+  `metadata_filter_duration_seconds` and `protected_write_checks_total{outcome}` /
+  `protected_write_check_duration_seconds` (per tenant/pool), so operators can see
+  how often statements are filtered or denied by those steps and their latency,
+  matching the existing column/row-policy rewrite metrics.
+
 - **Closed a column/row-security bypass (S1).** A user restricted by a column mask
   or row policy could previously launder the unmasked/unfiltered data by wrapping
   the read in a write (`CREATE TABLE ... AS SELECT`, `INSERT ... SELECT`,
