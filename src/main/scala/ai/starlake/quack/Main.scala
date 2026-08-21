@@ -694,16 +694,14 @@ object Main extends IOApp with LazyLogging:
         metricsEndpoint: MetricsEndpoint,
         stmtInstruments: StatementInstruments
     ): IO[Unit] =
-      val classifier           = EdgeRewriters.statementClassifier()
-      val columnPolicyRewriter =
-        EdgeRewriters.columnPolicyRewriter(sup, catalogReaders, stmtInstruments)
-      val rowPolicyRewriter = EdgeRewriters.rowPolicyRewriter()
-      // The guard resolves columns through the same catalog as the SELECT-path rewriter, so
-      // its Deny-mode oracle and the rewriter agree on which columns a masked read exposes.
-      val protectedWriteGuard =
-        EdgeRewriters.protectedWriteGuard(
-          EdgeRewriters.columnCatalog(sup, catalogReaders, stmtInstruments)
-        )
+      val classifier = EdgeRewriters.statementClassifier()
+      // ONE catalog instance (hence one cache) shared by the SELECT-path rewriter and the
+      // write-path guard, so both resolve a table's columns identically AND the metastore fetch
+      // is not doubled on cold misses.
+      val columnCatalog        = EdgeRewriters.columnCatalog(sup, catalogReaders, stmtInstruments)
+      val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
+      val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter()
+      val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
       val journalDropped: Int => Unit = n =>
         metricsReg.composite

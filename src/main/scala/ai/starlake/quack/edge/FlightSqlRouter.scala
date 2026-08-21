@@ -333,9 +333,16 @@ final class FlightSqlRouter(
     def protectedWrite(): Either[RouterFailure, Unit] = effectiveSet match
       case None      => Right(())
       case Some(eff) =>
-        protectedWriteGuard.check(sql, kind, eff, schemaCtx) match
-          case ai.starlake.quack.edge.policy.GuardOutcome.Allow        => Right(())
+        val g0        = System.nanoTime()
+        val outcome   = protectedWriteGuard.check(sql, kind, eff, schemaCtx)
+        val elapsedMs = (System.nanoTime() - g0) / 1_000_000L
+        stmtInstruments.recordProtectedWriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+        outcome match
+          case ai.starlake.quack.edge.policy.GuardOutcome.Allow =>
+            stmtInstruments.recordProtectedWrite(poolKey.tenant, poolKey.pool, "allow")
+            Right(())
           case ai.starlake.quack.edge.policy.GuardOutcome.Deny(reason) =>
+            stmtInstruments.recordProtectedWrite(poolKey.tenant, poolKey.pool, "deny")
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             Left(RouterFailure.AccessDenied(reason))
     import cats.effect.unsafe.implicits.global
@@ -412,11 +419,19 @@ final class FlightSqlRouter(
         // so nothing filterable survives to here.
         case None      => Right(rewrittenSql)
         case Some(eff) =>
-          metadataFilterRewriter.rewrite(rewrittenSql, eff, schemaCtx) match
+          val m0        = System.nanoTime()
+          val outcome   = metadataFilterRewriter.rewrite(rewrittenSql, eff, schemaCtx)
+          val elapsedMs = (System.nanoTime() - m0) / 1_000_000L
+          stmtInstruments.recordMetadataFilterDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+          outcome match
             case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough =>
+              stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "passthrough")
               Right(rewrittenSql)
-            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Rewritten(s)   => Right(s)
+            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Rewritten(s) =>
+              stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "rewritten")
+              Right(s)
             case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Denied(reason) =>
+              stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "denied")
               val f = RouterFailure.AccessDenied(s"access denied: $reason")
               maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
               Left(f)

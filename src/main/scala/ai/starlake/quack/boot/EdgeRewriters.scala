@@ -40,11 +40,11 @@ object EdgeRewriters extends LazyLogging:
     * reader cache. Returns Nil for unknown catalogs; the rewriter's unresolvedMode then decides
     * whether to deny or pass through.
     */
-  def columnPolicyRewriter(
-      sup: PoolSupervisor,
-      catalogReaders: CatalogReaders,
-      stmtInstruments: StatementInstruments
-  ): ColumnPolicyRewriter =
+  /** SELECT-path column-masking rewriter. Takes a pre-built [[columnCatalog]] so the caller can
+    * share ONE catalog instance (hence one cache) with the write-path [[protectedWriteGuard]],
+    * rather than each building its own.
+    */
+  def columnPolicyRewriter(catalog: ColumnCatalog): ColumnPolicyRewriter =
     val clsConfig = com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.cls")
     val clsEnabled: Boolean = clsConfig.getBoolean("enabled")
     if !clsEnabled then
@@ -62,7 +62,7 @@ object EdgeRewriters extends LazyLogging:
           )
           UnresolvedMode.Pass
     new ColumnPolicyRewriter(
-      catalog = columnCatalog(sup, catalogReaders, stmtInstruments),
+      catalog = catalog,
       unresolvedMode = unresolvedTableMode,
       enabled = clsEnabled
     )
