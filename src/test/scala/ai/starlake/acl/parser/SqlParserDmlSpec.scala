@@ -4,19 +4,19 @@ import ai.starlake.acl.model.Config
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Verifies that `SqlParser.processStatement` extracts the right
-  * `TableAccess(table, verb)` tuples for DML statements (INSERT / UPDATE /
-  * DELETE / MERGE). These tests pin the behavior that the ACL validator now
-  * relies on for per-table grant enforcement of write-side traffic --
-  * before this refactor, DML produced an empty access set and the validator
-  * silently allowed all writes (see project memory `project-dml-acl-unenforced`).
+/** Verifies that `SqlParser.processStatement` extracts the right `TableAccess(table, verb)` tuples
+  * for DML statements (INSERT / UPDATE / DELETE / MERGE). These tests pin the behavior that the ACL
+  * validator now relies on for per-table grant enforcement of write-side traffic -- before this
+  * refactor, DML produced an empty access set and the validator silently allowed all writes (see
+  * project memory `project-dml-acl-unenforced`).
   */
 class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
 
   private val config = Config.forGeneric("testdb", "public")
 
-  /** Assert the head statement is `Extracted` and its accesses match the
-    * supplied (canonical, verb) tuples exactly. */
+  /** Assert the head statement is `Extracted` and its accesses match the supplied (canonical, verb)
+    * tuples exactly.
+    */
   private def assertAccesses(sql: String, expected: (String, Verb)*): Unit =
     val r = SqlParser.extract(sql, config)
     r.statements.headOption match
@@ -59,6 +59,68 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
       "other.public.t" -> Verb.Write
     )
 
+  it should "surface a subquery read embedded in a VALUES row" in:
+    // Closes a read-grant hole: the VALUES form was not walked, so the embedded
+    // SELECT source escaped both grant-checking and the protected-write guard.
+    assertAccesses(
+      "INSERT INTO t VALUES ((SELECT x FROM other))",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read inside a VALUES-derived FROM table" in:
+    // The symmetric hole: a VALUES used as a derived table also carries subqueries.
+    assertAccesses(
+      "INSERT INTO t SELECT * FROM (VALUES ((SELECT x FROM other))) v",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read nested in an expression wrapper (ARRAY constructor)" in:
+    // The visitExpression backstop: wrappers like ARRAY[...] hold child expressions
+    // that can be subqueries; they must not be silently dropped.
+    assertAccesses(
+      "INSERT INTO t SELECT a FROM s WHERE a = ANY(ARRAY[(SELECT x FROM other)])",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in a window PARTITION BY clause" in:
+    // Arm-preempted child: AnalyticExpression's explicit arm walked only getExpression;
+    // descendChildren reaches its partition/order/filter children.
+    assertAccesses(
+      "INSERT INTO t SELECT rank() OVER (PARTITION BY (SELECT x FROM other)) FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in an aggregate FILTER clause" in:
+    assertAccesses(
+      "INSERT INTO t SELECT sum(a) FILTER (WHERE b IN (SELECT x FROM other)) FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in a GROUP BY clause" in:
+    // Select-level clause omitted by the hand-walk; reached by the symmetric descend on the SELECT.
+    assertAccesses(
+      "INSERT INTO t SELECT a FROM s GROUP BY (SELECT x FROM other)",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
+  it should "surface a subquery read hidden in a DISTINCT ON clause" in:
+    assertAccesses(
+      "INSERT INTO t SELECT DISTINCT ON ((SELECT x FROM other)) a FROM s",
+      "testdb.public.t"     -> Verb.Write,
+      "testdb.public.s"     -> Verb.Read,
+      "testdb.public.other" -> Verb.Read
+    )
+
   // ---------- UPDATE ----------
 
   "SqlParser UPDATE" should "mark a bare UPDATE as Write on the target" in:
@@ -87,7 +149,7 @@ class SqlParserDmlSpec extends AnyFlatSpec with Matchers:
     val r = SqlParser.extract("UPDATE t SET a = (SELECT max(x) FROM s)", config)
     r.statements.headOption match
       case Some(StatementResult.Extracted(_, _, accesses, _, _)) =>
-        accesses.map(_.table.canonical) should contain ("testdb.public.t")
+        accesses.map(_.table.canonical) should contain("testdb.public.t")
         accesses.find(_.table.canonical == "testdb.public.t").get.verb shouldBe Verb.Write
       case other => fail(s"expected Extracted, got $other")
 

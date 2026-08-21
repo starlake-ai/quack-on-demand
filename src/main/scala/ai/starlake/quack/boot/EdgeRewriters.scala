@@ -61,24 +61,52 @@ object EdgeRewriters extends LazyLogging:
             s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to pass"
           )
           UnresolvedMode.Pass
-    val columnCatalog: ColumnCatalog =
-      new DuckLakeColumnCatalog(
-        fetch = (cat, sch, tab) =>
-          IO.blocking {
-            sup.findTenantDbByCatalogName(cat) match
-              case None     => Nil
-              case Some(td) =>
-                sup.getTenantById(td.tenantId) match
-                  case None    => Nil
-                  case Some(t) => catalogReaders.get(t.id, td.name).columnNames(sch, tab)
-          },
-        instruments = Some(stmtInstruments)
-      )
     new ColumnPolicyRewriter(
-      catalog = columnCatalog,
+      catalog = columnCatalog(sup, catalogReaders, stmtInstruments),
       unresolvedMode = unresolvedTableMode,
       enabled = clsEnabled
     )
+
+  /** DuckLake-backed column catalog shared by the SELECT-path [[columnPolicyRewriter]] and the
+    * write-path [[protectedWriteGuard]]. Both must resolve a table's columns identically so the
+    * guard's Deny-mode oracle and the rewriter agree on which columns a masked SELECT exposes.
+    * Resolves a DuckDB-side catalog name to its DuckLakeCatalogReader via the tenant-db owning that
+    * catalog; unknown catalogs return Nil so the caller's unresolvedMode decides deny-vs-pass.
+    */
+  def columnCatalog(
+      sup: PoolSupervisor,
+      catalogReaders: CatalogReaders,
+      stmtInstruments: StatementInstruments
+  ): ColumnCatalog =
+    new DuckLakeColumnCatalog(
+      fetch = (cat, sch, tab) =>
+        IO.blocking {
+          sup.findTenantDbByCatalogName(cat) match
+            case None     => Nil
+            case Some(td) =>
+              sup.getTenantById(td.tenantId) match
+                case None    => Nil
+                case Some(t) => catalogReaders.get(t.id, td.name).columnNames(sch, tab)
+        },
+      instruments = Some(stmtInstruments)
+    )
+
+  /** Write-path protected-read guard. Reads the same CLS / RLS enable flags the SELECT-path
+    * rewriters consult, and takes the [[columnCatalog]] (NOT a pre-built rewriter): the guard owns
+    * its own Deny-mode oracle internally, so an unresolvable protected table denies rather than
+    * passing through. Inert when both flags are off.
+    */
+  def protectedWriteGuard(
+      catalog: ColumnCatalog
+  ): ai.starlake.quack.edge.policy.ProtectedWriteGuard =
+    val clsEnabled =
+      com.typesafe.config.ConfigFactory
+        .load()
+        .getConfig("quack-on-demand.cls")
+        .getBoolean("enabled")
+    val rlsEnabled =
+      com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
+    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(catalog, clsEnabled, rlsEnabled)
 
   def rowPolicyRewriter(): RowPolicyRewriter =
     val rlsEnabled: Boolean =
