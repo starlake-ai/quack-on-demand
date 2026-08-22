@@ -162,27 +162,34 @@ object TenantDb {
     case TenantDbKind.InMemory   => Set.empty
 
   /** Returns Some(error) if the value violates its per-kind contract. Enforces required-key
-    * presence AND injection safety; use on the REST createTenantDb path where the full metastore is
-    * supplied inline.
+    * presence AND injection safety; use on the REST createTenantDb path where the metastore is
+    * supplied inline. `defaults` is the manager's `quack-on-demand.defaultMetastore` map: a
+    * required DuckLake key missing from the request but carrying a non-empty value in `defaults` is
+    * satisfied there, because the runtime merge
+    * ([[ai.starlake.quack.ondemand.PoolSupervisor.effectiveMetastoreFor]]) fills it at spawn time.
+    * Only the DuckLake arm consults `defaults`; duckdb-file keeps requiring its keys inline, and
+    * injection safety always runs on the supplied values.
     */
-  def validate(td: TenantDb): Option[String] = td.kind match {
-    case TenantDbKind.DuckLake =>
-      val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet
-      if missing.nonEmpty then
-        Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
-      else if td.dataPath.isEmpty then Some("kind=ducklake requires non-empty dataPath")
-      else validateSafety(td)
+  def validate(td: TenantDb, defaults: Map[String, String] = Map.empty): Option[String] =
+    td.kind match {
+      case TenantDbKind.DuckLake =>
+        val defaulted = defaults.collect { case (k, v) if v.nonEmpty => k }.toSet
+        val missing   = requiredMetastoreKeys(td.kind) -- td.metastore.keySet -- defaulted
+        if missing.nonEmpty then
+          Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")
+        else if td.dataPath.isEmpty then Some("kind=ducklake requires non-empty dataPath")
+        else validateSafety(td)
 
-    case TenantDbKind.DuckDbFile =>
-      val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet
-      if missing.nonEmpty then
-        Some(s"kind=duckdb-file requires metastore keys ${missing.mkString(", ")}")
-      else if td.dataPath.isEmpty then Some("kind=duckdb-file requires non-empty dataPath")
-      else validateSafety(td)
+      case TenantDbKind.DuckDbFile =>
+        val missing = requiredMetastoreKeys(td.kind) -- td.metastore.keySet
+        if missing.nonEmpty then
+          Some(s"kind=duckdb-file requires metastore keys ${missing.mkString(", ")}")
+        else if td.dataPath.isEmpty then Some("kind=duckdb-file requires non-empty dataPath")
+        else validateSafety(td)
 
-    case TenantDbKind.InMemory =>
-      if td.metastore.nonEmpty then Some("kind=memory requires empty metastore")
-      else if td.dataPath.nonEmpty then Some("kind=memory requires empty dataPath")
-      else None
-  }
+      case TenantDbKind.InMemory =>
+        if td.metastore.nonEmpty then Some("kind=memory requires empty metastore")
+        else if td.dataPath.nonEmpty then Some("kind=memory requires empty dataPath")
+        else None
+    }
 }

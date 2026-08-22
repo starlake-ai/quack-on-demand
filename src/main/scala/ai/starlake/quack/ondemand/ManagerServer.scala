@@ -758,6 +758,9 @@ final class ManagerServer(
       TenantEndpoints.updateTenantDb.serverLogic { case (req, token) =>
         tenantDbs.update(req, token)(scopeOfToken)
       },
+      TenantEndpoints.metastoreDefaults.serverLogic { token =>
+        tenantDbs.metastoreDefaults(token)(scopeOfToken)
+      },
       Endpoints.health.serverLogic(_ => health.health),
       Endpoints.ready.serverLogic(_ => health.ready),
       Endpoints.clientConfig.serverLogic(_ =>

@@ -906,6 +906,81 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     td.metastore("dbName")     shouldBe "tpch_prod"
     td.metastore("schemaName") shouldBe "main"
 
+  private val sparseDefaults = Map(
+    "pgHost"     -> "localhost",
+    "pgPort"     -> "1",
+    "pgUser"     -> "postgres",
+    "pgPassword" -> "pw",
+    "dbName"     -> "qod",
+    "schemaName" -> "main",
+    "dataPath"   -> "/data/ducklake"
+  )
+
+  private def sparseFixture(): PoolSupervisor =
+    val sup = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = sparseDefaults
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+
+  "createTenantDb (sparse metastore)" should
+    "accept a ducklake create with no pg keys when defaults cover them" in {
+      val sup = sparseFixture()
+      val out = sup
+        .createTenantDb("acme", "prod", TenantDbKind.DuckLake, Map.empty, "/data/acme_prod")
+        .unsafeRunSync()
+      out.isRight shouldBe true
+      // Sparse row: only the auto-injected dbName is stored, so the database follows
+      // later QOD_PG_* changes instead of freezing a copy of the credentials.
+      out.toOption.get.metastore shouldBe Map("dbName" -> "acme_prod")
+      val eff = sup.effectiveMetastoreFor("acme", "acme_prod")
+      eff("pgHost")     shouldBe "localhost"
+      eff("pgPassword") shouldBe "pw"
+      eff("dbName")     shouldBe "acme_prod"
+      eff("dataPath")   shouldBe "/data/acme_prod"
+    }
+
+  it should "let a partial override win over the defaults" in {
+    val sup = sparseFixture()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map("pgPassword" -> "tenant-secret"),
+        "/data/acme_prod"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val eff = sup.effectiveMetastoreFor("acme", "acme_prod")
+    eff("pgPassword") shouldBe "tenant-secret"
+    eff("pgHost")     shouldBe "localhost"
+  }
+
+  it should "still reject when a key is missing from both the request and the defaults" in {
+    val sup = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = sparseDefaults.updated("pgPassword", "")
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val out = sup
+      .createTenantDb("acme", "prod", TenantDbKind.DuckLake, Map.empty, "/data/acme_prod")
+      .unsafeRunSync()
+    out.isLeft shouldBe true
+    val msg = out.swap.toOption.get.message
+    msg should include("pgPassword")
+    msg should not include "pgHost"
+  }
+
+  "metastoreDefaults" should "expose the raw configured defaults" in {
+    sparseFixture().metastoreDefaults shouldBe sparseDefaults
+  }
+
   // ---------- Managed object storage (createTenantDb / deleteTenantDb) ----------
 
   private def managedCfg(): ai.starlake.quack.ManagedObjectStoreConfig =
@@ -1825,6 +1900,31 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get.message should include("drops required")
+  }
+
+  it should "let a ducklake patch drop a pg override, reverting to the manager default" in {
+    val sup = sparseFixture()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map("pgHost" -> "tenant-host"),
+        "/data/acme_prod"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sup.effectiveMetastoreFor("acme", "acme_prod")("pgHost") shouldBe "tenant-host"
+
+    // Patch that omits pgHost: with sparse semantics this reverts to the default
+    // instead of being refused as a dropped required key.
+    val out = sup
+      .updateTenantDb("acme", "acme_prod", TenantDbPatch(
+        metastore = Some(Map("dbName" -> "acme_prod"))
+      ))
+      .unsafeRunSync()
+    out.isRight shouldBe true
+    sup.effectiveMetastoreFor("acme", "acme_prod")("pgHost") shouldBe "localhost"
   }
 
   it should "succeed when a patch drops only a non-required custom key" in {

@@ -77,7 +77,7 @@ qod database create --tenant acme --name sales --kind ducklake \
 | `tenant` | Owning tenant (must exist). |
 | `name` | Database suffix; the full name becomes `${tenant}_${name}`. |
 | `kind` | `ducklake` (DuckLake catalog backed by Postgres, the default), `duckdb-file` (a standalone `.duckdb` file), or `memory` (no persistent catalog; useful for federation-only databases). |
-| `dataPath` | Where DuckLake writes Parquet. A filesystem path, or an `s3://` / `az://` / `abfss://` URI for object storage. Defaults are derived from the global metastore when omitted. |
+| `dataPath` | Where DuckLake writes Parquet. A filesystem path, or an `s3://` / `az://` / `abfss://` URI for object storage. Required on create for `kind=ducklake` unless `managedStorage` is used. |
 | `metastore` | Optional per-database overrides of the Postgres connection (`pgHost`, `pgPort`, `pgUser`, `pgPassword`, `dbName`, `schemaName`). Empty inherits the global defaults. |
 | `objectStore` | Optional per-database object-store credentials when `dataPath` is an object-store URI. Takes effect at node spawn as a path-scoped DuckDB secret; see below. |
 | `defaultDatabase` / `defaultSchema` | The catalog and schema unqualified table names resolve against for sessions on this database. `defaultSchema` must differ from the database name to avoid ambiguous two-part identifiers in DuckDB. |

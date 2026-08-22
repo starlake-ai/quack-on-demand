@@ -20,6 +20,7 @@ import type {
   TenantOpRequest,
   TenantDbRequest,
   TenantDbResponse,
+  MetastoreDefaultsResponse,
   TenantDbListResponse,
   TenantDbOpRequest,
   UpdateTenantDbRequest,
@@ -252,6 +253,7 @@ export const api = {
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>
     get<TenantDbListResponse>(`/database/list?tenant=${encodeURIComponent(tenant)}`),
+  metastoreDefaults: () => get<MetastoreDefaultsResponse>('/database/metastore-defaults'),
   createTenantDb:    (req: TenantDbRequest)            => post<TenantDbResponse>('/database/create', req),
   deleteTenantDb:    (req: TenantDbOpRequest)          => post<void>('/database/delete', req),
   updateTenantDb:    (req: UpdateTenantDbRequest)      => post<UpdateTenantDbResponse>('/database/update', req),

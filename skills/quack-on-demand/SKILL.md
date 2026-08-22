@@ -506,6 +506,8 @@ When creating a tenant-db, pick a `kind`:
 - `duckdb-file` - Local `.duckdb` file at `dataPath`. Single-node only (file must exist on every node).
 - `memory` - No persistent default catalog. Use with `defaultDatabase` pointing at a federated alias.
 
+For `ducklake` creates, Postgres connection keys are optional: anything omitted resolves from the manager's `defaultMetastore` (`QOD_PG_*`) at spawn time, and the row follows later config changes.
+
 Example: create an in-memory tenant-db that only serves federated sources.
 
 ```bash

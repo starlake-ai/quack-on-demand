@@ -121,3 +121,14 @@ object TenantEndpoints:
       .in(jsonBody[UpdateTenantDbRequest])
       .in(authToken)
       .out(jsonBody[UpdateTenantDbResponse])
+
+  val metastoreDefaults: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    MetastoreDefaultsResponse,
+    Any
+  ] =
+    base.get
+      .in("database" / "metastore-defaults")
+      .in(authToken)
+      .out(jsonBody[MetastoreDefaultsResponse])

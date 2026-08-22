@@ -193,6 +193,27 @@ final class TenantDbHandlers(
           )
         }
 
+  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin session
+    * (tenant or system) or the static key may read it: `ManagerServer.apiKeyGuard` already rejects
+    * unauthenticated callers and demotes profile sessions, and the values are deployment-wide
+    * (tenant admins already see pgHost/pgUser on redacted database/list rows). `pgPassword` is
+    * absent from the response type by construction.
+    */
+  def metastoreDefaults(apiKey: Option[String])(
+      scopeOf: String => Option[SessionScope]
+  ): Out[MetastoreDefaultsResponse] =
+    IO.pure {
+      val d = sup.metastoreDefaults
+      Right(
+        MetastoreDefaultsResponse(
+          pgHost = d.getOrElse("pgHost", ""),
+          pgPort = d.getOrElse("pgPort", ""),
+          pgUser = d.getOrElse("pgUser", ""),
+          schemaName = d.getOrElse("schemaName", "")
+        )
+      )
+    }
+
   def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =

@@ -427,3 +427,51 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
     err.error shouldBe "invalid_kind"
+
+  "TenantDbHandlers.metastoreDefaults" should "return the configured defaults without pgPassword" in:
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = Map(
+        "pgHost"     -> "localhost",
+        "pgPort"     -> "5432",
+        "pgUser"     -> "postgres",
+        "pgPassword" -> "pw",
+        "dbName"     -> "qod",
+        "schemaName" -> "main"
+      )
+    )
+    val h   = new TenantDbHandlers(sup)
+    val out = h.metastoreDefaults(None)((_: String) => None).unsafeRunSync()
+    out shouldBe Right(MetastoreDefaultsResponse("localhost", "5432", "postgres", "main"))
+
+  "TenantDbHandlers.createTenantDb" should
+    "accept a sparse ducklake metastore when the supervisor has defaults" in:
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = Map(
+        "pgHost"     -> "localhost",
+        "pgPort"     -> "1",
+        "pgUser"     -> "postgres",
+        "pgPassword" -> "pw",
+        "dbName"     -> "qod",
+        "schemaName" -> "main"
+      )
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val h   = new TenantDbHandlers(sup)
+    val out = h.createTenantDb(
+      TenantDbRequest(
+        tenant   = "acme",
+        name     = "prod",
+        kind     = "ducklake",
+        dataPath = "/data/acme_prod"
+      ),
+      None
+    )((_: String) => None).unsafeRunSync()
+    out.isRight shouldBe true
+    // Response metastore is the sparse stored row (dbName only), password-free.
+    out.toOption.get.metastore shouldBe Map("dbName" -> "acme_prod")

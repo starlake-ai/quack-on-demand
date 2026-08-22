@@ -22,6 +22,10 @@ EXCLUSIONS = {
     # operation (no human at a terminal holds a ticket).
     "/api/auth/sso/ticket",
     "/api/auth/sso/redeem",
+    # Admin-UI support read: feeds the database-create form's "QoD default
+    # Postgres" section. The CLI has no create-form to prefill, and the same
+    # values are operator config (QOD_PG_*), so no CLI command is warranted.
+    "/api/database/metastore-defaults",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

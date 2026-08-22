@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
-import type { TenantDbKind, TenantDbResponse, UpdateTenantDbRequest } from '../api/types';
+import type { TenantDbKind, TenantDbResponse, UpdateTenantDbRequest, MetastoreDefaultsResponse } from '../api/types';
 import CatalogBrowser from './CatalogBrowser';
 import CatalogSnapshotsPanel from './CatalogSnapshotsPanel';
 import DataPathEditor, {
@@ -40,6 +40,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [storeType, setStoreType]     = useState<StoreType>('none');
   const [storeKeys, setStoreKeys]     = useState<Record<string, string>>({});
   const [storeExtras, setStoreExtras] = useState('');
+
+  // Catalog Postgres (metastore) section: 'default' sends no pg keys (server
+  // resolves them from defaultMetastore); 'custom' sends only non-empty fields.
+  const [msMode, setMsMode]         = useState<'default' | 'custom'>('default');
+  const [msKeys, setMsKeys]         = useState<Record<string, string>>({});
+  const [msDefaults, setMsDefaults] = useState<MetastoreDefaultsResponse | null>(null);
 
   const [kind, setKind]                     = useState<TenantDbKind>('ducklake');
   const [defaultDatabase, setDefaultDatabase] = useState('');
@@ -85,12 +91,15 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setDefaultDatabase('');
     setDefaultSchema('');
     setInitSql('');
+    setMsMode('default');
+    setMsKeys({});
     setError(null);
   }
 
   function openForm() {
     resetForm();
     setAdding(true);
+    api.metastoreDefaults().then(setMsDefaults).catch(() => setMsDefaults(null));
   }
 
   // Locked-prefix UX: input always shows `${tenant}_` followed by
@@ -116,6 +125,12 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   function collectMetastore(): Record<string, string> {
     const m: Record<string, string> = {};
     if (schemaName.trim()) m.schemaName = schemaName.trim();
+    if (kind === 'ducklake' && msMode === 'custom') {
+      for (const k of ['pgHost', 'pgPort', 'pgUser', 'pgPassword'] as const) {
+        const v = (msKeys[k] ?? '').trim();
+        if (v) m[k] = v;
+      }
+    }
     Object.assign(m, parseStoreExtras(extrasText, new Set(['schemaName', 'dataPath'])));
     return m;
   }
@@ -398,10 +413,10 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
           <fieldset>
             <legend>Identity</legend>
             <p className="subtle" style={{ marginTop: 0 }}>
-              Postgres host, port, user, and password are global (shared across every database).
-              Only the fields below -- name, schema, data path + its cloud credentials, and any
-              advanced metastore keys -- are per-database. The Postgres database itself is
-              created automatically as <code>{`${tenant}_<suffix>`}</code>.
+              The catalog's Postgres connection defaults to the manager's configured
+              server (override it per-database in the Catalog Postgres section below).
+              The Postgres database itself is created automatically as{' '}
+              <code>{`${tenant}_<suffix>`}</code>.
             </p>
             <label>
               Name
@@ -426,7 +441,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <select value={kind} onChange={e => setKind(e.target.value as TenantDbKind)}>
                 <option value="ducklake">ducklake</option>
                 <option value="duckdb-file">duckdb-file</option>
-                <option value="memory">memory</option>
+                <option value="memory">memory (federation-only sources)</option>
               </select>
             </label>
             <p className="subtle" style={{ fontSize: '0.85em', marginTop: '-0.5rem' }}>
@@ -455,6 +470,65 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               </details>
             )}
           </fieldset>
+
+          {kind === 'ducklake' && (
+            <fieldset style={{ marginTop: '0.5rem' }}>
+              <legend>Catalog Postgres (metastore)</legend>
+              <label>
+                Connection
+                <select value={msMode} onChange={e => setMsMode(e.target.value as 'default' | 'custom')}>
+                  <option value="default">QoD default Postgres</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              {msMode === 'default' ? (
+                <p className="subtle" style={{ marginTop: 0 }}>
+                  {msDefaults ? (
+                    <>
+                      Uses the manager's configured Postgres:{' '}
+                      <code>{msDefaults.pgUser}@{msDefaults.pgHost}:{msDefaults.pgPort}</code>.
+                      Follows <code>QOD_PG_*</code> changes; no credentials are copied into
+                      this database.
+                    </>
+                  ) : (
+                    <>Uses the manager's configured Postgres (follows <code>QOD_PG_*</code> changes).</>
+                  )}
+                </p>
+              ) : (
+                <>
+                  <p className="subtle" style={{ marginTop: 0 }}>
+                    Only non-empty fields are sent; anything left blank falls back to the
+                    manager default.
+                  </p>
+                  <label>
+                    Host
+                    <input value={msKeys.pgHost ?? ''}
+                      onChange={ev => setMsKeys({ ...msKeys, pgHost: ev.target.value })}
+                      placeholder={msDefaults?.pgHost || 'localhost'} />
+                  </label>
+                  <label>
+                    Port
+                    <input value={msKeys.pgPort ?? ''}
+                      onChange={ev => setMsKeys({ ...msKeys, pgPort: ev.target.value })}
+                      placeholder={msDefaults?.pgPort || '5432'} />
+                  </label>
+                  <label>
+                    User
+                    <input value={msKeys.pgUser ?? ''}
+                      onChange={ev => setMsKeys({ ...msKeys, pgUser: ev.target.value })}
+                      placeholder={msDefaults?.pgUser || 'postgres'}
+                      autoComplete="off" />
+                  </label>
+                  <label>
+                    Password
+                    <input type="password" value={msKeys.pgPassword ?? ''}
+                      onChange={ev => setMsKeys({ ...msKeys, pgPassword: ev.target.value })}
+                      autoComplete="new-password" />
+                  </label>
+                </>
+              )}
+            </fieldset>
+          )}
 
           {kind === 'ducklake' && (
             <div style={{ marginTop: '0.5rem' }}>

@@ -1274,6 +1274,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/database/metastore-defaults:
+    get:
+      operationId: getApiDatabaseMetastore-defaults
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetastoreDefaultsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/group/list:
     get:
       operationId: getApiGroupList
@@ -6081,6 +6115,23 @@ components:
       type: object
       additionalProperties:
         type: string
+    MetastoreDefaultsResponse:
+      title: MetastoreDefaultsResponse
+      type: object
+      required:
+      - pgHost
+      - pgPort
+      - pgUser
+      - schemaName
+      properties:
+        pgHost:
+          type: string
+        pgPort:
+          type: string
+        pgUser:
+          type: string
+        schemaName:
+          type: string
     NodeInfo:
       title: NodeInfo
       type: object

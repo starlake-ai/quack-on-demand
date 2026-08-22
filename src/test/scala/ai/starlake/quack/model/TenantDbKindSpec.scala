@@ -303,4 +303,65 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
     )
     TenantDb.validate(td) shouldBe None
   }
+
+  // --- Sparse metastore + manager defaults (defaultMetastore) ---
+
+  private val fullDefaults = Map(
+    "pgHost"     -> "localhost",
+    "pgPort"     -> "5432",
+    "pgUser"     -> "postgres",
+    "pgPassword" -> "pw",
+    "dbName"     -> "qod",
+    "schemaName" -> "main"
+  )
+
+  it should "accept a sparse ducklake metastore when defaults cover the missing keys" in {
+    val td =
+      TenantDb(
+        "td-1",
+        "t-1",
+        "tpch1",
+        TenantDbKind.DuckLake,
+        Map("dbName" -> "acme_tpch1"),
+        "/tmp/d"
+      )
+    TenantDb.validate(td, fullDefaults) shouldBe None
+  }
+
+  it should "name only keys missing from BOTH the request and the (non-empty) defaults" in {
+    val td =
+      TenantDb(
+        "td-1",
+        "t-1",
+        "tpch1",
+        TenantDbKind.DuckLake,
+        Map("dbName" -> "acme_tpch1"),
+        "/tmp/d"
+      )
+    val err = TenantDb.validate(td, fullDefaults.updated("pgPassword", "")).get
+    err should include("pgPassword")
+    err should not include "pgHost"
+  }
+
+  it should "still run injection safety on supplied values under full defaults" in {
+    val td = TenantDb(
+      "td-1",
+      "t-1",
+      "tpch1",
+      TenantDbKind.DuckLake,
+      Map("schemaName" -> "main; ATTACH 'x' AS y"),
+      "/tmp/d"
+    )
+    TenantDb.validate(td, fullDefaults).get should include("schemaName")
+  }
+
+  it should "keep requiring duckdb-file keys inline regardless of defaults" in {
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckDbFile, Map.empty, "/tmp/f.duckdb")
+    TenantDb.validate(td, fullDefaults).get should include("dbName")
+  }
+
+  it should "keep requiring a ducklake dataPath even with full defaults" in {
+    val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, Map("dbName" -> "x"), "")
+    TenantDb.validate(td, fullDefaults).get should include("dataPath")
+  }
 }

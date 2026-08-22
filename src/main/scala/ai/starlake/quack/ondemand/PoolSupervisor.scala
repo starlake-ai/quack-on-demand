@@ -888,6 +888,12 @@ final class PoolSupervisor(
       .map(effectiveMetastoreFor)
       .getOrElse(defaultMetastore)
 
+  /** The manager-wide metastore defaults (`quack-on-demand.defaultMetastore`), raw. Backing for the
+    * REST `database/metastore-defaults` endpoint; response surfaces must never include
+    * `pgPassword`.
+    */
+  def metastoreDefaults: Map[String, String] = defaultMetastore
+
   // ---------- Tenant-of-resource lookups (RBAC scope check) ----------
 
   /** Tenant id owning a `qodstate_user` row. Outer `Option` distinguishes "not found" from
@@ -1154,7 +1160,7 @@ final class PoolSupervisor(
                       initSql = initSql
                     )
 
-                    TenantDb.validate(td) match
+                    TenantDb.validate(td, defaultMetastore) match
                       case Some(msg) =>
                         Left(
                           SupervisorError.InvalidArgument(s"invalid kind=${kind.wireValue}: $msg")
@@ -1174,7 +1180,8 @@ final class PoolSupervisor(
                                 // don't race on `CREATE TABLE __ducklake_metadata`.
                                 try
                                   DuckLakeInitializer.initBlocking(
-                                    effectiveMeta.updated("dataPath", effectiveDataPath)
+                                    (defaultMetastore ++ effectiveMeta)
+                                      .updated("dataPath", effectiveDataPath)
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
@@ -1323,9 +1330,16 @@ final class PoolSupervisor(
         TenantDb.validateSafety(merged) match
           case Some(msg) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
           case None      =>
+            // Keys the manager config can stand in for: dropping one of these from a
+            // ducklake row is "revert to default", not a contract violation. duckdb-file
+            // has no default-merge contract on create, so it keeps the strict guard.
+            val defaultedKeys =
+              if merged.kind == TenantDbKind.DuckLake then
+                defaultMetastore.collect { case (k, v) if v.nonEmpty => k }.toSet
+              else Set.empty[String]
             val droppedRequired =
               (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --
-                merged.metastore.keySet
+                merged.metastore.keySet -- defaultedKeys
             if droppedRequired.nonEmpty then
               IO.pure(
                 Left(

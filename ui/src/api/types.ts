@@ -306,6 +306,15 @@ export interface TenantDbRequest {
   managedStorage?: boolean;
 }
 
+// Resolved manager defaults for the database-create form's metastore section.
+// Never includes pgPassword.
+export interface MetastoreDefaultsResponse {
+  pgHost: string;
+  pgPort: string;
+  pgUser: string;
+  schemaName: string;
+}
+
 export interface TenantDbResponse {
   id: string;
   tenant: string;

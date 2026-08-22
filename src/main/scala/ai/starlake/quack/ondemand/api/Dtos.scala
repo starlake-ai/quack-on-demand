@@ -364,6 +364,17 @@ final case class TenantDbResponse(
     tableCount: Option[Int] = None
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
+
+/** Resolved `quack-on-demand.defaultMetastore` connection defaults, backing the admin UI's
+  * database-create form ("QoD default Postgres" mode). Deliberately has no `pgPassword` field: the
+  * browser has no use for the secret and it must never reach a response surface.
+  */
+final case class MetastoreDefaultsResponse(
+    pgHost: String = "",
+    pgPort: String = "",
+    pgUser: String = "",
+    schemaName: String = ""
+)
 final case class TenantDbOpRequest(
     tenant: String,
     name: String,
@@ -1208,9 +1219,10 @@ object Dtos:
   given Codec[ConfigListResponse]       = deriveCodec
   given Codec[ManifestImportSummary]    = deriveCodec
 
-  given Codec[TenantDbRequest]      = ConfiguredCodec.derived
-  given Codec[TenantDbResponse]     = deriveCodec
-  given Codec[TenantDbListResponse] = deriveCodec
+  given Codec[TenantDbRequest]           = ConfiguredCodec.derived
+  given Codec[TenantDbResponse]          = deriveCodec
+  given Codec[TenantDbListResponse]      = deriveCodec
+  given Codec[MetastoreDefaultsResponse] = ConfiguredCodec.derived
   // ConfiguredCodec so an old body without `purgeManagedData` still decodes.
   given Codec[TenantDbOpRequest]      = ConfiguredCodec.derived
   given Codec[UpdateTenantDbRequest]  = deriveCodec
