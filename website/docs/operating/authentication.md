@@ -129,7 +129,7 @@ Cookie attributes are configurable:
   - `false`: force not `Secure`. Use for stunnel-style local TLS termination where you want to opt out of derivation.
 - `QOD_SESSION_COOKIE_PATH` (default `/api`) - override behind a path-rewriting reverse proxy to match the browser-visible URL prefix.
 
-The `application.conf` default `sessionJwtSecret` is a **well-known dev string**. Anyone with the source can forge admin sessions if you don't override it. Main emits a loud startup warning when the default is in use.
+When `QOD_SESSION_JWT_SECRET` is unset, the manager generates a fresh random secret at every boot and prints it to the console. Sessions then die on restart, and HA refuses to boot (replicas cannot verify each other's tokens). Pin a stable random value (32+ chars) for production.
 
 ## Management plane (REST and UI)
 

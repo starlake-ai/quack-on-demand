@@ -178,9 +178,10 @@ Every scalar in `application.conf` accepts a matching `QOD_*` environment variab
 |---|---|---|
 | Admin password | `QOD_ADMIN_PASSWORD` | `admin` |
 | Postgres password | `QOD_PG_PASSWORD` | `azizam` |
-| REST API key | `QOD_API_KEY` | unset (open API) |
+| REST API key | `QOD_API_KEY` | unset (random key generated each boot) |
+| Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset (random secret generated each boot) |
 
-Setting `QOD_API_KEY` to a secret string requires that value in the `X-API-Key` header on every REST call. Leaving it unset means the REST API is accessible without authentication (acceptable only on localhost or behind a trusted network boundary).
+Setting `QOD_API_KEY` to a secret string requires that value in the `X-API-Key` header on static-key REST calls (session and PAT credentials work regardless). When `QOD_API_KEY` or `QOD_SESSION_JWT_SECRET` is unset, the manager generates a random value at boot and prints it to the console in a banner; the values change on every restart, so pin both env vars for production (sessions and API-key callers otherwise die with the process).
 
 Other commonly used variables:
 

@@ -133,8 +133,6 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[AuthenticationConfig]     = deriveReader[AuthenticationConfig]
   import MetricsConfigCodec.given
 
-  private val DevSessionJwtSecret = "qod-dev-session-secret-rotate-in-production-x9k2v7p3m8q1"
-
   def run(args: List[String]): IO[ExitCode] =
     // Route JUL through slf4j: grpc-netty logs via JUL directly, and without the
     // bridge its benign stream-cancel warnings print raw to stderr, unfilterable.
@@ -177,7 +175,7 @@ object Main extends IOApp with LazyLogging:
     )
 
   private[quack] def bootManager(
-      mgrCfg: ManagerConfig,
+      mgrCfg0: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
       aclCfg: AclConfig,
@@ -185,12 +183,15 @@ object Main extends IOApp with LazyLogging:
       lockdownCfg: NodeLockdownConfig = NodeLockdownConfig(enabled = false),
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
   ): IO[ExitCode] =
+    // Unset boot secrets (session JWT secret, static API key) are generated and printed here,
+    // BEFORE anything reads them. A no-op under HA, so the gate below still sees the raw empty
+    // secret and refuses: per-replica random secrets cannot verify each other's sessions.
+    val mgrCfg = BootPreflight.withGeneratedBootSecrets(mgrCfg0)
     HaPreconditions
       .validate(
         mgrCfg.ha.enabled,
         mgrCfg.runtimeType,
-        mgrCfg.auth.management.sessionJwtSecret,
-        DevSessionJwtSecret
+        mgrCfg.auth.management.sessionJwtSecret
       )
       .left
       .foreach(msg => sys.error(msg))
@@ -395,13 +396,6 @@ object Main extends IOApp with LazyLogging:
 
     val health = new HealthHandler(sup, dbHealthy)
 
-    if mgrCfg.auth.management.sessionJwtSecret == DevSessionJwtSecret then
-      // ERROR (not warn) so it survives the default ERROR root log level.
-      logger.error(
-        "USING THE DEV DEFAULT session JWT secret. Anyone with the source can forge admin " +
-          "sessions on this manager. Override QOD_SESSION_JWT_SECRET before exposing the " +
-          "manager beyond localhost."
-      )
     val sessionTokens = new SessionTokenStore(
       secret = mgrCfg.auth.management.sessionJwtSecret,
       maxLifetime = scala.concurrent.duration.DurationInt(mgrCfg.sessionIdleTtlSec).seconds,

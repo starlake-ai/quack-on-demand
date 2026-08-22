@@ -127,6 +127,14 @@ cd "$REPO_DIR"
 # Override by exporting QOD_DUCKLAKE_DATA_PATH before invoking this script.
 export QOD_DUCKLAKE_DATA_PATH="${QOD_DUCKLAKE_DATA_PATH:-$REPO_DIR/ducklake/data}"
 
+# Color the log level (logback %highlight: ERROR bold red, WARN red, INFO
+# blue) when stdout is a terminal. Redirected output and containers stay
+# plain so ANSI escapes never reach log files or aggregators. Export
+# QOD_LOG_COLOR=false before invoking to keep an interactive run plain.
+if [[ -z "${QOD_LOG_COLOR:-}" && -t 1 ]]; then
+  export QOD_LOG_COLOR=true
+fi
+
 NUKE="${NUKE:-0}"
 GH_REPO="starlake-ai/quack-on-demand"
 ASSEMBLY="quack-on-demand-assembly"

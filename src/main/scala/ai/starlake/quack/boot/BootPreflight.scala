@@ -1,8 +1,10 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.AdminConfig
+import ai.starlake.quack.ManagerConfig
 import ai.starlake.quack.edge.auth.AuthQueryPreconditions
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.quack.ondemand.state.EmailFormat
 import ai.starlake.quack.ondemand.state.UserStore
 import com.typesafe.scalalogging.LazyLogging
@@ -12,6 +14,59 @@ import com.typesafe.scalalogging.LazyLogging
   * boot with a clean config-error framing instead of a raw stack trace).
   */
 object BootPreflight extends LazyLogging:
+
+  /** Resolve the two boot secrets an operator may leave unset: the session JWT signing secret and
+    * the static admin API key. Outside HA, an unset (or empty) value is replaced with a fresh
+    * random one for this boot, and the generated values are printed to stdout -- deliberately NOT
+    * through the logger, whose default ERROR root level would swallow an info line -- so a
+    * first-run operator cannot miss them. Under HA the config is returned unchanged: a per-replica
+    * random secret cannot verify sessions minted by other replicas (HaPreconditions refuses the
+    * empty secret), and a per-replica API key behind one load balancer would authenticate on only
+    * the replica that minted it.
+    */
+  def withGeneratedBootSecrets(cfg: ManagerConfig): ManagerConfig =
+    if cfg.ha.enabled then cfg
+    else
+      val genSecret = Option.when(cfg.auth.management.sessionJwtSecret.trim.isEmpty)(
+        SessionTokenStore.randomSecret()
+      )
+      val genKey = Option.when(cfg.apiKey.forall(_.trim.isEmpty))(randomApiKey())
+      if genSecret.isEmpty && genKey.isEmpty then cfg
+      else
+        val lines =
+          genSecret.map(s => s"  QOD_SESSION_JWT_SECRET=$s").toList ++
+            genKey.map(k => s"  QOD_API_KEY=$k").toList
+        println(
+          s"""
+             |================================================================================
+             |  GENERATED BOOT SECRETS
+             |
+             |  The following were not configured, so fresh random values were minted for
+             |  this boot only:
+             |
+             |${lines.mkString("\n")}
+             |
+             |  They change on every restart: UI/CLI sessions and API-key callers die with
+             |  the process. Pin both env vars to stable values for production.
+             |================================================================================
+             |""".stripMargin
+        )
+        cfg.copy(
+          apiKey = genKey.orElse(cfg.apiKey),
+          auth = cfg.auth.copy(
+            management = cfg.auth.management.copy(
+              sessionJwtSecret = genSecret.getOrElse(cfg.auth.management.sessionJwtSecret)
+            )
+          )
+        )
+
+  /** 32 random bytes, url-safe base64 without padding, `qod_`-prefixed so a leaked value is
+    * recognizable in config dumps the way `qod_pat_` tokens are.
+    */
+  private def randomApiKey(): String =
+    val bytes = new Array[Byte](32)
+    new java.security.SecureRandom().nextBytes(bytes)
+    "qod_" + java.util.Base64.getUrlEncoder.withoutPadding.encodeToString(bytes)
 
   /** Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery must each project
     * (password_hash, role, enabled, must_change_password) -- exactly the shape

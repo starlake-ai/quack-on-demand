@@ -1,7 +1,15 @@
 <configuration>
+  <!-- QOD_LOG_COLOR=true wraps the level in %highlight (ERROR bold red, WARN
+       red, INFO blue). Off by default: the ANSI escapes would pollute
+       redirected output and log aggregators (Docker/K8s). Any value other
+       than exactly "true" falls back to the plain pattern. -->
+  <property name="qodPattern.false"
+            value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
+  <property name="qodPattern.true"
+            value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %highlight(%-5level) %logger{36} - %msg%n"/>
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
-      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+      <pattern>${qodPattern.${QOD_LOG_COLOR:-false}:-${qodPattern.false}}</pattern>
     </encoder>
   </appender>
   <!-- ONE knob: QOD_LOG_LEVEL (env var or -D system property) drives the whole

@@ -138,7 +138,7 @@ On the wire:
 - `ManagerServer.apiKeyGuard` admits on either path: `X-API-Key` header (CLI / static key) OR `qod_session` cookie (browser).
 - UI does not stash a token in localStorage; fetch's same-origin credentials policy auto-attaches the cookie.
 
-Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. Pin `QOD_SESSION_JWT_SECRET` to a stable random >=32-char value before exposing the manager; the default value in `application.conf` is a well-known dev string and Main emits a loud startup warning if it isn't overridden.
+Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. When `QOD_SESSION_JWT_SECRET` is unset, `BootPreflight.withGeneratedBootSecrets` generates a fresh random secret at boot and prints it to stdout (println, not the logger, so the default ERROR level can't swallow it); sessions then die on restart, and HA refuses to boot on an empty secret. Pin a stable random >=32-char value for production.
 
 Forced password change: `qodstate_user.must_change_password` (set via `mustChangePassword`
 on `user/create` / `user/update`) makes `DatabaseAuthenticator` refuse the password on BOTH
@@ -193,7 +193,7 @@ behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
 
 Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `QOD_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin `admin@localhost.local` / `admin`. `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
 
-Two security-critical knobs **must** be set before any non-localhost deploy: `QOD_API_KEY` (otherwise `/api/*` is open) and `QOD_SESSION_JWT_SECRET` (otherwise the well-known dev secret in `application.conf` is used and anyone with the source can forge admin sessions). Main logs a loud warning on boot when either is at its default.
+Two security-critical knobs should be pinned before any non-localhost deploy: `QOD_API_KEY` and `QOD_SESSION_JWT_SECRET`. When either is unset, boot generates a random value and prints it to stdout in an unmissable banner (`BootPreflight.withGeneratedBootSecrets`); the values change on every restart, so sessions and API-key callers die with the process. Under HA nothing is generated: an empty session secret refuses boot, an unset API key just disables the static-key arm.
 
 `federation.secretStore` defaults to `dispatch` (route per secret by externalRef prefix). The `aws-sm` / `gcp-sm` / `azure-kv` / `vault` single-backend modes are refused at config load -- their resolvers are stubs that `NotImplementedError` at node spawn. Under `dispatch` mode the stubs stay wired but the runtime error spells out the supported alternatives (`postgres` inline value, `env:` prefix).
 

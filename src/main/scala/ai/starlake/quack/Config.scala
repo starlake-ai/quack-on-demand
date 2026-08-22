@@ -135,8 +135,8 @@ final case class ManagementAuthConfig(
       description =
         "HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make " +
           "sessions survive manager restart and to share session state across replicas. Empty " +
-          "= autogenerate a fresh 32-byte secret at boot (sessions die on restart, no horizontal " +
-          "scale).",
+          "= autogenerate a fresh 32-byte secret at boot, printed to the console (sessions die " +
+          "on restart; HA refuses to boot).",
       sensitive = true
     )
     sessionJwtSecret: String,
@@ -174,16 +174,15 @@ final case class ManagementAuthConfig(
     slEnabled: Boolean = false,
     @field @ConfigField(
       envVar = "SL_URL",
-      description =
-        "Starlake base URL for the SSO handoff and logout callback, e.g. " +
-          "https://starlake.example.com"
+      description = "Starlake base URL for the SSO handoff and logout callback, e.g. " +
+        "https://starlake.example.com"
     )
     slUrl: String = ""
 ):
-  /** Effective enablement: `SL_ENABLED` alone is not enough to turn the integration on -- an
-    * empty `SL_URL` would mean redirecting the browser nowhere. Everything that gates the SSO
-    * surface (endpoint mounting, the client-config flag, the menu link) reads this, never
-    * `slEnabled` directly.
+  /** Effective enablement: `SL_ENABLED` alone is not enough to turn the integration on -- an empty
+    * `SL_URL` would mean redirecting the browser nowhere. Everything that gates the SSO surface
+    * (endpoint mounting, the client-config flag, the menu link) reads this, never `slEnabled`
+    * directly.
     */
   def slIntegrationOn: Boolean = slEnabled && slUrl.trim.nonEmpty
 
@@ -451,8 +450,9 @@ final case class ManagerConfig(
     @field @ConfigField(
       envVar = "QOD_API_KEY",
       description =
-        "Static admin API key sent as X-API-Key. Unset or empty disables the static-key arm; " +
-          "/api then accepts only session and PAT credentials (never open).",
+        "Static admin API key sent as X-API-Key. Unset or empty: outside HA a random key is " +
+          "generated at boot and printed to the console; under HA the static-key arm stays " +
+          "disabled and /api accepts only session and PAT credentials (never open).",
       sensitive = true
     )
     apiKey: Option[String],
