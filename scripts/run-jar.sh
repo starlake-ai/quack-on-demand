@@ -56,12 +56,16 @@
 #                                 bundled demo manifest on first boot. Loaders
 #                                 run in background before exec java.   (default unset)
 #
-#   DEMO=full|minimal             Which bundled demo manifest a LOAD_* boot
-#                                 imports. full = acme + globex, multi-pool,
+#   DEMO=full|minimal             Which bundled demo manifest to import.
+#                                 full = acme + globex, multi-pool,
 #                                 federation. minimal = acme only, one pool
-#                                 with a single dual node. Only consulted
-#                                 when a LOAD_* flag is set and
-#                                 QOD_BOOTSTRAP_YAML is unset.  (default full)
+#                                 with a single dual node. An explicit
+#                                 DEMO=... with no LOAD_* flag implies
+#                                 LOAD_TPC=1 (all benchmarks at SF=1), so
+#                                 DEMO=full NUKE=1 yields a queryable demo
+#                                 out of the box. Ignored when
+#                                 QOD_BOOTSTRAP_YAML is already set.
+#                                                               (default full)
 #
 #   NUKE=1                        wipe local state (Postgres DB, ducklake/,
 #                                 state/, certs/) before booting. Irreversible.
@@ -312,6 +316,14 @@ ensure_duckdb_headers() {
 #   LOAD_TPC=1                        -> shortcut for LOAD_TPCH=1 LOAD_TPCDS=1 LOAD_SSB=1
 #   LOAD_TPC=10 LOAD_TPCDS=100        -> TPC-H + SSB from LOAD_TPC (SF=10),
 #                                        TPC-DS from LOAD_TPCDS (SF=100)
+# An explicitly-set DEMO=... with no LOAD_* flag implies the full demo:
+# LOAD_TPC=1 (all benchmarks at SF=1; minimal still skips TPC-DS below).
+# Set any LOAD_* flag yourself to control what loads. Before 2026-08-22
+# this combination booted an EMPTY manager with only a WARN.
+if [[ -n "${DEMO:-}" && -z "${LOAD_TPCH:-}${LOAD_TPCDS:-}${LOAD_SSB:-}${LOAD_TPC:-}" ]]; then
+  echo "demo: DEMO=$DEMO with no LOAD_* flag - implying LOAD_TPC=1 (all benchmarks at SF=1)."
+  LOAD_TPC=1
+fi
 LOAD_TPCH="${LOAD_TPCH:-${LOAD_TPC:-}}"
 LOAD_TPCDS="${LOAD_TPCDS:-${LOAD_TPC:-}}"
 LOAD_SSB="${LOAD_SSB:-${LOAD_TPC:-}}"
@@ -325,7 +337,6 @@ done
 unset _v _val
 
 # Demo profile: which bundled bootstrap manifest a LOAD_* boot imports.
-_demo_explicit="${DEMO:+1}"
 DEMO="${DEMO:-full}"
 if [[ "$DEMO" != "full" && "$DEMO" != "minimal" ]]; then
   echo "ERROR: DEMO must be 'full' or 'minimal' (got: '$DEMO')." >&2
@@ -335,12 +346,6 @@ if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" ]]; then
   echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
   LOAD_TPCDS=""
 fi
-# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
-# that no demo seed remains and bootstrap will not run.
-if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
-  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
-fi
-
 # ---- Resolve jar ----
 # QOD_VERSION=BUILD always builds locally; QOD_VERSION=LOCAL reuses the
 # newest distrib/ jar. Everything else tries GitHub releases and falls back

@@ -34,9 +34,11 @@
 #                       QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml in
 #                       the quack container so the JVM imports the bundled
 #                       manifest on first boot.
-#   DEMO=full|minimal   Which bundled demo manifest a LOAD_* boot imports
-#                       (minimal = acme only, one pool, single dual node).
-#                       Only consulted when injecting QOD_BOOTSTRAP_YAML.
+#   DEMO=full|minimal   Which bundled demo manifest to import (minimal =
+#                       acme only, one pool, single dual node). An explicit
+#                       DEMO=... with no LOAD_* flag implies LOAD_TPC=1
+#                       (all benchmarks at SF=1); pass LOAD_*=0 to inject
+#                       the manifest without data.
 #   NUKE                "1" tears down any existing stack and wipes
 #                       ./pgdata, ./ducklake, ./certs before starting.
 #                       Irreversible.            (default 0)
@@ -151,6 +153,14 @@ if [[ "$IMAGE_SOURCE" == "pull" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
 fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
+# An explicitly-set DEMO=... with no LOAD_* flag implies the full demo:
+# LOAD_TPC=1 (all benchmarks at SF=1; minimal still skips TPC-DS below).
+# Set any LOAD_* flag yourself (0/false = skip) to control what loads.
+# Before 2026-08-22 this combination booted an EMPTY manager with only a WARN.
+if [[ -n "$_demo_explicit" && -z "${LOAD_TPCH:-}${LOAD_TPCDS:-}${LOAD_SSB:-}${LOAD_TPC:-}" ]]; then
+  echo "demo: DEMO=$DEMO with no LOAD_* flag - implying LOAD_TPC=1 (all benchmarks at SF=1)."
+  LOAD_TPC=1
+fi
 LOAD_TPC="${LOAD_TPC:-}"
 # Per-benchmark opt-ins; explicit values win over LOAD_TPC. Any being set
 # enables the bootstrap YAML import below + the matching seed step.
@@ -161,11 +171,9 @@ if [[ "$DEMO" == "minimal" && -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD
   echo "WARN: DEMO=minimal has no globex tenant; skipping the TPC-DS loader." >&2
   LOAD_TPCDS=""
 fi
-# Checked AFTER the TPC-DS skip so a TPCDS-only minimal boot loudly announces
-# that no demo seed remains and bootstrap will not run.
-if [[ -n "$_demo_explicit" && -z "$LOAD_TPCH$LOAD_TPCDS$LOAD_SSB" ]]; then
-  echo "WARN: DEMO is set but no LOAD_* flag is; bootstrap only runs with a demo seed." >&2
-fi
+# Explicit DEMO with every loader explicitly disabled (0/false) still injects
+# the bootstrap manifest below (tenants/pools/users, no data); the no-flag
+# case never reaches here because it implied LOAD_TPC=1 above.
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
 COMPOSE_FILE="docker-compose.yml"
@@ -298,12 +306,14 @@ for p in "${_profiles[@]:-}"; do
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
-# ---- Inject QOD_BOOTSTRAP_YAML before up when any bench is requested ----
+# ---- Inject QOD_BOOTSTRAP_YAML before up when a bench or explicit DEMO asks ----
 # The JVM reads this at startup, so it must be in .env before `docker compose up`.
+# An explicit DEMO=... injects the manifest even with no bench requested
+# (bootstrap only: tenants/pools/users, no data).
 _want_tpch=0; [[ -n "$LOAD_TPCH" && "$LOAD_TPCH" != "0" && "$LOAD_TPCH" != "false" ]] && _want_tpch=1
 _want_tpcds=0; [[ -n "$LOAD_TPCDS" && "$LOAD_TPCDS" != "0" && "$LOAD_TPCDS" != "false" ]] && _want_tpcds=1
 _want_ssb=0; [[ -n "$LOAD_SSB" && "$LOAD_SSB" != "0" && "$LOAD_SSB" != "false" ]] && _want_ssb=1
-if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; then
+if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" || -n "$_demo_explicit" ]]; then
   _demo_manifest="bootstrap-demo.yaml"
   [[ "$DEMO" == "minimal" ]] && _demo_manifest="bootstrap-demo-minimal.yaml"
   _demo_line="QOD_BOOTSTRAP_YAML=classpath:$_demo_manifest  # added by run-docker-compose.sh"
